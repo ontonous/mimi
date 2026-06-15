@@ -1,0 +1,10 @@
+// Test cap (linear capability) syntax
+
+cap FileReadCap;
+
+func main() -> i32 {
+    let c = FileReadCap;
+    drop(c);
+    println(42);
+    42
+}

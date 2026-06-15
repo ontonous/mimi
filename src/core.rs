@@ -109,7 +109,7 @@ impl<'a> Checker<'a> {
                     self.collect_item_decls(inner);
                 }
             }
-            Item::Rule(_) | Item::Desc(_) => {}
+            Item::Rule(_) | Item::Desc(_) | Item::Cap(_) | Item::Actor(_) => {}
         }
     }
 
@@ -135,6 +135,7 @@ impl<'a> Checker<'a> {
                 args.iter().map(|a| self.resolve_type(a)).collect(),
                 Box::new(self.resolve_type(ret)),
             ),
+            Type::Cap(_) => ty.clone(),
         }
     }
 
@@ -146,7 +147,7 @@ impl<'a> Checker<'a> {
                     self.check_item(inner);
                 }
             }
-            Item::Type(_) => {}
+            Item::Type(_) | Item::Cap(_) | Item::Actor(_) => {}
             Item::Rule(_) | Item::Desc(_) => {}
         }
     }
@@ -178,7 +179,8 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) {
         match stmt {
-            Stmt::Let { pat, ty, init, mut_ } => {
+            Stmt::Let { pat, ty, init, mut_, ref_ } => {
+                // If ref_ is true, the variable is an arena reference
                 let init_ty = init
                     .as_ref()
                     .map(|e| self.infer_expr(e, scopes))
@@ -195,7 +197,14 @@ impl<'a> Checker<'a> {
                         }
                         d
                     }
-                    None => init_ty,
+                    None => {
+                        if *ref_ {
+                            // ref variables have reference type
+                            Type::Ref(Box::new(init_ty))
+                        } else {
+                            init_ty
+                        }
+                    }
                 };
                 if *mut_ {
                     // For v0.2, mutability is tracked per-variable; tuple patterns ignore mut_ for simplicity.
@@ -268,6 +277,13 @@ impl<'a> Checker<'a> {
                 self.check_block(block, ret, scopes);
                 scopes.pop();
             }
+            Stmt::Arena(block) => {
+                // Arena block is like a scope with special memory semantics
+                // For now, just check the block contents
+                scopes.push(HashMap::new());
+                self.check_block(block, ret, scopes);
+                scopes.pop();
+            }
             Stmt::Assign { target, value } => {
                 let value_ty = self.infer_expr(value, scopes);
                 match target {
@@ -285,7 +301,7 @@ impl<'a> Checker<'a> {
                     _ => self.emit("assignment target must be a variable"),
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis => {}
+            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::Drop(_) | Stmt::OnFailure(_) => {}
         }
     }
 
@@ -487,6 +503,88 @@ impl<'a> Checker<'a> {
                         self.emit(format!("cannot index {}", fmt_type(&obj_ty)));
                         Type::Name("unknown".into(), vec![])
                     }
+                }
+            }
+            Expr::Try(expr) => {
+                let inner_ty = self.infer_expr(expr, scopes);
+                match inner_ty {
+                    Type::Name(n, args) if n == "Result" && args.len() == 2 => {
+                        // Result<T, E> -> ? extracts T
+                        args[0].clone()
+                    }
+                    Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                        // Option<T> -> ? extracts T
+                        args[0].clone()
+                    }
+                    Type::Option(inner) => {
+                        // T? is syntactic sugar for Option<T>
+                        (*inner).clone()
+                    }
+                    // Support user-defined Result/Option-like enums
+                    // If it's a known type with 2 args (success, error), extract first
+                    // If it's a known type with 1 arg (some value), extract it
+                    Type::Name(_, args) if args.len() == 2 => {
+                        args[0].clone()
+                    }
+                    Type::Name(_, args) if args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    // For unparameterized enum types like `Res`, look up the type definition
+                    Type::Name(name, ref args) if args.is_empty() => {
+                        if let Some(tdef) = self.types.get(&name) {
+                            match &tdef.kind {
+                                TypeDefKind::Enum(variants) if variants.len() == 2 => {
+                                    // Try to find Ok/Err or Some/None pattern
+                                    let first_variant = &variants[0];
+                                    match &first_variant.payload {
+                                        Some(VariantPayload::Tuple(types)) if !types.is_empty() => {
+                                            types[0].clone()
+                                        }
+                                        _ => {
+                                            self.emit(format!(
+                                                "? operator: cannot determine success type from {}",
+                                                name
+                                            ));
+                                            Type::Name("unknown".into(), vec![])
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.emit(format!(
+                                        "? operator requires Result or Option type, found {}",
+                                        name
+                                    ));
+                                    Type::Name("unknown".into(), vec![])
+                                }
+                            }
+                        } else {
+                            self.emit(format!(
+                                "? operator requires Result or Option type, found {}",
+                                name
+                            ));
+                            Type::Name("unknown".into(), vec![])
+                        }
+                    }
+                    _ => {
+                        self.emit(format!(
+                            "? operator requires Result or Option type, found {}",
+                            fmt_type(&inner_ty)
+                        ));
+                        Type::Name("unknown".into(), vec![])
+                    }
+                }
+            }
+            Expr::Spawn(_) => {
+                // Spawn returns a future/handle type - simplified for now
+                Type::Name("Future".into(), vec![])
+            }
+            Expr::Await(inner) => {
+                // Await unwraps the future type
+                let inner_ty = self.infer_expr(inner, scopes);
+                // For now, just return the inner type
+                match inner_ty {
+                    Type::Name(n, args) if n == "Future" && !args.is_empty() => args[0].clone(),
+                    other => other,
                 }
             }
         }
@@ -797,6 +895,7 @@ fn same_type(a: &Type, b: &Type) -> bool {
                 && a_args.iter().zip(b_args.iter()).all(|(x, y)| same_type(x, y))
                 && same_type(a_ret, b_ret)
         }
+        (Type::Cap(a), Type::Cap(b)) => a == b,
         _ => false,
     }
 }
@@ -831,5 +930,6 @@ fn fmt_type(t: &Type) -> String {
             args.iter().map(fmt_type).collect::<Vec<_>>().join(", "),
             fmt_type(ret)
         ),
+        Type::Cap(name) => format!("cap {}", name),
     }
 }

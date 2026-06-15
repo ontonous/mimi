@@ -271,6 +271,13 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
+            Stmt::Arena(block) => {
+                // Arena block evaluates like a regular block
+                // In a real implementation, this would manage region-based memory
+                if let Some(v) = self.eval_block(block)? {
+                    return Ok(Some(v));
+                }
+            }
             Stmt::Assign { target, value } => {
                 let v = self.eval_expr(value)?;
                 match target {
@@ -279,6 +286,16 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis => {}
+            Stmt::Drop(expr) => {
+                // Evaluate and discard the value (for linear capability drops)
+                self.eval_expr(expr)?;
+                // In a real implementation, this would track capability usage
+            }
+            Stmt::OnFailure(block) => {
+                // On failure block - for now just evaluate the block
+                // Full implementation would register compensation actions
+                self.eval_block(block)?;
+            }
         }
         Ok(None)
     }
@@ -389,6 +406,32 @@ impl<'a> Interpreter<'a> {
                     }
                     _ => Err("invalid index operation".into()),
                 }
+            }
+            Expr::Try(expr) => {
+                let v = self.eval_expr(expr)?;
+                match v {
+                    Value::Variant(name, vals) if name == "Ok" || name == "Some" => {
+                        // Return the inner value of Ok/T
+                        Ok(vals.into_iter().next().unwrap_or(Value::Unit))
+                    }
+                    Value::Variant(name, _) if name == "Err" || name == "None" => {
+                        // Propagate error as runtime error
+                        Err(format!("{} propagated via ?", name))
+                    }
+                    _ => {
+                        Err(format!("? operator requires Result or Option, found {}", v))
+                    }
+                }
+            }
+            Expr::Spawn(expr) => {
+                // Spawn a future - for now, just evaluate and return the value
+                // Real implementation would create a task
+                self.eval_expr(expr)
+            }
+            Expr::Await(expr) => {
+                // Await a future - for now, just return the value
+                // Real implementation would wait for the task
+                self.eval_expr(expr)
             }
         }
     }

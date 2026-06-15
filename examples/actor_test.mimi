@@ -1,0 +1,11 @@
+// Test actor definition (syntax only - spawn/await require runtime)
+
+actor Counter {
+    mut count: i32 = 0;
+    func increment() { }
+}
+
+func main() -> i32 {
+    println(42);
+    42
+}

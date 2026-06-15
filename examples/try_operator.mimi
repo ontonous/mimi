@@ -1,0 +1,23 @@
+// Test ? operator with user-defined Result-like types
+
+type Res {
+    Ok(i32)
+    Err(string)
+}
+
+func safe_div(a: i32, b: i32) -> Res {
+    if b == 0 {
+        return Err("division by zero");
+    }
+    return Ok(a / b);
+}
+
+func main() -> i32 {
+    // Test with ?
+    let result = safe_div(10, 2)?;
+    println(result);
+
+    // Test error propagation
+    let bad = safe_div(10, 0)?;
+    bad
+}

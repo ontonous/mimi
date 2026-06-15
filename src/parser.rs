@@ -163,6 +163,8 @@ impl Parser {
             TokenKind::Module => Ok(Item::Module(self.parse_module()?)),
             TokenKind::Type => Ok(Item::Type(self.parse_type_def()?)),
             TokenKind::Newtype => Ok(Item::Type(self.parse_newtype()?)),
+            TokenKind::Actor => Ok(Item::Actor(self.parse_actor_def()?)),
+            TokenKind::Cap => Ok(Item::Cap(self.parse_cap_def()?)),
             TokenKind::Rule => {
                 self.advance();
                 let s = self.expect_string()?;
@@ -184,6 +186,85 @@ impl Parser {
                 ))
             }
         }
+    }
+
+    fn parse_cap_def(&mut self) -> Result<CapDef, ParseError> {
+        let commitment = self.expect_keyword(TokenKind::Cap)?;
+        let name = self.expect_ident()?;
+        let combined_with = if self.at(&TokenKind::Plus) {
+            self.advance();
+            let combined_name = self.expect_ident()?;
+            Some(combined_name)
+        } else {
+            None
+        };
+        self.match_semi();
+        Ok(CapDef {
+            name,
+            commitment,
+            combined_with,
+        })
+    }
+
+    fn parse_actor_def(&mut self) -> Result<ActorDef, ParseError> {
+        let commitment = self.expect_keyword(TokenKind::Actor)?;
+        let name = self.expect_ident()?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        self.skip_newlines();
+
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&TokenKind::RBrace) {
+                break;
+            }
+            // Check if it's a method (func keyword) or field
+            if self.at(&TokenKind::Mut) || matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                // Could be field: [mut] name: Type [= expr]
+                let mut_ = self.at(&TokenKind::Mut);
+                if mut_ {
+                    self.advance();
+                }
+                let fname = self.expect_ident()?;
+                if self.at(&TokenKind::Colon) {
+                    // It's a field
+                    self.advance();
+                    let fty = self.parse_type()?;
+                    let init = if self.at(&TokenKind::Eq) {
+                        self.advance();
+                        Some(self.parse_expr(0)?)
+                    } else {
+                        None
+                    };
+                    self.match_semi();
+                    fields.push(ActorField { name: fname, ty: fty, mut_, init });
+                } else {
+                    // Not a field - error
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        "expected `:` for field type",
+                        tok.line,
+                        tok.col,
+                    ));
+                }
+            } else if self.at(&TokenKind::Func) {
+                methods.push(self.parse_func()?);
+            } else {
+                let tok = self.peek();
+                return Err(ParseError::new(
+                    format!("unexpected token {} in actor body", tok.kind),
+                    tok.line,
+                    tok.col,
+                ));
+            }
+            self.skip_newlines();
+        }
+
+        self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(ActorDef { name, commitment, fields, methods })
     }
 
     fn parse_module(&mut self) -> Result<ModuleDef, ParseError> {
@@ -485,6 +566,7 @@ impl Parser {
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
+            TokenKind::Arena => self.parse_arena(),
             TokenKind::LBrace => {
                 self.advance();
                 Ok(Stmt::Block(self.parse_block()?))
@@ -499,6 +581,14 @@ impl Parser {
                 self.advance();
                 self.match_semi();
                 Ok(Stmt::Ellipsis)
+            }
+            TokenKind::Drop => {
+                self.advance();
+                self.expect(TokenKind::LParen, "`(`")?;
+                let expr = self.parse_expr(0)?;
+                self.expect(TokenKind::RParen, "`)`")?;
+                self.match_semi();
+                Ok(Stmt::Drop(expr))
             }
             _ => {
                 let expr = self.parse_expr(0)?;
@@ -515,10 +605,22 @@ impl Parser {
         }
     }
 
+    fn parse_arena(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::Arena, "`arena`")?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Arena(body))
+    }
+
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::Let, "`let`")?;
         let mut_ = self.at(&TokenKind::Mut);
         if mut_ {
+            self.advance();
+        }
+        let ref_ = self.at(&TokenKind::Ref);
+        if ref_ {
             self.advance();
         }
         let pat = self.parse_pattern()?;
@@ -540,6 +642,7 @@ impl Parser {
             ty,
             init,
             mut_,
+            ref_,
         })
     }
 
@@ -671,7 +774,7 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let kind = self.peek().kind.clone();
-        match kind {
+        let mut expr = match kind {
             TokenKind::Int(s) => {
                 let (line, col) = (self.peek().line, self.peek().col);
                 self.advance();
@@ -679,7 +782,7 @@ impl Parser {
                     .replace('_', "")
                     .parse::<i64>()
                     .map_err(|_| ParseError::new("invalid integer", line, col))?;
-                Ok(Expr::Literal(Lit::Int(v)))
+                Expr::Literal(Lit::Int(v))
             }
             TokenKind::Float(s) => {
                 let (line, col) = (self.peek().line, self.peek().col);
@@ -688,50 +791,50 @@ impl Parser {
                     .replace('_', "")
                     .parse::<f64>()
                     .map_err(|_| ParseError::new("invalid float", line, col))?;
-                Ok(Expr::Literal(Lit::Float(v)))
+                Expr::Literal(Lit::Float(v))
             }
             TokenKind::String(s) => {
                 self.advance();
-                Ok(Expr::Literal(Lit::String(s)))
+                Expr::Literal(Lit::String(s))
             }
             TokenKind::True => {
                 self.advance();
-                Ok(Expr::Literal(Lit::Bool(true)))
+                Expr::Literal(Lit::Bool(true))
             }
             TokenKind::False => {
                 self.advance();
-                Ok(Expr::Literal(Lit::Bool(false)))
+                Expr::Literal(Lit::Bool(false))
             }
             TokenKind::Unit => {
                 self.advance();
-                Ok(Expr::Literal(Lit::Unit))
+                Expr::Literal(Lit::Unit)
             }
             TokenKind::Ident(name) => {
                 self.advance();
-                let mut expr = Expr::Ident(name);
+                let mut e = Expr::Ident(name);
                 loop {
                     if self.at(&TokenKind::LParen) {
                         self.advance();
                         let args = self.parse_args()?;
                         self.expect(TokenKind::RParen, "`)`")?;
-                        expr = Expr::Call(Box::new(expr), args);
+                        e = Expr::Call(Box::new(e), args);
                     } else if self.at(&TokenKind::Dot) {
                         self.advance();
                         let field = self.expect_ident()?;
-                        expr = Expr::Field(Box::new(expr), field);
+                        e = Expr::Field(Box::new(e), field);
                     } else if self.at(&TokenKind::LBracket) {
                         self.advance();
                         let idx = self.parse_expr(0)?;
                         self.expect(TokenKind::RBracket, "`]`")?;
-                        expr = Expr::Index(Box::new(expr), Box::new(idx));
+                        e = Expr::Index(Box::new(e), Box::new(idx));
                     } else if self.at(&TokenKind::LBrace) {
-                        if let Expr::Ident(ty_name) = &expr {
+                        if let Expr::Ident(ty_name) = &e {
                             if ty_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                                 let ty_name = ty_name.clone();
                                 self.advance();
                                 let fields = self.parse_record_expr_fields()?;
                                 self.expect(TokenKind::RBrace, "`}`")?;
-                                expr = Expr::Record {
+                                e = Expr::Record {
                                     ty: Some(ty_name),
                                     fields,
                                 };
@@ -743,7 +846,7 @@ impl Parser {
                         break;
                     }
                 }
-                Ok(expr)
+                e
             }
             TokenKind::LParen => {
                 self.advance();
@@ -751,9 +854,9 @@ impl Parser {
                     self.advance();
                     return Ok(Expr::Literal(Lit::Unit));
                 }
-                let expr = self.parse_expr(0)?;
+                let e = self.parse_expr(0)?;
                 if self.at(&TokenKind::Comma) {
-                    let mut elems = vec![expr];
+                    let mut elems = vec![e];
                     while self.at(&TokenKind::Comma) {
                         self.advance();
                         elems.push(self.parse_expr(0)?);
@@ -762,7 +865,7 @@ impl Parser {
                     return Ok(Expr::Tuple(elems));
                 }
                 self.expect(TokenKind::RParen, "`)`")?;
-                Ok(expr)
+                e
             }
             TokenKind::LBracket => {
                 self.advance();
@@ -777,26 +880,32 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RBracket, "`]`")?;
-                Ok(Expr::List(elems))
+                Expr::List(elems)
             }
             TokenKind::Match => {
                 self.advance();
-                let expr = self.parse_expr(0)?;
+                let e = self.parse_expr(0)?;
                 self.skip_newlines();
                 self.expect(TokenKind::LBrace, "`{`")?;
                 let arms = self.parse_match_arms()?;
                 self.expect(TokenKind::RBrace, "`}`")?;
-                Ok(Expr::Match(Box::new(expr), arms))
+                Expr::Match(Box::new(e), arms)
             }
             _ => {
                 let (line, col) = (self.peek().line, self.peek().col);
-                Err(ParseError::new(
+                return Err(ParseError::new(
                     format!("unexpected token {}", kind),
                     line,
                     col,
-                ))
+                ));
             }
+        };
+        // Handle postfix `?` operator for Result/Option
+        if self.at(&TokenKind::Question) {
+            self.advance();
+            expr = Expr::Try(Box::new(expr));
         }
+        Ok(expr)
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>, ParseError> {

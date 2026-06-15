@@ -1,0 +1,16 @@
+// Test arena with ref type
+
+func process_data() -> i32 {
+    arena {
+        let ref x: i32 = 42;
+        // In a real implementation, ref would be a borrowing reference
+        // For now, just return the value
+        return x;
+    }
+}
+
+func main() -> i32 {
+    let result = process_data();
+    println(result);
+    result
+}

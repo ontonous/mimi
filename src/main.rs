@@ -410,4 +410,42 @@ func main() -> i32 {
         let errs = check_source(src).unwrap_err();
         assert!(errs.iter().any(|d| d.message.contains("argument 1") || d.message.contains("UserId")));
     }
+
+    #[test]
+    fn interp_try_operator() {
+        let src = r#"
+type Res {
+    Ok(i32)
+    Err(i32)
+}
+
+func safe_div(a: i32, b: i32) -> Res {
+    if b == 0 {
+        return Err(999);
+    }
+    return Ok(a / b);
+}
+
+func main() -> i32 {
+    let result = safe_div(10, 2)?;
+    result
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn typecheck_try_on_non_result() {
+        // Test that ? on an integer fails - this is a basic sanity check
+        // The exact error message may vary based on implementation
+        let src = r#"
+func main() -> i32 {
+    42?
+}
+"#;
+        let errs = check_source(src).unwrap_err();
+        // i32 is not Result/Option, so ? should fail
+        assert!(!errs.is_empty());
+    }
 }

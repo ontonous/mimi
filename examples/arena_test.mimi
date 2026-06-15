@@ -1,0 +1,15 @@
+// Test arena block
+
+func process() -> i32 {
+    arena {
+        let x = 10;
+        let y = 20;
+        return x + y;
+    }
+}
+
+func main() -> i32 {
+    let result = process();
+    println(result);
+    result
+}

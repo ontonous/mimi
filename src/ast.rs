@@ -43,8 +43,34 @@ pub enum Item {
     Func(FuncDef),
     Module(ModuleDef),
     Type(TypeDef),
+    Actor(ActorDef),
+    Cap(CapDef),
     Rule(String),
     Desc(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct CapDef {
+    pub name: String,
+    pub commitment: Commitment,
+    /// None for simple cap, Some(other_cap) for combined cap (A + B)
+    pub combined_with: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActorDef {
+    pub name: String,
+    pub commitment: Commitment,
+    pub fields: Vec<ActorField>,
+    pub methods: Vec<FuncDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActorField {
+    pub name: String,
+    pub ty: Type,
+    pub mut_: bool,
+    pub init: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +147,7 @@ pub enum Stmt {
         ty: Option<Type>,
         init: Option<Expr>,
         mut_: bool,
+        ref_: bool,  // let ref x = ... for arena references
     },
     Return(Option<Expr>),
     Expr(Expr),
@@ -147,6 +174,12 @@ pub enum Stmt {
         target: Expr,
         value: Expr,
     },
+    /// Arena block for region-based memory management
+    Arena(Block),
+    /// Drop a capability
+    Drop(Expr),
+    /// On failure compensation block
+    OnFailure(Block),
     Ellipsis,
 }
 
@@ -166,6 +199,12 @@ pub enum Expr {
         ty: Option<String>,
         fields: Vec<RecordFieldExpr>,
     },
+    /// `?` operator for Result/Option error propagation
+    Try(Box<Expr>),
+    /// Spawn a new task/actor
+    Spawn(Box<Expr>),
+    /// Await a future
+    Await(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -231,4 +270,6 @@ pub enum Type {
     Result(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),
     Func(Vec<Type>, Box<Type>),
+    /// Capability type for linear capabilities
+    Cap(String),
 }
