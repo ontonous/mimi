@@ -1,0 +1,14 @@
+// Mimi v0.2 示例：newtype 强类型隔离
+
+newtype UserId = i32;
+newtype OrderId = i32;
+
+func user_id_value(u: UserId) -> i32 {
+    let UserId(v) = u;
+    v
+}
+
+func main() -> i32 {
+    let u = UserId(42);
+    user_id_value(u)
+}

@@ -1,0 +1,5 @@
+// Mimi v0.1 示例：hello world
+
+func main() {
+    println("Hello, Mimi!");
+}

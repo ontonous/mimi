@@ -1,0 +1,16 @@
+// Mimi v0.2 示例：记录类型与字段访问
+
+type Point {
+    x: f64,
+    y: f64,
+}
+
+func distance(p: Point) -> f64 {
+    sqrt(p.x * p.x + p.y * p.y)
+}
+
+func main() -> f64 {
+    let origin = Point { x: 0.0, y: 0.0 };
+    let p = Point { x: 3.0, y: 4.0 };
+    return distance(origin) + distance(p);
+}
