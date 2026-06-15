@@ -612,6 +612,14 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Parasteps(body))
             }
+            TokenKind::On => {
+                self.advance();
+                self.expect(TokenKind::Failure, "`failure`")?;
+                self.skip_newlines();
+                self.expect(TokenKind::LBrace, "`{`")?;
+                let body = self.parse_block()?;
+                Ok(Stmt::OnFailure(body))
+            }
             _ => {
                 let expr = self.parse_expr(0)?;
                 if self.at(&TokenKind::Eq) {
@@ -912,6 +920,16 @@ impl Parser {
                 let arms = self.parse_match_arms()?;
                 self.expect(TokenKind::RBrace, "`}`")?;
                 Expr::Match(Box::new(e), arms)
+            }
+            TokenKind::Spawn => {
+                self.advance();
+                let e = self.parse_expr(0)?;
+                Expr::Spawn(Box::new(e))
+            }
+            TokenKind::Await => {
+                self.advance();
+                let e = self.parse_expr(0)?;
+                Expr::Await(Box::new(e))
             }
             _ => {
                 let (line, col) = (self.peek().line, self.peek().col);

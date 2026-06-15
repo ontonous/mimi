@@ -334,6 +334,7 @@ impl<'a> Interpreter<'a> {
                 // Collect spawn expressions and their results
                 let mut last_value = None;
                 let mut futures = Vec::new();
+                let mut spawn_bindings: HashMap<String, std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, String>>>>> = HashMap::new();
 
                 for stmt in block {
                     match stmt {
@@ -348,6 +349,35 @@ impl<'a> Interpreter<'a> {
                                 let _ = tx.send(result);
                             });
                             futures.push(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+                        }
+                        Stmt::Let { pat, init, .. } => {
+                            // Handle let bindings that might contain spawn
+                            let v = match init {
+                                Some(Expr::Spawn(expr)) => {
+                                    // Create a future for concurrent execution
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    let expr = expr.clone();
+                                    let file = self.file.clone();
+                                    std::thread::spawn(move || {
+                                        let mut interp = Interpreter::new(&file);
+                                        let result = interp.eval_expr(&expr);
+                                        let _ = tx.send(result);
+                                    });
+                                    let rx_arc = std::sync::Arc::new(std::sync::Mutex::new(rx));
+                                    // Store the future for later await
+                                    if let Pattern::Variable(name) = pat {
+                                        spawn_bindings.insert(name.clone(), rx_arc.clone());
+                                    }
+                                    Value::Future(rx_arc)
+                                }
+                                Some(e) => self.eval_expr(e)?,
+                                None => Value::Unit,
+                            };
+                            if let Some(bindings) = self.match_pattern(pat, &v) {
+                                for (name, val) in bindings {
+                                    self.bind(&name, val);
+                                }
+                            }
                         }
                         Stmt::Expr(expr) => {
                             // Evaluate non-spawn expressions sequentially
@@ -367,6 +397,12 @@ impl<'a> Interpreter<'a> {
                     if let Ok(Err(e)) = rx.recv() {
                         return Err(e);
                     }
+                }
+
+                // If last_value is a Future, await it
+                if let Some(Value::Future(rx)) = last_value {
+                    let rx = rx.lock().map_err(|e| format!("await failed: {}", e))?;
+                    last_value = Some(rx.recv().map_err(|e| format!("await failed: {}", e))??);
                 }
 
                 return Ok(last_value);
