@@ -400,6 +400,21 @@ impl Parser {
         } else {
             None
         };
+        // Parse where clause if present
+        let where_clause = if self.at(&TokenKind::Where) {
+            self.advance();
+            let type_param = self.expect_ident()?;
+            self.expect(TokenKind::Colon, "`:`")?;
+            let mut bounds = Vec::new();
+            bounds.push(self.expect_ident()?);
+            while self.at(&TokenKind::Plus) {
+                self.advance();
+                bounds.push(self.expect_ident()?);
+            }
+            Some(WhereClause { type_param, bounds })
+        } else {
+            None
+        };
         self.skip_newlines();
         if self.is_sketch() {
             self.expect(TokenKind::Colon, "`:`")?;
@@ -414,6 +429,7 @@ impl Parser {
             params,
             ret,
             body,
+            where_clause,
         })
     }
 

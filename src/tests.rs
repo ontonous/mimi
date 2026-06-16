@@ -3321,3 +3321,78 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
+
+// ==================== where clause tests ====================
+
+#[test]
+fn where_single_constraint() {
+    let src = r#"
+trait Display {
+    func to_string() -> string;
+}
+
+type MyType {
+    value: i32
+}
+
+func print(x: MyType) where MyType: Display {
+    println(x);
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn where_multiple_constraints() {
+    let src = r#"
+trait Display {
+    func to_string() -> string;
+}
+
+trait Clone {
+    func clone() -> Self;
+}
+
+type MyType {
+    value: i32
+}
+
+func process(x: MyType) where MyType: Display + Clone {
+    println(x);
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn where_with_return_type() {
+    let src = r#"
+trait Display {
+    func to_string() -> string;
+}
+
+type MyType {
+    value: i32
+}
+
+func format(x: MyType) -> string where MyType: Display {
+    x.to_string()
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}

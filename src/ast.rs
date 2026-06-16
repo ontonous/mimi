@@ -105,6 +105,13 @@ pub struct FuncDef {
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Block,
+    pub where_clause: Option<WhereClause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhereClause {
+    pub type_param: String,
+    pub bounds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
