@@ -658,6 +658,9 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Arena => self.parse_arena(),
+            TokenKind::Shared => self.parse_shared_let(SharedKind::Shared),
+            TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
+            TokenKind::Weak => self.parse_shared_let(SharedKind::Weak),
             TokenKind::LBrace => {
                 self.advance();
                 Ok(Stmt::Block(self.parse_block()?))
@@ -742,6 +745,41 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block()?;
         Ok(Stmt::Arena(body))
+    }
+
+    fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {
+        // Consume the shared/local_shared/weak keyword
+        self.advance();
+        // Parse variable name
+        let tok = self.peek().clone();
+        let name = match &tok.kind {
+            TokenKind::Ident(s) => {
+                self.advance();
+                s.clone()
+            }
+            _ => return Err(ParseError::new(
+                format!("expected variable name after '{}'", match kind {
+                    SharedKind::Shared => "shared",
+                    SharedKind::LocalShared => "local_shared",
+                    SharedKind::Weak | SharedKind::WeakLocal => "weak",
+                }),
+                tok.line,
+                tok.col,
+            )),
+        };
+        // Optional type annotation
+        let ty = if self.at(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        // Expect '='
+        self.expect(TokenKind::Eq, "`=`")?;
+        // Parse initializer expression
+        let init = self.parse_expr(0)?;
+        self.match_semi();
+        Ok(Stmt::SharedLet { kind, name, ty, init })
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {

@@ -141,6 +141,19 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
+/// Kind of shared ownership
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedKind {
+    /// Thread-safe atomic refcount (Arc<RwLock<T>>)
+    Shared,
+    /// Single-thread non-atomic (Rc<RefCell<T>>)
+    LocalShared,
+    /// Weak reference (weak upgrade to Shared)
+    Weak,
+    /// Weak reference (weak upgrade to LocalShared)
+    WeakLocal,
+}
+
 pub type Block = Vec<Stmt>;
 
 #[derive(Debug, Clone)]
@@ -181,6 +194,13 @@ pub enum Stmt {
     Arena(Block),
     /// Drop a capability
     Drop(Expr),
+    /// Shared ownership binding: shared x = expr;
+    SharedLet {
+        kind: SharedKind,
+        name: String,
+        ty: Option<Type>,
+        init: Expr,
+    },
     /// On failure compensation block
     OnFailure(Block),
     /// Parallel steps block (parasteps)

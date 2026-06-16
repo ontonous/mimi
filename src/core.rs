@@ -459,6 +459,49 @@ impl<'a> Checker<'a> {
                 self.check_block(block, ret, scopes);
                 scopes.pop();
             }
+            Stmt::SharedLet { kind, name, ty, init } => {
+                let init_ty = self.infer_expr(init, scopes);
+                let final_ty = match kind {
+                    SharedKind::Shared => Type::Shared(Box::new(init_ty.clone())),
+                    SharedKind::LocalShared => Type::LocalShared(Box::new(init_ty.clone())),
+                    SharedKind::Weak => {
+                        // Expect init to be a Shared value
+                        match &init_ty {
+                            Type::Shared(inner) => Type::Weak(inner.clone()),
+                            _ => {
+                                self.emit(format!(
+                                    "weak requires a shared value, found {}",
+                                    fmt_type(&init_ty)
+                                ));
+                                Type::Weak(Box::new(Type::Name("unknown".into(), vec![])))
+                            }
+                        }
+                    }
+                    SharedKind::WeakLocal => {
+                        match &init_ty {
+                            Type::LocalShared(inner) => Type::Weak(inner.clone()),
+                            _ => {
+                                self.emit(format!(
+                                    "weak_local requires a local_shared value, found {}",
+                                    fmt_type(&init_ty)
+                                ));
+                                Type::Weak(Box::new(Type::Name("unknown".into(), vec![])))
+                            }
+                        }
+                    }
+                };
+                if let Some(declared) = ty {
+                    let declared = self.resolve_type(declared);
+                    if !same_type(&declared, &final_ty) {
+                        self.emit(format!(
+                            "shared binding declared as {} but inferred as {}",
+                            fmt_type(&declared),
+                            fmt_type(&final_ty)
+                        ));
+                    }
+                }
+                scopes.last_mut().unwrap().insert(name.clone(), final_ty);
+            }
             Stmt::Parasteps(block) => {
                 // Parasteps block executes statements in parallel
                 // Each statement in the block should be independent

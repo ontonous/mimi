@@ -1,5 +1,31 @@
 use crate::ast::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::{Rc, Weak as RcWeak};
+use std::sync::{Arc, RwLock, Weak as ArcWeak};
+
+/// Wrapper around Rc that implements Send/Sync.
+/// Safe in our interpreter because LocalShared values are never shared across OS threads;
+/// parasteps creates fresh Interpreter clones per thread.
+#[derive(Debug, Clone)]
+struct SendRc<T>(Rc<T>);
+unsafe impl<T: Clone> Send for SendRc<T> {}
+unsafe impl<T: Clone> Sync for SendRc<T> {}
+impl<T> std::ops::Deref for SendRc<T> {
+    type Target = Rc<T>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+/// Wrapper around RcWeak that implements Send/Sync.
+#[derive(Debug, Clone)]
+struct SendWeak<T>(RcWeak<T>);
+unsafe impl<T: Clone> Send for SendWeak<T> {}
+unsafe impl<T: Clone> Sync for SendWeak<T> {}
+impl<T> SendWeak<T> {
+    fn upgrade(&self) -> Option<SendRc<T>> {
+        self.0.upgrade().map(SendRc)
+    }
+}
 
 /// A quoted AST value - represents syntax tree at runtime for compile-time metaprogramming
 #[derive(Debug, Clone)]
@@ -85,6 +111,14 @@ pub enum Value {
         /// Captured variables from the enclosing scope
         captured: HashMap<String, Value>,
     },
+    /// Thread-safe shared ownership (Arc<RwLock<Value>>)
+    Shared(Arc<RwLock<Value>>),
+    /// Single-thread shared ownership (Rc<RefCell<Value>>)
+    LocalShared(SendRc<RefCell<Value>>),
+    /// Weak reference to a Shared value
+    WeakShared(ArcWeak<RwLock<Value>>),
+    /// Weak reference to a LocalShared value
+    WeakLocal(SendWeak<RefCell<Value>>),
 }
 
 /// Arena memory manager for region-based allocation
@@ -192,6 +226,28 @@ impl std::fmt::Display for Value {
             Value::Newtype(v) => write!(f, "Newtype({})", v),
             Value::Actor(_) => write!(f, "Actor(...)"),
             Value::Closure { .. } => write!(f, "Closure(...)"),
+            Value::Shared(arc) => {
+                let v = arc.read().map_err(|_| std::fmt::Error)?;
+                write!(f, "shared({})", v)
+            }
+            Value::LocalShared(rc) => {
+                let v = rc.0.borrow();
+                write!(f, "local_shared({})", v)
+            }
+            Value::WeakShared(w) => match w.upgrade() {
+                Some(arc) => {
+                    let v = arc.read().map_err(|_| std::fmt::Error)?;
+                    write!(f, "weak_shared({})", v)
+                }
+                None => write!(f, "weak_shared(None)"),
+            },
+            Value::WeakLocal(w) => match w.upgrade() {
+                Some(rc) => {
+                    let v = rc.0.borrow();
+                    write!(f, "weak_local({})", v)
+                }
+                None => write!(f, "weak_local(None)"),
+            },
         }
     }
 }
@@ -716,6 +772,28 @@ impl<'a> Interpreter<'a> {
                 self.eval_expr(expr)?;
                 // In a real implementation, this would track capability usage
             }
+            Stmt::SharedLet { kind, name, init, .. } => {
+                let v = self.eval_expr(init)?;
+                let shared_val = match kind {
+                    SharedKind::Shared => Value::Shared(Arc::new(RwLock::new(v))),
+                    SharedKind::LocalShared => Value::LocalShared(SendRc(Rc::new(RefCell::new(v)))),
+                    SharedKind::Weak => {
+                        // Auto-detect: if init is Shared → WeakShared, if LocalShared → WeakLocal
+                        match v {
+                            Value::Shared(arc) => Value::WeakShared(Arc::downgrade(&arc)),
+                            Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                            _ => return Err(format!("weak requires a shared or local_shared value, got {}", v)),
+                        }
+                    }
+                    SharedKind::WeakLocal => {
+                        match v {
+                            Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                            _ => return Err(format!("weak_local requires a local_shared value, got {}", v)),
+                        }
+                    }
+                };
+                self.bind(name, shared_val);
+            }
             Stmt::OnFailure(block) => {
                 // Register compensation action to the current scope level
                 // Will be executed in LIFO order if error propagates
@@ -957,6 +1035,22 @@ impl<'a> Interpreter<'a> {
                         actor.fields.get(field.as_str())
                             .cloned()
                             .ok_or_else(|| format!("actor field '{}' not found", field))
+                    }
+                    Value::Shared(arc) => {
+                        let inner = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
+                        match &*inner {
+                            Value::Record(fields) => fields.get(field.as_str()).cloned()
+                                .ok_or_else(|| format!("field '{}' not found in shared record", field)),
+                            _ => Err(format!("field access on non-record shared value")),
+                        }
+                    }
+                    Value::LocalShared(rc) => {
+                        let inner = rc.0.borrow();
+                        match &*inner {
+                            Value::Record(fields) => fields.get(field.as_str()).cloned()
+                                .ok_or_else(|| format!("field '{}' not found in local_shared record", field)),
+                            _ => Err(format!("field access on non-record local_shared value")),
+                        }
                     }
                     _ => Err(format!("field access on non-record value {}", obj_val)),
                 }
@@ -1304,6 +1398,48 @@ impl<'a> Interpreter<'a> {
     /// Call a method on an actor instance
     fn call_method(&mut self, obj: &Value, method: &str, args: Vec<Value>) -> Result<Value, String> {
         match obj {
+            Value::Shared(arc) => {
+                match method {
+                    "clone" => Ok(Value::Shared(Arc::clone(arc))),
+                    "deref" | "inner" => {
+                        let inner = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
+                        Ok(inner.clone())
+                    }
+                    _ => Err(format!("shared value has no method '{}'", method)),
+                }
+            }
+            Value::LocalShared(rc) => {
+                match method {
+                    "clone" => Ok(Value::LocalShared(SendRc(Rc::clone(&rc.0)))),
+                    "deref" | "inner" => {
+                        let inner = rc.0.borrow();
+                        Ok(inner.clone())
+                    }
+                    _ => Err(format!("local_shared value has no method '{}'", method)),
+                }
+            }
+            Value::WeakShared(w) => {
+                match method {
+                    "upgrade" => {
+                        match w.upgrade() {
+                            Some(arc) => Ok(Value::Shared(arc)),
+                            None => Ok(Value::Variant("None".into(), vec![])),
+                        }
+                    }
+                    _ => Err(format!("weak_shared value has no method '{}'", method)),
+                }
+            }
+            Value::WeakLocal(w) => {
+                match method {
+                    "upgrade" => {
+                        match w.upgrade() {
+                            Some(rc) => Ok(Value::LocalShared(rc)),
+                            None => Ok(Value::Variant("None".into(), vec![])),
+                        }
+                    }
+                    _ => Err(format!("weak_local value has no method '{}'", method)),
+                }
+            }
             Value::Actor(actor_arc) => {
                 // Handle special methods
                 match method {
@@ -1345,7 +1481,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            _ => Err(format!("cannot call method '{}' on non-actor value", method)),
+            _ => Err(format!("cannot call method '{}' on value {}", method, obj)),
         }
     }
 
@@ -1529,6 +1665,10 @@ fn collect_stmt_free_vars(
             // Add pattern variables to local bound
             collect_pattern_names(pat, local_bound);
         }
+        Stmt::SharedLet { init, name, .. } => {
+            collect_expr_free_vars(init, bound, free);
+            local_bound.insert(name.clone());
+        }
         Stmt::Expr(e) | Stmt::Return(Some(e)) => {
             collect_expr_free_vars(e, bound, free);
         }
@@ -1657,6 +1797,8 @@ fn is_copy(v: &Value) -> bool {
         Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit => true,
         Value::Tuple(elems) => elems.iter().all(is_copy),
         Value::Newtype(inner) => is_copy(inner),
+        // Shared/LocalShared are reference-counted, cloning is cheap
+        Value::Shared(_) | Value::LocalShared(_) => true,
         _ => false,
     }
 }
