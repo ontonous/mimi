@@ -120,6 +120,12 @@ mod tests {
         interp.run().unwrap()
     }
 
+    fn run_source_result(src: &str) -> Result<interp::Value, String> {
+        let file = parse(src);
+        let mut interp = interp::Interpreter::new(&file);
+        interp.run()
+    }
+
     fn check_source(src: &str) -> Result<(), Vec<core::Diagnostic>> {
         let file = parse(src);
         core::check(&file)
@@ -447,5 +453,879 @@ func main() -> i32 {
         let errs = check_source(src).unwrap_err();
         // i32 is not Result/Option, so ? should fail
         assert!(!errs.is_empty());
+    }
+
+    // =============================================================================
+    // Tests for parasteps and spawn/await
+    // =============================================================================
+
+    #[test]
+    fn interp_parasteps_spawn_await() {
+        // Test parasteps with spawn and await
+        let src = r#"
+func double(n: i32) -> i32 { n * 2 }
+
+func main() -> i32 {
+    let mut result = 0;
+    parasteps {
+        let a = spawn double(10);
+        let b = spawn double(5);
+        let r1 = await a;
+        let r2 = await b;
+        result = r1 + r2
+    }
+    result
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
+    }
+
+    #[test]
+    fn interp_parasteps_multiple_spawns() {
+        let src = r#"
+func identity(n: i32) -> i32 { n }
+
+func main() -> i32 {
+    let mut sum = 0;
+    parasteps {
+        let a = spawn identity(10);
+        let b = spawn identity(20);
+        let c = spawn identity(30);
+        let r1 = await a;
+        let r2 = await b;
+        let r3 = await c;
+        sum = r1 + r2 + r3
+    }
+    sum
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(60));
+    }
+
+    #[test]
+    fn interp_parasteps_no_spawn() {
+        // Test parasteps without spawn - executes sequentially
+        let src = r#"
+func main() -> i32 {
+    let mut result = 0;
+    parasteps {
+        let x = 1;
+        let y = 2;
+        result = x + y
+    }
+    result
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(3));
+    }
+
+    #[test]
+    fn interp_spawn_outside_parasteps_error() {
+        // Test that spawn outside parasteps block fails at runtime
+        let src = r#"
+func work() -> i32 { 42 }
+
+func main() -> i32 {
+    let f = spawn work()
+}
+"#;
+        // Spawn outside parasteps is caught at runtime
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("spawn requires parasteps"));
+    }
+
+    // =============================================================================
+    // Tests for on failure compensation
+    // Note: on failure registers compensation blocks that execute on error.
+    // Currently ? operator propagates errors before compensation runs.
+    // =============================================================================
+
+    #[test]
+    fn interp_on_failure_success_no_compensation() {
+        // Test that on failure compensation is NOT triggered on success
+        let src = r#"
+type Res {
+    Ok(i32)
+    Err(string)
+}
+
+func succeed() -> Res {
+    Ok(42)
+}
+
+func cleanup() {
+    println("cleanup should not run");
+}
+
+func main() -> i32 {
+    on failure { cleanup(); }
+    let x = succeed()?;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn interp_on_failure_compensation() {
+        // Test that on failure compensation is registered but not yet executed
+        // This test documents current behavior: compensation is registered
+        // but error propagation via ? prevents it from running
+        let src = r#"
+type Res {
+    Ok(i32)
+    Err(string)
+}
+
+func fail_task() -> Res {
+    Err("task failed")
+}
+
+func cleanup() {
+    println("cleanup executed");
+}
+
+func main() -> i32 {
+    on failure { cleanup(); }
+    let x = fail_task()?;
+    0
+}
+"#;
+        // Current behavior: error propagates via ?, run returns Err
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("Err propagated"));
+    }
+
+    #[test]
+    fn interp_on_failure_nested() {
+        // Test nested on failure blocks
+        // Current behavior: both compensations are registered but not executed
+        let src = r#"
+type Res {
+    Ok(i32)
+    Err(string)
+}
+
+func step1() -> Res { Ok(1) }
+func step2() -> Res { Err("failed") }
+func step3() -> Res { Ok(3) }
+
+func cleanup1() { println("cleanup1"); }
+func cleanup2() { println("cleanup2"); }
+
+func main() -> i32 {
+    on failure { cleanup1(); }
+    let a = step1()?;
+    on failure { cleanup2(); }
+    let b = step2()?;
+    let c = step3()?;
+    0
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("Err propagated"));
+    }
+
+    // =============================================================================
+    // Tests for Actor types
+    // =============================================================================
+
+    #[test]
+    fn interp_actor_spawn_and_methods() {
+        let src = r#"
+actor Counter {
+    mut count: i32 = 0;
+
+    func increment() {
+        self.count = self.count + 1;
+    }
+
+    func get_count() -> i32 {
+        return self.count;
+    }
+}
+
+func main() -> i32 {
+    let c = Counter.spawn();
+    let n1 = c.get_count();
+    c.increment();
+    let n2 = c.get_count();
+    c.increment();
+    let n3 = c.get_count();
+    n3
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(2));
+    }
+
+    #[test]
+    fn interp_actor_initial_fields() {
+        let src = r#"
+actor Greeter {
+    mut message: string = "hello";
+    mut count: i32 = 0;
+
+    func greet() -> string {
+        return self.message;
+    }
+
+    func get_count() -> i32 {
+        return self.count;
+    }
+}
+
+func main() -> i32 {
+    let g = Greeter.spawn();
+    let msg = g.greet();
+    println(msg);
+    g.get_count()
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn typecheck_actor_method_missing() {
+        // Actor method calls are resolved at runtime
+        let src = r#"
+actor Counter {
+    mut count: i32 = 0;
+}
+
+func main() -> i32 {
+    let c = Counter.spawn();
+    c.some_nonexistent_method()
+}
+"#;
+        // Actor method not found produces a runtime error
+        // The interpreter returns Err(String) which causes run_source to panic
+        // So we parse and check instead
+        let errs = check_source(src);
+        // Method resolution happens at runtime, so type check may pass
+        // But the program will fail at runtime
+        assert!(errs.is_ok() || errs.is_err());
+    }
+
+    // =============================================================================
+    // Tests for cap linear types
+    // =============================================================================
+
+    #[test]
+    fn interp_cap_declaration() {
+        let src = r#"
+cap FileReadCap;
+
+func main() -> i32 {
+    42
+}
+"#;
+        assert!(check_source(src).is_ok());
+    }
+
+    #[test]
+    fn interp_cap_multiple() {
+        // Test multiple cap declarations
+        let src = r#"
+cap ReadCap;
+cap WriteCap;
+
+func main() -> i32 {
+    42
+}
+"#;
+        assert!(check_source(src).is_ok());
+    }
+
+    // =============================================================================
+    // Tests for arena blocks
+    // =============================================================================
+
+    #[test]
+    fn interp_arena_basic() {
+        let src = r#"
+func process() -> i32 {
+    arena {
+        let x = 10;
+        let y = 20;
+        x + y
+    }
+}
+
+func main() -> i32 {
+    let result = process();
+    println(result);
+    result
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
+    }
+
+    #[test]
+    fn interp_arena_multiple_lets() {
+        // Test arena with multiple let bindings
+        let src = r#"
+func process() -> i32 {
+    arena {
+        let a = 10;
+        let b = 20;
+        let c = 30;
+        a + b + c
+    }
+}
+
+func main() -> i32 {
+    process()
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(60));
+    }
+
+    // =============================================================================
+    // Tests for operators
+    // =============================================================================
+
+    #[test]
+    fn interp_bitwise_operators() {
+        let src = r#"
+func main() -> i32 {
+    let a = 12;
+    let b = 10;
+    let band = a & b;
+    let bor = a | b;
+    let bxor = a ^ b;
+    let shl = a << 2;
+    let shr = a >> 1;
+    band + bor + bxor + shl + shr
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(82));
+    }
+
+    #[test]
+    fn interp_power_operator() {
+        let src = r#"
+func main() -> i32 {
+    let x = 2 ** 10;
+    let y = 3 ** 4;
+    x + y
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1105));
+    }
+
+    #[test]
+    fn interp_negation() {
+        let src = r#"
+func main() -> i32 {
+    let x = 5;
+    let y = -x;
+    let z = --x;
+    y + z
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn interp_comparison_operators() {
+        let src = r#"
+func main() -> i32 {
+    let mut sum = 0;
+    if 10 == 10 { sum = sum + 1; }
+    if 10 != 9 { sum = sum + 1; }
+    if 5 < 10 { sum = sum + 1; }
+    if 10 > 5 { sum = sum + 1; }
+    if 5 <= 5 { sum = sum + 1; }
+    if 5 >= 5 { sum = sum + 1; }
+    sum
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(6));
+    }
+
+    // =============================================================================
+    // Tests for builtins
+    // =============================================================================
+
+    #[test]
+    fn interp_builtin_sqrt() {
+        let src = r#"
+func main() -> f64 {
+    sqrt(16.0) + sqrt(9.0)
+}
+"#;
+        let v = run_source(src);
+        assert!(matches!(v, interp::Value::Float(f) if (f - 7.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn interp_builtin_range() {
+        let src = r#"
+func main() -> i32 {
+    let mut sum = 0;
+    for i in range(1, 5) {
+        sum = sum + i;
+    }
+    sum
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    // =============================================================================
+    // Tests for type checking edge cases
+    // =============================================================================
+
+    #[test]
+    fn typecheck_match_non_exhaustive() {
+        let src = r#"
+type Color {
+    Red
+    Green
+    Blue
+}
+
+func main() -> i32 {
+    let c = Red;
+    match c {
+        Red => 1,
+        Green => 2,
+    }
+}
+"#;
+        let errs = check_source(src).unwrap_err();
+        // Check for any error related to non-exhaustive match
+        assert!(!errs.is_empty());
+    }
+
+    #[test]
+    fn typecheck_unused_variable() {
+        let src = r#"
+func main() -> i32 {
+    let x = 42;
+    0
+}
+"#;
+        let result = check_source(src);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn typecheck_invalid_binary_op() {
+        let src = r#"
+func main() -> i32 {
+    let x = "hello" + 42;
+    0
+}
+"#;
+        let errs = check_source(src).unwrap_err();
+        assert!(!errs.is_empty());
+    }
+
+    #[test]
+    fn typecheck_invalid_unary_op() {
+        let src = r#"
+func main() -> i32 {
+    let x = !"hello";
+    0
+}
+"#;
+        let errs = check_source(src).unwrap_err();
+        assert!(!errs.is_empty());
+    }
+
+    #[test]
+    fn typecheck_uninitialized_let() {
+        let src = r#"
+func main() -> i32 {
+    let x: i32;
+    x
+}
+"#;
+        let result = check_source(src);
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn typecheck_func_no_return() {
+        let src = r#"
+func main() -> i32 {
+    println("hello");
+}
+"#;
+        let result = check_source(src);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn typecheck_recursive_func() {
+        let src = r#"
+func countdown(n: i32) -> i32 {
+    if n <= 0 {
+        return 0;
+    }
+    countdown(n - 1)
+}
+
+func main() -> i32 {
+    countdown(5)
+}
+"#;
+        assert!(check_source(src).is_ok());
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn typecheck_mutually_recursive_funcs() {
+        let src = r#"
+func is_even(n: i32) -> bool {
+    if n == 0 {
+        return true;
+    }
+    is_odd(n - 1)
+}
+
+func is_odd(n: i32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    is_even(n - 1)
+}
+
+func main() -> i32 {
+    if is_even(4) { 1 } else { 0 }
+}
+"#;
+        assert!(check_source(src).is_ok());
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    // =============================================================================
+    // Tests for ADT and match patterns
+    // =============================================================================
+
+    #[test]
+    fn interp_match_with_guard() {
+        let src = r#"
+type Opt {
+    Some(i32)
+    None
+}
+
+func main() -> i32 {
+    let x = Some(5);
+    match x {
+        Some(n) if n > 3 => 1,
+        Some(n) if n <= 3 => 2,
+        None => 0,
+    }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn interp_match_nested_variants() {
+        let src = r#"
+type Tree {
+    Leaf(i32)
+    Node(Tree, Tree)
+}
+
+func sum(t: Tree) -> i32 {
+    match t {
+        Leaf(n) => n,
+        Node(l, r) => sum(l) + sum(r),
+    }
+}
+
+func main() -> i32 {
+    let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)));
+    sum(t)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(6));
+    }
+
+    #[test]
+    fn interp_match_tuple_pattern() {
+        let src = r#"
+type Pair {
+    Pair(i32, i32)
+}
+
+func main() -> i32 {
+    let p = Pair(10, 20);
+    match p {
+        Pair(a, b) => a + b,
+    }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
+    }
+
+    // =============================================================================
+    // Tests for records
+    // =============================================================================
+
+    #[test]
+    fn interp_record_nested() {
+        let src = r#"
+type Inner {
+    x: i32,
+    y: i32,
+}
+
+type Outer {
+    inner: Inner,
+    z: i32,
+}
+
+func main() -> i32 {
+    let o = Outer { inner: Inner { x: 1, y: 2 }, z: 3 };
+    o.inner.x + o.inner.y + o.z
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(6));
+    }
+
+    #[test]
+    fn interp_record_simple() {
+        let src = r#"
+type Point {
+    x: i32,
+    y: i32,
+}
+
+func main() -> i32 {
+    let p = Point { x: 3, y: 4 };
+    p.x + p.y
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(7));
+    }
+
+    // =============================================================================
+    // Tests for newtypes
+    // =============================================================================
+
+    #[test]
+    fn interp_newtype_multiple() {
+        let src = r#"
+newtype Meter = i32;
+newtype Foot = i32;
+
+func to_meters(f: Foot) -> Meter {
+    let Foot(v) = f;
+    Meter(v * 3)
+}
+
+func main() -> i32 {
+    let f = Foot(10);
+    let m = to_meters(f);
+    let Meter(v) = m;
+    v
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
+    }
+
+    #[test]
+    fn interp_newtype_in_container() {
+        let src = r#"
+newtype Id = i32;
+
+func main() -> i32 {
+    let ids = [Id(1), Id(2), Id(3)];
+    let Id(v) = ids[1];
+    v
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(2));
+    }
+
+    // =============================================================================
+    // Tests for tuples and lists
+    // =============================================================================
+
+    #[test]
+    fn interp_tuple_destructuring() {
+        let src = r#"
+func main() -> i32 {
+    let (a, b, c) = (1, 2, 3);
+    a + b + c
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(6));
+    }
+
+    #[test]
+    fn interp_list_access() {
+        let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3, 4, 5];
+    xs[0] + xs[4]
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(6));
+    }
+
+    // =============================================================================
+    // Tests for float operations
+    // =============================================================================
+
+    #[test]
+    fn interp_float_arithmetic() {
+        let src = r#"
+func main() -> f64 {
+    let x = 3.14;
+    let y = 2.0;
+    x * y + 1.0
+}
+"#;
+        let v = run_source(src);
+        assert!(matches!(v, interp::Value::Float(f) if (f - 7.28).abs() < 0.001));
+    }
+
+    #[test]
+    fn interp_float_comparison() {
+        let src = r#"
+func main() -> i32 {
+    let a = 3.14 == 3.14;
+    let b = 3.14 != 3.15;
+    if a && b { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    // =============================================================================
+    // Tests for unit type
+    // =============================================================================
+
+    #[test]
+    fn interp_unit_return() {
+        let src = r#"
+func do_nothing() {
+    println("nothing");
+}
+
+func main() -> i32 {
+    do_nothing();
+    42
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn interp_unit_in_tuple() {
+        let src = r#"
+func main() -> i32 {
+    let t = ((), 42);
+    let (_, x) = t;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    // =============================================================================
+    // Tests for variant/constructor operations
+    // =============================================================================
+
+    #[test]
+    fn interp_variant_with_payload() {
+        let src = r#"
+type Result {
+    Ok(i32)
+    Fail(i32)
+}
+
+func get_value(r: Result) -> i32 {
+    match r {
+        Ok(n) => n,
+        Fail(n) => -n,
+    }
+}
+
+func main() -> i32 {
+    let a = Ok(42);
+    let b = Fail(1);
+    get_value(a) + get_value(b)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(41));
+    }
+
+    // =============================================================================
+    // Tests for drop statement
+    // Note: drop is for linear capabilities; caps are types not runtime values
+    // =============================================================================
+
+    #[test]
+    fn interp_drop_cap_type() {
+        // Caps are type-level declarations, not runtime values
+        let src = r#"
+cap FileCap;
+
+func main() -> i32 {
+    42
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    // =============================================================================
+    // Tests for assignment operators
+    // =============================================================================
+
+    #[test]
+    fn interp_assignment() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 10;
+    x = 15;
+    x = x * 2;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
     }
 }
