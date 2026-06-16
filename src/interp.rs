@@ -443,7 +443,39 @@ impl<'a> Interpreter<'a> {
         for (p, a) in func.params.iter().zip(args) {
             self.bind(&p.name, a);
         }
+
+        // Extract and check requires conditions
+        for stmt in &func.body {
+            if let Stmt::Requires(expr) = stmt {
+                let cond = self.eval_expr(expr)?;
+                if !is_truthy(&cond) {
+                    self.pop_scope();
+                    return Err(format!("requires condition failed for '{}': {}", func.name, cond));
+                }
+            }
+        }
+
         let result = self.eval_block(&func.body);
+
+        // Extract and check ensures conditions
+        if let Ok(ref opt_val) = result {
+            if let Some(ref rv) = opt_val {
+                self.push_scope();
+                self.bind("result", rv.clone());
+                for stmt in &func.body {
+                    if let Stmt::Ensures(expr) = stmt {
+                        let cond = self.eval_expr(expr)?;
+                        if !is_truthy(&cond) {
+                            self.pop_scope();
+                            self.pop_scope();
+                            return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
+                        }
+                    }
+                }
+                self.pop_scope();
+            }
+        }
+
         self.pop_scope();
         result.map(|v| v.unwrap_or(Value::Unit))
     }

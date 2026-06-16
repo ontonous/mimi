@@ -2473,4 +2473,94 @@ func main() -> i32 {
             panic!("expected Func item");
         }
     }
+
+    // =============================================================================
+    // Tests for P6: requires/ensures runtime assertions
+    // =============================================================================
+
+    #[test]
+    fn requires_passes() {
+        let src = r#"
+func add(a: i32, b: i32) -> i32 {
+    requires: a > 0
+    requires: b > 0
+    a + b
+}
+
+func main() -> i32 {
+    add(1, 2)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(3));
+    }
+
+    #[test]
+    fn requires_fails() {
+        let src = r#"
+func add(a: i32, b: i32) -> i32 {
+    requires: a > 0
+    a + b
+}
+
+func main() -> i32 {
+    add(-1, 2)
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("requires condition failed"), "Expected requires error, got: {}", err);
+    }
+
+    #[test]
+    fn ensures_passes() {
+        let src = r#"
+func double(x: i32) -> i32 {
+    ensures: result == x * 2
+    x * 2
+}
+
+func main() -> i32 {
+    double(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    #[test]
+    fn ensures_fails() {
+        let src = r#"
+func buggy(x: i32) -> i32 {
+    ensures: result == x * 2
+    x * 3
+}
+
+func main() -> i32 {
+    buggy(5)
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("ensures condition failed"), "Expected ensures error, got: {}", err);
+    }
+
+    #[test]
+    fn requires_ensures_combined() {
+        let src = r#"
+func abs_val(x: i32) -> i32 {
+    requires: x != 0
+    ensures: result > 0
+    if x < 0 { -x } else { x }
+}
+
+func main() -> i32 {
+    abs_val(-5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
 }
