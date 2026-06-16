@@ -201,6 +201,8 @@ pub struct Interpreter<'a> {
     env: Vec<HashMap<String, Value>>,
     /// Track which variables have been moved (for move semantics)
     moved_vars: Vec<HashMap<String, bool>>,
+    /// Track which variables are mutable
+    mut_vars: Vec<HashMap<String, bool>>,
     constructors: HashMap<String, usize>,
     /// Set of constructor names that are newtypes (for wrapping result in Value::Newtype)
     newtype_constructors: HashMap<String, bool>,
@@ -231,6 +233,7 @@ impl<'a> Interpreter<'a> {
             file,
             env: vec![HashMap::new()],
             moved_vars: vec![HashMap::new()],
+            mut_vars: vec![HashMap::new()],
             constructors,
             newtype_constructors,
             type_variants,
@@ -325,16 +328,26 @@ impl<'a> Interpreter<'a> {
     fn push_scope(&mut self) {
         self.env.push(HashMap::new());
         self.moved_vars.push(HashMap::new());
+        self.mut_vars.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.env.pop();
         self.moved_vars.pop();
+        self.mut_vars.pop();
     }
 
     fn bind(&mut self, name: &str, value: Value) {
         self.env.last_mut().unwrap().insert(name.into(), value);
         self.moved_vars.last_mut().unwrap().insert(name.into(), false);
+        // Default to immutable unless explicitly marked as mutable
+        self.mut_vars.last_mut().unwrap().entry(name.into()).or_insert(false);
+    }
+
+    fn bind_mut(&mut self, name: &str, value: Value) {
+        self.env.last_mut().unwrap().insert(name.into(), value);
+        self.moved_vars.last_mut().unwrap().insert(name.into(), false);
+        self.mut_vars.last_mut().unwrap().insert(name.into(), true);
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
@@ -379,6 +392,15 @@ impl<'a> Interpreter<'a> {
     fn assign(&mut self, name: &str, value: Value) -> Result<(), String> {
         for (scope, moved) in self.env.iter_mut().zip(self.moved_vars.iter_mut()).rev() {
             if scope.contains_key(name) {
+                // Check if variable is mutable
+                for mut_scope in self.mut_vars.iter().rev() {
+                    if let Some(&is_mut) = mut_scope.get(name) {
+                        if !is_mut {
+                            return Err(format!("cannot assign to immutable variable '{}'", name));
+                        }
+                        break;
+                    }
+                }
                 scope.insert(name.into(), value);
                 moved.insert(name.into(), false);
                 return Ok(());
@@ -462,17 +484,22 @@ impl<'a> Interpreter<'a> {
             if let Some(ref rv) = opt_val {
                 self.push_scope();
                 self.bind("result", rv.clone());
-                for stmt in &func.body {
-                    if let Stmt::Ensures(expr) = stmt {
-                        let cond = self.eval_expr(expr)?;
-                        if !is_truthy(&cond) {
-                            self.pop_scope();
-                            self.pop_scope();
-                            return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
+                let ensures_ok = (|| {
+                    for stmt in &func.body {
+                        if let Stmt::Ensures(expr) = stmt {
+                            let cond = self.eval_expr(expr)?;
+                            if !is_truthy(&cond) {
+                                return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
+                            }
                         }
                     }
+                    Ok(())
+                })();
+                self.pop_scope(); // always pop ensures scope
+                if let Err(e) = ensures_ok {
+                    self.pop_scope(); // pop function scope
+                    return Err(e);
                 }
-                self.pop_scope();
             }
         }
 
@@ -528,7 +555,7 @@ impl<'a> Interpreter<'a> {
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Option<Value>, String> {
         match stmt {
-            Stmt::Let { pat, init, mut_: _, ref_, ty: _ } => {
+            Stmt::Let { pat, init, mut_, ref_, ty: _ } => {
                 let v = match init {
                     Some(e) => {
                         let result = self.eval_expr(e);
@@ -565,7 +592,11 @@ impl<'a> Interpreter<'a> {
 
                 if let Some(bindings) = self.match_pattern(pat, &final_value) {
                     for (name, val) in bindings {
-                        self.bind(&name, val);
+                        if *mut_ {
+                            self.bind_mut(&name, val);
+                        } else {
+                            self.bind(&name, val);
+                        }
                     }
                 } else {
                     return Err(format!("let pattern did not match value {}", v));
@@ -579,7 +610,10 @@ impl<'a> Interpreter<'a> {
                 return Ok(Some(v));
             }
             Stmt::Expr(e) => {
-                self.eval_expr(e)?;
+                match self.eval_expr(e)? {
+                    Value::Error(msg) => return Err(msg),
+                    _ => {}
+                }
             }
             Stmt::If { cond, then_, else_ } => {
                 let c = self.eval_expr(cond)?;
@@ -1425,14 +1459,20 @@ impl<'a> Interpreter<'a> {
             },
             BinOp::Sub => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
             BinOp::Mul => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
-            BinOp::Div => numeric_op(left, right, |a, b| a / b, |a, b| a / b),
-            BinOp::Mod => match (left, right) {
+            BinOp::Div => match (&left, &right) {
+                (Value::Int(_), Value::Int(0)) => Err("division by zero".into()),
+                (Value::Float(_), Value::Float(b)) if *b == 0.0 => Err("division by zero".into()),
+                _ => numeric_op(left, right, |a, b| a / b, |a, b| a / b),
+            },
+            BinOp::Mod => match (&left, &right) {
+                (Value::Int(_), Value::Int(0)) => Err("modulo by zero".into()),
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
                 _ => Err("modulo requires integers".into()),
             },
-            BinOp::Pow => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(b as u32))),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(b))),
+            BinOp::Pow => match (&left, &right) {
+                (Value::Int(_), Value::Int(b)) if *b < 0 => Err("negative exponent not supported for integers".into()),
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(*b as u32))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
                 _ => Err("power requires numbers".into()),
             },
             BinOp::EqCmp => Ok(Value::Bool(values_equal(&left, &right))),
