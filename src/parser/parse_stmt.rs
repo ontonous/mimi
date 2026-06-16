@@ -180,9 +180,33 @@ impl Parser {
         };
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        // NOTE: mimispec parsing deferred — the mimispec parser can hang on certain inputs.
-        // Store content only; AST parsing will be added with proper timeout protection.
-        Ok(Stmt::MmsBlock { content, ast: None })
+        let ast = Self::try_parse_mimispec_with_timeout(&content);
+        Ok(Stmt::MmsBlock { content, ast })
+    }
+
+    fn try_parse_mimispec_with_timeout(content: &str) -> Option<mimispec::ast::File> {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let content_owned = content.to_string();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let result = mimispec::parse(&content_owned);
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => {
+                if result.errors.is_empty() {
+                    Some(result.file)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {

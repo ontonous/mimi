@@ -3,7 +3,7 @@ use crate::lsp::LspServer;
 
 #[test]
 fn hover_function() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func add(a: i32, b: i32) -> i32 { a + b }";
     let result = server.compute_hover(text, 0, 5);
     assert!(result.is_some(), "should hover over 'add'");
@@ -14,7 +14,7 @@ fn hover_function() {
 
 #[test]
 fn hover_type() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "type Point { x: i32, y: i32 }";
     let result = server.compute_hover(text, 0, 5);
     assert!(result.is_some(), "should hover over 'Point'");
@@ -25,7 +25,7 @@ fn hover_type() {
 
 #[test]
 fn hover_module() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "module Math { }";
     let result = server.compute_hover(text, 0, 7);
     assert!(result.is_some(), "should hover over 'Math'");
@@ -36,7 +36,7 @@ fn hover_module() {
 
 #[test]
 fn hover_builtin() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { println(42) }";
     let result = server.compute_hover(text, 0, 17);
     assert!(result.is_some(), "should hover over 'println'");
@@ -47,7 +47,7 @@ fn hover_builtin() {
 
 #[test]
 fn hover_empty_word() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { 42 }";
     let result = server.compute_hover(text, 0, 15);
     assert!(result.is_none(), "should not hover over whitespace");
@@ -55,7 +55,7 @@ fn hover_empty_word() {
 
 #[test]
 fn definition_function() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() { add(1, 2) }";
     // Line 1, character 16 is inside 'add'
     let result = server.compute_definition(text, 1, 16, "file:///test.mimi");
@@ -67,7 +67,7 @@ fn definition_function() {
 
 #[test]
 fn definition_type() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "type Point { x: i32, y: i32 }\nfunc main() -> i32 { 0 }";
     // Line 0, character 5 is inside 'Point'
     let result = server.compute_definition(text, 0, 5, "file:///test.mimi");
@@ -76,7 +76,7 @@ fn definition_type() {
 
 #[test]
 fn definition_module() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "module Math { }\nfunc main() { }";
     // Line 0, character 7 is inside 'Math'
     let result = server.compute_definition(text, 0, 7, "file:///test.mimi");
@@ -85,7 +85,7 @@ fn definition_module() {
 
 #[test]
 fn definition_builtin_returns_none() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { println(42) }";
     let result = server.compute_definition(text, 0, 17, "file:///test.mimi");
     assert!(result.is_none(), "builtins should not have definitions");
@@ -93,7 +93,7 @@ fn definition_builtin_returns_none() {
 
 #[test]
 fn definition_unknown_returns_none() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { unknown_func() }";
     let result = server.compute_definition(text, 0, 17, "file:///test.mimi");
     assert!(result.is_none(), "unknown symbols should return None");
@@ -101,7 +101,7 @@ fn definition_unknown_returns_none() {
 
 #[test]
 fn document_symbols_functions() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() { add(1, 2) }";
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.len() >= 2, "should have at least 2 symbols, got {}", symbols.len());
@@ -114,7 +114,7 @@ fn document_symbols_functions() {
 
 #[test]
 fn document_symbols_types() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "type Point { x: i32, y: i32 }\ntype Color { Red | Green | Blue }";
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.len() >= 2, "should have at least 2 symbols");
@@ -127,7 +127,7 @@ fn document_symbols_types() {
 
 #[test]
 fn document_symbols_mixed() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "module Math { }\ntype Point { x: i32, y: i32 }\nfunc add(a: i32, b: i32) -> i32 { a + b }";
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.len() >= 3, "should have at least 3 symbols");
@@ -135,7 +135,7 @@ fn document_symbols_mixed() {
 
 #[test]
 fn document_symbols_empty() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "";
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.is_empty(), "empty file should have no symbols");
@@ -143,7 +143,7 @@ fn document_symbols_empty() {
 
 #[test]
 fn completion_new_builtins() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { }";
     let items = server.compute_completion(text);
     let labels: Vec<&str> = items.iter()
@@ -173,7 +173,7 @@ fn completion_new_builtins() {
 
 #[test]
 fn hover_new_builtins() {
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() { pow(2, 10) }";
     let result = server.compute_hover(text, 0, 16);
     assert!(result.is_some(), "should hover over 'pow'");
