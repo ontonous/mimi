@@ -44,6 +44,7 @@ pub enum TokenKind {
     Steps,
     Parasteps,
     Quote,
+    Comptime,
     Flow,
     Ui,
     Binds,
@@ -64,6 +65,7 @@ pub enum TokenKind {
     F64,
     Bool,
     StringKw,
+    Nothing,
 
     // Operators
     Plus,
@@ -157,6 +159,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Steps => "steps",
             TokenKind::Parasteps => "parasteps",
             TokenKind::Quote => "quote",
+            TokenKind::Comptime => "comptime",
             TokenKind::Flow => "flow",
             TokenKind::Ui => "ui",
             TokenKind::Binds => "binds",
@@ -175,6 +178,7 @@ impl fmt::Display for TokenKind {
             TokenKind::F64 => "f64",
             TokenKind::Bool => "bool",
             TokenKind::StringKw => "string",
+            TokenKind::Nothing => "nothing",
             TokenKind::Plus => "+",
             TokenKind::Minus => "-",
             TokenKind::Star => "*",
@@ -493,6 +497,7 @@ impl<'a> Lexer<'a> {
             "steps" => TokenKind::Steps,
             "parasteps" => TokenKind::Parasteps,
             "quote" => TokenKind::Quote,
+            "comptime" => TokenKind::Comptime,
             "flow" => TokenKind::Flow,
             "ui" => TokenKind::Ui,
             "binds" => TokenKind::Binds,
@@ -514,6 +519,7 @@ impl<'a> Lexer<'a> {
             "f64" => TokenKind::F64,
             "bool" => TokenKind::Bool,
             "string" => TokenKind::StringKw,
+            "nothing" => TokenKind::Nothing,
             _ => TokenKind::Ident(name.into()),
         }
     }

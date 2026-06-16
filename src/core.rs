@@ -214,6 +214,7 @@ impl<'a> Checker<'a> {
             ),
             Type::Cap(_) | Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) => ty.clone(),
             Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(self.resolve_type(inner))),
+            Type::Nothing => Type::Nothing,
         }
     }
 
@@ -1339,5 +1340,6 @@ fn fmt_type(t: &Type) -> String {
         Type::LocalShared(inner) => format!("local_shared {}", fmt_type(inner)),
         Type::Weak(inner) => format!("weak {}", fmt_type(inner)),
         Type::Newtype(name, inner) => format!("newtype {} {}", name, fmt_type(inner)),
+        Type::Nothing => "nothing".to_string(),
     }
 }

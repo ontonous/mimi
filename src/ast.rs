@@ -295,4 +295,6 @@ pub enum Type {
     Weak(Box<Type>),
     /// Newtype wrapper for strong type isolation (name, inner type)
     Newtype(String, Box<Type>),
+    /// Nothing type (unreachable / error type)
+    Nothing,
 }

@@ -419,6 +419,10 @@ impl Parser {
                 self.advance();
                 Ok(Type::Name(name, Vec::new()))
             }
+            TokenKind::Nothing => {
+                self.advance();
+                Ok(Type::Nothing)
+            }
             TokenKind::BitAnd => {
                 self.advance();
                 let mut_ = self.at(&TokenKind::Mut);

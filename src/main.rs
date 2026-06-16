@@ -2563,4 +2563,94 @@ func main() -> i32 {
         let v = run_source(src);
         assert_eq!(v, interp::Value::Int(5));
     }
+
+    // =============================================================================
+    // Tests for P7: comptime keyword, nothing type, more builtins
+    // =============================================================================
+
+    #[test]
+    fn builtin_min_int() {
+        let src = r#"
+func main() -> i32 {
+    min(3, 7)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(3));
+    }
+
+    #[test]
+    fn builtin_max_int() {
+        let src = r#"
+func main() -> i32 {
+    max(3, 7)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(7));
+    }
+
+    #[test]
+    fn builtin_min_float() {
+        let src = r#"
+func main() -> f64 {
+    min(3.14, 2.71)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Float(2.71));
+    }
+
+    #[test]
+    fn builtin_contains_list() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3, 4, 5];
+    if contains(a, 3) { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn builtin_contains_string() {
+        let src = r#"
+func main() -> i32 {
+    let s = "hello world";
+    if contains(s, "world") { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn builtin_contains_not_found() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    if contains(a, 99) { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn nothing_type_parsing() {
+        let src = r#"
+func diverge() -> nothing {
+    assert(false)
+}
+
+func main() -> i32 {
+    1
+}
+"#;
+        let file = parse(src);
+        // Should parse without errors
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
 }

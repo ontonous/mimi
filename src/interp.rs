@@ -1179,6 +1179,57 @@ impl<'a> Interpreter<'a> {
                     _ => Err("pop expects a list".into()),
                 }
             }
+            "min" => {
+                if args.len() != 2 {
+                    return Err("min expects 2 arguments".into());
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
+                    _ => Err("min expects two numbers of the same type".into()),
+                }
+            }
+            "max" => {
+                if args.len() != 2 {
+                    return Err("max expects 2 arguments".into());
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
+                    _ => Err("max expects two numbers of the same type".into()),
+                }
+            }
+            "contains" => {
+                if args.len() != 2 {
+                    return Err("contains expects 2 arguments (container, elem)".into());
+                }
+                match &args[0] {
+                    Value::List(l) => {
+                        let found = l.iter().any(|v| values_equal(v, &args[1]));
+                        Ok(Value::Bool(found))
+                    }
+                    Value::String(s) => {
+                        match &args[1] {
+                            Value::String(sub) => Ok(Value::Bool(s.contains(sub.as_str()))),
+                            _ => Err("contains on string expects a string needle".into()),
+                        }
+                    }
+                    _ => Err("contains expects a list or string".into()),
+                }
+            }
+            "input" => {
+                use std::io::{self, BufRead};
+                let mut line = String::new();
+                io::stdin().lock().read_line(&mut line).map_err(|e| format!("input error: {}", e))?;
+                // Remove trailing newline
+                if line.ends_with('\n') {
+                    line.pop();
+                }
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                Ok(Value::String(line))
+            }
             _ => {
                 let func = self
                     .find_function(name)
