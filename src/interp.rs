@@ -199,6 +199,8 @@ impl std::fmt::Display for Value {
 pub struct Interpreter<'a> {
     file: &'a File,
     env: Vec<HashMap<String, Value>>,
+    /// Track which variables have been moved (for move semantics)
+    moved_vars: Vec<HashMap<String, bool>>,
     constructors: HashMap<String, usize>,
     /// Set of constructor names that are newtypes (for wrapping result in Value::Newtype)
     newtype_constructors: HashMap<String, bool>,
@@ -228,6 +230,7 @@ impl<'a> Interpreter<'a> {
         Self {
             file,
             env: vec![HashMap::new()],
+            moved_vars: vec![HashMap::new()],
             constructors,
             newtype_constructors,
             type_variants,
@@ -321,17 +324,32 @@ impl<'a> Interpreter<'a> {
 
     fn push_scope(&mut self) {
         self.env.push(HashMap::new());
+        self.moved_vars.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.env.pop();
+        self.moved_vars.pop();
     }
 
     fn bind(&mut self, name: &str, value: Value) {
         self.env.last_mut().unwrap().insert(name.into(), value);
+        self.moved_vars.last_mut().unwrap().insert(name.into(), false);
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
+        for (scope, moved) in self.env.iter().zip(self.moved_vars.iter()).rev() {
+            if let Some(v) = scope.get(name) {
+                if moved.get(name).copied().unwrap_or(false) {
+                    return None; // Treat moved vars as undefined
+                }
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+
+    fn lookup_raw(&self, name: &str) -> Option<Value> {
         for scope in self.env.iter().rev() {
             if let Some(v) = scope.get(name) {
                 return Some(v.clone());
@@ -340,10 +358,29 @@ impl<'a> Interpreter<'a> {
         None
     }
 
+    fn is_moved(&self, name: &str) -> bool {
+        for moved in self.moved_vars.iter().rev() {
+            if let Some(&m) = moved.get(name) {
+                return m;
+            }
+        }
+        false
+    }
+
+    fn mark_moved(&mut self, name: &str) {
+        for moved in self.moved_vars.iter_mut().rev() {
+            if moved.contains_key(name) {
+                moved.insert(name.into(), true);
+                return;
+            }
+        }
+    }
+
     fn assign(&mut self, name: &str, value: Value) -> Result<(), String> {
-        for scope in self.env.iter_mut().rev() {
+        for (scope, moved) in self.env.iter_mut().zip(self.moved_vars.iter_mut()).rev() {
             if scope.contains_key(name) {
                 scope.insert(name.into(), value);
+                moved.insert(name.into(), false);
                 return Ok(());
             }
         }
@@ -476,6 +513,13 @@ impl<'a> Interpreter<'a> {
                     None => Value::Unit,
                 };
 
+                // Move semantics: if init is a simple identifier and value is non-Copy, mark source as moved
+                if let Some(Expr::Ident(name)) = init {
+                    if !is_copy(&v) && !self.is_moved(name) {
+                        self.mark_moved(name);
+                    }
+                }
+
                 // Handle `let ref` in arena: create ArenaRef instead of storing value directly
                 let final_value = if *ref_ && self.arena_depth > 0 {
                     // Allocate in current arena
@@ -570,6 +614,12 @@ impl<'a> Interpreter<'a> {
             }
             Stmt::Assign { target, value } => {
                 let v = self.eval_expr(value)?;
+                // Move semantics: if value is a simple identifier and non-Copy, mark source as moved
+                if let Expr::Ident(name) = value {
+                    if !is_copy(&v) && !self.is_moved(name) {
+                        self.mark_moved(name);
+                    }
+                }
                 match target {
                     Expr::Ident(name) => self.assign(name, v)?,
                     Expr::Field(obj, field) => {
@@ -710,6 +760,8 @@ impl<'a> Interpreter<'a> {
             Expr::Ident(name) => {
                 if let Some(v) = self.lookup(name) {
                     Ok(v)
+                } else if self.is_moved(name) {
+                    Err(format!("use of moved value '{}'", name))
                 } else if let Some(func) = self.find_function(name) {
                     // First-class function: wrap as a closure with empty capture
                     Ok(Value::Closure {
@@ -1270,6 +1322,17 @@ impl<'a> Interpreter<'a> {
             BinOp::Assign => Err("assignment as expression not supported".into()),
             BinOp::And | BinOp::Or => unreachable!(),
         }
+    }
+}
+
+/// Check if a value is Copy (can be used after move)
+/// Copy types: Int, Float, Bool, Unit, and Tuples of Copy types
+fn is_copy(v: &Value) -> bool {
+    match v {
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit => true,
+        Value::Tuple(elems) => elems.iter().all(is_copy),
+        Value::Newtype(inner) => is_copy(inner),
+        _ => false,
     }
 }
 

@@ -1848,4 +1848,262 @@ func main() -> i32 {
         let v = run_source(src);
         assert_eq!(v, interp::Value::Int(26));
     }
+
+    // =============================================================================
+    // Tests for move semantics
+    // =============================================================================
+
+    #[test]
+    fn move_semantics_int_copy() {
+        let src = r#"
+func main() -> i32 {
+    let x = 42;
+    let y = x;
+    x + y
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(84));
+    }
+
+    #[test]
+    fn move_semantics_string_move() {
+        let src = r#"
+func main() -> i32 {
+    let s = "hello";
+    let t = s;
+    1
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_string_use_after_move() {
+        let src = r#"
+func main() -> i32 {
+    let s = "hello";
+    let t = s;
+    s
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("use of moved value"), "Expected 'use of moved value' error, got: {}", err);
+    }
+
+    #[test]
+    fn move_semantics_list_move() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    let b = a;
+    1
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_list_use_after_move() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    let b = a;
+    a
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("use of moved value"), "Expected 'use of moved value' error, got: {}", err);
+    }
+
+    #[test]
+    fn move_semantics_tuple_copy() {
+        // Tuples of Copy types (int, bool, float) are Copy - can be used after move
+        let src = r#"
+func main() -> i32 {
+    let t = (1, 2, 3);
+    let u = t;
+    // t is still usable because tuples of ints are Copy
+    let (a, _, _) = t;
+    let (b, _, _) = u;
+    a + b
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(2));
+    }
+
+    #[test]
+    fn move_semantics_bool_copy() {
+        let src = r#"
+func main() -> i32 {
+    let b = true;
+    let c = b;
+    if b { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_float_copy() {
+        let src = r#"
+func main() -> f64 {
+    let x = 3.14;
+    let y = x;
+    x + y
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Float(6.28));
+    }
+
+    #[test]
+    fn move_semantics_assignment_move() {
+        let src = r#"
+func main() -> i32 {
+    let s = "hello";
+    let mut t = "world";
+    t = s;
+    1
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_assignment_use_after_move() {
+        let src = r#"
+func main() -> i32 {
+    let s = "hello";
+    let mut t = "world";
+    t = s;
+    s
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("use of moved value"), "Expected 'use of moved value' error, got: {}", err);
+    }
+
+    #[test]
+    fn move_semantics_function_arg_move() {
+        let src = r#"
+func consume(s: string) -> i32 { 1 }
+
+func main() -> i32 {
+    let s = "hello";
+    consume(s)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_closure_capture() {
+        let src = r#"
+func main() -> i32 {
+    let x = 10;
+    let f = fn() -> i32 { x };
+    f()
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    #[test]
+    fn move_semantics_variant_move() {
+        let src = r#"
+type Opt {
+    Some(i32)
+    None
+}
+
+func main() -> i32 {
+    let o = Some(42);
+    let p = o;
+    1
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn move_semantics_variant_use_after_move() {
+        let src = r#"
+type Opt {
+    Some(i32)
+    None
+}
+
+func main() -> i32 {
+    let o = Some(42);
+    let p = o;
+    match o {
+        Some(v) => v,
+        None => 0,
+    }
+}
+"#;
+        let result = run_source_result(src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("use of moved value"), "Expected 'use of moved value' error, got: {}", err);
+    }
+
+    // =============================================================================
+    // Tests for borrowing syntax (& and &mut)
+    // =============================================================================
+
+    #[test]
+    fn borrow_immutable() {
+        let src = r#"
+func main() -> i32 {
+    let x = 42;
+    let r = &x;
+    r
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn borrow_mutable() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 42;
+    let r = &mut x;
+    r
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn borrow_does_not_move_copy() {
+        let src = r#"
+func main() -> i32 {
+    let x = 42;
+    let r = &x;
+    // x is still usable because it's Copy and & doesn't move
+    x + r
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(84));
+    }
 }
