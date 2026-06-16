@@ -114,7 +114,9 @@ fn mms_block_ast_token_content() {
         }
     }).unwrap();
     assert!(!mms_stmt.0.is_empty(), "content should not be empty");
-    assert!(mms_stmt.1.is_none(), "token-represented content should not produce AST (graceful degradation)");
+    assert!(mms_stmt.0.contains("func add"), "content should contain original text");
+    assert!(mms_stmt.0.contains("requires"), "content should contain requires");
+    assert!(mms_stmt.1.is_some(), "valid MMS content should produce AST");
 }
 
 #[test]

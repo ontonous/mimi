@@ -160,6 +160,8 @@ impl Parser {
         } else {
             let mut text = String::new();
             let mut depth = 1;
+            let mut first_line = None;
+            let mut first_col = None;
             while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                 let tok = self.peek();
                 match &tok.kind {
@@ -172,8 +174,23 @@ impl Parser {
                     }
                     _ => {}
                 }
-                text.push_str(&tok.kind.to_string());
-                text.push(' ');
+                let t = tok.kind.source_text();
+                if t == "\n" {
+                    text.push('\n');
+                } else if !t.is_empty() {
+                    if first_line.is_none() {
+                        first_line = Some(tok.line);
+                        first_col = Some(tok.col);
+                    }
+                    let base_col = first_col.unwrap_or(0);
+                    let relative_col = tok.col.saturating_sub(base_col);
+                    if text.ends_with('\n') || text.is_empty() {
+                        text.push_str(&" ".repeat(relative_col));
+                    } else {
+                        text.push(' ');
+                    }
+                    text.push_str(t);
+                }
                 self.advance();
             }
             text.trim().to_string()
