@@ -729,15 +729,14 @@ impl Parser {
         }
     }
 
-    fn parse_brace_block(&mut self) -> Result<Block, ParseError> {
+    fn parse_block_with_terminator(&mut self, terminator: TokenKind, label: &str) -> Result<Block, ParseError> {
         let mut stmts = Vec::new();
         self.skip_newlines();
-        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+        while !self.at(&terminator) && !self.at(&TokenKind::Eof) {
             self.skip_newlines();
-            if self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof) {
+            if self.at(&terminator) || self.at(&TokenKind::Eof) {
                 break;
             }
-            // Contract prefixes inside block
             if self.at(&TokenKind::Requires) {
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
@@ -779,73 +778,21 @@ impl Parser {
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                // Rule is metadata-only in v1.0, stored as Desc for simplicity
                 stmts.push(Stmt::Desc(format!("rule: {}", s)));
                 continue;
             }
             stmts.push(self.parse_stmt()?);
         }
-        self.expect(TokenKind::RBrace, "`}`")?;
+        self.expect(terminator, label)?;
         Ok(stmts)
     }
 
+    fn parse_brace_block(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_with_terminator(TokenKind::RBrace, "`}`")
+    }
+
     fn parse_indent_block(&mut self) -> Result<Block, ParseError> {
-        let mut stmts = Vec::new();
-        self.skip_newlines();
-        while !self.at(&TokenKind::Dedent) && !self.at(&TokenKind::Eof) {
-            self.skip_newlines();
-            if self.at(&TokenKind::Dedent) || self.at(&TokenKind::Eof) {
-                break;
-            }
-            // Contract prefixes inside block
-            if self.at(&TokenKind::Requires) {
-                self.advance();
-                self.expect(TokenKind::Colon, "`:`")?;
-                let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Requires(expr));
-                continue;
-            }
-            if self.at(&TokenKind::Ensures) {
-                self.advance();
-                self.expect(TokenKind::Colon, "`:`")?;
-                let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Ensures(expr));
-                continue;
-            }
-            if self.at(&TokenKind::Math) {
-                self.advance();
-                self.expect(TokenKind::Colon, "`:`")?;
-                self.skip_newlines();
-                self.expect(TokenKind::LBrace, "`{` for math block")?;
-                let mut exprs = Vec::new();
-                self.skip_newlines();
-                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-                    exprs.push(self.parse_expr(0)?);
-                    self.match_semi();
-                    self.skip_newlines();
-                }
-                self.expect(TokenKind::RBrace, "`}`")?;
-                stmts.push(Stmt::Math(exprs));
-                continue;
-            }
-            if self.at(&TokenKind::Desc) {
-                self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                stmts.push(Stmt::Desc(s));
-                continue;
-            }
-            if self.at(&TokenKind::Rule) {
-                self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                stmts.push(Stmt::Desc(format!("rule: {}", s)));
-                continue;
-            }
-            stmts.push(self.parse_stmt()?);
-        }
-        self.expect(TokenKind::Dedent, "dedent")?;
-        Ok(stmts)
+        self.parse_block_with_terminator(TokenKind::Dedent, "dedent")
     }
 
     fn parse_quote_block(&mut self) -> Result<Block, ParseError> {

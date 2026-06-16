@@ -1540,7 +1540,7 @@ impl<'a> Checker<'a> {
             // Check where constraints
             if let Some((type_param, bounds)) = self.where_clauses.get(name).cloned() {
                 // Find the argument that matches the type parameter
-                for (_i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
+                for (arg, param) in args.iter().zip(params.iter()) {
                     let at = self.infer_expr(arg, scopes);
                     // Check if this parameter uses the type parameter
                     if self.type_uses_type_param(param, &type_param) {
