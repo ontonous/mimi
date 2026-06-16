@@ -246,6 +246,7 @@ impl Parser {
     fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
         let commitment = self.expect_keyword(TokenKind::Trait)?;
         let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         let mut methods = Vec::new();
@@ -279,6 +280,7 @@ impl Parser {
             name,
             commitment,
             methods,
+            generics,
         })
     }
 
@@ -463,6 +465,8 @@ impl Parser {
     fn parse_func(&mut self) -> Result<FuncDef, ParseError> {
         let commitment = self.expect_keyword(TokenKind::Func)?;
         let name = self.expect_ident()?;
+        // Parse optional generic parameters: <T> or <T: Trait>
+        let generics = self.parse_generic_params()?;
         let params = if self.is_sketch() && !self.at(&TokenKind::LParen) {
             Vec::new()
         } else {
@@ -497,6 +501,19 @@ impl Parser {
             self.expect(TokenKind::Colon, "`:`")?;
             self.skip_newlines();
         }
+        // Parse effects if present: with Effect1, Effect2
+        let effects = if self.at(&TokenKind::With) {
+            self.advance();
+            let mut effects = Vec::new();
+            effects.push(self.expect_ident()?);
+            while self.at(&TokenKind::Comma) {
+                self.advance();
+                effects.push(self.expect_ident()?);
+            }
+            effects
+        } else {
+            Vec::new()
+        };
         self.expect_block_start("function body")?;
         let body = self.parse_block()?;
         Ok(FuncDef {
@@ -507,7 +524,40 @@ impl Parser {
             ret,
             body,
             where_clause,
+            generics,
+            effects,
         })
+    }
+
+    fn parse_generic_params(&mut self) -> Result<Vec<GenericParam>, ParseError> {
+        if !self.at(&TokenKind::Lt) {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        let mut params = Vec::new();
+        if !self.at(&TokenKind::Gt) {
+            loop {
+                let name = self.expect_ident()?;
+                let bounds = if self.at(&TokenKind::Colon) {
+                    self.advance();
+                    let mut b = vec![self.expect_ident()?];
+                    while self.at(&TokenKind::Plus) {
+                        self.advance();
+                        b.push(self.expect_ident()?);
+                    }
+                    b
+                } else {
+                    Vec::new()
+                };
+                params.push(GenericParam { name, bounds });
+                if !self.at(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::Gt, "`>`")?;
+        Ok(params)
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
@@ -831,6 +881,7 @@ impl Parser {
             TokenKind::Shared => self.parse_shared_let(SharedKind::Shared),
             TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
             TokenKind::Weak => self.parse_shared_let(SharedKind::Weak),
+            TokenKind::Mms => self.parse_mms_block(),
             TokenKind::LBrace => {
                 self.advance();
                 Ok(Stmt::Block(self.parse_block()?))
@@ -915,6 +966,42 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block()?;
         Ok(Stmt::Arena(body))
+    }
+
+    fn parse_mms_block(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::Mms, "`mms`")?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        // Parse the content inside the mms block
+        // It can be a string literal or raw text until closing brace
+        let content = if self.at(&TokenKind::String("".into())) {
+            // String literal: mms { "content" }
+            self.expect_string()?
+        } else {
+            // Raw text: collect tokens until closing brace
+            let mut text = String::new();
+            let mut depth = 1;
+            while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                let tok = self.peek();
+                match &tok.kind {
+                    TokenKind::LBrace => depth += 1,
+                    TokenKind::RBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                text.push_str(&tok.kind.to_string());
+                text.push(' ');
+                self.advance();
+            }
+            text.trim().to_string()
+        };
+        self.expect(TokenKind::RBrace, "`}`")?;
+        self.match_semi();
+        Ok(Stmt::MmsBlock(content))
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {
@@ -1236,6 +1323,32 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 self.advance();
+                // Check for turbofish: name::<Type>(args)
+                if self.at(&TokenKind::ColonColon) {
+                    self.advance();
+                    if self.at(&TokenKind::Lt) {
+                        self.advance();
+                        let mut type_args = Vec::new();
+                        if !self.at(&TokenKind::Gt) {
+                            loop {
+                                type_args.push(self.parse_type()?);
+                                if !self.at(&TokenKind::Comma) {
+                                    break;
+                                }
+                                self.advance();
+                            }
+                        }
+                        self.expect(TokenKind::Gt, "`>`")?;
+                        self.expect(TokenKind::LParen, "`(`")?;
+                        let args = self.parse_args()?;
+                        self.expect(TokenKind::RParen, "`)`")?;
+                        Expr::Turbofish(name, type_args, args)
+                    } else {
+                        // Plain path separator (e.g., module::func)
+                        let field = self.expect_ident()?;
+                        Expr::Field(Box::new(Expr::Ident(name)), field)
+                    }
+                } else {
                 let mut e = Expr::Ident(name);
                 loop {
                     if self.at(&TokenKind::LParen) {
@@ -1286,6 +1399,7 @@ impl Parser {
                     }
                 }
                 e
+                }
             }
             TokenKind::LParen => {
                 self.advance();
@@ -1472,6 +1586,7 @@ impl Parser {
     fn parse_type_def(&mut self) -> Result<TypeDef, ParseError> {
         let commitment = self.expect_keyword(TokenKind::Type)?;
         let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
         self.skip_newlines();
         if self.is_sketch() {
             self.expect(TokenKind::Colon, "`:`")?;
@@ -1507,7 +1622,7 @@ impl Parser {
                 let variants = self.parse_enum_variants()?;
                 TypeDefKind::Enum(variants)
             };
-            return Ok(TypeDef { name, commitment, pub_: false, kind });
+            return Ok(TypeDef { name, commitment, pub_: false, kind, generics });
         }
         if self.at(&TokenKind::Eq) {
             self.advance();
@@ -1518,6 +1633,7 @@ impl Parser {
                 commitment,
                 pub_: false,
                 kind: TypeDefKind::Alias(ty),
+                generics,
             });
         }
         self.expect(TokenKind::LBrace, "`{`")?;
@@ -1531,7 +1647,7 @@ impl Parser {
         };
         self.skip_newlines();
         self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(TypeDef { name, commitment, pub_: false, kind })
+        Ok(TypeDef { name, commitment, pub_: false, kind, generics })
     }
 
     fn lookahead_is_record(&self) -> bool {
@@ -1723,6 +1839,7 @@ impl Parser {
     fn parse_newtype(&mut self) -> Result<TypeDef, ParseError> {
         let commitment = self.expect_keyword(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
         self.expect(TokenKind::Eq, "`=`")?;
         let ty = self.parse_type()?;
         self.match_semi();
@@ -1731,6 +1848,7 @@ impl Parser {
             commitment,
             pub_: false,
             kind: TypeDefKind::Newtype(ty),
+            generics,
         })
     }
 }

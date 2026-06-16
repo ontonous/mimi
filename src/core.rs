@@ -36,6 +36,16 @@ struct Checker<'a> {
     cap_vars: Vec<HashMap<String, bool>>,
     /// Track borrow state of variables: name -> borrow state
     borrows: Vec<HashMap<String, BorrowState>>,
+    /// Track trait definitions: trait_name -> list of method names
+    traits: HashMap<String, Vec<String>>,
+    /// Track trait implementations: (trait_name, type_name) -> list of method names
+    impls: HashMap<(String, String), Vec<String>>,
+    /// Track where clauses for functions: func_name -> (type_param, bounds)
+    where_clauses: HashMap<String, (String, Vec<String>)>,
+    /// Track effects for functions: func_name -> list of effect names
+    func_effects: HashMap<String, Vec<String>>,
+    /// Track available effects in current scope
+    available_effects: Vec<HashMap<String, bool>>,
 }
 
 impl<'a> Checker<'a> {
@@ -49,6 +59,11 @@ impl<'a> Checker<'a> {
             newtypes: HashMap::new(),
             cap_vars: vec![HashMap::new()],
             borrows: vec![HashMap::new()],
+            traits: HashMap::new(),
+            impls: HashMap::new(),
+            where_clauses: HashMap::new(),
+            func_effects: HashMap::new(),
+            available_effects: vec![HashMap::new()],
         }
     }
 
@@ -111,6 +126,17 @@ impl<'a> Checker<'a> {
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 self.funcs.insert(f.name.clone(), (params, ret));
+                // Store where clause if present
+                if let Some(where_clause) = &f.where_clause {
+                    self.where_clauses.insert(
+                        f.name.clone(),
+                        (where_clause.type_param.clone(), where_clause.bounds.clone()),
+                    );
+                }
+                // Store effects if present
+                if !f.effects.is_empty() {
+                    self.func_effects.insert(f.name.clone(), f.effects.clone());
+                }
             }
             Item::Type(t) => {
                 if self.types.contains_key(&t.name) {
@@ -162,6 +188,7 @@ impl<'a> Checker<'a> {
                         name: f.name.clone(),
                         ty: f.ty.clone(),
                     }).collect()),
+                    generics: Vec::new(),
                 };
                 self.types.insert(actor.name.clone(), actor_type_def);
 
@@ -184,8 +211,28 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Rule(_) | Item::Desc(_) | Item::Cap(_) => {}
-            Item::Trait(_) | Item::Impl(_) => {
-                // Trait and impl definitions are collected but not type-checked in v1.1
+            Item::Trait(trait_def) => {
+                let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
+                self.traits.insert(trait_def.name.clone(), method_names);
+            }
+            Item::Impl(impl_def) => {
+                let method_names: Vec<String> = impl_def.methods.iter().map(|m| m.name.clone()).collect();
+                self.impls.insert(
+                    (impl_def.trait_name.clone(), impl_def.type_name.clone()),
+                    method_names,
+                );
+                // Also register impl methods as functions with self parameter
+                for method in &impl_def.methods {
+                    let mut params = vec![Type::Name(impl_def.type_name.clone(), vec![])];
+                    params.extend(method.params.iter().map(|p| self.resolve_type(&p.ty)));
+                    let ret = method
+                        .ret
+                        .as_ref()
+                        .map(|t| self.resolve_type(t))
+                        .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    let key = format!("{}_{}", impl_def.type_name, method.name);
+                    self.funcs.insert(key, (params, ret));
+                }
             }
             Item::ExternBlock(_) => {
                 // Extern blocks are collected but not type-checked in v1.1
@@ -289,8 +336,44 @@ impl<'a> Checker<'a> {
             }
             Item::Type(_) | Item::Cap(_) => {}
             Item::Rule(_) | Item::Desc(_) => {}
-            Item::Trait(_) | Item::Impl(_) => {
-                // Trait and impl definitions are collected but not type-checked in v1.1
+            Item::Trait(trait_def) => {
+                // Check that all trait method types are well-formed
+                for method in &trait_def.methods {
+                    for param in &method.params {
+                        let resolved = self.resolve_type(&param.ty);
+                        self.check_type_well_formed(&resolved, &format!("trait '{}' method '{}'", trait_def.name, method.name));
+                    }
+                    if let Some(ret) = &method.ret {
+                        let resolved = self.resolve_type(ret);
+                        self.check_type_well_formed(&resolved, &format!("trait '{}' method '{}' return", trait_def.name, method.name));
+                    }
+                }
+            }
+            Item::Impl(impl_def) => {
+                // Check that the trait exists
+                if !self.traits.contains_key(&impl_def.trait_name) {
+                    self.emit(format!("undefined trait '{}'", impl_def.trait_name));
+                }
+                // Check that the type exists
+                if !self.types.contains_key(&impl_def.type_name) && !Self::is_builtin_type(&impl_def.type_name) {
+                    self.emit(format!("undefined type '{}'", impl_def.type_name));
+                }
+                // Check that all required trait methods are implemented
+                if let Some(required_methods) = self.traits.get(&impl_def.trait_name).cloned() {
+                    let implemented: Vec<String> = impl_def.methods.iter().map(|m| m.name.clone()).collect();
+                    for required in &required_methods {
+                        if !implemented.contains(required) {
+                            self.emit(format!(
+                                "missing method '{}' in impl of trait '{}' for '{}'",
+                                required, impl_def.trait_name, impl_def.type_name
+                            ));
+                        }
+                    }
+                }
+                // Check impl method bodies
+                for method in &impl_def.methods {
+                    self.check_func(method);
+                }
             }
             Item::ExternBlock(_) => {
                 // Extern blocks are collected but not type-checked in v1.1
@@ -300,6 +383,54 @@ impl<'a> Checker<'a> {
 
     fn is_builtin_type(name: &str) -> bool {
         matches!(name, "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "List" | "Future" | "Result" | "Option")
+    }
+
+    fn check_type_well_formed(&mut self, ty: &Type, context: &str) {
+        match ty {
+            Type::Name(name, args) => {
+                if !Self::is_builtin_type(name) && !self.types.contains_key(name) {
+                    self.emit(format!("unknown type '{}' in {}", name, context));
+                }
+                for arg in args {
+                    self.check_type_well_formed(arg, context);
+                }
+            }
+            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner) | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) => {
+                self.check_type_well_formed(inner, context);
+            }
+            Type::Result(ok, err) => {
+                self.check_type_well_formed(ok, context);
+                self.check_type_well_formed(err, context);
+            }
+            Type::Tuple(elems) => {
+                for elem in elems {
+                    self.check_type_well_formed(elem, context);
+                }
+            }
+            Type::Func(args, ret) => {
+                for arg in args {
+                    self.check_type_well_formed(arg, context);
+                }
+                self.check_type_well_formed(ret, context);
+            }
+            Type::Newtype(name, inner) => {
+                if !self.types.contains_key(name) && !self.newtypes.contains_key(name) {
+                    self.emit(format!("unknown newtype '{}' in {}", name, context));
+                }
+                self.check_type_well_formed(inner, context);
+            }
+            Type::Cap(_) | Type::Nothing => {}
+        }
+    }
+
+    /// Check if a type implements a trait
+    fn type_implements_trait(&self, ty: &Type, trait_name: &str) -> bool {
+        match ty {
+            Type::Name(type_name, _) => {
+                self.impls.contains_key(&(trait_name.to_string(), type_name.clone()))
+            }
+            _ => false,
+        }
     }
 
     fn check_func(&mut self, func: &FuncDef) {
@@ -353,6 +484,97 @@ impl<'a> Checker<'a> {
         self.cap_vars.pop();
     }
 
+    /// Check that a statement doesn't capture local_shared variables from outer scope
+    fn check_stmt_parasteps_safe(&mut self, stmt: &Stmt, scopes: &mut Vec<HashMap<String, Type>>) {
+        match stmt {
+            Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                self.check_expr_parasteps_safe(e, scopes);
+            }
+            Stmt::Let { init: Some(e), .. } => {
+                self.check_expr_parasteps_safe(e, scopes);
+            }
+            Stmt::Assign { target, value } => {
+                self.check_expr_parasteps_safe(target, scopes);
+                self.check_expr_parasteps_safe(value, scopes);
+            }
+            Stmt::If { cond, then_, else_ } => {
+                self.check_expr_parasteps_safe(cond, scopes);
+                for s in then_ {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+                if let Some(else_) = else_ {
+                    for s in else_ {
+                        self.check_stmt_parasteps_safe(s, scopes);
+                    }
+                }
+            }
+            Stmt::While { cond, body } => {
+                self.check_expr_parasteps_safe(cond, scopes);
+                for s in body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
+            Stmt::For { iterable, body, .. } => {
+                self.check_expr_parasteps_safe(iterable, scopes);
+                for s in body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Check that an expression doesn't reference local_shared variables
+    fn check_expr_parasteps_safe(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) {
+        match expr {
+            Expr::Ident(name) => {
+                // Check if this variable is local_shared from outer scope
+                for scope in scopes.iter().rev() {
+                    if let Some(ty) = scope.get(name) {
+                        if matches!(ty, Type::LocalShared(_)) {
+                            self.emit(format!(
+                                "cannot capture 'local_shared' variable '{}' in parallel block (use 'shared' instead)",
+                                name
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
+            Expr::Binary(_, l, r) => {
+                self.check_expr_parasteps_safe(l, scopes);
+                self.check_expr_parasteps_safe(r, scopes);
+            }
+            Expr::Unary(_, e) => {
+                self.check_expr_parasteps_safe(e, scopes);
+            }
+            Expr::Call(callee, args) => {
+                self.check_expr_parasteps_safe(callee, scopes);
+                for arg in args {
+                    self.check_expr_parasteps_safe(arg, scopes);
+                }
+            }
+            Expr::Field(obj, _) => {
+                self.check_expr_parasteps_safe(obj, scopes);
+            }
+            Expr::Index(obj, idx) => {
+                self.check_expr_parasteps_safe(obj, scopes);
+                self.check_expr_parasteps_safe(idx, scopes);
+            }
+            Expr::List(elems) => {
+                for e in elems {
+                    self.check_expr_parasteps_safe(e, scopes);
+                }
+            }
+            Expr::Tuple(elems) => {
+                for e in elems {
+                    self.check_expr_parasteps_safe(e, scopes);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn check_stmt(
         &mut self,
         stmt: &Stmt,
@@ -391,10 +613,12 @@ impl<'a> Checker<'a> {
                     // For v0.2, mutability is tracked per-variable; tuple patterns ignore mut_ for simplicity.
                 }
                 self.check_pattern(pat, &final_ty, scopes);
-                // Track cap variables for linear type checking
-                if let Type::Cap(_) = &final_ty {
+                // Track cap variables for linear type checking and introduce effects
+                if let Type::Cap(cap_name) = &final_ty {
                     if let Pattern::Variable(name) = pat {
                         self.cap_vars.last_mut().unwrap().insert(name.clone(), false);
+                        // Introduce the cap as an effect
+                        self.available_effects.last_mut().unwrap().insert(cap_name.clone(), true);
                     }
                 }
             }
@@ -516,8 +740,11 @@ impl<'a> Checker<'a> {
             }
             Stmt::Parasteps(block) => {
                 // Parasteps block executes statements in parallel
-                // Each statement in the block should be independent
-                // For now, just type-check all statements
+                // Check that no local_shared variables are captured from outer scope
+                for stmt in block {
+                    self.check_stmt_parasteps_safe(stmt, scopes);
+                }
+                // Then type-check all statements
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();
@@ -562,7 +789,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) => {}
+            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock(_) => {}
         }
     }
 
@@ -971,6 +1198,40 @@ impl<'a> Checker<'a> {
                 let return_type = ret.clone().unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 Type::Func(param_types, Box::new(return_type))
             }
+            Expr::Turbofish(name, _type_args, args) => {
+                // Turbofish: func::<Type>(args) — explicit type instantiation
+                // For now, look up the function and check args, ignoring type_args
+                let (params, ret) = match self.funcs.get(name) {
+                    Some(sig) => sig.clone(),
+                    None => {
+                        self.emit(format!("undefined function '{}'", name));
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                };
+                if args.len() != params.len() {
+                    self.emit(format!(
+                        "function '{}' expects {} arguments, got {}",
+                        name,
+                        params.len(),
+                        args.len()
+                    ));
+                } else {
+                    for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
+                        let at = self.infer_expr(arg, scopes);
+                        if !same_type(&at, param) {
+                            self.emit(format!(
+                                "argument {} of '{}' expected {}, found {}",
+                                i + 1,
+                                name,
+                                fmt_type(param),
+                                fmt_type(&at)
+                            ));
+                        }
+                    }
+                }
+                // Substitute type args into return type if possible
+                ret
+            }
         }
     }
 
@@ -1276,8 +1537,71 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
+            // Check where constraints
+            if let Some((type_param, bounds)) = self.where_clauses.get(name).cloned() {
+                // Find the argument that matches the type parameter
+                for (_i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
+                    let at = self.infer_expr(arg, scopes);
+                    // Check if this parameter uses the type parameter
+                    if self.type_uses_type_param(param, &type_param) {
+                        // Check all bounds
+                        for bound in &bounds {
+                            if !self.type_implements_trait(&at, bound) {
+                                self.emit(format!(
+                                    "where constraint violated: type '{}' does not implement trait '{}' (required by function '{}')",
+                                    fmt_type(&at),
+                                    bound,
+                                    name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // Check effects
+            if let Some(required_effects) = self.func_effects.get(name).cloned() {
+                for effect in &required_effects {
+                    if !self.has_effect(effect) {
+                        self.emit(format!(
+                            "effect '{}' required by function '{}' is not available in current scope",
+                            effect, name
+                        ));
+                    }
+                }
+            }
         }
         ret
+    }
+
+    /// Check if an effect is available in the current scope
+    fn has_effect(&self, effect: &str) -> bool {
+        for scope in self.available_effects.iter().rev() {
+            if scope.contains_key(effect) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a type uses a type parameter
+    fn type_uses_type_param(&self, ty: &Type, type_param: &str) -> bool {
+        match ty {
+            Type::Name(name, _) => name == type_param,
+            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner) | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) => {
+                self.type_uses_type_param(inner, type_param)
+            }
+            Type::Result(ok, err) => {
+                self.type_uses_type_param(ok, type_param) || self.type_uses_type_param(err, type_param)
+            }
+            Type::Tuple(elems) => {
+                elems.iter().any(|e| self.type_uses_type_param(e, type_param))
+            }
+            Type::Func(args, ret) => {
+                args.iter().any(|a| self.type_uses_type_param(a, type_param)) || self.type_uses_type_param(ret, type_param)
+            }
+            Type::Newtype(_, inner) => self.type_uses_type_param(inner, type_param),
+            _ => false,
+        }
     }
 
     fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {

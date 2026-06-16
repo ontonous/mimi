@@ -872,7 +872,7 @@ impl<'a> Interpreter<'a> {
                     _ => return Err("assignment target must be a variable".into()),
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Ellipsis => {}
+            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Ellipsis | Stmt::MmsBlock(_) => {}
             Stmt::Math(exprs) => {
                 // Math block: evaluate constant expressions at compile time
                 for expr in exprs {
@@ -1353,6 +1353,17 @@ impl<'a> Interpreter<'a> {
                     captured,
                 })
             }
+            Expr::Turbofish(name, _type_args, args) => {
+                // Turbofish: func::<Type>(args) — evaluate args and call the function
+                // Type arguments are ignored at runtime (monomorphization happens at compile time)
+                let func = self.find_function(name)
+                    .ok_or_else(|| format!("undefined function '{}'", name))?;
+                let mut arg_vals = Vec::new();
+                for arg in args {
+                    arg_vals.push(self.eval_expr(arg)?);
+                }
+                self.call_func(&func, arg_vals)
+            }
         }
     }
 
@@ -1393,7 +1404,7 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(Some(QuotedAst::Return(inner)))
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis => Ok(None),
+            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock(_) => Ok(None),
             _ => Ok(None),
         }
     }
@@ -1496,6 +1507,14 @@ impl<'a> Interpreter<'a> {
                 // Represent lambda as a call to a synthetic function
                 // For simplicity, just quote the body
                 Ok(quoted_body)
+            }
+            Expr::Turbofish(name, _type_args, args) => {
+                // In quote context, treat turbofish as a regular call
+                let mut q_args = Vec::new();
+                for arg in args {
+                    q_args.push(self.quote_expr(arg)?);
+                }
+                Ok(QuotedAst::Call(Box::new(QuotedAst::Ident(name.clone())), q_args))
             }
         }
     }

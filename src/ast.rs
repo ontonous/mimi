@@ -83,6 +83,7 @@ pub struct TraitDef {
     pub name: String,
     pub commitment: Commitment,
     pub methods: Vec<TraitMethod>,
+    pub generics: Vec<GenericParam>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +126,12 @@ pub struct ActorField {
 }
 
 #[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name: String,
+    pub bounds: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FuncDef {
     pub name: String,
     pub commitment: Commitment,
@@ -133,6 +140,8 @@ pub struct FuncDef {
     pub ret: Option<Type>,
     pub body: Block,
     pub where_clause: Option<WhereClause>,
+    pub generics: Vec<GenericParam>,
+    pub effects: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +170,7 @@ pub struct TypeDef {
     pub commitment: Commitment,
     pub pub_: bool,
     pub kind: TypeDefKind,
+    pub generics: Vec<GenericParam>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +272,8 @@ pub enum Stmt {
     OnFailure(Block),
     /// Parallel steps block (parasteps)
     Parasteps(Block),
+    /// mms {} super-comment block containing MimiSpec intent
+    MmsBlock(String),
     Ellipsis,
 }
 
@@ -306,6 +318,8 @@ pub enum Expr {
     },
     /// old(expr) - snapshot value at function entry for use in ensures
     Old(Box<Expr>),
+    /// Turbofish: func_name::<Type>(args) — explicit type instantiation
+    Turbofish(String, Vec<Type>, Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
