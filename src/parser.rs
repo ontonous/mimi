@@ -956,6 +956,13 @@ impl Parser {
                     Ok(Expr::Unary(UnOp::Ref, Box::new(self.parse_unary()?)))
                 }
             }
+            TokenKind::Old => {
+                self.advance();
+                self.expect(TokenKind::LParen, "`(`")?;
+                let expr = self.parse_expr(0)?;
+                self.expect(TokenKind::RParen, "`)`")?;
+                Ok(Expr::Old(Box::new(expr)))
+            }
             _ => self.parse_primary(),
         }
     }

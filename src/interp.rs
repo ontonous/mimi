@@ -557,7 +557,11 @@ impl<'a> Interpreter<'a> {
             ));
         }
         self.push_scope();
+        
+        // Snapshot parameters for old() in ensures
+        let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(args) {
+            old_snapshots.insert(p.name.clone(), a.clone());
             self.bind(&p.name, a);
         }
 
@@ -579,6 +583,10 @@ impl<'a> Interpreter<'a> {
             if let Some(ref rv) = opt_val {
                 self.push_scope();
                 self.bind("result", rv.clone());
+                // Bind old snapshots for old(x) access
+                for (name, val) in &old_snapshots {
+                    self.bind(&format!("old_{}", name), val.clone());
+                }
                 let ensures_ok = (|| {
                     for stmt in &func.body {
                         if let Stmt::Ensures(expr) = stmt {
@@ -1265,6 +1273,17 @@ impl<'a> Interpreter<'a> {
                 let quoted = self.quote_block(block)?;
                 Ok(Value::QuoteAst(Box::new(quoted)))
             }
+            Expr::Old(expr) => {
+                // old(x) looks up the snapshot value from before function execution
+                if let Expr::Ident(name) = expr.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    if let Some(v) = self.lookup(&old_name) {
+                        return Ok(v);
+                    }
+                }
+                // If not found as old_ variable, evaluate the expression normally
+                self.eval_expr(expr)
+            }
             Expr::Lambda { params, ret, body } => {
                 // Collect free variables from the lambda body
                 let param_names: std::collections::HashSet<String> =
@@ -1364,6 +1383,11 @@ impl<'a> Interpreter<'a> {
             Expr::Try(e) => Ok(QuotedAst::Try(Box::new(self.quote_expr(e)?))),
             Expr::Spawn(e) => Ok(QuotedAst::Spawn(Box::new(self.quote_expr(e)?))),
             Expr::Await(e) => Ok(QuotedAst::Await(Box::new(self.quote_expr(e)?))),
+            Expr::Old(e) => {
+                // old() in quote context - evaluate and return as interpolation
+                let v = self.eval_expr(e)?;
+                Ok(QuotedAst::Interpolate(Box::new(v)))
+            }
             Expr::QuoteInterpolate(e) => {
                 // Interpolation: evaluate the expression and embed the result
                 let v = self.eval_expr(e)?;
@@ -2189,6 +2213,9 @@ fn collect_expr_free_vars(
             }
             let inner_free = collect_free_vars(body, &inner_bound);
             free.extend(inner_free);
+        }
+        Expr::Old(expr) => {
+            collect_expr_free_vars(expr, bound, free);
         }
         _ => {}
     }

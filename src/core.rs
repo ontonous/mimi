@@ -927,6 +927,10 @@ impl<'a> Checker<'a> {
                 // quote! returns an AST value
                 Type::Name("AST".into(), vec![])
             }
+            Expr::Old(expr) => {
+                // old(x) returns the same type as x
+                self.infer_expr(expr, scopes)
+            }
             Expr::Lambda { params, ret, .. } => {
                 let param_types: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
                 let return_type = ret.clone().unwrap_or_else(|| Type::Name("unit".into(), vec![]));

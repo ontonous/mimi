@@ -3132,3 +3132,71 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
+
+// ==================== old(x) in ensures tests ====================
+
+#[test]
+fn old_basic_snapshot() {
+    let src = r#"
+func double(x: i32) -> i32 {
+    ensures: result == old(x) * 2
+    return x * 2;
+}
+
+func main() -> i32 {
+    double(5)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(10));
+}
+
+#[test]
+fn old_with_mutation() {
+    let src = r#"
+func increment(x: i32) -> i32 {
+    ensures: result == old(x) + 1
+    return x + 1;
+}
+
+func main() -> i32 {
+    increment(10)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(11));
+}
+
+#[test]
+fn old_fails() {
+    let src = r#"
+func bad(x: i32) -> i32 {
+    ensures: result == old(x) + 10
+    return x + 1;
+}
+
+func main() -> i32 {
+    bad(5)
+}
+"#;
+    let result = run_source_result(src);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("ensures condition failed"), "Expected ensures error, got: {}", err);
+}
+
+#[test]
+fn old_multiple_params() {
+    let src = r#"
+func add(a: i32, b: i32) -> i32 {
+    ensures: result == old(a) + old(b)
+    return a + b;
+}
+
+func main() -> i32 {
+    add(3, 4)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(7));
+}

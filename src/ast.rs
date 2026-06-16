@@ -240,6 +240,8 @@ pub enum Expr {
         ret: Option<Type>,
         body: Block,
     },
+    /// old(expr) - snapshot value at function entry for use in ensures
+    Old(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
