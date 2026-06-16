@@ -17,6 +17,13 @@ pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
     checker.check()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorrowState {
+    Unborrowed,
+    BorrowedImm,
+    BorrowedMut,
+}
+
 struct Checker<'a> {
     file: &'a File,
     errors: Vec<Diagnostic>,
@@ -27,6 +34,8 @@ struct Checker<'a> {
     newtypes: HashMap<String, Type>,
     /// Track linear capabilities in scope: name -> consumed
     cap_vars: Vec<HashMap<String, bool>>,
+    /// Track borrow state of variables: name -> borrow state
+    borrows: Vec<HashMap<String, BorrowState>>,
 }
 
 impl<'a> Checker<'a> {
@@ -39,6 +48,7 @@ impl<'a> Checker<'a> {
             types: HashMap::new(),
             newtypes: HashMap::new(),
             cap_vars: vec![HashMap::new()],
+            borrows: vec![HashMap::new()],
         }
     }
 
@@ -56,6 +66,29 @@ impl<'a> Checker<'a> {
 
     fn emit(&mut self, msg: impl Into<String>) {
         self.errors.push(Diagnostic::new(msg));
+    }
+
+    fn push_borrow_scope(&mut self) {
+        self.borrows.push(HashMap::new());
+    }
+
+    fn pop_borrow_scope(&mut self) {
+        self.borrows.pop();
+    }
+
+    fn lookup_borrow(&self, name: &str) -> Option<BorrowState> {
+        for scope in self.borrows.iter().rev() {
+            if let Some(&state) = scope.get(name) {
+                return Some(state);
+            }
+        }
+        None
+    }
+
+    fn set_borrow(&mut self, name: &str, state: BorrowState) {
+        if let Some(scope) = self.borrows.last_mut() {
+            scope.insert(name.into(), state);
+        }
     }
 
     fn collect_decls(&mut self) {
@@ -294,13 +327,15 @@ impl<'a> Checker<'a> {
     }
 
     fn check_block(&mut self, block: &Block, ret: &Type, scopes: &mut Vec<HashMap<String, Type>>) {
-        // Push cap scope for block
+        // Push cap scope and borrow scope for block
         self.cap_vars.push(HashMap::new());
+        self.push_borrow_scope();
         for stmt in block {
             self.check_stmt(stmt, ret, scopes);
         }
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
+        self.pop_borrow_scope();
         self.cap_vars.pop();
     }
 
@@ -503,8 +538,39 @@ impl<'a> Checker<'a> {
                             Type::Name("unknown".into(), vec![])
                         }
                     }
-                    UnOp::Ref => Type::Ref(Box::new(t)),
-                    UnOp::RefMut => Type::RefMut(Box::new(t)),
+                    UnOp::Ref => {
+                        // Check borrow rules: cannot borrow if already mutably borrowed
+                        if let Expr::Ident(name) = e.as_ref() {
+                            if let Some(state) = self.lookup_borrow(name) {
+                                match state {
+                                    BorrowState::BorrowedMut => {
+                                        self.emit(format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name));
+                                    }
+                                    _ => {} // Unborrowed or BorrowedImm: multiple immutable borrows allowed
+                                }
+                            }
+                            self.set_borrow(name, BorrowState::BorrowedImm);
+                        }
+                        Type::Ref(Box::new(t))
+                    }
+                    UnOp::RefMut => {
+                        // Check borrow rules: cannot &mut if already borrowed (imm or mut)
+                        if let Expr::Ident(name) = e.as_ref() {
+                            if let Some(state) = self.lookup_borrow(name) {
+                                match state {
+                                    BorrowState::Unborrowed => {}
+                                    BorrowState::BorrowedImm => {
+                                        self.emit(format!("cannot borrow '{}' as mutable because it is already immutably borrowed", name));
+                                    }
+                                    BorrowState::BorrowedMut => {
+                                        self.emit(format!("cannot borrow '{}' as mutable because it is already mutably borrowed", name));
+                                    }
+                                }
+                            }
+                            self.set_borrow(name, BorrowState::BorrowedMut);
+                        }
+                        Type::RefMut(Box::new(t))
+                    }
                 }
             }
             Expr::Binary(op, l, r) => self.infer_binary(*op, l, r, scopes),
@@ -888,11 +954,20 @@ impl<'a> Checker<'a> {
                                                 }
                                             }
                                         }
-                                        Some(VariantPayload::Record(_)) => {
-                                            self.emit(format!(
-                                                "record-style variant '{}' pattern not yet supported",
-                                                name
-                                            ));
+                                        Some(VariantPayload::Record(fields)) => {
+                                            if pats.len() != fields.len() {
+                                                self.emit(format!(
+                                                    "variant '{}' record expects {} fields, got {}",
+                                                    name,
+                                                    fields.len(),
+                                                    pats.len()
+                                                ));
+                                            } else {
+                                                let resolved: Vec<Type> = fields.iter().map(|f| self.resolve_type(&f.ty)).collect();
+                                                for (p, t) in pats.iter().zip(resolved.iter()) {
+                                                    self.check_pattern(p, t, scopes);
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
