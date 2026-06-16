@@ -4,6 +4,7 @@ mod ast;
 mod core;
 mod interp;
 mod lexer;
+mod loader;
 mod parser;
 #[cfg(test)]
 mod tests;
@@ -96,14 +97,25 @@ fn run(path: &PathBuf) -> Result<(), String> {
     }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    if let Err(diagnostics) = core::check(&file) {
+
+    // Load imports if any
+    let merged_file = if !file.imports.is_empty() {
+        let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+        let mut loader = loader::ModuleLoader::new(base_dir);
+        loader.load_main(path)?;
+        loader.merge_all()
+    } else {
+        file
+    };
+
+    if let Err(diagnostics) = core::check(&merged_file) {
         eprintln!("✗ {} has {} type error(s):", path.display(), diagnostics.len());
         for d in diagnostics {
             eprintln!("  - {}", d.message);
         }
         return Err("type checking failed".into());
     }
-    let mut interp = interp::Interpreter::new(&file);
+    let mut interp = interp::Interpreter::new(&merged_file);
     let value = interp.run()?;
     println!("-> {}", value);
     Ok(())
