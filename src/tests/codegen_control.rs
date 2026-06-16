@@ -502,3 +502,269 @@ fn codegen_compound_expression() {
         }
     "#);
 }
+
+// ===================== Phase A: Builtins Tests =====================
+
+#[test]
+fn codegen_builtin_println_string() {
+    assert_compiles(r#"
+        func main() {
+            println("hello")
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            println("hello")
+        }
+    "#);
+    assert!(ir.contains("call"), "IR should contain call for println");
+}
+
+#[test]
+fn codegen_builtin_println_int() {
+    assert_compiles(r#"
+        func main() {
+            println(42)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            println(42)
+        }
+    "#);
+    assert!(ir.contains("printf"), "IR should contain printf for integer println");
+}
+
+#[test]
+fn codegen_builtin_assert() {
+    assert_compiles(r#"
+        func main() {
+            assert(true)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            assert(true)
+        }
+    "#);
+    assert!(ir.contains("assert_ok"), "IR should have assert_ok block");
+    assert!(ir.contains("assert_fail"), "IR should have assert_fail block");
+}
+
+#[test]
+fn codegen_builtin_assert_eq() {
+    assert_compiles(r#"
+        func main() {
+            assert_eq(1 + 1, 2)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            assert_eq(1 + 1, 2)
+        }
+    "#);
+    assert!(ir.contains("aeq_ok"), "IR should have aeq_ok block");
+    assert!(ir.contains("aeq_fail"), "IR should have aeq_fail block");
+}
+
+#[test]
+fn codegen_builtin_range() {
+    assert_compiles(r#"
+        func main() {
+            let nums = range(0, 5)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let nums = range(0, 5)
+        }
+    "#);
+    assert!(ir.contains("range_loop"), "IR should have range_loop block");
+    assert!(ir.contains("malloc"), "IR should call malloc for range");
+}
+
+#[test]
+fn codegen_builtin_range_in_for_loop() {
+    assert_compiles(r#"
+        func main() {
+            for i in range(0, 3) {
+                println(i)
+            }
+        }
+    "#);
+}
+
+#[test]
+fn codegen_builtin_len() {
+    assert_compiles(r#"
+        func main() {
+            let nums = range(0, 5)
+            let n = len(nums)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let nums = range(0, 5)
+            let n = len(nums)
+        }
+    "#);
+    assert!(ir.contains("list.len"), "IR should load list.len for len builtin");
+}
+
+#[test]
+fn codegen_builtin_to_string() {
+    assert_compiles(r#"
+        func main() {
+            let s = to_string(42)
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let s = to_string(42)
+        }
+    "#);
+    assert!(ir.contains("sprintf"), "IR should call sprintf for to_string");
+    assert!(ir.contains("strlen"), "IR should call strlen for to_string");
+}
+
+#[test]
+fn codegen_builtin_abs() {
+    assert_compiles(r#"
+        func main() {
+            let x = abs(-5)
+        }
+    "#);
+}
+
+#[test]
+fn codegen_builtin_min_max() {
+    assert_compiles(r#"
+        func main() {
+            let a = min(3, 7)
+            let b = max(3, 7)
+        }
+    "#);
+}
+
+// ===================== Phase A: List Operations Tests =====================
+
+#[test]
+fn codegen_list_literal() {
+    assert_compiles(r#"
+        func main() {
+            let nums = [1, 2, 3, 4, 5]
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let nums = [1, 2, 3, 4, 5]
+        }
+    "#);
+    assert!(ir.contains("malloc"), "IR should call malloc for list allocation");
+    assert!(ir.contains("list_len"), "IR should store list length");
+    assert!(ir.contains("list_data"), "IR should store list data pointer");
+}
+
+#[test]
+fn codegen_list_literal_empty() {
+    assert_compiles(r#"
+        func main() {
+            let nums = []
+        }
+    "#);
+}
+
+#[test]
+fn codegen_list_index() {
+    assert_compiles(r#"
+        func main() {
+            let nums = [10, 20, 30]
+            let x = nums[1]
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let nums = [10, 20, 30]
+            let x = nums[1]
+        }
+    "#);
+    assert!(ir.contains("list.data"), "IR should access list.data for indexing");
+    assert!(ir.contains("elem_val"), "IR should load element value");
+}
+
+#[test]
+fn codegen_list_for_loop() {
+    assert_compiles(r#"
+        func main() {
+            let nums = [10, 20, 30]
+            for x in nums {
+                println(x)
+            }
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() {
+            let nums = [10, 20, 30]
+            for x in nums {
+                println(x)
+            }
+        }
+    "#);
+    assert!(ir.contains("forloop"), "IR should have forloop block");
+    assert!(ir.contains("forbody"), "IR should have forbody block");
+}
+
+// ===================== Phase A: Field Access Tests =====================
+
+#[test]
+fn codegen_record_field_access() {
+    assert_compiles(r#"
+        type Point { x: i32, y: i32 }
+        func main() {
+            let p = Point { x: 10, y: 20 }
+            let val = p.x
+        }
+    "#);
+}
+
+#[test]
+fn codegen_record_field_access_chain() {
+    assert_compiles(r#"
+        type Inner { val: i32 }
+        type Outer { inner: i32 }
+        func main() {
+            let o = Outer { inner: 42 }
+            let v = o.inner
+        }
+    "#);
+}
+
+// ===================== Phase A: Integration Tests =====================
+
+#[test]
+fn codegen_function_with_builtins() {
+    assert_compiles(r#"
+        func sum_range(n: i32) -> i32 {
+            let total = 0
+            for i in range(0, n) {
+                total = total + i
+            }
+            total
+        }
+    "#);
+}
+
+#[test]
+fn codegen_list_with_function_call() {
+    assert_compiles(r#"
+        func double(x: i32) -> i32 {
+            x * 2
+        }
+        func main() {
+            let nums = [1, 2, 3]
+            for x in nums {
+                let d = double(x)
+            }
+        }
+    "#);
+}
