@@ -120,9 +120,9 @@ module Shop {
 | 类型类别 | 关键字 | 说明 |
 |:---|:---|:---|
 | 单元 | `unit` | 空元组 `()` 的类型 |
-| 任意 | `any` | 顶层类型，仅可在 `unsafe` 或 `comptime` 中解构 |
+| 任意 | `any` | 顶层类型，仅可在 `comptime` 中解构（`unsafe` 块规划中） |
 | 字符串 | `string` | UTF-8 编码，不可变 |
-| 切片 | `&[T]` | 对连续内存的引用视图 |
+| 切片 | `&[T]` | 对连续内存的引用视图（规划中，当前用 `List<T>` 替代） |
 | 可选 | `T?` / `Option<T>` | 显式可空，**`null` 不是任意类型的子类型** |
 | 无返回 | `nothing` | 表示不可达或 `error`/`raise` 的类型 |
 
@@ -224,7 +224,7 @@ cap FileWriteCap;
 
 cap FullFileAccess = FileReadCap + FileWriteCap;
 
-func write_config(path: string, data: &[u8], cap: FileWriteCap) -> Result<(), Err> {
+func write_config(path: string, data: string, cap: FileWriteCap) -> Result<(), Err> {
     std::fs::write(path, data)!;
     drop(cap);   // 显式消费
     Ok(())
@@ -483,7 +483,7 @@ func pay(order: Order, amount: f64) -> Result<(), Err> {
 
 - v0.x - 早期草案：定义核心语法、AAM 内存模型、并发、Saga 补偿。
 - v1.0 - 基线整合版：确立 L4 花括号体、逻辑安全支柱、`cap` 显式 drop + `+` 组合、`newtype` / `type` 别名分工、契约检查分级等基线决策。
-- v1.1 - 特性扩展版：新增 `cap.split()` 能力分解、`old()` 契约快照语义、`math:` 块编译时求值、`trait`/`impl` 基础多态、`where` 约束语法、`extern "C"` FFI 块支持。
+- v1.1 - 特性扩展版：新增 `cap.split()` 能力分解、`old()` 契约快照语义、`math:` 块编译时求值、`trait`/`impl` 基础多态、`where` 约束语法、`extern "C"` FFI 块支持（已在 mimi v0.1.1 实现）。
 - v1.2 - 集成版：新增 `mms {}` 超级注释支持 MimiSpec 嵌入，实现意图→实现的契约绑定。
 
 ---
