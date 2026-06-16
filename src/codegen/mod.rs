@@ -739,46 +739,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             _ => None,
                         };
-                        if let Some(ty) = type_name {
-                            if let BasicTypeEnum::StructType(sty) = ty {
-                                // Find field index by looking up the type definition
-                                let type_name_str = match obj.as_ref() {
-                                    Expr::Ident(_name) => {
-                                        // Try to find the type from type_defs
-                                        self.type_defs.iter().find(|(_, td)| {
-                                            matches!(&td.kind, TypeDefKind::Record(fields) if fields.iter().any(|f| &f.name == field_name))
-                                        }).map(|(n, _)| n.clone())
-                                    }
-                                    Expr::Record { ty: Some(name), .. } => Some(name.clone()),
-                                    _ => None,
-                                };
-                                if let Some(tn) = type_name_str {
-                                    if let Some(td) = self.type_defs.get(&tn) {
-                                        if let TypeDefKind::Record(fields) = &td.kind {
-                                            if let Some(idx) = fields.iter().position(|f| &f.name == field_name) {
-                                                let gep = self.builder.build_struct_gep(*sty, pv, idx as u32, field_name)
-                                                    .map_err(|e| format!("gep error: {}", e))?;
-                                                let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
-                                                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                                                return self.builder.build_load(field_ty, gep, field_name)
-                                                    .map_err(|e| format!("load error: {}", e));
-                                            }
+                        if let Some(BasicTypeEnum::StructType(sty)) = type_name {
+                            // Find field index by looking up the type definition
+                            let type_name_str = match obj.as_ref() {
+                                Expr::Ident(_name) => {
+                                    // Try to find the type from type_defs
+                                    self.type_defs.iter().find(|(_, td)| {
+                                        matches!(&td.kind, TypeDefKind::Record(fields) if fields.iter().any(|f| &f.name == field_name))
+                                    }).map(|(n, _)| n.clone())
+                                }
+                                Expr::Record { ty: Some(name), .. } => Some(name.clone()),
+                                _ => None,
+                            };
+                            if let Some(tn) = type_name_str {
+                                if let Some(td) = self.type_defs.get(&tn) {
+                                    if let TypeDefKind::Record(fields) = &td.kind {
+                                        if let Some(idx) = fields.iter().position(|f| &f.name == field_name) {
+                                            let gep = self.builder.build_struct_gep(*sty, pv, idx as u32, field_name)
+                                                .map_err(|e| format!("gep error: {}", e))?;
+                                            let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
+                                                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                                            return self.builder.build_load(field_ty, gep, field_name)
+                                                .map_err(|e| format!("load error: {}", e));
                                         }
                                     }
                                 }
-                                // Fallback: try field name as index (for anonymous structs)
-                                if let Ok(idx) = field_name.parse::<u32>() {
-                                    let gep = self.builder.build_struct_gep(*sty, pv, idx, field_name)
-                                        .map_err(|e| format!("gep error: {}", e))?;
-                                    return self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), gep, field_name)
-                                        .map_err(|e| format!("load error: {}", e));
-                                }
+                            }
+                            // Fallback: try field name as index (for anonymous structs)
+                            if let Ok(idx) = field_name.parse::<u32>() {
+                                let gep = self.builder.build_struct_gep(*sty, pv, idx, field_name)
+                                    .map_err(|e| format!("gep error: {}", e))?;
+                                return self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), gep, field_name)
+                                    .map_err(|e| format!("load error: {}", e));
                             }
                         }
                         // Fallback: return 0 placeholder
                         Ok(self.context.i64_type().const_int(0, false).into())
                     }
-                    _ => Err(format!("field access on non-struct type")),
+                    _ => Err("field access on non-struct type".to_string()),
                 }
             }
             Expr::List(elems) => {

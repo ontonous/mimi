@@ -8,8 +8,8 @@
 /// - E0400-E0499: Semantic errors (undefined variable, duplicate definition, etc.)
 /// - E0500-E0599: Contract/intention errors (lock conflicts, etc.)
 /// - E0600-E0699: Warnings
-
-/// Parse error codes (E00xx - E01xx)
+///
+/// Parse error codes (E00xx - E01xx).
 pub const E0001: &str = "E0001"; // unterminated string literal
 pub const E0002: &str = "E0002"; // unterminated f-string
 pub const E0003: &str = "E0003"; // illegal character

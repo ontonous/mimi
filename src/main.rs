@@ -225,7 +225,7 @@ fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, verify_rule
                     eprint!("{}", strip_ansi(&formatted));
                 }
             }
-            if parse_errors.iter().all(|e| e.span.as_ref().map_or(true, |s| s.start_line > 0)) {
+            if parse_errors.iter().all(|e| e.span.as_ref().is_none_or(|s| s.start_line > 0)) {
                 // All errors have valid positions, continue to type checking
             } else {
                 return Err(format!("{} parse error(s)", parse_errors.len()));
@@ -413,9 +413,11 @@ fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: boo
     };
 
     if test_funcs.is_empty() {
-        println!("No test functions found{}.",
-            if filter.is_some() { format!(" matching '{}'", filter.unwrap()) } else { String::new() }
-        );
+    if let Some(pattern) = filter {
+        println!("No test functions found matching '{}'.", pattern);
+    } else {
+        println!("No test functions found.");
+    }
         return Ok(());
     }
 
