@@ -654,6 +654,17 @@ impl<'a> Interpreter<'a> {
                     Some(e) => self.eval_expr(e)?,
                     None => Value::Unit,
                 };
+                // Check if returning an ArenaRef from an active arena
+                if self.arena_depth > 0 {
+                    for arena in &self.arenas {
+                        if contains_arena_ref(&v, arena.id) {
+                            return Err(format!(
+                                "arena escape: returning a reference to arena {} that is still active",
+                                arena.id
+                            ));
+                        }
+                    }
+                }
                 return Ok(Some(v));
             }
             Stmt::Expr(e) => {
@@ -715,6 +726,45 @@ impl<'a> Interpreter<'a> {
 
                 // Evaluate the block
                 let result = self.eval_block(block);
+
+                // Before exiting, check for escape: scan OUTER scope variables
+                // (skip the arena's own scope, which is the last one)
+                // for any ArenaRefs that reference this arena
+                let mut escape_var = None;
+                let outer_count = self.env.len() - 1;
+                for scope in self.env.iter().take(outer_count) {
+                    for (name, val) in scope {
+                        if contains_arena_ref(val, arena_id) {
+                            escape_var = Some(name.clone());
+                            break;
+                        }
+                    }
+                    if escape_var.is_some() {
+                        break;
+                    }
+                }
+                if let Some(name) = escape_var {
+                    self.arena_depth -= 1;
+                    self.pop_scope();
+                    self.arenas.pop();
+                    return Err(format!(
+                        "arena escape: variable '{}' holds a reference to arena {} that is about to be freed",
+                        name, arena_id
+                    ));
+                }
+
+                // Check if the result itself is an escaping ArenaRef
+                if let Ok(Some(ref v)) = result {
+                    if contains_arena_ref(v, arena_id) {
+                        self.arena_depth -= 1;
+                        self.pop_scope();
+                        self.arenas.pop();
+                        return Err(format!(
+                            "arena escape: returning a reference to arena {} that is about to be freed",
+                            arena_id
+                        ));
+                    }
+                }
 
                 self.arena_depth -= 1;
                 self.pop_scope();
@@ -1790,7 +1840,18 @@ fn collect_pattern_names(pat: &Pattern, names: &mut std::collections::HashSet<St
     }
 }
 
-/// Check if a value is Copy (can be used after move)
+/// Check if a value contains an ArenaRef from a specific arena
+fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
+    match v {
+        Value::ArenaRef(id, _) => *id == arena_id,
+        Value::List(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
+        Value::Tuple(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
+        Value::Record(fields) => fields.values().any(|v| contains_arena_ref(v, arena_id)),
+        Value::Variant(_, args) => args.iter().any(|v| contains_arena_ref(v, arena_id)),
+        Value::Newtype(inner) => contains_arena_ref(inner, arena_id),
+        _ => false,
+    }
+}
 /// Copy types: Int, Float, Bool, Unit, and Tuples of Copy types
 fn is_copy(v: &Value) -> bool {
     match v {

@@ -2711,3 +2711,110 @@ func main() {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
+
+// ==================== arena escape checking tests ====================
+
+#[test]
+fn arena_no_escape_ok() {
+    let src = r#"
+func process() -> i32 {
+    arena {
+        let ref x = 10;
+        let val = x;
+        42
+    }
+}
+
+func main() -> i32 {
+    process()
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn arena_escape_return_detected() {
+    let src = r#"
+func process() -> i32 {
+    arena {
+        let ref x = 10;
+        return x;
+    }
+}
+
+func main() -> i32 {
+    process()
+}
+"#;
+    let result = run_source_result(src);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("arena escape"), "Expected arena escape error, got: {}", err);
+}
+
+#[test]
+fn arena_escape_variable_detected() {
+    let src = r#"
+func main() -> i32 {
+    let mut escaped = 0;
+    arena {
+        let ref x = 42;
+        escaped = x;
+    }
+    escaped
+}
+"#;
+    let result = run_source_result(src);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("arena escape"), "Expected arena escape error, got: {}", err);
+}
+
+#[test]
+fn arena_nested_ok() {
+    let src = r#"
+func main() -> i32 {
+    arena {
+        let a = 10;
+        arena {
+            let b = 20;
+            a + b
+        }
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(30));
+}
+
+#[test]
+fn arena_no_ref_ok() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 0;
+    arena {
+        x = 42;
+    }
+    x
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn arena_ref_within_scope_ok() {
+    let src = r#"
+func main() -> i32 {
+    arena {
+        let a = 10;
+        let b = 20;
+        let result = a + b;
+        result
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(30));
+}
