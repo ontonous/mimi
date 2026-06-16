@@ -283,7 +283,10 @@ pub enum Stmt {
     /// Parallel steps block (parasteps)
     Parasteps(Block),
     /// mms {} super-comment block containing MimiSpec intent
-    MmsBlock(String),
+    MmsBlock {
+        content: String,
+        ast: Option<mimispec::ast::File>,
+    },
     /// alloc(Kind) { ... } block using a specific allocator
     Alloc {
         kind: AllocKind,

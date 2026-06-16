@@ -711,7 +711,7 @@ impl<'a> Checker<'a> {
                 // $$ locked: any modification to the function body is an error
                 // Check for mms blocks that contain modified contracts
                 for stmt in body {
-                    if let Stmt::MmsBlock(text) = stmt {
+                    if let Stmt::MmsBlock { content: text, .. } = stmt {
                         if text.contains("requires:") || text.contains("ensures:") || text.contains("math:") {
                             // In strict mode, $$ locked functions should not have their contracts changed
                             // For now, just warn that this is a $$ locked function
@@ -726,7 +726,7 @@ impl<'a> Checker<'a> {
             Commitment::Locked | Commitment::LockedQuestion | Commitment::LockedQuestionQuestion => {
                 // $ locked: warn about contract modifications
                 for stmt in body {
-                    if let Stmt::MmsBlock(text) = stmt {
+                    if let Stmt::MmsBlock { content: text, .. } = stmt {
                         if text.contains("requires:") || text.contains("ensures:") || text.contains("math:") {
                             self.emit(format!(
                                 "strict mode: function '{}' is $ locked - contract modifications discouraged",

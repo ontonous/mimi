@@ -170,7 +170,7 @@ fn extract_item_contracts(items: &[Item], out: &mut HashMap<String, Contract>) {
             Item::Func(func) => {
                 let mut contract = Contract::default();
                 for stmt in &func.body {
-                    if let Stmt::MmsBlock(text) = stmt {
+                    if let Stmt::MmsBlock { content: text, .. } = stmt {
                         let c = contracts::extract_contracts(text);
                         contract.requires.extend(c.requires);
                         contract.ensures.extend(c.ensures);

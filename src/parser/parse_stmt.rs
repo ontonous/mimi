@@ -180,7 +180,9 @@ impl Parser {
         };
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        Ok(Stmt::MmsBlock(content))
+        // NOTE: mimispec parsing deferred — the mimispec parser can hang on certain inputs.
+        // Store content only; AST parsing will be added with proper timeout protection.
+        Ok(Stmt::MmsBlock { content, ast: None })
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {

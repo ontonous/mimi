@@ -385,7 +385,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock(_) => {}
+            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
         }
     }
 }

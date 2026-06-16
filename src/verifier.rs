@@ -58,7 +58,7 @@ impl Verifier {
                 Stmt::Requires(expr) => requires_exprs.push(expr.clone()),
                 Stmt::Ensures(expr) => ensures_exprs.push(expr.clone()),
                 Stmt::Math(exprs) => math_exprs.extend(exprs.clone()),
-                Stmt::MmsBlock(text) => {
+                Stmt::MmsBlock { content: text, .. } => {
                     let contract = contracts::extract_contracts(text);
                     for req_text in &contract.requires {
                         if let Ok(expr) = parse_contract_expr(req_text) {
