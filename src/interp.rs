@@ -130,6 +130,8 @@ pub enum Value {
     WeakShared(ArcWeak<RwLock<Value>>),
     /// Weak reference to a LocalShared value
     WeakLocal(SendWeak<RefCell<Value>>),
+    /// A linear capability (simple or combined)
+    Cap(Vec<String>),
 }
 
 /// Arena memory manager for region-based allocation
@@ -259,6 +261,9 @@ impl std::fmt::Display for Value {
                 }
                 None => write!(f, "weak_local(None)"),
             },
+            Value::Cap(names) => {
+                write!(f, "cap({})", names.join(" + "))
+            }
         }
     }
 }
@@ -277,6 +282,8 @@ pub struct Interpreter<'a> {
     type_variants: HashMap<String, Vec<String>>,
     /// Variants that represent "failure" (Err, None, *Error, *Fail)
     failure_variants: HashMap<String, bool>,
+    /// Capability definitions: cap_name -> list of component caps
+    cap_defs: HashMap<String, Vec<String>>,
     /// Compensation stack for on failure blocks (LIFO) - scope-aware
     /// Each scope level contains compensation blocks registered in that scope
     /// Push a new scope when entering a block, pop when exiting
@@ -293,8 +300,10 @@ impl<'a> Interpreter<'a> {
         let mut newtype_constructors = HashMap::new();
         let mut type_variants: HashMap<String, Vec<String>> = HashMap::new();
         let mut failure_variants: HashMap<String, bool> = HashMap::new();
+        let mut cap_defs: HashMap<String, Vec<String>> = HashMap::new();
         for item in &file.items {
             Self::collect_constructors(item, &mut constructors, &mut newtype_constructors, &mut type_variants, &mut failure_variants);
+            Self::collect_caps(item, &mut cap_defs);
         }
         Self {
             file,
@@ -305,6 +314,7 @@ impl<'a> Interpreter<'a> {
             newtype_constructors,
             type_variants,
             failure_variants,
+            cap_defs,
             compensation_stack: Vec::new(),
             arenas: Vec::new(),
             arena_depth: 0,
@@ -343,6 +353,33 @@ impl<'a> Interpreter<'a> {
             Item::Module(m) => {
                 for inner in &m.items {
                     Self::collect_constructors(inner, out, newtype_constructors, type_variants, failure_variants);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_caps(item: &Item, out: &mut HashMap<String, Vec<String>>) {
+        match item {
+            Item::Cap(cap) => {
+                let components = if let Some(ref combined) = cap.combined_with {
+                    // Parse "A + B" format
+                    let parts: Vec<String> = combined.split(" + ")
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    if parts.len() > 1 {
+                        parts
+                    } else {
+                        vec![cap.name.clone(), combined.clone()]
+                    }
+                } else {
+                    vec![cap.name.clone()]
+                };
+                out.insert(cap.name.clone(), components);
+            }
+            Item::Module(m) => {
+                for inner in &m.items {
+                    Self::collect_caps(inner, out);
                 }
             }
             _ => {}
@@ -958,6 +995,9 @@ impl<'a> Interpreter<'a> {
                     Ok(v)
                 } else if self.is_moved(name) {
                     Err(format!("use of moved value '{}'", name))
+                } else if let Some(components) = self.cap_defs.get(name.as_str()) {
+                    // Cap definition: return as Value::Cap
+                    Ok(Value::Cap(components.clone()))
                 } else if let Some(func) = self.find_function(name) {
                     // First-class function: wrap as a closure with empty capture
                     Ok(Value::Closure {
@@ -1805,6 +1845,20 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     _ => Err(format!("weak_local value has no method '{}'", method)),
+                }
+            }
+            Value::Cap(names) => {
+                match method {
+                    "split" => {
+                        if names.len() < 2 {
+                            return Err("split() requires a combined capability (cap A + B)".into());
+                        }
+                        let tuple: Vec<Value> = names.iter()
+                            .map(|n| Value::Cap(vec![n.clone()]))
+                            .collect();
+                        Ok(Value::Tuple(tuple))
+                    }
+                    _ => Err(format!("cap value has no method '{}'", method)),
                 }
             }
             Value::Actor(actor_arc) => {

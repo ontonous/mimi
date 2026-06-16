@@ -213,9 +213,22 @@ impl Parser {
         let commitment = self.expect_keyword(TokenKind::Cap)?;
         let name = self.expect_ident()?;
         let combined_with = if self.at(&TokenKind::Plus) {
+            // cap A + B syntax
             self.advance();
             let combined_name = self.expect_ident()?;
             Some(combined_name)
+        } else if self.at(&TokenKind::Eq) {
+            // cap A = B + C syntax
+            self.advance();
+            let first = self.expect_ident()?;
+            if self.at(&TokenKind::Plus) {
+                self.advance();
+                let second = self.expect_ident()?;
+                // Store as "first + second" in combined_with
+                Some(format!("{} + {}", first, second))
+            } else {
+                Some(first)
+            }
         } else {
             None
         };
