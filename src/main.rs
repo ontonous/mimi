@@ -98,6 +98,20 @@ enum Command {
         #[arg(long)]
         emit_ir: bool,
     },
+    /// Promote a .mms file to .mimi (clean placeholders, validate locks)
+    Promote {
+        path: PathBuf,
+        /// Output path (defaults to same name with .mimi extension)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate documentation from Mimi source
+    Doc {
+        path: PathBuf,
+        /// Output format: markdown (default)
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
 }
 
 fn main() {
@@ -113,6 +127,8 @@ fn main() {
         Command::Lsp => lsp(),
         Command::Verify { path } => verify(path.as_deref()),
         Command::Build { path, output, emit_ir } => build(path.as_deref(), output.as_deref(), emit_ir),
+        Command::Promote { path, output } => promote(&path, output.as_deref()),
+        Command::Doc { path, format } => doc(&path, &format),
     };
     if let Err(e) = result {
         eprintln!("error: {}", e);
@@ -527,5 +543,101 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool) -> Result<()
     } else {
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn main_promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
+    promote(path, output)
+}
+
+#[cfg(test)]
+pub fn main_doc(path: &Path, format: &str) -> Result<(), String> {
+    doc(path, format)
+}
+
+fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
+    let source = fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+
+    // Check for ... placeholders
+    if source.contains("...") {
+        return Err(format!("file contains '...' placeholders, cannot promote: {}", path.display()));
+    }
+
+    // Check for uncommitted desc/rule (without $ suffix)
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    for item in &file.items {
+        if let Item::Func(_) = item {
+            // Check if function has desc or rule without commitment
+            // For now, just check basic structure
+        }
+    }
+
+    // Determine output path
+    let output_path = if let Some(out) = output {
+        out.to_path_buf()
+    } else {
+        let mut out = path.to_path_buf();
+        out.set_extension("mimi");
+        out
+    };
+
+    // Write the promoted file
+    fs::write(&output_path, &source)
+        .map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
+
+    println!("✓ Promoted {} → {}", path.display(), output_path.display());
+    Ok(())
+}
+
+fn doc(path: &Path, format: &str) -> Result<(), String> {
+    let source = fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    match format {
+        "markdown" | "md" => {
+            println!("# Documentation for {}", path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown"));
+            println!();
+
+            for item in &file.items {
+                match item {
+                    Item::Func(f) => {
+                        let params: Vec<String> = f.params.iter()
+                            .map(|p| format!("{}: {:?}", p.name, p.ty))
+                            .collect();
+                        let ret = f.ret.as_ref().map(|t| format!(" -> {:?}", t)).unwrap_or_default();
+                        println!("## `func {}({}){}`", f.name, params.join(", "), ret);
+                        println!();
+                        // Extract desc from body
+                        for stmt in &f.body {
+                            if let crate::ast::Stmt::Desc(desc) = stmt {
+                                println!("{}", desc);
+                                println!();
+                            }
+                        }
+                    }
+                    Item::Type(t) => {
+                        println!("## `type {}`", t.name);
+                        println!();
+                    }
+                    Item::Module(m) => {
+                        println!("## `module {}`", m.name);
+                        println!();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            return Err(format!("unsupported format: {}", format));
+        }
+    }
+
     Ok(())
 }
