@@ -102,16 +102,11 @@ pub struct ActorHandle {
     pub id: usize,
 }
 
-static mut ACTOR_HANDLE_COUNTER: usize = 0;
+static ACTOR_HANDLE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl ActorHandle {
     fn new(instance: ActorInstance) -> Self {
-        let id = {
-            unsafe {
-                ACTOR_HANDLE_COUNTER += 1;
-                ACTOR_HANDLE_COUNTER
-            }
-        };
+        let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         ActorHandle {
             inner: std::sync::Arc::new(std::sync::RwLock::new(instance)),
             id,
@@ -703,9 +698,22 @@ impl<'a> Interpreter<'a> {
                 Lit::String(v) => Value::String(v.clone()),
                 Lit::Unit => Value::Unit,
             }),
-            Expr::Ident(name) => self
-                .lookup(name)
-                .ok_or_else(|| format!("undefined variable '{}'", name)),
+            Expr::Ident(name) => {
+                if let Some(v) = self.lookup(name) {
+                    Ok(v)
+                } else if let Some(&arity) = self.constructors.get(name.as_str()) {
+                    if arity == 0 {
+                        if self.newtype_constructors.get(name.as_str()).copied().unwrap_or(false) {
+                            return Err(format!("newtype '{}' requires exactly one argument", name));
+                        }
+                        Ok(Value::Variant(name.clone(), vec![]))
+                    } else {
+                        Err(format!("constructor '{}' requires {} arguments", name, arity))
+                    }
+                } else {
+                    Err(format!("undefined variable '{}'", name))
+                }
+            }
             Expr::Unary(op, e) => self.eval_unary(*op, e),
             Expr::Binary(op, l, r) => self.eval_binary(*op, l, r),
             Expr::Call(callee, args) => {

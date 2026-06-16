@@ -522,6 +522,21 @@ impl Parser {
                 stmts.push(Stmt::Math(exprs));
                 continue;
             }
+            if self.at(&TokenKind::Desc) {
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                stmts.push(Stmt::Desc(s));
+                continue;
+            }
+            if self.at(&TokenKind::Rule) {
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                // Rule is metadata-only in v1.0, stored as Desc for simplicity
+                stmts.push(Stmt::Desc(format!("rule: {}", s)));
+                continue;
+            }
             stmts.push(self.parse_stmt()?);
         }
         self.expect(TokenKind::RBrace, "`}`")?;
@@ -565,6 +580,20 @@ impl Parser {
                 }
                 self.expect(TokenKind::RBrace, "`}`")?;
                 stmts.push(Stmt::Math(exprs));
+                continue;
+            }
+            if self.at(&TokenKind::Desc) {
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                stmts.push(Stmt::Desc(s));
+                continue;
+            }
+            if self.at(&TokenKind::Rule) {
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                stmts.push(Stmt::Desc(format!("rule: {}", s)));
                 continue;
             }
             stmts.push(self.parse_stmt()?);
@@ -615,6 +644,13 @@ impl Parser {
             }
             TokenKind::Ellipsis => {
                 self.advance();
+                if !self.is_sketch() {
+                    return Err(ParseError::new(
+                        "`...` placeholder is not allowed in production mode (.mimi); implement or use sketch mode (.mms)",
+                        self.tokens[self.pos.saturating_sub(1)].line,
+                        self.tokens[self.pos.saturating_sub(1)].col,
+                    ));
+                }
                 self.match_semi();
                 Ok(Stmt::Ellipsis)
             }
@@ -648,6 +684,24 @@ impl Parser {
                     let value = self.parse_expr(0)?;
                     self.match_semi();
                     Ok(Stmt::Assign { target: expr, value })
+                } else if self.at(&TokenKind::PlusEq)
+                    || self.at(&TokenKind::MinusEq)
+                    || self.at(&TokenKind::StarEq)
+                    || self.at(&TokenKind::SlashEq)
+                {
+                    let op_token = self.peek().kind.clone();
+                    self.advance();
+                    let value = self.parse_expr(0)?;
+                    self.match_semi();
+                    let op = match op_token {
+                        TokenKind::PlusEq => BinOp::Add,
+                        TokenKind::MinusEq => BinOp::Sub,
+                        TokenKind::StarEq => BinOp::Mul,
+                        TokenKind::SlashEq => BinOp::Div,
+                        _ => unreachable!(),
+                    };
+                    let rhs = Expr::Binary(op, Box::new(expr.clone()), Box::new(value));
+                    Ok(Stmt::Assign { target: expr, value: rhs })
                 } else {
                     self.match_semi();
                     Ok(Stmt::Expr(expr))
@@ -720,8 +774,14 @@ impl Parser {
         let else_ = if self.at(&TokenKind::Else) {
             self.advance();
             self.skip_newlines();
-            self.expect(TokenKind::LBrace, "`{`")?;
-            Some(self.parse_block()?)
+            if self.at(&TokenKind::If) {
+                // else if: parse as a single-statement else block containing the next if
+                let elif = self.parse_if()?;
+                Some(vec![elif])
+            } else {
+                self.expect(TokenKind::LBrace, "`{`")?;
+                Some(self.parse_block()?)
+            }
         } else {
             None
         };

@@ -72,6 +72,10 @@ pub enum TokenKind {
     Percent,
     Pow,
     Eq,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
     EqEq,
     Ne,
     Lt,
@@ -176,6 +180,10 @@ impl fmt::Display for TokenKind {
             TokenKind::Percent => "%",
             TokenKind::Pow => "**",
             TokenKind::Eq => "=",
+            TokenKind::PlusEq => "+=",
+            TokenKind::MinusEq => "-=",
+            TokenKind::StarEq => "*=",
+            TokenKind::SlashEq => "/=",
             TokenKind::EqEq => "==",
             TokenKind::Ne => "!=",
             TokenKind::Lt => "<",
@@ -639,7 +647,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        (TokenKind::Eq, Commitment::None) // += not in v0.1
+                        (TokenKind::PlusEq, Commitment::None)
                     } else {
                         (TokenKind::Plus, Commitment::None)
                     }
@@ -651,7 +659,7 @@ impl<'a> Lexer<'a> {
                         (TokenKind::Arrow, Commitment::None)
                     } else if self.peek() == Some('=') {
                         self.advance();
-                        (TokenKind::Eq, Commitment::None)
+                        (TokenKind::MinusEq, Commitment::None)
                     } else {
                         (TokenKind::Minus, Commitment::None)
                     }
@@ -663,7 +671,7 @@ impl<'a> Lexer<'a> {
                         (TokenKind::Pow, Commitment::None)
                     } else if self.peek() == Some('=') {
                         self.advance();
-                        (TokenKind::Eq, Commitment::None)
+                        (TokenKind::StarEq, Commitment::None)
                     } else {
                         (TokenKind::Star, Commitment::None)
                     }
@@ -672,7 +680,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        (TokenKind::Eq, Commitment::None)
+                        (TokenKind::SlashEq, Commitment::None)
                     } else {
                         (TokenKind::Slash, Commitment::None)
                     }

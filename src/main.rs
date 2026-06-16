@@ -1328,4 +1328,331 @@ func main() -> i32 {
         let v = run_source(src);
         assert_eq!(v, interp::Value::Int(30));
     }
+
+    // =============================================================================
+    // Tests for compound assignment operators
+    // =============================================================================
+
+    #[test]
+    fn interp_compound_assignment_plus_eq() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 10;
+    x += 5;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(15));
+    }
+
+    #[test]
+    fn interp_compound_assignment_minus_eq() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 10;
+    x -= 3;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(7));
+    }
+
+    #[test]
+    fn interp_compound_assignment_mul_eq() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 10;
+    x *= 4;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(40));
+    }
+
+    #[test]
+    fn interp_compound_assignment_div_eq() {
+        let src = r#"
+func main() -> i32 {
+    let mut x = 20;
+    x /= 4;
+    x
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    // =============================================================================
+    // Tests for else-if chains
+    // =============================================================================
+
+    #[test]
+    fn interp_else_if_chain() {
+        let src = r#"
+func classify(n: i32) -> i32 {
+    if n < 0 {
+        -1
+    } else if n == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+func main() -> i32 {
+    classify(-5) + classify(0) + classify(10)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn interp_else_if_multiple() {
+        let src = r#"
+func grade(score: i32) -> i32 {
+    if score >= 90 {
+        4
+    } else if score >= 80 {
+        3
+    } else if score >= 70 {
+        2
+    } else if score >= 60 {
+        1
+    } else {
+        0
+    }
+}
+
+func main() -> i32 {
+    grade(95) + grade(85) + grade(75) + grade(65) + grade(50)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    // =============================================================================
+    // Tests for desc/rule inside brace blocks
+    // =============================================================================
+
+    #[test]
+    fn interp_desc_in_brace_block() {
+        let src = r#"
+func main() -> i32 {
+    desc "this is a description";
+    42
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn interp_rule_in_brace_block() {
+        let src = r#"
+func main() -> i32 {
+    rule "must be positive";
+    42
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(42));
+    }
+
+    // =============================================================================
+    // Tests for ... rejection in production mode
+    // =============================================================================
+
+    #[test]
+    fn typecheck_ellipsis_rejected_in_production() {
+        let src = r#"
+func main() -> i32 {
+    ...
+}
+"#;
+        // ... is rejected at parse time in production mode
+        let tokens = lexer::Lexer::new(src).tokenize().unwrap();
+        let result = parser::Parser::new(tokens).parse_file();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("placeholder is not allowed in production mode"));
+    }
+
+    // =============================================================================
+    // Tests for parasteps with await pattern
+    // =============================================================================
+
+    #[test]
+    fn interp_parasteps_await_all() {
+        let src = r#"
+func fetch(n: i32) -> i32 { n * 10 }
+
+func main() -> i32 {
+    let mut result = 0;
+    parasteps {
+        let a = spawn fetch(1);
+        let b = spawn fetch(2);
+        let r1 = await a;
+        let r2 = await b;
+        result = r1 + r2
+    }
+    result
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(30));
+    }
+
+    // =============================================================================
+    // Tests for contracts in production mode
+    // =============================================================================
+
+    #[test]
+    fn interp_requires_ensures_in_brace_block() {
+        let src = r#"
+func add(a: i32, b: i32) -> i32 {
+    requires: a > 0
+    ensures: result == a + b
+    return a + b;
+}
+
+func main() -> i32 {
+    add(1, 2)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(3));
+    }
+
+    // =============================================================================
+    // Tests for string operations
+    // =============================================================================
+
+    #[test]
+    fn interp_string_equality() {
+        let src = r#"
+func main() -> i32 {
+    let a = "hello";
+    let b = "hello";
+    if a == b { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    #[test]
+    fn interp_string_index() {
+        let src = r#"
+func main() -> string {
+    let s = "abc";
+    s[1]
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::String("b".to_string()));
+    }
+
+    // =============================================================================
+    // Tests for boolean operations
+    // =============================================================================
+
+    #[test]
+    fn interp_short_circuit_and() {
+        let src = r#"
+func main() -> i32 {
+    let x = 0;
+    if false && x > 0 { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn interp_short_circuit_or() {
+        let src = r#"
+func main() -> i32 {
+    let x = 0;
+    if true || x > 0 { 1 } else { 0 }
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(1));
+    }
+
+    // =============================================================================
+    // Tests for nested expressions
+    // =============================================================================
+
+    #[test]
+    fn interp_nested_match() {
+        let src = r#"
+type Opt {
+    Some(i32)
+    None
+}
+
+func unwrap_or(o: Opt, default: i32) -> i32 {
+    match o {
+        Some(v) => v,
+        None => default,
+    }
+}
+
+func main() -> i32 {
+    unwrap_or(Some(42), 0) + unwrap_or(None, 10)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(52));
+    }
+
+    #[test]
+    fn interp_nested_function_calls() {
+        let src = r#"
+func double(x: i32) -> i32 { x * 2 }
+func inc(x: i32) -> i32 { x + 1 }
+
+func main() -> i32 {
+    double(inc(5))
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(12));
+    }
+
+    // =============================================================================
+    // Tests for negative numbers
+    // =============================================================================
+
+    #[test]
+    fn interp_negative_literal() {
+        let src = r#"
+func main() -> i32 {
+    let x = -5;
+    x + 10
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn interp_double_negation() {
+        let src = r#"
+func main() -> i32 {
+    let x = 5;
+    let y = -x;
+    let z = -y;
+    z
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
 }
