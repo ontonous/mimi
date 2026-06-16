@@ -649,6 +649,185 @@ impl<'a> Interpreter<'a> {
                 let arena_id = self.arenas.len() - 1;
                 Ok(Value::Int(self.arenas[arena_id].slots.len() as i64))
             }
+            // Standard library extensions
+            "print" => {
+                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                print!("{}", parts.join(" "));
+                Ok(Value::Unit)
+            }
+            "pow" => {
+                if args.len() != 2 { return Err("pow expects 2 arguments (base, exp)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::Int(b), Value::Int(e)) => Ok(Value::Int(b.pow(*e as u32))),
+                    (Value::Float(b), Value::Int(e)) => Ok(Value::Float(b.powf(*e as f64))),
+                    (Value::Float(b), Value::Float(e)) => Ok(Value::Float(b.powf(*e))),
+                    _ => Err("pow expects numbers".into()),
+                }
+            }
+            "floor" => {
+                if args.len() != 1 { return Err("floor expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Float(v) => Ok(Value::Float(v.floor())),
+                    Value::Int(v) => Ok(Value::Int(*v)),
+                    _ => Err("floor expects a number".into()),
+                }
+            }
+            "ceil" => {
+                if args.len() != 1 { return Err("ceil expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Float(v) => Ok(Value::Float(v.ceil())),
+                    Value::Int(v) => Ok(Value::Int(*v)),
+                    _ => Err("ceil expects a number".into()),
+                }
+            }
+            "round" => {
+                if args.len() != 1 { return Err("round expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Float(v) => Ok(Value::Float(v.round())),
+                    Value::Int(v) => Ok(Value::Int(*v)),
+                    _ => Err("round expects a number".into()),
+                }
+            }
+            "random" => {
+                use std::collections::hash_map::RandomState;
+                use std::hash::{BuildHasher, Hasher};
+                let s = RandomState::new();
+                let mut hasher = s.build_hasher();
+                hasher.write_u64(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64);
+                let bits = hasher.finish();
+                Ok(Value::Float((bits as f64) / (u64::MAX as f64)))
+            }
+            "pi" => {
+                Ok(Value::Float(std::f64::consts::PI))
+            }
+            "read_file" => {
+                if args.len() != 1 { return Err("read_file expects 1 argument (path)".into()); }
+                match &args[0] {
+                    Value::String(path) => {
+                        std::fs::read_to_string(path)
+                            .map(Value::String)
+                            .map_err(|e| format!("read_file error: {}", e))
+                    }
+                    _ => Err("read_file expects a string path".into()),
+                }
+            }
+            "write_file" => {
+                if args.len() != 2 { return Err("write_file expects 2 arguments (path, content)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::String(path), Value::String(content)) => {
+                        std::fs::write(path, content)
+                            .map(|_| Value::Unit)
+                            .map_err(|e| format!("write_file error: {}", e))
+                    }
+                    _ => Err("write_file expects (string, string)".into()),
+                }
+            }
+            "file_exists" => {
+                if args.len() != 1 { return Err("file_exists expects 1 argument".into()); }
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).exists())),
+                    _ => Err("file_exists expects a string path".into()),
+                }
+            }
+            "str_char_at" => {
+                if args.len() != 2 { return Err("str_char_at expects 2 arguments (string, index)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::Int(idx)) => {
+                        let i = *idx as usize;
+                        s.chars().nth(i)
+                            .map(|c| Value::String(c.to_string()))
+                            .ok_or_else(|| format!("str_char_at: index {} out of bounds (len {})", i, s.chars().count()))
+                    }
+                    _ => Err("str_char_at expects (string, int)".into()),
+                }
+            }
+            "str_substring" => {
+                if args.len() != 3 { return Err("str_substring expects 3 arguments (string, start, end)".into()); }
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::String(s), Value::Int(start), Value::Int(end)) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let s_idx = (*start as usize).min(chars.len());
+                        let e_idx = (*end as usize).min(chars.len());
+                        if s_idx > e_idx {
+                            return Err("str_substring: start > end".into());
+                        }
+                        Ok(Value::String(chars[s_idx..e_idx].iter().collect()))
+                    }
+                    _ => Err("str_substring expects (string, int, int)".into()),
+                }
+            }
+            "str_parse_int" => {
+                if args.len() != 1 { return Err("str_parse_int expects 1 argument".into()); }
+                match &args[0] {
+                    Value::String(s) => Ok(s.trim().parse::<i64>()
+                        .map(|n| Value::Tuple(vec![Value::Bool(true), Value::Int(n)]))
+                        .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Int(0)]))),
+                    _ => Err("str_parse_int expects a string".into()),
+                }
+            }
+            "str_parse_float" => {
+                if args.len() != 1 { return Err("str_parse_float expects 1 argument".into()); }
+                match &args[0] {
+                    Value::String(s) => Ok(s.trim().parse::<f64>()
+                        .map(|n| Value::Tuple(vec![Value::Bool(true), Value::Float(n)]))
+                        .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)]))),
+                    _ => Err("str_parse_float expects a string".into()),
+                }
+            }
+            "keys" => {
+                if args.len() != 1 { return Err("keys expects 1 argument (record)".into()); }
+                match &args[0] {
+                    Value::Record(_, fields) => {
+                        let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
+                        Ok(Value::List(keys))
+                    }
+                    _ => Err("keys expects a record".into()),
+                }
+            }
+            "values" => {
+                if args.len() != 1 { return Err("values expects 1 argument (record)".into()); }
+                match &args[0] {
+                    Value::Record(_, fields) => {
+                        Ok(Value::List(fields.values().cloned().collect()))
+                    }
+                    _ => Err("values expects a record".into()),
+                }
+            }
+            "has_key" => {
+                if args.len() != 2 { return Err("has_key expects 2 arguments (record, key)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::Record(_, fields), Value::String(key)) => {
+                        Ok(Value::Bool(fields.contains_key(key.as_str())))
+                    }
+                    _ => Err("has_key expects (record, string)".into()),
+                }
+            }
+            "to_int" => {
+                if args.len() != 1 { return Err("to_int expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Int(v) => Ok(Value::Int(*v)),
+                    Value::Float(v) => Ok(Value::Int(*v as i64)),
+                    Value::String(s) => s.parse::<i64>()
+                        .map(Value::Int)
+                        .map_err(|e| format!("to_int parse error: {}", e)),
+                    Value::Bool(b) => Ok(Value::Int(*b as i64)),
+                    _ => Err("to_int cannot convert this type".into()),
+                }
+            }
+            "to_float" => {
+                if args.len() != 1 { return Err("to_float expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Float(v) => Ok(Value::Float(*v)),
+                    Value::Int(v) => Ok(Value::Float(*v as f64)),
+                    Value::String(s) => s.parse::<f64>()
+                        .map(Value::Float)
+                        .map_err(|e| format!("to_float parse error: {}", e)),
+                    _ => Err("to_float cannot convert this type".into()),
+                }
+            }
             _ => {
                 // Check for pre-computed comptime function results
                 if let Some(result) = self.comptime_results.get(name) {
@@ -759,6 +938,27 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::Record(type_name, fields) => {
+                // Handle built-in derive methods before trait dispatch
+                match method {
+                    "to_string" => {
+                        let type_label = type_name.as_deref().unwrap_or("Record");
+                        let field_strs: Vec<String> = fields.iter()
+                            .map(|(k, v)| format!("{}: {}", k, self.value_to_debug_string(v)))
+                            .collect();
+                        return Ok(Value::String(format!("{} {{ {} }}", type_label, field_strs.join(", "))));
+                    }
+                    "clone" => {
+                        return Ok(obj.clone());
+                    }
+                    "eq" => {
+                        if let Some(other) = args.first() {
+                            let equal = self.values_equal(obj, other);
+                            return Ok(Value::Bool(equal));
+                        }
+                        return Ok(Value::Bool(false));
+                    }
+                    _ => {}
+                }
                 // Try trait method dispatch
                 if let Some(type_name) = type_name {
                     if let Some(impls) = self.type_impls.get(type_name) {
@@ -794,21 +994,141 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Call an extern function via FFI
-    fn call_extern(&mut self, extern_func: &ExternFunc, _args: Vec<Value>) -> Result<Value, String> {
-        // Get library path from environment variable
+    fn call_extern(&mut self, extern_func: &ExternFunc, args: Vec<Value>) -> Result<Value, String> {
         let lib_path = std::env::var("MIMI_FFI_LIB")
             .map_err(|_| "MIMI_FFI_LIB environment variable not set for extern function call".to_string())?;
 
-        // For now, return a placeholder since full FFI type conversion is complex
-        // In a full implementation, this would:
-        // 1. Resolve the symbol: unsafe { lib.get::<CFunc>(name) }
-        // 2. Convert Mimi values to C types
-        // 3. Call the function via function pointer
-        // 4. Convert the result back to Mimi value
-        let _ = lib_path; // suppress unused warning
-        Err(format!(
-            "extern function '{}' call not yet fully implemented (set MIMI_FFI_LIB to load library)",
-            extern_func.name
-        ))
+        // Load library if not already loaded
+        let lib_idx = if let Some(idx) = self.loaded_libs.iter().position(|l| {
+            format!("{:?}", l) == format!("Library({})", lib_path)
+        }) {
+            idx
+        } else {
+            unsafe {
+                let lib = libloading::Library::new(&lib_path)
+                    .map_err(|e| format!("failed to load library '{}': {}", lib_path, e))?;
+                self.loaded_libs.push(lib);
+                self.loaded_libs.len() - 1
+            }
+        };
+
+        // Convert Mimi args to raw bytes for FFI
+        let mut c_args: Vec<i64> = Vec::new();
+        for arg in &args {
+            match arg {
+                Value::Int(n) => c_args.push(*n),
+                Value::Float(f) => c_args.push(f.to_bits() as i64),
+                Value::Bool(b) => c_args.push(*b as i64),
+                Value::String(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str())
+                        .map_err(|e| format!("failed to convert string to C string: {}", e))?;
+                    c_args.push(c_str.into_raw() as i64);
+                }
+                _ => return Err(format!("unsupported FFI argument type: {:?}", arg)),
+            }
+        }
+
+        let func_name = extern_func.name.clone();
+
+        // Call the function via libloading
+        let result = unsafe {
+            let lib = &self.loaded_libs[lib_idx];
+            type CFunc = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64;
+            let symbol: libloading::Symbol<CFunc> = lib.get(func_name.as_bytes())
+                .map_err(|e| format!("failed to find symbol '{}': {}", func_name, e))?;
+
+            // Call with up to 8 args (zeroed if fewer)
+            let mut raw_args = [0i64; 8];
+            for (i, &a) in c_args.iter().enumerate().take(8) {
+                raw_args[i] = a;
+            }
+            symbol(raw_args[0], raw_args[1], raw_args[2], raw_args[3],
+                   raw_args[4], raw_args[5], raw_args[6], raw_args[7])
+        };
+
+        // Convert result back to Mimi Value
+        match &extern_func.ret {
+            Some(Type::Name(name, _)) if name == "i32" => Ok(Value::Int(result as i64)),
+            Some(Type::Name(name, _)) if name == "i64" => Ok(Value::Int(result)),
+            Some(Type::Name(name, _)) if name == "f64" => Ok(Value::Float(f64::from_bits(result as u64))),
+            Some(Type::Name(name, _)) if name == "bool" => Ok(Value::Bool(result != 0)),
+            Some(Type::Name(name, _)) if name == "string" => {
+                if result == 0 {
+                    Ok(Value::String(String::new()))
+                } else {
+                    let c_str = unsafe { std::ffi::CStr::from_ptr(result as *const i8) };
+                    Ok(Value::String(c_str.to_string_lossy().into_owned()))
+                }
+            }
+            None => Ok(Value::Unit),
+            _ => Ok(Value::Int(result)),
+        }
+    }
+
+    fn value_to_debug_string(&self, v: &Value) -> String {
+        match v {
+            Value::Int(n) => format!("{}", n),
+            Value::Float(f) => format!("{}", f),
+            Value::Bool(b) => format!("{}", b),
+            Value::String(s) => format!("\"{}\"", s),
+            Value::Record(type_name, fields) => {
+                let name = type_name.as_deref().unwrap_or("Record");
+                let fs: Vec<String> = fields.iter()
+                    .map(|(k, v)| format!("{}: {}", k, self.value_to_debug_string(v)))
+                    .collect();
+                format!("{} {{ {} }}", name, fs.join(", "))
+            }
+            Value::Variant(name, args) => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let as_: Vec<String> = args.iter().map(|a| self.value_to_debug_string(a)).collect();
+                    format!("{}({})", name, as_.join(", "))
+                }
+            }
+            Value::List(items) => {
+                let is_: Vec<String> = items.iter().map(|i| self.value_to_debug_string(i)).collect();
+                format!("[{}]", is_.join(", "))
+            }
+            Value::Tuple(items) => {
+                let ts: Vec<String> = items.iter().map(|i| self.value_to_debug_string(i)).collect();
+                format!("({})", ts.join(", "))
+            }
+            Value::Unit => "unit".to_string(),
+            _ => format!("{:?}", v),
+        }
+    }
+
+    fn values_equal(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
+            (Value::Record(n1, f1), Value::Record(n2, f2)) => {
+                if n1 != n2 || f1.len() != f2.len() {
+                    return false;
+                }
+                f1.iter().all(|(k, v)| {
+                    if let Some(v2) = f2.get(k) {
+                        self.values_equal(v, v2)
+                    } else {
+                        false
+                    }
+                })
+            }
+            (Value::Variant(n1, a1), Value::Variant(n2, a2)) => {
+                n1 == n2 && a1.len() == a2.len()
+                    && a1.iter().zip(a2.iter()).all(|(a, b)| self.values_equal(a, b))
+            }
+            (Value::List(a), Value::List(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
+            }
+            (Value::Tuple(a), Value::Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
+            }
+            _ => false,
+        }
     }
 }

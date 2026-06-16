@@ -47,6 +47,10 @@ pub(crate) mod v1_2_misc_remaining;
 pub(crate) mod loader;
 pub(crate) mod manifest;
 pub(crate) mod lsp;
+pub(crate) mod extern_calls;
+pub(crate) mod actor_concurrent;
+pub(crate) mod derive_methods;
+pub(crate) mod builtin_extended;
 
 use crate::{core, interp, lexer, parser};
 

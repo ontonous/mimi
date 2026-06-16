@@ -203,18 +203,18 @@ func main() -> i32 {
 }
 
 #[test]
-fn interp_spawn_outside_parasteps_error() {
+fn interp_spawn_non_actor_evaluates_directly() {
     let src = r#"
 func work() -> i32 { 42 }
 
 func main() -> i32 {
     let f = spawn work()
+    f
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err();
-    assert!(err_msg.contains("spawn requires parasteps"));
+    assert!(result.is_ok(), "spawn of non-actor call should evaluate directly: {:?}", result.err());
+    assert_eq!(result.unwrap(), interp::Value::Int(42));
 }
 
 #[test]

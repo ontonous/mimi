@@ -884,10 +884,41 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            Expr::Spawn(_expr) => {
-                // Spawn a concurrent task - for now just return a placeholder future
-                // A full implementation would capture the expression and evaluate in a thread
-                Err("spawn requires parasteps block".into())
+            Expr::Spawn(expr) => {
+                // Spawn evaluates the expression in a new thread and returns a Future
+                let (tx, rx) = std::sync::mpsc::channel();
+                // Evaluate args and actor reference in current thread
+                let spawned = {
+                    if let Expr::Call(callee, args) = expr.as_ref() {
+                        if let Expr::Field(obj, method) = callee.as_ref() {
+                            let obj_val = self.eval_expr(obj)?;
+                            let method_name = method.clone();
+                            let args_vals: Vec<Value> = args.iter()
+                                .map(|a| self.eval_expr(a))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            match obj_val {
+                                Value::Actor(handle) => {
+                                    Some((handle, method_name, args_vals))
+                                }
+                                _ => None,
+                            }
+                        } else { None }
+                    } else { None }
+                };
+
+                if let Some((actor_handle, method, args_vals)) = spawned {
+                    std::thread::spawn(move || {
+                        let empty_file = File { imports: vec![], items: vec![] };
+                        let mut interp = Interpreter::new(&empty_file);
+                        let actor_val = Value::Actor(actor_handle);
+                        let result = interp.call_method(&actor_val, &method, args_vals);
+                        let _ = tx.send(result);
+                    });
+                    Ok(Value::Future(Arc::new(std::sync::Mutex::new(rx))))
+                } else {
+                    // For non-actor spawns, evaluate directly
+                    self.eval_expr(expr)
+                }
             }
             Expr::Await(expr) => {
                 // Check if this is a method call on an actor
