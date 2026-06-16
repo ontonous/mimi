@@ -2106,4 +2106,151 @@ func main() -> i32 {
         let v = run_source(src);
         assert_eq!(v, interp::Value::Int(84));
     }
+
+    // =============================================================================
+    // Tests for P1: String operations and built-in functions
+    // =============================================================================
+
+    #[test]
+    fn string_concat() {
+        let src = r#"
+func main() -> string {
+    let s = "hello" + " " + "world";
+    s
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::String("hello world".to_string()));
+    }
+
+    #[test]
+    fn string_concat_empty() {
+        let src = r#"
+func main() -> string {
+    let s = "" + "abc" + "";
+    s
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::String("abc".to_string()));
+    }
+
+    #[test]
+    fn builtin_len_string() {
+        let src = r#"
+func main() -> i32 {
+    len("hello")
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn builtin_len_list() {
+        let src = r#"
+func main() -> i32 {
+    len([1, 2, 3, 4, 5])
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn builtin_len_empty_string() {
+        let src = r#"
+func main() -> i32 {
+    len("")
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(0));
+    }
+
+    #[test]
+    fn builtin_to_string_int() {
+        let src = r#"
+func main() -> string {
+    to_string(42)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::String("42".to_string()));
+    }
+
+    #[test]
+    fn builtin_to_string_bool() {
+        let src = r#"
+func main() -> string {
+    to_string(true)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn builtin_abs_int() {
+        let src = r#"
+func main() -> i32 {
+    abs(-5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn builtin_abs_float() {
+        let src = r#"
+func main() -> f64 {
+    abs(-3.14)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Float(3.14));
+    }
+
+    #[test]
+    fn builtin_push() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    let result = push(a, 4);
+    len(result)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(4));
+    }
+
+    #[test]
+    fn builtin_pop() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    let result = pop(a);
+    // pop returns (popped_value, remaining_list) as tuple
+    let (popped, _) = result;
+    popped
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(3));
+    }
+
+    #[test]
+    fn builtin_pop_returns_remaining() {
+        let src = r#"
+func main() -> i32 {
+    let a = [1, 2, 3];
+    let result = pop(a);
+    let (_, new_list) = result;
+    len(new_list)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(2));
+    }
 }

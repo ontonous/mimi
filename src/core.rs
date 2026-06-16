@@ -970,7 +970,22 @@ impl<'a> Checker<'a> {
         let rt = self.infer_expr(r, scopes);
 
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
+            BinOp::Add => {
+                // String concatenation: string + string -> string
+                if is_string(&lt) && is_string(&rt) {
+                    Type::Name("string".into(), vec![])
+                } else if !same_type(&lt, &rt) || !is_numeric(&lt) {
+                    self.emit(format!(
+                        "arithmetic operator requires matching numeric types, found {} and {}",
+                        fmt_type(&lt),
+                        fmt_type(&rt)
+                    ));
+                    Type::Name("unknown".into(), vec![])
+                } else {
+                    lt
+                }
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
                 if !same_type(&lt, &rt) || !is_numeric(&lt) {
                     self.emit(format!(
                         "arithmetic operator requires matching numeric types, found {} and {}",

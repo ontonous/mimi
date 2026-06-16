@@ -1091,6 +1091,62 @@ impl<'a> Interpreter<'a> {
                     _ => Err("sqrt expects a number".into()),
                 }
             }
+            "len" => {
+                if args.len() != 1 {
+                    return Err("len expects 1 argument".into());
+                }
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    Value::List(l) => Ok(Value::Int(l.len() as i64)),
+                    _ => Err("len expects a string or list".into()),
+                }
+            }
+            "to_string" => {
+                if args.len() != 1 {
+                    return Err("to_string expects 1 argument".into());
+                }
+                Ok(Value::String(args[0].to_string()))
+            }
+            "abs" => {
+                if args.len() != 1 {
+                    return Err("abs expects 1 argument".into());
+                }
+                match &args[0] {
+                    Value::Int(v) => Ok(Value::Int(v.abs())),
+                    Value::Float(v) => Ok(Value::Float(v.abs())),
+                    _ => Err("abs expects a number".into()),
+                }
+            }
+            "push" => {
+                if args.len() != 2 {
+                    return Err("push expects 2 arguments (list, elem)".into());
+                }
+                match &args[0] {
+                    Value::List(l) => {
+                        let mut new_list = l.clone();
+                        new_list.push(args[1].clone());
+                        Ok(Value::List(new_list))
+                    }
+                    _ => Err("push first argument must be a list".into()),
+                }
+            }
+            "pop" => {
+                if args.len() != 1 {
+                    return Err("pop expects 1 argument (list)".into());
+                }
+                match &args[0] {
+                    Value::List(l) => {
+                        if l.is_empty() {
+                            return Err("pop from empty list".into());
+                        }
+                        let mut new_list = l.clone();
+                        let popped = new_list.pop().unwrap();
+                        // Return (popped, new_list) as a tuple
+                        Ok(Value::Tuple(vec![popped, Value::List(new_list)]))
+                    }
+                    _ => Err("pop expects a list".into()),
+                }
+            }
             _ => {
                 let func = self
                     .find_function(name)
@@ -1280,7 +1336,10 @@ impl<'a> Interpreter<'a> {
         let left = self.eval_expr(l)?;
         let right = self.eval_expr(r)?;
         match op {
-            BinOp::Add => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
+            BinOp::Add => match (&left, &right) {
+                (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
+                _ => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
+            },
             BinOp::Sub => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
             BinOp::Mul => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
             BinOp::Div => numeric_op(left, right, |a, b| a / b, |a, b| a / b),
