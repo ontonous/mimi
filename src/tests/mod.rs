@@ -51,6 +51,7 @@ pub(crate) mod extern_calls;
 pub(crate) mod actor_concurrent;
 pub(crate) mod derive_methods;
 pub(crate) mod builtin_extended;
+pub(crate) mod cap_runtime;
 
 use crate::{core, interp, lexer, parser};
 
