@@ -975,16 +975,20 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
+                self.skip_newlines();
                 if self.at(&TokenKind::RParen) {
                     self.advance();
                     return Ok(Expr::Literal(Lit::Unit));
                 }
                 let e = self.parse_expr(0)?;
+                self.skip_newlines();
                 if self.at(&TokenKind::Comma) {
                     let mut elems = vec![e];
                     while self.at(&TokenKind::Comma) {
                         self.advance();
+                        self.skip_newlines();
                         elems.push(self.parse_expr(0)?);
+                        self.skip_newlines();
                     }
                     self.expect(TokenKind::RParen, "`)`")?;
                     return Ok(Expr::Tuple(elems));
@@ -994,14 +998,17 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 self.advance();
+                self.skip_newlines();
                 let mut elems = Vec::new();
                 if !self.at(&TokenKind::RBracket) {
                     loop {
                         elems.push(self.parse_expr(0)?);
+                        self.skip_newlines();
                         if !self.at(&TokenKind::Comma) {
                             break;
                         }
                         self.advance();
+                        self.skip_newlines();
                     }
                 }
                 self.expect(TokenKind::RBracket, "`]`")?;
@@ -1042,6 +1049,26 @@ impl Parser {
                 let inner = self.parse_expr(0)?;
                 self.expect(TokenKind::RParen, "`)` for quote interpolation")?;
                 Expr::QuoteInterpolate(Box::new(inner))
+            }
+            TokenKind::Fn => {
+                self.advance();
+                self.expect(TokenKind::LParen, "`(`")?;
+                let params = self.parse_params()?;
+                self.expect(TokenKind::RParen, "`)`")?;
+                let ret = if self.at(&TokenKind::Arrow) {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                self.skip_newlines();
+                if self.is_sketch() {
+                    self.expect(TokenKind::Colon, "`:`")?;
+                    self.skip_newlines();
+                }
+                self.expect_block_start("closure body")?;
+                let body = self.parse_block()?;
+                Expr::Lambda { params, ret, body }
             }
             _ => {
                 let (line, col) = (self.peek().line, self.peek().col);

@@ -77,6 +77,14 @@ pub enum Value {
     Newtype(Box<Value>),
     /// An actor instance - contains state and methods
     Actor(ActorHandle),
+    /// A closure - captures environment and has parameters + body
+    Closure {
+        params: Vec<Param>,
+        ret: Option<Type>,
+        body: Block,
+        /// Captured variables from the enclosing scope
+        captured: HashMap<String, Value>,
+    },
 }
 
 /// Arena memory manager for region-based allocation
@@ -183,6 +191,7 @@ impl std::fmt::Display for Value {
             Value::QuoteAst(_) => write!(f, "QuoteAst(...)"),
             Value::Newtype(v) => write!(f, "Newtype({})", v),
             Value::Actor(_) => write!(f, "Actor(...)"),
+            Value::Closure { .. } => write!(f, "Closure(...)"),
         }
     }
 }
@@ -701,6 +710,14 @@ impl<'a> Interpreter<'a> {
             Expr::Ident(name) => {
                 if let Some(v) = self.lookup(name) {
                     Ok(v)
+                } else if let Some(func) = self.find_function(name) {
+                    // First-class function: wrap as a closure with empty capture
+                    Ok(Value::Closure {
+                        params: func.params,
+                        ret: func.ret,
+                        body: func.body,
+                        captured: HashMap::new(),
+                    })
                 } else if let Some(&arity) = self.constructors.get(name.as_str()) {
                     if arity == 0 {
                         if self.newtype_constructors.get(name.as_str()).copied().unwrap_or(false) {
@@ -736,7 +753,34 @@ impl<'a> Interpreter<'a> {
                         let obj_val = self.eval_expr(obj)?;
                         self.call_method(&obj_val, method, vals)
                     }
-                    _ => Err("callee must be a function name".into()),
+                    _ => {
+                        // Evaluate callee - could be a closure or other expression
+                        let callee_val = self.eval_expr(callee)?;
+                        match callee_val {
+                            Value::Closure { params, ret: _, body, captured } => {
+                                if params.len() != vals.len() {
+                                    return Err(format!(
+                                        "closure expects {} arguments, got {}",
+                                        params.len(),
+                                        vals.len()
+                                    ));
+                                }
+                                self.push_scope();
+                                // Restore captured environment
+                                for (name, val) in &captured {
+                                    self.bind(name, val.clone());
+                                }
+                                // Bind parameters
+                                for (p, a) in params.iter().zip(vals) {
+                                    self.bind(&p.name, a);
+                                }
+                                let result = self.eval_block(&body);
+                                self.pop_scope();
+                                result.map(|v| v.unwrap_or(Value::Unit))
+                            }
+                            _ => Err(format!("cannot call non-function value: {}", callee_val)),
+                        }
+                    }
                 }
             }
             Expr::Tuple(elems) => {
@@ -888,10 +932,53 @@ impl<'a> Interpreter<'a> {
                 // For v1.0, quote! returns the AST as a value that can be spliced
                 Err("quote! must be used inside a comptime context or with $(...) interpolation".into())
             }
+            Expr::Lambda { params, ret, body } => {
+                // Capture all variables from the current environment
+                let mut captured = HashMap::new();
+                for scope in self.env.iter() {
+                    for (name, val) in scope {
+                        captured.entry(name.clone()).or_insert_with(|| val.clone());
+                    }
+                }
+                Ok(Value::Closure {
+                    params: params.clone(),
+                    ret: ret.clone(),
+                    body: body.clone(),
+                    captured,
+                })
+            }
         }
     }
 
     fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, String> {
+        // First check if the name is bound to a closure in the local scope
+        if let Some(v) = self.lookup(name) {
+            match v {
+                Value::Closure { params, ret: _, body, captured } => {
+                    if params.len() != args.len() {
+                        return Err(format!(
+                            "closure '{}' expects {} arguments, got {}",
+                            name, params.len(), args.len()
+                        ));
+                    }
+                    self.push_scope();
+                    for (n, val) in &captured {
+                        self.bind(n, val.clone());
+                    }
+                    for (p, a) in params.iter().zip(args) {
+                        self.bind(&p.name, a);
+                    }
+                    let result = self.eval_block(&body);
+                    self.pop_scope();
+                    return result.map(|v| v.unwrap_or(Value::Unit));
+                }
+                other => {
+                    // Not a closure, fall through to other lookup methods
+                    drop(other);
+                }
+            }
+        }
+
         // Handle Actor.spawn() calls
         if let Some(actor_name) = name.strip_suffix(".spawn") {
             return self.spawn_actor(actor_name, args);

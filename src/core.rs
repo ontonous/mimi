@@ -816,6 +816,11 @@ impl<'a> Checker<'a> {
                 // quote! returns an AST value
                 Type::Name("AST".into(), vec![])
             }
+            Expr::Lambda { params, ret, .. } => {
+                let param_types: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
+                let return_type = ret.clone().unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                Type::Func(param_types, Box::new(return_type))
+            }
         }
     }
 

@@ -1655,4 +1655,197 @@ func main() -> i32 {
         let v = run_source(src);
         assert_eq!(v, interp::Value::Int(5));
     }
+
+    // =============================================================================
+    // Tests for closures / first-class functions
+    // =============================================================================
+
+    #[test]
+    fn interp_closure_basic() {
+        let src = r#"
+func main() -> i32 {
+    let add = fn(x: i32, y: i32) -> i32 { x + y };
+    add(3, 4)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(7));
+    }
+
+    #[test]
+    fn interp_closure_single_param() {
+        let src = r#"
+func main() -> i32 {
+    let double = fn(x: i32) -> i32 { x * 2 };
+    double(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    #[test]
+    fn interp_closure_no_params() {
+        let src = r#"
+func main() -> i32 {
+    let get_five = fn() -> i32 { 5 };
+    get_five()
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(5));
+    }
+
+    #[test]
+    fn interp_closure_capture() {
+        let src = r#"
+func main() -> i32 {
+    let offset = 10;
+    let add_offset = fn(x: i32) -> i32 { x + offset };
+    add_offset(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(15));
+    }
+
+    #[test]
+    fn interp_closure_as_argument() {
+        let src = r#"
+func apply(f: i32, x: i32) -> i32 {
+    f(x)
+}
+
+func main() -> i32 {
+    let double = fn(x: i32) -> i32 { x * 2 };
+    apply(double, 5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    #[test]
+    fn interp_closure_in_list() {
+        let src = r#"
+func main() -> i32 {
+    let fns = [
+        fn(x: i32) -> i32 { x + 1 },
+        fn(x: i32) -> i32 { x * 2 },
+        fn(x: i32) -> i32 { x - 1 }
+    ];
+    fns[0](10) + fns[1](10) + fns[2](10)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(40));
+    }
+
+    #[test]
+    fn interp_closure_in_tuple() {
+        let src = r#"
+func main() -> i32 {
+    let inc = fn(x: i32) -> i32 { x + 1 };
+    let dec = fn(x: i32) -> i32 { x - 1 };
+    inc(10) + dec(10)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(20));
+    }
+
+    #[test]
+    fn interp_closure_return_closure() {
+        let src = r#"
+func make_adder(n: i32) -> i32 {
+    fn(x: i32) -> i32 { x + n }
+}
+
+func main() -> i32 {
+    let add10 = make_adder(10);
+    let add20 = make_adder(20);
+    add10(5) + add20(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(40));
+    }
+
+    #[test]
+    fn interp_first_class_function() {
+        let src = r#"
+func double(x: i32) -> i32 { x * 2 }
+func inc(x: i32) -> i32 { x + 1 }
+
+func main() -> i32 {
+    let f1 = double;
+    let f2 = inc;
+    f1(3) + f2(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(12));
+    }
+
+    #[test]
+    fn interp_closure_with_if() {
+        let src = r#"
+func main() -> i32 {
+    let abs = fn(x: i32) -> i32 {
+        if x < 0 { -x } else { x }
+    };
+    abs(-5) + abs(3)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(8));
+    }
+
+    #[test]
+    fn interp_closure_with_while() {
+        let src = r#"
+func main() -> i32 {
+    let count = fn(n: i32) -> i32 {
+        let mut sum = 0;
+        let mut i = 0;
+        while i < n {
+            sum += i;
+            i += 1;
+        }
+        sum
+    };
+    count(5)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(10));
+    }
+
+    #[test]
+    fn interp_closure_multiple_captures() {
+        let src = r#"
+func main() -> i32 {
+    let a = 10;
+    let b = 20;
+    let c = 30;
+    let sum = fn(x: i32) -> i32 { x + a + b + c };
+    sum(1)
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(61));
+    }
+
+    #[test]
+    fn interp_closure_nested_calls() {
+        let src = r#"
+func main() -> i32 {
+    let add = fn(a: i32, b: i32) -> i32 { a + b };
+    let mul = fn(a: i32, b: i32) -> i32 { a * b };
+    add(mul(2, 3), mul(4, 5))
+}
+"#;
+        let v = run_source(src);
+        assert_eq!(v, interp::Value::Int(26));
+    }
 }

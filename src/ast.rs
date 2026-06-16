@@ -211,6 +211,12 @@ pub enum Expr {
     Quote(Block),
     /// Interpolation inside quote - evaluated at compile time and spliced into AST
     QuoteInterpolate(Box<Expr>),
+    /// Lambda/closure expression: fn(params) -> Ret { body }
+    Lambda {
+        params: Vec<Param>,
+        ret: Option<Type>,
+        body: Block,
+    },
 }
 
 #[derive(Debug, Clone)]
