@@ -128,7 +128,7 @@ impl<'a> Checker<'a> {
                             break;
                         }
                     }
-                    self.var_scopes.last_mut().unwrap().insert(name.clone(), 0);
+                    self.var_scopes.last_mut().expect("scope stack non-empty").insert(name.clone(), 0);
                 }
 
                 let init_ty = init
@@ -158,15 +158,15 @@ impl<'a> Checker<'a> {
                 };
                 // Track mutability
                 if let Pattern::Variable(name) = pat {
-                    self.mut_vars.last_mut().unwrap().insert(name.clone(), *mut_);
+                    self.mut_vars.last_mut().expect("scope stack non-empty").insert(name.clone(), *mut_);
                 }
                 self.check_pattern(pat, &final_ty, scopes);
                 // Track cap variables for linear type checking and introduce effects
                 if let Type::Cap(cap_name) = &final_ty {
                     if let Pattern::Variable(name) = pat {
-                        self.cap_vars.last_mut().unwrap().insert(name.clone(), false);
+                        self.cap_vars.last_mut().expect("scope stack non-empty").insert(name.clone(), false);
                         // Introduce the cap as an effect
-                        self.available_effects.last_mut().unwrap().insert(cap_name.clone(), true);
+                        self.available_effects.last_mut().expect("scope stack non-empty").insert(cap_name.clone(), true);
                     }
                 }
             }
@@ -239,7 +239,7 @@ impl<'a> Checker<'a> {
                     }
                 };
                 scopes.push(HashMap::new());
-                scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
+                scopes.last_mut().expect("scope stack non-empty").insert(var.clone(), elem_ty);
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
@@ -304,7 +304,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                 }
-                scopes.last_mut().unwrap().insert(name.clone(), final_ty);
+                scopes.last_mut().expect("scope stack non-empty").insert(name.clone(), final_ty);
             }
             Stmt::Parasteps(block) => {
                 // Parasteps block executes statements in parallel
@@ -373,7 +373,7 @@ impl<'a> Checker<'a> {
                 self.infer_expr(expr, scopes);
                 // Mark the capability as consumed
                 if let Expr::Ident(name) = expr {
-                    if let Some(consumed) = self.cap_vars.last_mut().unwrap().get_mut(name) {
+                    if let Some(consumed) = self.cap_vars.last_mut().expect("scope stack non-empty").get_mut(name) {
                         if *consumed {
                             self.emit(format!(
                                 "capability '{}' has already been consumed",

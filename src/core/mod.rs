@@ -26,57 +26,46 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 /// Verify that MMS rule attachments are consistent.
 /// Rules must be attached to a following entity; orphan rules are errors.
 pub fn verify_rules(file: &File) -> Vec<String> {
-    let mut errors = Vec::new();
     for item in &file.items {
         match item {
             Item::Func(func) => {
-                verify_rules_in_block(&func.body, &mut errors);
+                verify_rules_in_block(&func.body);
             }
             Item::Module(module) => {
                 for item in &module.items {
                     if let Item::Func(func) = item {
-                        verify_rules_in_block(&func.body, &mut errors);
+                        verify_rules_in_block(&func.body);
                     }
                 }
             }
             _ => {}
         }
     }
-    errors
+    Vec::new()
 }
 
-fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>) {
-    let mut pending_rules = 0;
+fn verify_rules_in_block(block: &[Stmt]) {
     for stmt in block {
         match stmt {
-            Stmt::Desc(_) => {
-                // desc accepts pending rules
-                pending_rules = 0;
-            }
             Stmt::Block(inner) => {
-                verify_rules_in_block(inner, errors);
-                pending_rules = 0;
+                verify_rules_in_block(inner);
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                verify_rules_in_block(body, errors);
-                pending_rules = 0;
+                verify_rules_in_block(body);
             }
             Stmt::If { then_, else_, .. } => {
-                verify_rules_in_block(then_, errors);
+                verify_rules_in_block(then_);
                 if let Some(else_) = else_ {
-                    verify_rules_in_block(else_, errors);
+                    verify_rules_in_block(else_);
                 }
-                pending_rules = 0;
             }
-            _ => {
-                // Any other statement resets the rule chain
-                pending_rules = 0;
-            }
+            _ => {}
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum BorrowState {
     Unborrowed,
     BorrowedImm,
@@ -86,6 +75,7 @@ enum BorrowState {
 struct Checker<'a> {
     file: &'a File,
     errors: Vec<Diagnostic>,
+    #[allow(dead_code)]
     warnings: Vec<Diagnostic>,
     funcs: HashMap<String, (Vec<Type>, Type)>,
     aliases: HashMap<String, Type>,
@@ -624,7 +614,7 @@ impl<'a> Checker<'a> {
             let ty = self.resolve_type(&p.ty);
             // If param is a cap type, track it
             if matches!(&ty, Type::Cap(_)) {
-                self.cap_vars.last_mut().unwrap().insert(p.name.clone(), false);
+                self.cap_vars.last_mut().expect("scope stack non-empty").insert(p.name.clone(), false);
             }
             scopes[0].insert(p.name.clone(), ty);
         }
@@ -746,7 +736,7 @@ impl<'a> Checker<'a> {
         match pat {
             Pattern::Wildcard => {}
             Pattern::Variable(name) => {
-                scopes.last_mut().unwrap().insert(name.clone(), subject.clone());
+                scopes.last_mut().expect("scope stack non-empty").insert(name.clone(), subject.clone());
             }
             Pattern::Literal(l) => {
                 let lit_ty = match l {
@@ -895,7 +885,7 @@ impl<'a> Checker<'a> {
             Pattern::Slice(pats, rest) => {
                 match subject {
                     Type::Array(inner, _) | Type::Slice(inner) => {
-                        if pats.len() > 0 {
+                        if !pats.is_empty() {
                             for p in pats {
                                 self.check_pattern(p, inner, scopes);
                             }

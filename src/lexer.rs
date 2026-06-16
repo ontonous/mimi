@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ast::Commitment;
 use std::fmt;
 
@@ -661,7 +663,7 @@ impl<'a> Lexer<'a> {
                         self.line, self.col
                     ));
                 }
-                let current = *self.indent_stack.last().unwrap();
+                let current = *self.indent_stack.last().expect("indent stack non-empty");
                 if spaces > current {
                     self.indent_stack.push(spaces);
                     tokens.push(Token {
@@ -671,7 +673,7 @@ impl<'a> Lexer<'a> {
                         col: spaces,
                     });
                 } else if spaces < current {
-                    while *self.indent_stack.last().unwrap() > spaces {
+                    while *self.indent_stack.last().expect("indent stack non-empty") > spaces {
                         self.indent_stack.pop();
                         tokens.push(Token {
                             kind: TokenKind::Dedent,
@@ -680,7 +682,7 @@ impl<'a> Lexer<'a> {
                             col: spaces,
                         });
                     }
-                    if *self.indent_stack.last().unwrap() != spaces {
+                    if *self.indent_stack.last().expect("indent stack non-empty") != spaces {
                         return Err(format!(
                             "dedent does not match any indentation level at {}:{}",
                             self.line, self.col
@@ -750,7 +752,7 @@ impl<'a> Lexer<'a> {
                 }
                 '0'..='9' => (self.scan_number(), Commitment::None),
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    let first = self.advance().unwrap();
+                    let first = self.advance().expect("peek confirmed non-EOF");
                     let (name, commitment) = self.scan_ident(first);
                     (Self::keyword_or_ident(&name), commitment)
                 }

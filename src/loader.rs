@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Loaded module with its parsed AST and file path
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LoadedModule {
     pub path: PathBuf,
     pub file: File,
@@ -109,6 +109,7 @@ impl ModuleLoader {
     }
 
     /// Get a loaded module by name
+    #[allow(dead_code)]
     pub fn get_module(&self, name: &str) -> Option<&LoadedModule> {
         self.modules.get(name)
     }
@@ -130,6 +131,7 @@ impl ModuleLoader {
     }
 
     /// Type-check all loaded modules
+    #[allow(dead_code)]
     pub fn check_all(&self) -> Result<(), Vec<core::Diagnostic>> {
         for module in self.modules.values() {
             core::check(&module.file)?;

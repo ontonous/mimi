@@ -64,7 +64,7 @@ impl LspServer {
         }
     }
 
-    fn handle_message(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
+    pub(crate) fn handle_message(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
         let method = msg.get("method")?.as_str()?;
         let id = msg.get("id");
 

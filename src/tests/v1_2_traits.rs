@@ -167,10 +167,5 @@ func main() -> i32 {
 "#;
     // MyType implements Display, so this should pass type checking
     let result = check_source(src);
-    if let Err(ref errors) = result {
-        for e in errors {
-            eprintln!("ERROR: {}", e.message);
-        }
-    }
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "trait impl should pass: {:?}", result.err());
 }

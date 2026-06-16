@@ -815,7 +815,7 @@ impl<'a> Interpreter<'a> {
                 let len = match &obj {
                     Value::List(l) => l.len(),
                     Value::Array(a) => a.len(),
-                    Value::Slice { source, start: s, end: e } => e - s,
+                    Value::Slice { source: _, start: s, end: e } => e - s,
                     Value::String(s) => s.len(),
                     _ => return Err("cannot slice non-sequence value".into()),
                 };

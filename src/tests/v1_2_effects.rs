@@ -38,8 +38,10 @@ func main() -> i32 {
     42
 }
 "#;
-    // Function with effect should fail when effect is not available
+    // Function with effect should fail because effect cap is declared but not bound
     let result = check_source(src);
-    // For now, just check that parsing works
-    assert!(result.is_ok() || result.is_err());
+    assert!(result.is_err(), "calling function with unbound effect should fail");
+    let errors = result.unwrap_err();
+    let err_messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
+    assert!(err_messages.iter().any(|m| m.contains("effect") || m.contains("cap") || m.contains("not available")));
 }

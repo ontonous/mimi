@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod ast;
 mod codegen;
 mod contracts;
@@ -515,9 +513,9 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool) -> Result<()
     // Link with cc to create executable
     let obj_path = output_path.with_extension("o");
     let status = std::process::Command::new("cc")
-        .arg(obj_path.to_str().unwrap())
+        .arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
         .arg("-o")
-        .arg(output_path.to_str().unwrap())
+        .arg(output_path.to_str().ok_or("output path is not valid UTF-8")?)
         .status()
         .map_err(|e| format!("failed to run linker: {}", e))?;
 

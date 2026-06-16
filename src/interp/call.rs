@@ -114,7 +114,7 @@ impl<'a> Interpreter<'a> {
             }
             // Check if this is a newtype constructor - wrap in Value::Newtype
             if *self.newtype_constructors.get(name).unwrap_or(&false) && args.len() == 1 {
-                return Ok(Value::Newtype(Box::new(args.into_iter().next().unwrap())));
+                return Ok(Value::Newtype(Box::new(args.into_iter().next().expect("args.len() == 1 guaranteed single element"))));
             }
             return Ok(Value::Variant(name.into(), args));
         }
@@ -213,7 +213,7 @@ impl<'a> Interpreter<'a> {
                             return Err("pop from empty list".into());
                         }
                         let mut new_list = l.clone();
-                        let popped = new_list.pop().unwrap();
+                        let popped = new_list.pop().expect("checked non-empty above");
                         // Return (popped, new_list) as a tuple
                         Ok(Value::Tuple(vec![popped, Value::List(new_list)]))
                     }

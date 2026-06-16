@@ -115,7 +115,8 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_ok() || result.is_err());
+    // uninitialized let with type annotation should fail type checking
+    assert!(result.is_err(), "uninitialized typed let should fail: {:?}", result.ok());
 }
 
 #[test]

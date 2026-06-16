@@ -1,3 +1,5 @@
+#![allow(dead_code, deprecated)]
+
 pub mod types;
 
 use crate::ast::*;
@@ -79,7 +81,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(ty) = types::mimi_type_to_llvm(self.context, &param.ty) {
                 let alloca = self.builder.build_alloca(ty, &param.name)
                     .map_err(|e| format!("alloca error: {}", e))?;
-                self.builder.build_store(alloca, function.get_nth_param(i as u32).unwrap())
+                self.builder.build_store(alloca, function.get_nth_param(i as u32).expect("param index matches function signature"))
                     .map_err(|e| format!("store error: {}", e))?;
                 vars.insert(param.name.clone(), (alloca, ty));
             }

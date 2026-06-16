@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use super::*;
 
 // ── T202: --verify-contracts tests ──
@@ -95,6 +96,7 @@ fn verify_source(source: &str) -> Vec<crate::verifier::VerificationResult> {
     crate::verifier::verify_source(source).unwrap()
 }
 
+#[allow(dead_code)]
 fn assert_verified(source: &str) {
     let results = verify_source(source);
     for r in &results {

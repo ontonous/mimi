@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod value;
 mod closure_utils;
 mod eval;
@@ -530,16 +532,16 @@ impl<'a> Interpreter<'a> {
     }
 
     fn bind(&mut self, name: &str, value: Value) {
-        self.env.last_mut().unwrap().insert(name.into(), value);
-        self.moved_vars.last_mut().unwrap().insert(name.into(), false);
+        self.env.last_mut().expect("scope stack non-empty").insert(name.into(), value);
+        self.moved_vars.last_mut().expect("scope stack non-empty").insert(name.into(), false);
         // Default to immutable unless explicitly marked as mutable
-        self.mut_vars.last_mut().unwrap().entry(name.into()).or_insert(false);
+        self.mut_vars.last_mut().expect("scope stack non-empty").entry(name.into()).or_insert(false);
     }
 
     fn bind_mut(&mut self, name: &str, value: Value) {
-        self.env.last_mut().unwrap().insert(name.into(), value);
-        self.moved_vars.last_mut().unwrap().insert(name.into(), false);
-        self.mut_vars.last_mut().unwrap().insert(name.into(), true);
+        self.env.last_mut().expect("scope stack non-empty").insert(name.into(), value);
+        self.moved_vars.last_mut().expect("scope stack non-empty").insert(name.into(), false);
+        self.mut_vars.last_mut().expect("scope stack non-empty").insert(name.into(), true);
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {

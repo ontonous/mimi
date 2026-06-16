@@ -102,6 +102,7 @@ fn codegen_and() {
     assert_compiles("func main() -> i32 { let a = 1; let b = 1; a && b }");
 }
 
+#[test]
 fn codegen_or() {
     assert_compiles("func main() -> i32 { let a = 1; let b = 0; a || b }");
 }
@@ -223,30 +224,37 @@ fn codegen_add_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a + b }", "add");
 }
 
+#[test]
 fn codegen_mul_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a * b }", "mul");
 }
 
+#[test]
 fn codegen_div_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a / b }", "sdiv");
 }
 
+#[test]
 fn codegen_rem_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a % b }", "srem");
 }
 
+#[test]
 fn codegen_neg_instruction() {
     assert_ir_contains("func main(x: i32) -> i32 { -x }", "sub");
 }
 
+#[test]
 fn codegen_icmp() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a < b }", "icmp");
 }
 
+#[test]
 fn codegen_and_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a && b }", "and");
 }
 
+#[test]
 fn codegen_or_instruction() {
     assert_ir_contains("func main(a: i32, b: i32) -> i32 { a || b }", "or");
 }

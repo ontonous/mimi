@@ -10,8 +10,8 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    // use statements parse but modules may not exist
-    assert!(result.is_ok() || result.is_err());
+    // use of non-existent module is accepted by parser; main() returns 42
+    assert!(result.is_ok(), "use statement should not fail type checking: {:?}", result.err());
 }
 
 #[test]
@@ -34,5 +34,5 @@ func main() -> i32 {
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_ok() || result.is_err());
+    assert!(result.is_ok(), "module with type and method should work: {:?}", result.err());
 }

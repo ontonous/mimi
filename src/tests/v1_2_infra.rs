@@ -166,7 +166,7 @@ fn manifest_save_and_load() {
 #[test]
 fn lsp_diagnostics_no_errors() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = r#"
 func main() -> i32 {
     42
@@ -180,7 +180,7 @@ func main() -> i32 {
 #[test]
 fn lsp_diagnostics_parse_error() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "func main() -> i32 {";
     let diagnostics = server.compute_diagnostics(text);
     assert!(!diagnostics.is_empty());
@@ -190,7 +190,7 @@ fn lsp_diagnostics_parse_error() {
 #[test]
 fn lsp_diagnostics_type_error() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = r#"
 func main() -> i32 {
     let x: string = 42;
@@ -205,7 +205,7 @@ func main() -> i32 {
 #[test]
 fn lsp_completion_keywords() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "";
     let items = server.compute_completion(text);
     let labels: Vec<&str> = items.iter()
@@ -220,7 +220,7 @@ fn lsp_completion_keywords() {
 #[test]
 fn lsp_completion_functions() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = r#"
 func my_function() -> i32 {
     42
@@ -242,7 +242,7 @@ func main() -> i32 {
 #[test]
 fn lsp_completion_builtins() {
     use crate::lsp::LspServer;
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let text = "";
     let items = server.compute_completion(text);
     let labels: Vec<&str> = items.iter()

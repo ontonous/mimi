@@ -140,11 +140,11 @@ impl Parser {
                     self.expect(TokenKind::RBracket, "`]`")?;
                     Ok(Type::Array(Box::new(elem_type), size))
                 } else {
-                    return Err(ParseError::new(
+                    Err(ParseError::new(
                         "expected `;` for array type `[T; n]`",
                         self.peek().line,
                         self.peek().col,
-                    ));
+                    ))
                 }
             }
             _ => Err(ParseError::new(

@@ -43,7 +43,8 @@ func main() -> i32 {
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_ok() || result.is_err());
+    // numeric tuple indexing (t.1) not yet supported — parser expects identifier
+    assert!(result.is_err(), "numeric tuple indexing should fail gracefully: {:?}", result.ok());
 }
 
 

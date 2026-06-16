@@ -44,6 +44,10 @@ pub(crate) mod v1_2_builtin_hof;
 pub(crate) mod v1_2_infra;
 pub(crate) mod v1_2_misc_remaining;
 
+pub(crate) mod loader;
+pub(crate) mod manifest;
+pub(crate) mod lsp;
+
 use crate::{core, interp, lexer, parser};
 
 pub(crate) fn parse(src: &str) -> crate::ast::File {

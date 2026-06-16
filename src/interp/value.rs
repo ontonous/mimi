@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ast::*;
 use std::cell::RefCell;
 use std::collections::HashMap;

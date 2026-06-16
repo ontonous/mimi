@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// 意图锁后缀（直接复用 mimispec 的语义）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Commitment {
@@ -338,6 +340,7 @@ pub enum Expr {
     /// old(expr) - snapshot value at function entry for use in ensures
     Old(Box<Expr>),
     /// Slice expression: expr[start..end]
+    #[allow(clippy::enum_variant_names)]
     SliceExpr {
         target: Box<Expr>,
         start: Option<Box<Expr>>,

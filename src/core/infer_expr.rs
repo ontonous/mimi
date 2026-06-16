@@ -183,7 +183,7 @@ impl<'a> Checker<'a> {
                     Type::Name("unknown".into(), vec![])
                 };
                 // Add var to scope
-                scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
+                scopes.last_mut().expect("scope stack non-empty").insert(var.clone(), elem_ty);
                 // Infer expression type
                 let expr_ty = self.infer_expr(expr, scopes);
                 // Check guard if present
