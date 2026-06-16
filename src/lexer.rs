@@ -7,6 +7,7 @@ pub enum TokenKind {
     Int(String),
     Float(String),
     String(String),
+    FString(String), // f"..." raw content for parser to split
     True,
     False,
     Unit,
@@ -132,6 +133,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Int(v) => return write!(f, "integer `{}`", v),
             TokenKind::Float(v) => return write!(f, "float `{}`", v),
             TokenKind::String(v) => return write!(f, "string `{}`", v),
+            TokenKind::FString(v) => return write!(f, "f-string `{}`", v),
             TokenKind::Ident(v) => return write!(f, "identifier `{}`", v),
             TokenKind::True => "true",
             TokenKind::False => "false",
@@ -380,6 +382,65 @@ impl<'a> Lexer<'a> {
         Ok(s)
     }
 
+    /// Scan an f-string: f"text {expr} text"
+    /// Returns the raw content string (with {expr} preserved for parser)
+    fn scan_fstring(&mut self) -> Result<String, String> {
+        // consume 'f' and opening quote
+        self.advance(); // 'f'
+        self.advance(); // '"'
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None => return Err("unterminated f-string".into()),
+                Some('"') => {
+                    self.advance();
+                    break;
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.peek() {
+                        Some('n') => { s.push_str("\\n"); self.advance(); }
+                        Some('t') => { s.push_str("\\t"); self.advance(); }
+                        Some('r') => { s.push_str("\\r"); self.advance(); }
+                        Some('\\') => { s.push_str("\\\\"); self.advance(); }
+                        Some('"') => { s.push_str("\\\""); self.advance(); }
+                        Some('{') => { s.push_str("\\{"); self.advance(); }
+                        Some('}') => { s.push_str("\\}"); self.advance(); }
+                        Some(c) => { s.push(c); self.advance(); }
+                        None => return Err("unterminated escape in f-string".into()),
+                    }
+                }
+                Some('{') => {
+                    // interpolation start - track braces
+                    s.push('{');
+                    self.advance();
+                    let mut depth = 1;
+                    while let Some(c) = self.peek() {
+                        if c == '{' { depth += 1; }
+                        else if c == '}' { 
+                            depth -= 1;
+                            if depth == 0 {
+                                s.push('}');
+                                self.advance();
+                                break;
+                            }
+                        }
+                        s.push(c);
+                        self.advance();
+                    }
+                    if depth != 0 {
+                        return Err("unterminated interpolation in f-string".into());
+                    }
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.advance();
+                }
+            }
+        }
+        Ok(s)
+    }
+
     fn scan_number(&mut self) -> TokenKind {
         let start_line = self.line;
         let start_col = self.col;
@@ -575,7 +636,7 @@ impl<'a> Lexer<'a> {
             }
             // real content
             if self.mode == LexerMode::Sketch {
-                if spaces % 4 != 0 {
+                if !spaces.is_multiple_of(4) {
                     return Err(format!(
                         "indentation must be a multiple of 4 spaces at {}:{}",
                         self.line, self.col
@@ -658,6 +719,11 @@ impl<'a> Lexer<'a> {
 
             self.at_line_start = false;
             let (kind, commitment) = match c {
+                'f' if self.chars.clone().next() == Some('"') => {
+                    let s = self.scan_fstring()?;
+                    let commitment = self.scan_commitment();
+                    (TokenKind::FString(s), commitment)
+                }
                 '"' => {
                     let s = self.scan_string()?;
                     let commitment = self.scan_commitment();

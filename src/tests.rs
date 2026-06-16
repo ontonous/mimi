@@ -13,7 +13,8 @@ fn run_source(src: &str) -> interp::Value {
 }
 
 fn run_source_result(src: &str) -> Result<interp::Value, String> {
-    let file = parse(src);
+    let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
+    let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
     let mut interp = interp::Interpreter::new(&file);
     interp.run()
 }
@@ -3462,4 +3463,349 @@ func main() -> i32 {
 "#;
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
+}
+
+// ==================== Additional edge case tests ====================
+
+#[test]
+fn cap_split_nested_combination() {
+    let src = r#"
+cap FileReadCap;
+cap FileWriteCap;
+cap FullAccess = FileReadCap + FileWriteCap;
+
+func main() -> i32 {
+    let c = FullAccess;
+    let (read, write) = c.split();
+    drop(read);
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn cap_split_use_individual_parts() {
+    let src = r#"
+cap FileReadCap;
+cap FileWriteCap;
+cap FullAccess = FileReadCap + FileWriteCap;
+
+func use_read(r: FileReadCap) -> i32 {
+    1
+}
+
+func use_write(w: FileWriteCap) -> i32 {
+    2
+}
+
+func main() -> i32 {
+    let c = FullAccess;
+    let (read, write) = c.split();
+    let a = use_read(read);
+    let b = use_write(write);
+    a + b
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(3));
+}
+
+#[test]
+fn old_on_string_non_copy() {
+    let src = r#"
+func append_world(s: string) -> string {
+    ensures: result == old(s) + "world"
+    return s + "world";
+}
+
+func main() -> string {
+    append_world("hello")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("helloworld".to_string()));
+}
+
+#[test]
+fn old_with_multiple_returns() {
+    let src = r#"
+func abs(x: i32) -> i32 {
+    ensures: result >= 0
+    ensures: result == old(x) || result == -old(x)
+    if x < 0 {
+        return -x;
+    }
+    return x;
+}
+
+func main() -> i32 {
+    abs(-5)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(5));
+}
+
+#[test]
+fn math_empty_block() {
+    let src = r#"
+func main() -> i32 {
+    math: {
+    }
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn math_with_division() {
+    let src = r#"
+func main() -> i32 {
+    math: {
+        10 / 2;
+        100 / 10;
+    }
+    5
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(5));
+}
+
+#[test]
+fn math_with_negative_numbers() {
+    let src = r#"
+func main() -> i32 {
+    math: {
+        -1 + 1;
+        -5 * -3;
+    }
+    15
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(15));
+}
+
+#[test]
+fn trait_with_multiple_methods_impl() {
+    let src = r#"
+trait Printable {
+    func to_string() -> string;
+    func print();
+}
+
+type MyItem {
+    value: i32
+}
+
+impl Printable for MyItem {
+    func to_string() -> string {
+        return "MyItem";
+    }
+    func print() {
+        println("MyItem");
+    }
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn where_with_multiple_bounds() {
+    let src = r#"
+trait Display {
+    func to_string() -> string;
+}
+
+trait Clone {
+    func clone() -> Self;
+}
+
+type MyType {
+    value: i32
+}
+
+func process(x: MyType) -> string where MyType: Display + Clone {
+    x.to_string()
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn extern_with_multiple_params() {
+    let src = r#"
+extern "C" {
+    func write(fd: i32, buf: string, len: i32) -> i32;
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn extern_with_no_return() {
+    let src = r#"
+extern "C" {
+    func exit(code: i32);
+}
+
+func main() -> i32 {
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+// ==================== f-string tests ====================
+
+#[test]
+fn fstring_basic() {
+    let src = r#"
+func main() -> string {
+    let name = "World";
+    f"Hello, {name}!"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("Hello, World!".to_string()));
+}
+
+#[test]
+fn fstring_multiple_interpolations() {
+    let src = r#"
+func main() -> string {
+    let a = 1;
+    let b = 2;
+    f"{a} + {b} = {a + b}"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("1 + 2 = 3".to_string()));
+}
+
+#[test]
+fn fstring_no_interpolation() {
+    let src = r#"
+func main() -> string {
+    f"just text"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("just text".to_string()));
+}
+
+#[test]
+fn fstring_expression_interpolation() {
+    let src = r#"
+func main() -> string {
+    let x = 10;
+    f"double is {x * 2}"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("double is 20".to_string()));
+}
+
+#[test]
+fn fstring_with_function_call() {
+    let src = r#"
+func greet(name: string) -> string {
+    f"Hi, {name}!"
+}
+
+func main() -> string {
+    greet("Alice")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("Hi, Alice!".to_string()));
+}
+
+// ==================== list comprehension tests ====================
+
+#[test]
+fn comprehension_basic() {
+    let src = r#"
+func main() -> i32 {
+    let nums = [1, 2, 3, 4, 5];
+    let doubled = [x * 2 for x in nums];
+    len(doubled)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(5));
+}
+
+#[test]
+fn comprehension_with_guard() {
+    let src = r#"
+func main() -> i32 {
+    let nums = [1, 2, 3, 4, 5, 6];
+    let evens = [x for x in nums if x % 2 == 0];
+    len(evens)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(3));
+}
+
+#[test]
+fn comprehension_transform() {
+    let src = r#"
+func main() -> string {
+    let words = ["hello", "world"];
+    let upper = [w + "!" for w in words];
+    upper[0] + " " + upper[1]
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello! world!".to_string()));
+}
+
+#[test]
+fn comprehension_empty_list() {
+    let src = r#"
+func main() -> i32 {
+    let empty = [];
+    let result = [x for x in empty];
+    len(result)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn comprehension_nested_unsupported() {
+    let src = r#"
+func main() -> i32 {
+    let lists = [[1, 2], [3, 4], [5]];
+    let flat = [x for sub in lists for x in sub];
+    len(flat)
+}
+"#;
+    let result = run_source_result(src);
+    // Nested comprehensions not yet supported, should error
+    assert!(result.is_err());
 }

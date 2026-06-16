@@ -573,6 +573,7 @@ impl<'a> Checker<'a> {
                 Lit::Float(_) => Type::Name("f64".into(), vec![]),
                 Lit::Bool(_) => Type::Name("bool".into(), vec![]),
                 Lit::String(_) => Type::Name("string".into(), vec![]),
+                Lit::FString(_) => Type::Name("string".into(), vec![]),
                 Lit::Unit => Type::Name("unit".into(), vec![]),
             },
             Expr::Ident(name) => self.lookup_var(name, scopes),
@@ -598,13 +599,8 @@ impl<'a> Checker<'a> {
                     UnOp::Ref => {
                         // Check borrow rules: cannot borrow if already mutably borrowed
                         if let Expr::Ident(name) = e.as_ref() {
-                            if let Some(state) = self.lookup_borrow(name) {
-                                match state {
-                                    BorrowState::BorrowedMut => {
-                                        self.emit(format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name));
-                                    }
-                                    _ => {} // Unborrowed or BorrowedImm: multiple immutable borrows allowed
-                                }
+                            if let Some(BorrowState::BorrowedMut) = self.lookup_borrow(name) {
+                                self.emit(format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name));
                             }
                             self.set_borrow(name, BorrowState::BorrowedImm);
                         }
@@ -672,6 +668,33 @@ impl<'a> Checker<'a> {
                     }
                 }
                 Type::Name("List".into(), vec![elem_ty])
+            }
+            Expr::Comprehension { expr, var, iter, guard } => {
+                let iter_ty = self.infer_expr(iter, scopes);
+                // Check iter is a list
+                if let Type::Name(n, args) = &iter_ty {
+                    if n != "List" || args.len() != 1 {
+                        self.emit(format!("comprehension requires a list, found {}", fmt_type(&iter_ty)));
+                    }
+                }
+                // Infer element type from iter
+                let elem_ty = if let Type::Name(_, args) = &iter_ty {
+                    if args.len() == 1 { args[0].clone() } else { Type::Name("unknown".into(), vec![]) }
+                } else {
+                    Type::Name("unknown".into(), vec![])
+                };
+                // Add var to scope
+                scopes.last_mut().unwrap().insert(var.clone(), elem_ty);
+                // Infer expression type
+                let expr_ty = self.infer_expr(expr, scopes);
+                // Check guard if present
+                if let Some(g) = guard {
+                    let guard_ty = self.infer_expr(g, scopes);
+                    if !matches!(&guard_ty, Type::Name(n, _) if n == "bool") {
+                        self.emit(format!("comprehension guard must be bool, found {}", fmt_type(&guard_ty)));
+                    }
+                }
+                Type::Name("List".into(), vec![expr_ty])
             }
             Expr::Match(subject, arms) => {
                 let subject_ty = self.infer_expr(subject, scopes);
@@ -968,6 +991,7 @@ impl<'a> Checker<'a> {
                     Lit::Float(_) => Type::Name("f64".into(), vec![]),
                     Lit::Bool(_) => Type::Name("bool".into(), vec![]),
                     Lit::String(_) => Type::Name("string".into(), vec![]),
+                    Lit::FString(_) => Type::Name("string".into(), vec![]),
                     Lit::Unit => Type::Name("unit".into(), vec![]),
                 };
                 if !same_type(subject, &lit_ty) {
@@ -1256,7 +1280,7 @@ impl<'a> Checker<'a> {
         ret
     }
 
-    fn lookup_var(&mut self, name: &str, scopes: &mut Vec<HashMap<String, Type>>) -> Type {
+    fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
                 return t.clone();

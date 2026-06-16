@@ -672,12 +672,11 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
-        let block = if self.is_sketch() {
+        if self.is_sketch() {
             self.parse_indent_block()
         } else {
             self.parse_brace_block()
-        };
-        block
+        }
     }
 
     fn parse_brace_block(&mut self) -> Result<Block, ParseError> {
@@ -1059,6 +1058,72 @@ impl Parser {
         }
     }
 
+    /// Parse f-string raw content into parts (text and interpolation expressions)
+    fn parse_fstring_parts(&self, raw: &str) -> Result<Vec<crate::ast::FStringPart>, ParseError> {
+        use crate::ast::FStringPart;
+        let mut parts = Vec::new();
+        let mut chars = raw.chars().peekable();
+        let mut current_text = String::new();
+        
+        while let Some(&c) = chars.peek() {
+            if c == '{' {
+                // Save any accumulated text
+                if !current_text.is_empty() {
+                    parts.push(FStringPart::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                // Skip opening brace
+                chars.next();
+                // Collect expression until matching '}'
+                let mut expr_str = String::new();
+                let mut depth = 1;
+                while let Some(&c) = chars.peek() {
+                    if c == '{' { depth += 1; }
+                    else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            chars.next(); // skip closing '}'
+                            break;
+                        }
+                    }
+                    expr_str.push(c);
+                    chars.next();
+                }
+                if depth != 0 {
+                    return Err(ParseError::new("unterminated interpolation in f-string", 0, 0));
+                }
+                // Parse the expression
+                let tokens = crate::lexer::Lexer::new(&expr_str).tokenize()
+                    .map_err(|e| ParseError::new(&e, 0, 0))?;
+                let expr = Parser::new(tokens).parse_expr(0)?;
+                parts.push(FStringPart::Interp(expr));
+            } else if c == '\\' {
+                // Handle escape sequences
+                chars.next();
+                if let Some(&esc) = chars.peek() {
+                    match esc {
+                        'n' => current_text.push('\n'),
+                        't' => current_text.push('\t'),
+                        'r' => current_text.push('\r'),
+                        '\\' => current_text.push('\\'),
+                        '"' => current_text.push('"'),
+                        '{' => current_text.push('{'),
+                        '}' => current_text.push('}'),
+                        other => { current_text.push('\\'); current_text.push(other); }
+                    }
+                    chars.next();
+                }
+            } else {
+                current_text.push(c);
+                chars.next();
+            }
+        }
+        if !current_text.is_empty() {
+            parts.push(FStringPart::Text(current_text));
+        }
+        Ok(parts)
+    }
+
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_unary()?;
         loop {
@@ -1149,6 +1214,13 @@ impl Parser {
             TokenKind::String(s) => {
                 self.advance();
                 Expr::Literal(Lit::String(s))
+            }
+            TokenKind::FString(raw) => {
+                let raw = raw.clone();
+                self.advance();
+                // Parse f-string: split by {expr} interpolations
+                let parts = self.parse_fstring_parts(&raw)?;
+                Expr::Literal(Lit::FString(parts))
             }
             TokenKind::True => {
                 self.advance();
@@ -1241,20 +1313,54 @@ impl Parser {
             TokenKind::LBracket => {
                 self.advance();
                 self.skip_newlines();
-                let mut elems = Vec::new();
-                if !self.at(&TokenKind::RBracket) {
+                // Parse first expression
+                let first_expr = if self.at(&TokenKind::RBracket) {
+                    // Empty list
+                    self.advance();
+                    return Ok(Expr::List(vec![]));
+                } else {
+                    self.parse_expr(0)?
+                };
+                self.skip_newlines();
+                // Check for list comprehension: [expr for x in iter if guard]
+                if self.at(&TokenKind::For) {
+                    // List comprehension
+                    self.advance(); // skip 'for'
+                    let var = self.expect_ident()?;
+                    self.expect(TokenKind::In, "`in`")?;
+                    let iter = self.parse_expr(0)?;
+                    self.skip_newlines();
+                    let guard = if self.at(&TokenKind::If) {
+                        self.advance();
+                        Some(Box::new(self.parse_expr(0)?))
+                    } else {
+                        None
+                    };
+                    self.expect(TokenKind::RBracket, "`]`")?;
+                    Expr::Comprehension {
+                        expr: Box::new(first_expr),
+                        var,
+                        iter: Box::new(iter),
+                        guard,
+                    }
+                } else {
+                    // Regular list
+                    let mut elems = vec![first_expr];
                     loop {
-                        elems.push(self.parse_expr(0)?);
                         self.skip_newlines();
                         if !self.at(&TokenKind::Comma) {
                             break;
                         }
                         self.advance();
                         self.skip_newlines();
+                        if self.at(&TokenKind::RBracket) {
+                            break;
+                        }
+                        elems.push(self.parse_expr(0)?);
                     }
+                    self.expect(TokenKind::RBracket, "`]`")?;
+                    Expr::List(elems)
                 }
-                self.expect(TokenKind::RBracket, "`]`")?;
-                Expr::List(elems)
             }
             TokenKind::Match => {
                 self.advance();
@@ -1453,10 +1559,7 @@ impl Parser {
             self.expect(TokenKind::Colon, "`:`")?;
             let fty = self.parse_type()?;
             fields.push(Field { name: fname, ty: fty });
-            if self.at(&TokenKind::Comma) {
-                self.advance();
-                self.skip_newlines();
-            } else if self.at(&TokenKind::Newline) {
+            if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Newline) {
                 self.advance();
                 self.skip_newlines();
             } else {
@@ -1497,13 +1600,7 @@ impl Parser {
                 None
             };
             variants.push(Variant { name: vname, payload });
-            if self.at(&TokenKind::BitOr) {
-                self.advance();
-                self.skip_newlines();
-            } else if self.at(&TokenKind::Comma) {
-                self.advance();
-                self.skip_newlines();
-            } else if self.at(&TokenKind::Newline) {
+            if matches!(self.peek_kind(), TokenKind::BitOr | TokenKind::Comma | TokenKind::Newline) {
                 self.advance();
                 self.skip_newlines();
             } else if matches!(self.peek_kind(), TokenKind::Ident(_)) {

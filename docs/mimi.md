@@ -438,9 +438,8 @@ use another_package::some_func;
 ## 11. 版本历史
 
 - v0.x - 早期草案：定义核心语法、AAM 内存模型、并发、Saga 补偿。
-- v1.1 - 内部完善稿：新增 `old()` 契约、`actor` 细化、线性能力类型、包管理模块系统。
-- v1.2 - 架构明确稿：确立 `.mimis` 为 `.mimi` 的草图模式，两者为同一语言的连续光谱。
-- **v1.0 - 基线整合版（本文）**：依据 `2.md` 收敛 1.0 特性集，确立 L4 花括号体、逻辑安全支柱、`cap` 显式 drop + `+` 组合、`newtype` / `type` 别名分工、无 trait/interface、契约检查分级等基线决策。
+- v1.0 - 基线整合版：确立 L4 花括号体、逻辑安全支柱、`cap` 显式 drop + `+` 组合、`newtype` / `type` 别名分工、契约检查分级等基线决策。
+- v1.1 - 特性扩展版：新增 `cap.split()` 能力分解、`old()` 契约快照语义、`math:` 块编译时求值、`trait`/`impl` 基础多态、`where` 约束语法、`extern "C"` FFI 块支持。
 
 ---
 
@@ -463,7 +462,7 @@ use another_package::some_func;
 | `drop` 显式丢弃 | ✅ 保留 | 与所有权系统一致 |
 | ADT + `match` 穷尽性 | ✅ 保留 | 现代语言标配 |
 | `comptime` 元编程 | ⚠️ 裁剪 | 仅支持 `quote!` 宏 |
-| `interface` / `trait` | ❌ 移除 | v1.0 用 duck typing + `comptime` 静态分派 |
-| 类型泛型（带约束） | ❌ 推迟 | 基础参数化多态若需可用 `comptime`；`where` 约束 v1.1+ |
+| `interface` / `trait` | ✅ v1.1 新增 | 基础 trait 系统，支持方法签名约定与静态分派 |
+| 类型泛型（带约束） | ✅ v1.1 新增 | `where T: Trait` 约束语法 |
 | 自定义分配器 | ❌ 推迟 | 超出 1.0 范围 |
 | 编译到原生代码 | ❌ 推迟 | 1.0 优先解释器 / JIT / 转译 |

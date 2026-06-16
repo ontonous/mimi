@@ -582,30 +582,28 @@ impl<'a> Interpreter<'a> {
         let result = self.eval_block(&func.body);
 
         // Extract and check ensures conditions
-        if let Ok(ref opt_val) = result {
-            if let Some(ref rv) = opt_val {
-                self.push_scope();
-                self.bind("result", rv.clone());
-                // Bind old snapshots for old(x) access
-                for (name, val) in &old_snapshots {
-                    self.bind(&format!("old_{}", name), val.clone());
-                }
-                let ensures_ok = (|| {
-                    for stmt in &func.body {
-                        if let Stmt::Ensures(expr) = stmt {
-                            let cond = self.eval_expr(expr)?;
-                            if !is_truthy(&cond) {
-                                return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
-                            }
+        if let Ok(Some(ref rv)) = result {
+            self.push_scope();
+            self.bind("result", rv.clone());
+            // Bind old snapshots for old(x) access
+            for (name, val) in &old_snapshots {
+                self.bind(&format!("old_{}", name), val.clone());
+            }
+            let ensures_ok = (|| {
+                for stmt in &func.body {
+                    if let Stmt::Ensures(expr) = stmt {
+                        let cond = self.eval_expr(expr)?;
+                        if !is_truthy(&cond) {
+                            return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
                         }
                     }
-                    Ok(())
-                })();
-                self.pop_scope(); // always pop ensures scope
-                if let Err(e) = ensures_ok {
-                    self.pop_scope(); // pop function scope
-                    return Err(e);
                 }
+                Ok(())
+            })();
+            self.pop_scope(); // always pop ensures scope
+            if let Err(e) = ensures_ok {
+                self.pop_scope(); // pop function scope
+                return Err(e);
             }
         }
 
@@ -727,9 +725,8 @@ impl<'a> Interpreter<'a> {
                 return Ok(Some(v));
             }
             Stmt::Expr(e) => {
-                match self.eval_expr(e)? {
-                    Value::Error(msg) => return Err(msg),
-                    _ => {}
+                if let Value::Error(msg) = self.eval_expr(e)? {
+                    return Err(msg);
                 }
             }
             Stmt::If { cond, then_, else_ } => {
@@ -869,7 +866,7 @@ impl<'a> Interpreter<'a> {
                             Value::Actor(handle) => {
                                 handle.inner.write().map_err(|e| format!("actor lock failed: {}", e))?.fields.insert(field.clone(), v);
                             }
-                            _ => return Err(format!("cannot assign to non-record/non-actor value")),
+                            _ => return Err("cannot assign to non-record/non-actor value".into()),
                         }
                     }
                     _ => return Err("assignment target must be a variable".into()),
@@ -924,8 +921,9 @@ impl<'a> Interpreter<'a> {
                 // Parasteps block: execute spawn statements in parallel
                 // Collect spawn expressions and their results
                 let mut last_value = None;
-                let mut futures = Vec::new();
-                let mut spawn_bindings: HashMap<String, std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, String>>>>> = HashMap::new();
+                type SpawnReceiver = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, String>>>>;
+                let mut futures: Vec<SpawnReceiver> = Vec::new();
+                let mut spawn_bindings: HashMap<String, SpawnReceiver> = HashMap::new();
 
                 for stmt in block {
                     match stmt {
@@ -1009,6 +1007,19 @@ impl<'a> Interpreter<'a> {
                 Lit::Float(v) => Value::Float(*v),
                 Lit::Bool(v) => Value::Bool(*v),
                 Lit::String(v) => Value::String(v.clone()),
+                Lit::FString(parts) => {
+                    let mut result = String::new();
+                    for part in parts {
+                        match part {
+                            crate::ast::FStringPart::Text(t) => result.push_str(t),
+                            crate::ast::FStringPart::Interp(expr) => {
+                                let val = self.eval_expr(expr)?;
+                                result.push_str(&val.to_string());
+                            }
+                        }
+                    }
+                    Value::String(result)
+                }
                 Lit::Unit => Value::Unit,
             }),
             Expr::Ident(name) => {
@@ -1106,6 +1117,30 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::List(vals))
             }
+            Expr::Comprehension { expr, var, iter, guard } => {
+                let iter_val = self.eval_expr(iter)?;
+                let items = match iter_val {
+                    Value::List(l) => l,
+                    _ => return Err("comprehension requires a list".into()),
+                };
+                let mut result = Vec::new();
+                for item in items {
+                    self.push_scope();
+                    self.bind(var, item.clone());
+                    let include = if let Some(g) = guard {
+                        let cond = self.eval_expr(g)?;
+                        is_truthy(&cond)
+                    } else {
+                        true
+                    };
+                    if include {
+                        let val = self.eval_expr(expr)?;
+                        result.push(val);
+                    }
+                    self.pop_scope();
+                }
+                Ok(Value::List(result))
+            }
             Expr::Match(subject, arms) => {
                 let val = self.eval_expr(subject)?;
                 for arm in arms {
@@ -1140,7 +1175,7 @@ impl<'a> Interpreter<'a> {
                             }
                             return Err(format!("actor field '{}' not found", field));
                         }
-                        return Err(format!("'self' is not bound to an actor"));
+                        return Err("'self' is not bound to an actor".into());
                     }
                 }
                 let obj_val = self.eval_expr(obj)?;
@@ -1163,7 +1198,7 @@ impl<'a> Interpreter<'a> {
                         match &*inner {
                             Value::Record(fields) => fields.get(field.as_str()).cloned()
                                 .ok_or_else(|| format!("field '{}' not found in shared record", field)),
-                            _ => Err(format!("field access on non-record shared value")),
+                            _ => Err("field access on non-record shared value".into()),
                         }
                     }
                     Value::LocalShared(rc) => {
@@ -1171,7 +1206,7 @@ impl<'a> Interpreter<'a> {
                         match &*inner {
                             Value::Record(fields) => fields.get(field.as_str()).cloned()
                                 .ok_or_else(|| format!("field '{}' not found in local_shared record", field)),
-                            _ => Err(format!("field access on non-record local_shared value")),
+                            _ => Err("field access on non-record local_shared value".into()),
                         }
                     }
                     _ => Err(format!("field access on non-record value {}", obj_val)),
@@ -1393,6 +1428,31 @@ impl<'a> Interpreter<'a> {
                 let q_elems: Result<Vec<_>, _> = elems.iter().map(|e| self.quote_expr(e)).collect();
                 Ok(QuotedAst::List(q_elems?))
             }
+            Expr::Comprehension { expr, var, iter, guard } => {
+                // For now, evaluate comprehension at quote time
+                let iter_val = self.eval_expr(iter)?;
+                let items = match iter_val {
+                    Value::List(l) => l,
+                    _ => return Err("comprehension requires a list".into()),
+                };
+                let mut result = Vec::new();
+                for item in items {
+                    self.push_scope();
+                    self.bind(var, item.clone());
+                    let include = if let Some(g) = guard {
+                        let cond = self.eval_expr(g)?;
+                        is_truthy(&cond)
+                    } else {
+                        true
+                    };
+                    if include {
+                        let val = self.eval_expr(expr)?;
+                        result.push(val);
+                    }
+                    self.pop_scope();
+                }
+                Ok(QuotedAst::List(result.into_iter().map(|v| QuotedAst::Interpolate(Box::new(v))).collect()))
+            }
             Expr::Try(e) => Ok(QuotedAst::Try(Box::new(self.quote_expr(e)?))),
             Expr::Spawn(e) => Ok(QuotedAst::Spawn(Box::new(self.quote_expr(e)?))),
             Expr::Await(e) => Ok(QuotedAst::Await(Box::new(self.quote_expr(e)?))),
@@ -1482,10 +1542,8 @@ impl<'a> Interpreter<'a> {
                 ));
             }
             // Check if this is a newtype constructor - wrap in Value::Newtype
-            if self.newtype_constructors.get(name).copied().unwrap_or(false) {
-                if args.len() == 1 {
-                    return Ok(Value::Newtype(Box::new(args.into_iter().next().unwrap())));
-                }
+            if *self.newtype_constructors.get(name).unwrap_or(&false) && args.len() == 1 {
+                return Ok(Value::Newtype(Box::new(args.into_iter().next().unwrap())));
             }
             return Ok(Value::Variant(name.into(), args));
         }
@@ -1671,6 +1729,7 @@ impl<'a> Interpreter<'a> {
                 Lit::Float(v) => Value::Float(*v),
                 Lit::Bool(v) => Value::Bool(*v),
                 Lit::String(v) => Value::String(v.clone()),
+                Lit::FString(_) => Value::Unit, // f-strings not supported in quoted context
                 Lit::Unit => Value::Unit,
             }),
             QuotedAst::Ident(name) => {
@@ -1732,7 +1791,7 @@ impl<'a> Interpreter<'a> {
                             _ => Err(format!("unsupported > for {} and {}", lv, rv)),
                         }
                     }
-                    _ => Err(format!("unsupported binary op in quoted AST")),
+                    _ => Err("unsupported binary op in quoted AST".into()),
                 }
             }
             QuotedAst::Unary(op, e) => {
@@ -1747,7 +1806,7 @@ impl<'a> Interpreter<'a> {
                         Value::Bool(b) => Ok(Value::Bool(!b)),
                         _ => Err(format!("unsupported not for {}", v)),
                     },
-                    _ => Err(format!("unsupported unary op in quoted AST")),
+                    _ => Err("unsupported unary op in quoted AST".into()),
                 }
             }
             QuotedAst::Interpolate(v) => Ok(*v.clone()),
@@ -1801,7 +1860,7 @@ impl<'a> Interpreter<'a> {
                         self.pop_scope();
                         result.map(|v| v.unwrap_or(Value::Unit))
                     }
-                    _ => Err(format!("cannot call non-closure in quoted AST")),
+                    _ => Err("cannot call non-closure in quoted AST".into()),
                 }
             }
             _ => Err(format!("unsupported quoted AST node: {:?}", qa)),
@@ -1965,6 +2024,7 @@ impl<'a> Interpreter<'a> {
                     Lit::Float(v) => Value::Float(*v),
                     Lit::Bool(v) => Value::Bool(*v),
                     Lit::String(v) => Value::String(v.clone()),
+                    Lit::FString(_) => return false, // f-strings can't be used in patterns
                     Lit::Unit => Value::Unit,
                 };
                 values_equal(value, &expected)

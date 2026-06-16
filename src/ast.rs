@@ -276,6 +276,13 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Tuple(Vec<Expr>),
     List(Vec<Expr>),
+    /// List comprehension: [expr for x in iter if condition]
+    Comprehension {
+        expr: Box<Expr>,
+        var: String,
+        iter: Box<Expr>,
+        guard: Option<Box<Expr>>,
+    },
     Match(Box<Expr>, Vec<MatchArm>),
     Record {
         ty: Option<String>,
@@ -320,7 +327,15 @@ pub enum Lit {
     Float(f64),
     Bool(bool),
     String(String),
+    FString(Vec<FStringPart>),
     Unit,
+}
+
+/// A part of an f-string: either literal text or an interpolation expression
+#[derive(Debug, Clone)]
+pub enum FStringPart {
+    Text(String),
+    Interp(Expr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
