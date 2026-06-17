@@ -115,7 +115,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
         | "str_index_of" | "str_repeat" | "str_trim"
         | "str_to_upper" | "str_to_lower" | "str_substring"
-        | "contains" | "sum" | "reverse" | "flatten"
+        | "contains" | "sum" | "reverse" | "flatten" | "sort" | "zip" | "enumerate"
         | "str_split" | "str_join" | "str_replace"
         | "type_name" | "type_fields" | "type_variants"
     )
