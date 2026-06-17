@@ -170,6 +170,26 @@ enum Command {
     Stats {
         path: Option<PathBuf>,
     },
+    /// Install dependencies from mimi.toml
+    Install {
+        /// Install all dependencies (default)
+        #[arg(long)]
+        all: bool,
+    },
+    /// Publish package to local registry
+    Publish {
+        /// Package name (defaults to mimi.toml name)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Version (defaults to mimi.toml version)
+        #[arg(short, long)]
+        version: Option<String>,
+    },
+    /// Search for packages in registry
+    Search {
+        /// Search query
+        query: String,
+    },
 }
 
 fn main() {
@@ -190,6 +210,9 @@ fn main() {
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats(path.as_deref()),
+        Command::Install { all } => install(all),
+        Command::Publish { name, version } => publish(name.as_deref(), version.as_deref()),
+        Command::Search { query } => search(&query),
     };
     if let Err(e) = result {
         eprintln!("{}", format_simple_error(&e));
@@ -1067,7 +1090,7 @@ fn doc(path: &Path, format: &str) -> Result<(), String> {
             }
         }
         _ => {
-            return Err(format!("unsupported format: {}", format));
+            return Err(format!("unsupported doc format: {}", format));
         }
     }
 
@@ -1078,67 +1101,224 @@ fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), Stri
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    if is_sketch(&path) {
-        return Err("cannot generate C headers from .mms sketch file; promote to .mimi first".into());
-    }
-    if !is_production(&path) {
-        return Err(format!(
-            "expected .mimi production file, got {}",
-            path.display()
-        ));
-    }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
-    // Load imports if any
-    let merged_file = if !file.imports.is_empty() {
-        let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
-        let mut loader = loader::ModuleLoader::new(base_dir);
-        loader.load_main(&path)?;
-        loader.merge_all()
-    } else {
-        file
-    };
-
-    // Type check
-    let check_result = core::check(&merged_file);
-    if let Err(diagnostics) = check_result {
-        eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
-        let use_color = colors_enabled();
-        let src = fs::read_to_string(&path).ok();
-        let src_ref = src.as_deref();
-        for d in &diagnostics {
-            let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
-            if use_color {
-                eprint!("{}", formatted);
-            } else {
-                eprint!("{}", strip_ansi(&formatted));
-            }
-        }
-        return Err("type checking failed".into());
-    }
-
-    // Collect extern functions and type definitions
     let mut extern_funcs = Vec::new();
-    let mut type_defs = HashMap::new();
-    collect_extern_and_types(&merged_file, &mut extern_funcs, &mut type_defs);
+    let mut type_defs = std::collections::HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
 
-    if extern_funcs.is_empty() {
-        return Err("no extern function declarations found".into());
-    }
+    let header = ffi::c_header::generate_c_header(&extern_funcs, type_defs)?;
 
-    // Generate C header
-    let header = ffi::generate_c_header(&extern_funcs, type_defs)?;
-
-    // Write to file or stdout
     match output {
-        Some(output_path) => {
-            fs::write(output_path, &header)
-                .map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
-            println!("✓ C header generated: {}", output_path.display());
+        Some(out_path) => {
+            std::fs::write(out_path, &header)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("✓ Generated C header: {}", out_path.display());
         }
         None => {
-            print!("{}", header);
+            println!("{}", header);
+        }
+    }
+    Ok(())
+}
+
+// ===================== Package Management =====================
+
+/// Get the local registry directory (~/.mimi/registry/)
+fn registry_dir() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|e| format!("cannot get HOME: {}", e))?;
+    let reg_dir = std::path::PathBuf::from(home).join(".mimi").join("registry");
+    std::fs::create_dir_all(&reg_dir)
+        .map_err(|e| format!("failed to create registry dir: {}", e))?;
+    Ok(reg_dir)
+}
+
+/// Install dependencies from mimi.toml
+fn install(_all: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
+    let (dir, manifest) = match manifest::Manifest::find(&cwd)? {
+        Some((d, m)) => (d, m),
+        None => return Err("no mimi.toml found; run 'mimi init' first".into()),
+    };
+
+    let deps = match &manifest.dependencies {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => {
+            println!("No dependencies to install.");
+            return Ok(());
+        }
+    };
+
+    let reg = registry_dir()?;
+    let deps_dir = dir.join(".mimi").join("deps");
+    std::fs::create_dir_all(&deps_dir)
+        .map_err(|e| format!("failed to create deps dir: {}", e))?;
+
+    let mut installed = 0;
+    for dep in &deps {
+        let source = dep.path.as_deref().unwrap_or("registry");
+
+        if source == "registry" {
+            let pkg_dir = reg.join(&dep.name);
+            if !pkg_dir.exists() {
+                println!("  ⚠ Package '{}' not found in local registry (use 'mimi publish' first)", dep.name);
+                continue;
+            }
+
+            let version = dep.version.as_deref().unwrap_or("*");
+            let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
+                .map_err(|e| format!("failed to read registry: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .collect();
+
+            let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
+            let resolved = lockfile::Lockfile::resolve_version(version, &version_refs);
+
+            match resolved {
+                Some(v) => {
+                    let src = pkg_dir.join(&v);
+                    let dst = deps_dir.join(&dep.name);
+                    if dst.exists() {
+                        std::fs::remove_dir_all(&dst)
+                            .map_err(|e| format!("failed to remove old: {}", e))?;
+                    }
+                    copy_dir_recursive(&src, &dst)
+                        .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+                    println!("  ✓ {} v{}", dep.name, v);
+                    installed += 1;
+                }
+                None => {
+                    println!("  ⚠ No matching version for '{}' {}", dep.name, version);
+                }
+            }
+        } else {
+            let src = std::path::PathBuf::from(source);
+            if !src.exists() {
+                println!("  ⚠ Path dependency '{}' not found at {}", dep.name, source);
+                continue;
+            }
+            let dst = deps_dir.join(&dep.name);
+            if dst.exists() {
+                std::fs::remove_dir_all(&dst)
+                    .map_err(|e| format!("failed to remove old: {}", e))?;
+            }
+            copy_dir_recursive(&src, &dst)
+                .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+            println!("  ✓ {} (path: {})", dep.name, source);
+            installed += 1;
+        }
+    }
+
+    let mut lock = lockfile::Lockfile::load(&dir)?
+        .unwrap_or_else(lockfile::Lockfile::new);
+    for dep in &deps {
+        let source = dep.path.as_deref().unwrap_or("registry");
+        let version = dep.version.as_deref().unwrap_or("*");
+        lock.add_package(&dep.name, version, Some(source), None);
+    }
+    lock.save(&dir)?;
+
+    println!("Installed {} package(s).", installed);
+    Ok(())
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("read_dir {}: {}", src.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("read_dir entry: {}", e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {}: {}", src_path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Publish package to local registry
+fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
+    let (_dir, manifest) = match manifest::Manifest::find(&cwd)? {
+        Some((d, m)) => (d, m),
+        None => return Err("no mimi.toml found; run 'mimi init' first".into()),
+    };
+
+    let pkg = manifest.package.as_ref()
+        .ok_or("no [package] in mimi.toml")?;
+    let pkg_name = name.unwrap_or(&pkg.name);
+    let pkg_version = version
+        .or(pkg.version.as_deref())
+        .unwrap_or("0.1.0");
+
+    let reg = registry_dir()?;
+    let pkg_dir = reg.join(pkg_name).join(pkg_version);
+
+    if pkg_dir.exists() {
+        return Err(format!("package {} v{} already exists in registry", pkg_name, pkg_version));
+    }
+
+    copy_dir_recursive(&cwd, &pkg_dir)
+        .map_err(|e| format!("failed to publish: {}", e))?;
+
+    println!("✓ Published {} v{} to local registry", pkg_name, pkg_version);
+    println!("  Location: {}", pkg_dir.display());
+    Ok(())
+}
+
+/// Search for packages in registry
+fn search(query: &str) -> Result<(), String> {
+    let reg = registry_dir()?;
+    if !reg.exists() {
+        println!("Registry is empty. Use 'mimi publish' to add packages.");
+        return Ok(());
+    }
+
+    let mut found = 0;
+    for entry in std::fs::read_dir(&reg)
+        .map_err(|e| format!("failed to read registry: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let pkg_name = entry.file_name();
+        let pkg_name_str = pkg_name.to_string_lossy();
+
+        if !query.is_empty() && !pkg_name_str.contains(query) {
+            continue;
+        }
+
+        let pkg_dir = entry.path();
+        let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
+            .map_err(|e| format!("read versions: {}", e))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+            .collect();
+
+        if versions.is_empty() {
+            continue;
+        }
+
+        println!("{} ({})", pkg_name_str, versions.join(", "));
+        found += 1;
+    }
+
+    if found == 0 {
+        if query.is_empty() {
+            println!("Registry is empty. Use 'mimi publish' to add packages.");
+        } else {
+            println!("No packages found matching '{}'.", query);
         }
     }
 
