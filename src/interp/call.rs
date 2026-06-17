@@ -10,8 +10,9 @@ impl<'a> Interpreter<'a> {
                 args.len()
             ));
         }
+        self.push_call(&func.name);
         self.push_scope();
-        
+
         // Snapshot parameters for old() in ensures
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(args) {
@@ -26,6 +27,7 @@ impl<'a> Interpreter<'a> {
                     let cond = self.eval_expr(expr)?;
                     if !is_truthy(&cond) {
                         self.pop_scope();
+                        self.pop_call();
                         return Err(format!("requires condition failed for '{}': {}", func.name, cond));
                     }
                 }
@@ -57,12 +59,14 @@ impl<'a> Interpreter<'a> {
                 self.pop_scope(); // always pop ensures scope
                 if let Err(e) = ensures_ok {
                     self.pop_scope(); // pop function scope
+                    self.pop_call();
                     return Err(e);
                 }
             }
         }
 
         self.pop_scope();
+        self.pop_call();
         result.map(|v| v.unwrap_or(Value::Unit))
     }
 

@@ -7,8 +7,10 @@ mod call;
 mod pattern;
 mod quote;
 mod actor;
+pub mod error;
 
 pub use value::*;
+pub use error::InterpError;
 
 use crate::ast::*;
 use std::cell::RefCell;
@@ -67,6 +69,8 @@ pub struct Interpreter<'a> {
     pub default_allocator: AllocatorKind,
     /// Current loop control flow action (break/continue signal)
     loop_action: Option<LoopAction>,
+    /// Call stack for error context (function names being executed)
+    call_stack: Vec<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -118,6 +122,7 @@ impl<'a> Interpreter<'a> {
             loaded_libs: Vec::new(),
             default_allocator: AllocatorKind::System,
             loop_action: None,
+            call_stack: Vec::new(),
         }
     }
 
@@ -432,11 +437,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub fn run(&mut self) -> Result<Value, String> {
+    pub fn run(&mut self) -> Result<Value, InterpError> {
         // Evaluate comptime functions (no-arg) at startup
-        self.eval_comptime_funcs()?;
-        let main = self.find_function("main").ok_or("no main() function found")?;
+        self.eval_comptime_funcs().map_err(|e| self.interp_err(e))?;
+        let main = self.find_function("main")
+            .ok_or_else(|| self.interp_err("no main() function found".into()))?;
         self.call_func(&main, vec![])
+            .map_err(|e| self.interp_err(e))
     }
 
     /// Evaluate comptime functions with no arguments at startup
@@ -534,6 +541,24 @@ impl<'a> Interpreter<'a> {
         self.env.pop();
         self.moved_vars.pop();
         self.mut_vars.pop();
+    }
+
+    fn push_call(&mut self, func_name: &str) {
+        self.call_stack.push(func_name.to_string());
+    }
+
+    fn pop_call(&mut self) {
+        self.call_stack.pop();
+    }
+
+    /// Convert a string error into an InterpError with current call stack context.
+    fn interp_err(&self, msg: String) -> InterpError {
+        InterpError::new(msg).with_call_stack(self.call_stack.clone())
+    }
+
+    /// Convert a string error with operation context into an InterpError.
+    fn interp_err_op(&self, msg: String, op: &str) -> InterpError {
+        InterpError::with_op(msg, op).with_call_stack(self.call_stack.clone())
     }
 
     fn bind(&mut self, name: &str, value: Value) {

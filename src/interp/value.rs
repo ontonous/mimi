@@ -366,13 +366,47 @@ pub(crate) fn compare_op<F>(a: Value, b: Value, f: F) -> Result<Value, String>
 where
     F: Fn(std::cmp::Ordering) -> bool,
 {
-    let ord = match (a, b) {
-        (Value::Int(a), Value::Int(b)) => a.cmp(&b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(&b).ok_or("cannot compare floats")?,
-        (Value::String(a), Value::String(b)) => a.cmp(&b),
-        _ => return Err("comparison requires comparable types".into()),
+    let ord = match (&a, &b) {
+        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).ok_or("cannot compare NaN with float")?,
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        _ => return Err(format!("cannot compare {} with {}", type_name(&a), type_name(&b))),
     };
     Ok(Value::Bool(f(ord)))
+}
+
+/// Get a human-readable type name for a value.
+fn type_name(val: &Value) -> &'static str {
+    match val {
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Unit => "unit",
+        Value::List(_) => "list",
+        Value::Array(_) => "array",
+        Value::Tuple(_) => "tuple",
+        Value::Variant(_, _) => "variant",
+        Value::Record(Some(_), _) => "record",
+        Value::Record(None, _) => "record",
+        Value::Error(_) => "error",
+        Value::Newtype(_) => "newtype",
+        Value::Type(_) => "type",
+        Value::Closure { .. } => "closure",
+        Value::QuoteAst(_) => "AST",
+        Value::Shared(_) => "shared",
+        Value::LocalShared(_) => "local_shared",
+        Value::Ref(_) => "ref",
+        Value::RefMut(_) => "ref_mut",
+        Value::Cap(_) => "cap",
+        Value::Actor(_) => "actor",
+        Value::Future(_) => "future",
+        Value::ArenaRef(_, _) => "arena_ref",
+        Value::ArenaBlock(_) => "arena_block",
+        Value::WeakShared(_) | Value::WeakLocal(_) => "weak",
+        Value::Allocator(_) => "allocator",
+        Value::Slice { .. } => "slice",
+    }
 }
 
 impl PartialEq for Value {

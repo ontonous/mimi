@@ -31,7 +31,7 @@ func main() -> i32 {
     let result = interp.run();
     assert!(result.is_err(), "with verify_contracts, requires violation should error");
     let err = result.unwrap_err();
-    assert!(err.contains("requires condition failed"), "Expected requires error, got: {}", err);
+    assert!(err.message.contains("requires condition failed"), "Expected requires error, got: {}", err.message);
 }
 
 #[test]
@@ -62,7 +62,7 @@ func main() -> i32 {
     let result = interp.run();
     assert!(result.is_err(), "with verify_contracts, ensures violation should error");
     let err = result.unwrap_err();
-    assert!(err.contains("ensures condition failed"), "Expected ensures error, got: {}", err);
+    assert!(err.message.contains("ensures condition failed"), "Expected ensures error, got: {}", err.message);
 }
 
 #[test]

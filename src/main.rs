@@ -355,9 +355,25 @@ fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str) -> Result<(
         "bump" => interp::AllocatorKind::Bump,
         _ => interp::AllocatorKind::System,
     };
-    let value = interp.run()?;
-    println!("-> {}", value);
-    Ok(())
+    match interp.run() {
+        Ok(value) => {
+            println!("-> {}", value);
+            Ok(())
+        }
+        Err(interp_err) => {
+            let use_color = colors_enabled();
+            let src = fs::read_to_string(&path).ok();
+            let src_ref = src.as_deref();
+            let diagnostic = interp_err.to_diagnostic();
+            let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());
+            if use_color {
+                eprintln!("{}", formatted);
+            } else {
+                eprintln!("{}", strip_ansi(&formatted));
+            }
+            std::process::exit(1);
+        }
+    }
 }
 
 fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: bool) -> Result<(), String> {

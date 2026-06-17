@@ -570,7 +570,29 @@ impl<'a> Interpreter<'a> {
                         Err(format!("constructor '{}' requires {} arguments", name, arity))
                     }
                 } else {
-                    Err(format!("undefined variable '{}'", name))
+                    // Try to suggest a similar name
+                    let mut candidates: Vec<String> = Vec::new();
+                    for scope in self.env.iter().rev() {
+                        for var_name in scope.keys() {
+                            if levenshtein_distance(name, var_name) <= 2 && name != var_name {
+                                candidates.push(var_name.clone());
+                            }
+                        }
+                    }
+                    for func_name in self.file.items.iter().filter_map(|item| {
+                        if let Item::Func(f) = item { Some(&f.name) } else { None }
+                    }) {
+                        if levenshtein_distance(name, func_name) <= 2 && name != func_name {
+                            candidates.push(func_name.clone());
+                        }
+                    }
+                    candidates.sort();
+                    candidates.dedup();
+                    if let Some(suggestion) = candidates.first() {
+                        Err(format!("undefined variable '{}' — did you mean '{}'?", name, suggestion))
+                    } else {
+                        Err(format!("undefined variable '{}'", name))
+                    }
                 }
             }
             Expr::Unary(op, e) => self.eval_unary(*op, e),
@@ -626,7 +648,7 @@ impl<'a> Interpreter<'a> {
                                 self.pop_scope();
                                 result.map(|v| v.unwrap_or(Value::Unit))
                             }
-                            _ => Err(format!("cannot call non-function value: {}", callee_val)),
+                            _ => Err(format!("cannot call {}: expected a function or closure", Self::type_name(&callee_val))),
                         }
                     }
                 }
@@ -765,7 +787,14 @@ impl<'a> Interpreter<'a> {
                         fields
                             .get(field)
                             .cloned()
-                            .ok_or_else(|| format!("field '{}' not found", field))
+                            .ok_or_else(|| {
+                                let available: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+                                if available.is_empty() {
+                                    format!("field '{}' not found in record (record is empty)", field)
+                                } else {
+                                    format!("field '{}' not found in record — available fields: {}", field, available.join(", "))
+                                }
+                            })
                     }
                     Value::Actor(handle) => {
                         // Actor field access using read lock
@@ -790,7 +819,7 @@ impl<'a> Interpreter<'a> {
                             _ => Err("field access on non-record local_shared value".into()),
                         }
                     }
-                    _ => Err(format!("field access on non-record value {}", obj_val)),
+                    _ => Err(format!("cannot access field '{}' on {}", field, Self::type_name(&obj_val))),
                 }
             }
             Expr::Record { ty, fields } => {
@@ -801,13 +830,13 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Record(ty.clone(), map))
             }
-            Expr::Index(obj, idx) => {
-                let obj = self.eval_expr(obj)?;
-                let idx = self.eval_expr(idx)?;
-                match (obj, idx) {
+            Expr::Index(obj_expr, idx_expr) => {
+                let obj = self.eval_expr(obj_expr)?;
+                let idx = self.eval_expr(idx_expr)?;
+                match (&obj, &idx) {
                     (Value::List(list), Value::Int(i)) => {
                         let len = list.len() as i64;
-                        let i = if i < 0 { len + i } else { i };
+                        let i = if *i < 0 { len + *i } else { *i };
                         if i < 0 || i >= len {
                             return Err(format!("index out of bounds: index {} is not valid for list of length {}", i, len));
                         }
@@ -815,29 +844,29 @@ impl<'a> Interpreter<'a> {
                     }
                     (Value::Array(arr), Value::Int(i)) => {
                         let len = arr.len() as i64;
-                        let i = if i < 0 { len + i } else { i };
+                        let i = if *i < 0 { len + *i } else { *i };
                         if i < 0 || i >= len {
-                            return Err(format!("array index out of bounds: index {} is not valid for array of length {}", i, len));
+                            return Err(format!("index out of bounds: index {} is not valid for array of length {}", i, len));
                         }
                         Ok(arr[i as usize].clone())
                     }
                     (Value::Slice { source, start, end }, Value::Int(i)) => {
-                        let slice_len = (end - start) as i64;
-                        let i = if i < 0 { slice_len + i } else { i };
+                        let slice_len = (*end - *start) as i64;
+                        let i = if *i < 0 { slice_len + *i } else { *i };
                         if i < 0 || i >= slice_len {
-                            return Err(format!("slice index out of bounds: index {} is not valid for slice of length {}", i, slice_len));
+                            return Err(format!("index out of bounds: index {} is not valid for slice of length {}", i, slice_len));
                         }
-                        Ok(source[start + i as usize].clone())
+                        Ok(source[*start + i as usize].clone())
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let len = s.chars().count() as i64;
-                        let i = if i < 0 { len + i } else { i };
+                        let i = if *i < 0 { len + *i } else { *i };
                         if i < 0 || i >= len {
-                            return Err(format!("string index out of bounds: index {} is not valid for string of length {}", i, len));
+                            return Err(format!("index out of bounds: index {} is not valid for string of length {}", i, len));
                         }
                         Ok(Value::String(s.chars().nth(i as usize).unwrap().to_string()))
                     }
-                    _ => Err("invalid index operation".into()),
+                    _ => Err(format!("cannot index {} with {}", Self::type_name(&obj), Self::type_name(&idx))),
                 }
             }
             Expr::SliceExpr { target, start, end } => {
@@ -1087,14 +1116,14 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 Value::Float(x) => Ok(Value::Float(-x)),
-                _ => Err("cannot negate non-number".into()),
+                _ => Err(format!("cannot negate {}", Self::type_name(&v))),
             },
             UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
             UnOp::Ref => Ok(Value::Ref(SendRc(Rc::new(RefCell::new(v))))),
             UnOp::RefMut => Ok(Value::RefMut(SendRc(Rc::new(RefCell::new(v))))),
             UnOp::Deref => match v {
                 Value::Ref(rc) | Value::RefMut(rc) => Ok(rc.0.borrow().clone()),
-                _ => Err("cannot dereference non-reference value".into()),
+                _ => Err(format!("cannot dereference {}", Self::type_name(&v))),
             },
         }
     }
@@ -1129,7 +1158,7 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                _ => Err("addition requires numbers or strings".into()),
+                _ => Err(format!("cannot apply '+' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Sub => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => {
@@ -1138,7 +1167,7 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-                _ => Err("subtraction requires numbers".into()),
+                _ => Err(format!("cannot apply '-' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Mul => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => {
@@ -1147,7 +1176,7 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-                _ => Err("multiplication requires numbers".into()),
+                _ => Err(format!("cannot apply '*' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Div => match (&left, &right) {
                 (Value::Int(_), Value::Int(0)) => Err("division by zero".into()),
@@ -1158,7 +1187,7 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-                _ => Err("division requires numbers".into()),
+                _ => Err(format!("cannot apply '/' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Mod => match (&left, &right) {
                 (Value::Int(_), Value::Int(0)) => Err("modulo by zero".into()),
@@ -1167,7 +1196,7 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| format!("integer overflow in modulo: {} % {}", a, b))
                         .map(Value::Int)
                 }
-                _ => Err("modulo requires integers".into()),
+                _ => Err(format!("cannot apply '%' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Pow => match (&left, &right) {
                 (Value::Int(_), Value::Int(b)) if *b < 0 => Err("negative exponent not supported for integers".into()),
@@ -1177,7 +1206,7 @@ impl<'a> Interpreter<'a> {
                         .map(Value::Int)
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
-                _ => Err("power requires numbers".into()),
+                _ => Err(format!("cannot apply '^' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::EqCmp => Ok(Value::Bool(values_equal(&left, &right))),
             BinOp::NeCmp => Ok(Value::Bool(!values_equal(&left, &right))),
@@ -1185,28 +1214,90 @@ impl<'a> Interpreter<'a> {
             BinOp::Gt => compare_op(left, right, |o| o == std::cmp::Ordering::Greater),
             BinOp::Le => compare_op(left, right, |o| o != std::cmp::Ordering::Greater),
             BinOp::Ge => compare_op(left, right, |o| o != std::cmp::Ordering::Less),
-            BinOp::BitAnd => match (left, right) {
+            BinOp::BitAnd => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
-                _ => Err("bitwise and requires integers".into()),
+                _ => Err(format!("cannot apply '&' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
-            BinOp::BitOr => match (left, right) {
+            BinOp::BitOr => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
-                _ => Err("bitwise or requires integers".into()),
+                _ => Err(format!("cannot apply '|' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
-            BinOp::BitXor => match (left, right) {
+            BinOp::BitXor => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
-                _ => Err("bitwise xor requires integers".into()),
+                _ => Err(format!("cannot apply '^' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
-            BinOp::Shl => match (left, right) {
+            BinOp::Shl => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a << b)),
-                _ => Err("shift requires integers".into()),
+                _ => Err(format!("cannot apply '<<' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
-            BinOp::Shr => match (left, right) {
+            BinOp::Shr => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a >> b)),
-                _ => Err("shift requires integers".into()),
+                _ => Err(format!("cannot apply '>>' to {} and {}", Self::type_name(&left), Self::type_name(&right))),
             },
             BinOp::Assign => Err("assignment as expression not supported".into()),
             BinOp::And | BinOp::Or => unreachable!(),
         }
     }
+
+    /// Get a human-readable type name for a value (standalone, no interpreter state needed).
+    fn type_name(val: &Value) -> &'static str {
+        match val {
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::String(_) => "string",
+            Value::Unit => "unit",
+            Value::List(_) => "list",
+            Value::Array(_) => "array",
+            Value::Tuple(_) => "tuple",
+            Value::Variant(name, _) => "variant",
+            Value::Record(Some(name), _) => "record",
+            Value::Record(None, _) => "record",
+            Value::Error(_) => "error",
+            Value::Newtype(_) => "newtype",
+            Value::Type(_) => "type",
+            Value::Closure { .. } => "closure",
+            Value::QuoteAst(_) => "AST",
+            Value::Shared(_) => "shared",
+            Value::LocalShared(_) => "local_shared",
+            Value::Ref(_) => "ref",
+            Value::RefMut(_) => "ref_mut",
+            Value::Cap(_) => "cap",
+            Value::Actor(_) => "actor",
+            Value::Future(_) => "future",
+            Value::ArenaRef(_, _) => "arena_ref",
+            Value::ArenaBlock(_) => "arena_block",
+            Value::WeakShared(_) | Value::WeakLocal(_) => "weak",
+            Value::Allocator(_) => "allocator",
+            Value::Slice { .. } => "slice",
+        }
+    }
+}
+
+/// Compute Levenshtein edit distance between two strings.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_len = a.len();
+    let b_len = b.len();
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut prev = vec![0usize; b_len + 1];
+    let mut curr = vec![0usize; b_len + 1];
+
+    for j in 0..=b_len {
+        prev[j] = j;
+    }
+
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1)
+                .min(curr[j] + 1)
+                .min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[b_len]
 }

@@ -76,7 +76,7 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_contracts = true;
-    interp.run()
+    interp.run().map_err(|e| e.message)
 }
 
 pub(crate) fn check_source(src: &str) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
