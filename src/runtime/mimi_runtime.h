@@ -36,4 +36,10 @@ const char* mimi_str_replace(const char* s, const char* from, const char* to);
    otherwise print as integer. */
 void mimi_try_exit(int64_t payload);
 
+/* Cap runtime functions.
+   Cap IDs are int64_t. Each cap has a name and a consumed flag. */
+int64_t mimi_cap_register(const char* name);
+int mimi_cap_check(int64_t cap, const char* name);
+int mimi_cap_consume(int64_t cap, const char* name);
+
 #endif

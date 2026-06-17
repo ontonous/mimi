@@ -315,6 +315,58 @@ void mimi_try_exit(int64_t payload) {
     exit(1);
 }
 
+/* ========== Capability runtime ========== */
+
+#define MAX_CAPS 256
+typedef struct {
+    int64_t id;
+    char name[64];
+    int consumed;
+} CapEntry;
+
+static CapEntry cap_table[MAX_CAPS];
+static int64_t cap_next_id = 1;
+static int cap_count = 0;
+
+int64_t mimi_cap_register(const char* name) {
+    if (cap_count >= MAX_CAPS) return -1;
+    int64_t id = cap_next_id++;
+    cap_table[cap_count].id = id;
+    cap_table[cap_count].consumed = 0;
+    if (name) {
+        strncpy(cap_table[cap_count].name, name, 63);
+        cap_table[cap_count].name[63] = '\0';
+    } else {
+        cap_table[cap_count].name[0] = '\0';
+    }
+    cap_count++;
+    return id;
+}
+
+int mimi_cap_check(int64_t cap, const char* name) {
+    for (int i = 0; i < cap_count; i++) {
+        if (cap_table[i].id == cap && !cap_table[i].consumed) {
+            if (!name || !name[0]) return 1;
+            if (strcmp(cap_table[i].name, name) == 0) return 1;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int mimi_cap_consume(int64_t cap, const char* name) {
+    for (int i = 0; i < cap_count; i++) {
+        if (cap_table[i].id == cap && !cap_table[i].consumed) {
+            if (!name || !name[0] || strcmp(cap_table[i].name, name) == 0) {
+                cap_table[i].consumed = 1;
+                return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
 const char* mimi_str_replace(const char* s, const char* from, const char* to) {
     if (!s) return strdup("");
     if (!from || from[0] == '\0') return strdup(s);

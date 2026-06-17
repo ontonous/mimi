@@ -24,6 +24,8 @@ pub struct CodeGenerator<'ctx> {
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
     /// Track linear capabilities in scope: name -> (pointer, consumed)
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
+    /// Known cap type names (from cap definitions)
+    cap_type_names: std::collections::HashSet<String>,
     /// Generic type substitution map for current monomorphization
     type_map: HashMap<String, crate::ast::Type>,
     /// Store function definitions for monomorphization lookup
@@ -55,7 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new() }
     }
 
     /// Enter parallel parasteps mode: track thread IDs for joining at block end
@@ -156,6 +158,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         false
     }
 
+    /// Check if a variable is a capability variable
+    fn is_cap_var(&self, name: &str) -> bool {
+        for scope in self.cap_vars.iter().rev() {
+            if scope.contains_key(name) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check for unconsumed capabilities at scope exit
     fn check_unconsumed_caps(&self) -> Result<(), String> {
         if let Some(scope) = self.cap_vars.last() {
@@ -221,7 +233,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile_file(&mut self, file: &File) -> Result<(), String> {
-        // First pass: collect type definitions and function definitions
+        // First pass: collect type definitions, function definitions, and cap definitions
         for item in &file.items {
             match item {
                 Item::Type(t) => {
@@ -232,6 +244,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Item::Func(f) if !f.is_comptime => {
                     self.func_defs.insert(f.name.clone(), f.clone());
+                }
+                Item::Cap(cap) => {
+                    self.cap_type_names.insert(cap.name.clone());
                 }
                 Item::Trait(t) => {
                     self.trait_defs.insert(t.name.clone(), t.clone());
@@ -253,6 +268,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             Item::Func(f) if !f.is_comptime => {
                                 self.func_defs.insert(f.name.clone(), f.clone());
+                            }
+                            Item::Cap(cap) => {
+                                self.cap_type_names.insert(cap.name.clone());
                             }
                             Item::Trait(t) => {
                                 self.trait_defs.insert(t.name.clone(), t.clone());
@@ -1321,10 +1339,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Drop(expr) => {
                     // Drop: evaluate expression and mark capability as consumed
-                    self.compile_expr(expr, &vars)?;
-                    // If the expression is a variable, mark it as consumed
+                    let val = self.compile_expr(expr, &vars)?;
+                    // If the expression is a variable, mark it as consumed and call mimi_cap_consume
                     if let Expr::Ident(name) = expr {
                         self.consume_cap(name)?;
+                        // Generate runtime cap consume call
+                        if self.is_cap_var(name) {
+                            if let Some(consume_fn) = self.module.get_function("mimi_cap_consume") {
+                                if let Some(&(alloca, _)) = vars.get(name) {
+                                    let cap_val = self.builder.build_load(
+                                        BasicTypeEnum::IntType(self.context.i64_type()),
+                                        alloca, &format!("cap_val_{}", name))
+                                        .map_err(|e| format!("load error: {}", e))?;
+                                    let name_global = self.builder.build_global_string_ptr(
+                                        &format!("{}\0", name), &format!("cap_name_drop_{}", name))
+                                        .map_err(|e| format!("string global error: {}", e))?;
+                                    let name_ptr = name_global.as_pointer_value();
+                                    self.builder.build_call(consume_fn, &[
+                                        BasicMetadataValueEnum::IntValue(cap_val.into_int_value()),
+                                        BasicMetadataValueEnum::PointerValue(name_ptr),
+                                    ], &format!("cap_consume_{}", name))
+                                        .map_err(|e| format!("cap_consume error: {}", e))?;
+                                }
+                            }
+                        }
                     }
                 }
                 Stmt::SharedLet { init, .. } => {
@@ -1593,6 +1631,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(&(alloca, ty)) = vars.get(name) {
                     self.builder.build_load(ty, alloca, name)
                         .map_err(|e| format!("load error: {}", e))
+                } else if self.cap_type_names.contains(name.as_str()) {
+                    // Cap literal: call mimi_cap_register(name) to get handle
+                    if let Some(register_fn) = self.module.get_function("mimi_cap_register") {
+                        let name_global = self.builder.build_global_string_ptr(
+                            &format!("{}\0", name), &format!("cap_name_{}", name))
+                            .map_err(|e| format!("string global error: {}", e))?;
+                        let name_ptr = name_global.as_pointer_value();
+                        let handle = self.builder.build_call(register_fn, &[
+                            BasicMetadataValueEnum::PointerValue(name_ptr),
+                        ], &format!("cap_register_{}", name))
+                            .map_err(|e| format!("cap_register error: {}", e))?
+                            .try_as_basic_value().left()
+                            .ok_or("mimi_cap_register returned void")?;
+                        Ok(handle)
+                    } else {
+                        Err(format!("cap literal '{}' requires mimi_cap_register runtime", name))
+                    }
                 } else {
                     Err(format!("undefined variable '{}'", name))
                 }

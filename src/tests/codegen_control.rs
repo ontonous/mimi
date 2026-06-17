@@ -919,6 +919,46 @@ fn codegen_extern_block_c_borrow() {
     "#);
 }
 
+#[test]
+fn codegen_cap_register() {
+    let ir = compile_to_ir(r#"
+        cap FileReadCap;
+        func main() -> i32 {
+            let c = FileReadCap
+            42
+        }
+    "#);
+    assert!(ir.contains("mimi_cap_register"), "IR should contain cap_register call when cap literal is used");
+}
+
+#[test]
+fn codegen_cap_consume() {
+    let ir = compile_to_ir(r#"
+        cap FileReadCap;
+        func main() -> i32 {
+            let c = FileReadCap
+            drop(c)
+            42
+        }
+    "#);
+    assert!(ir.contains("mimi_cap_consume"), "IR should contain cap_consume call when cap is dropped");
+}
+
+#[test]
+fn codegen_cap_extern_pass() {
+    let ir = compile_to_ir(r#"
+        cap FileReadCap;
+        extern "C" {
+            func use_cap(c: FileReadCap) -> i32;
+        }
+        func main() -> i32 {
+            let c = FileReadCap
+            use_cap(c)
+        }
+    "#);
+    assert!(ir.contains("mimi_cap_check"), "IR should contain cap_check for extern param");
+}
+
 // ===================== Phase B: Stdlib Module Tests =====================
 
 #[test]

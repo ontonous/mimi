@@ -194,6 +194,19 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
             BasicMetadataTypeEnum::PointerType(i8_ptr),
         ], false),
         Some(inkwell::module::Linkage::External));
+    // mimi_cap_register(name) -> cap_id
+    module.add_function("mimi_cap_register",
+        i64.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_cap_consume(cap, name) -> bool
+    module.add_function("mimi_cap_consume",
+        i32.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
 }
 
 pub fn is_builtin(name: &str) -> bool {
