@@ -116,5 +116,6 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_index_of" | "str_repeat" | "str_trim"
         | "str_to_upper" | "str_to_lower" | "str_substring"
         | "contains"
+        | "type_name" | "type_fields" | "type_variants"
     )
 }
