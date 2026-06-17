@@ -914,6 +914,73 @@ impl<'a> Interpreter<'a> {
                     _ => Err("has_key expects (record, string)".into()),
                 }
             }
+            // Map operations (using Record as map)
+            "map_new" => {
+                Ok(Value::Record(None, std::collections::HashMap::new()))
+            }
+            "map_get" => {
+                if args.len() != 2 { return Err("map_get expects 2 arguments (map, key)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::Record(_, fields), Value::String(key)) => {
+                        match fields.get(key.as_str()) {
+                            Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
+                            None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Unit])),
+                        }
+                    }
+                    _ => Err("map_get expects (record, string)".into()),
+                }
+            }
+            "map_set" => {
+                if args.len() != 3 { return Err("map_set expects 3 arguments (map, key, value)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::Record(type_name, fields), Value::String(key)) => {
+                        let mut new_fields = fields.clone();
+                        new_fields.insert(key.clone(), args[2].clone());
+                        Ok(Value::Record(type_name.clone(), new_fields))
+                    }
+                    _ => Err("map_set expects (record, string, value)".into()),
+                }
+            }
+            "map_remove" => {
+                if args.len() != 2 { return Err("map_remove expects 2 arguments (map, key)".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::Record(type_name, fields), Value::String(key)) => {
+                        let mut new_fields = fields.clone();
+                        new_fields.remove(key.as_str());
+                        Ok(Value::Record(type_name.clone(), new_fields))
+                    }
+                    _ => Err("map_remove expects (record, string)".into()),
+                }
+            }
+            "map_size" => {
+                if args.len() != 1 { return Err("map_size expects 1 argument".into()); }
+                match &args[0] {
+                    Value::Record(_, fields) => Ok(Value::Int(fields.len() as i64)),
+                    _ => Err("map_size expects a record".into()),
+                }
+            }
+            "map_from_list" => {
+                if args.len() != 1 { return Err("map_from_list expects 1 argument (list of (key, value) tuples)".into()); }
+                match &args[0] {
+                    Value::List(pairs) => {
+                        let mut fields = std::collections::HashMap::new();
+                        for pair in pairs {
+                            match pair {
+                                Value::Tuple(vec) if vec.len() == 2 => {
+                                    if let Value::String(key) = &vec[0] {
+                                        fields.insert(key.clone(), vec[1].clone());
+                                    } else {
+                                        return Err("map_from_list: keys must be strings".into());
+                                    }
+                                }
+                                _ => return Err("map_from_list: elements must be (string, value) tuples".into()),
+                            }
+                        }
+                        Ok(Value::Record(None, fields))
+                    }
+                    _ => Err("map_from_list expects a list".into()),
+                }
+            }
             "to_int" => {
                 if args.len() != 1 { return Err("to_int expects 1 argument".into()); }
                 match &args[0] {

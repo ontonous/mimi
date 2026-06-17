@@ -356,3 +356,86 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(6));
 }
+
+// ===================== Map Operations Tests =====================
+
+#[test]
+fn builtin_map_new() {
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    map_size(m)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn builtin_map_set_get() {
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    let m = map_set(m, "name", "mimi")
+    let (found, val) = map_get(m, "name")
+    if found { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+#[test]
+fn builtin_map_size() {
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    let m = map_set(m, "a", 1)
+    let m = map_set(m, "b", 2)
+    map_size(m)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(2));
+}
+
+#[test]
+fn builtin_map_remove() {
+    let src = r#"
+func main() -> i32 {
+    let m = map_new()
+    let m = map_set(m, "x", 1)
+    let m = map_remove(m, "x")
+    map_size(m)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn builtin_map_from_list() {
+    let src = r#"
+func main() -> i32 {
+    let pairs = [("a", 1), ("b", 2)]
+    let m = map_from_list(pairs)
+    let (found, val) = map_get(m, "b")
+    if found { val } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(2));
+}
+
+// ===================== IO Operations Tests =====================
+
+#[test]
+fn builtin_file_exists() {
+    let src = r#"
+func main() -> bool {
+    file_exists("/tmp")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Bool(true));
+}
