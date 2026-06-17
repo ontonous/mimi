@@ -1,0 +1,140 @@
+func main() -> i32 {
+    println("=== MimiSpec Parser Phase 1: Lexer + Parser ===")
+    println("")
+    var passed = 0
+    var failed = 0
+    if test("lexer_simple", test_lexer_simple()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_module", test_lexer_module()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_string", test_lexer_string()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_number", test_lexer_number()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_operators", test_lexer_operators()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_indent", test_lexer_indent()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_commitment", test_lexer_commitment()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_comment", test_lexer_comment()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_dot3", test_lexer_dot3()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("lexer_multi_line", test_lexer_multi_line()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_func", test_parse_func()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_type", test_parse_type()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_desc", test_parse_desc()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_rule", test_parse_rule()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_module", test_parse_module()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_steps", test_parse_steps()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_placeholder", test_parse_placeholder()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_full", test_parse_full()) { passed = passed + 1 } else { failed = failed + 1 }
+    if test("parse_commitment", test_parse_commitment()) { passed = passed + 1 } else { failed = failed + 1 }
+    println("")
+    println("Results: " + str(passed) + " passed, " + str(failed) + " failed")
+    if failed > 0 { 1 } else { println("All tests passed!"); 0 }
+}
+
+func test(name: string, ok: bool) -> bool {
+    if ok { println("  PASS " + name) } else { println("  FAIL " + name) }
+    ok
+}
+
+func test_lexer_simple() -> bool {
+    let t = lexer("func add:")
+    len(t) == 4 && t[0].kind == Func && t[1].text == "add" && t[2].kind == Colon && t[3].kind == Eof
+}
+
+func test_lexer_module() -> bool {
+    let t = lexer("module Shop:")
+    len(t) == 4 && t[0].kind == Module && t[1].text == "Shop" && t[2].kind == Colon && t[3].kind == Eof
+}
+
+func test_lexer_string() -> bool {
+    let t = lexer("desc \"hello world\"")
+    len(t) == 3 && t[0].kind == Desc && t[1].kind == StringLit && t[1].text == "hello world" && t[2].kind == Eof
+}
+
+func test_lexer_number() -> bool {
+    let t = lexer("42")
+    len(t) == 2 && t[0].kind == Number && t[0].text == "42" && t[1].kind == Eof
+}
+
+func test_lexer_operators() -> bool {
+    let t = lexer("== != <= >= = < > + - * ** /")
+    len(t) == 12 && t[0].kind == EqEq && t[1].kind == NotEq && t[2].kind == Le && t[3].kind == Ge && t[4].kind == Assign && t[5].kind == Lt && t[6].kind == Gt && t[7].kind == Plus && t[8].kind == Minus && t[9].kind == Star && t[10].kind == Power && t[11].kind == Slash
+}
+
+func test_lexer_indent() -> bool {
+    let t = lexer("func add:\n    desc \"body\"")
+    len(t) == 8 && t[0].kind == Func && t[3].kind == Newline && t[4].kind == Indent && t[5].kind == Desc && t[6].kind == StringLit && t[7].kind == Dedent
+}
+
+func test_lexer_commitment() -> bool {
+    let t1 = lexer("func$ locked_func:")
+    let t2 = lexer("func$$ strong_locked:")
+    let t3 = lexer("func? uncertain:")
+    let t4 = lexer("func?? delegated:")
+    t1[0].commitment == Locked && t2[0].commitment == StrongLocked && t3[0].commitment == Question && t4[0].commitment == QuestionQuestion
+}
+
+func test_lexer_comment() -> bool {
+    let t = lexer("# comment\nfunc add:")
+    len(t) == 4 && t[0].kind == Func && t[1].text == "add" && t[2].kind == Colon && t[3].kind == Eof
+}
+
+func test_lexer_dot3() -> bool {
+    let t = lexer("...")
+    len(t) == 2 && t[0].kind == Ellipsis && t[1].kind == Eof
+}
+
+func test_lexer_multi_line() -> bool {
+    let t = lexer("type Color:\n    Red\n    Green")
+    len(t) >= 5 && t[0].kind == Type && t[1].text == "Color" && t[2].kind == Colon
+}
+
+func test_parse_func() -> bool {
+    let tokens = lexer("func add:\n    desc \"add two numbers\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_type() -> bool {
+    let tokens = lexer("type Color: Red Green Blue")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_desc() -> bool {
+    let tokens = lexer("desc \"process payment\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_rule() -> bool {
+    let tokens = lexer("rule \"must be idempotent\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_module() -> bool {
+    let tokens = lexer("module Shop:\n    desc \"order management\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_steps() -> bool {
+    let tokens = lexer("steps:\n    desc \"do something\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_placeholder() -> bool {
+    let tokens = lexer("...")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
+
+func test_parse_full() -> bool {
+    let tokens = lexer("module Shop:\n    desc \"order management\"\n    func process_order:\n        desc \"handle order\"")
+    let result = parse(tokens)
+    len(result.errors) == 0 && len(result.fragments) == 1
+}
+
+func test_parse_commitment() -> bool {
+    let tokens = lexer("desc$ \"locked description\"")
+    let result = parse(tokens)
+    len(result.fragments) == 1 && len(result.errors) == 0
+}
