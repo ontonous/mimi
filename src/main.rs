@@ -155,6 +155,10 @@ enum Command {
         #[arg(short, long)]
         latex: bool,
     },
+    /// Analyze Commitment suffix distribution (intent modeling)
+    Stats {
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -173,6 +177,7 @@ fn main() {
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
+        Command::Stats { path } => stats(path.as_deref()),
     };
     if let Err(e) = result {
         eprintln!("{}", format_simple_error(&e));
@@ -544,6 +549,123 @@ fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str, strict: boo
     }
 }
 
+fn stats(path: Option<&Path>) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    count_commitments(&file.items, &mut counts);
+
+    let total: usize = counts.values().sum();
+    if total == 0 {
+        println!("No commitment suffixes found in {}", path.display());
+        return Ok(());
+    }
+
+    println!("Commitment distribution for {}:", path.display());
+    println!("  total items: {}", total);
+    println!();
+
+    let mut sorted: Vec<_> = counts.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1));
+
+    for (name, count) in &sorted {
+        let pct = (**count as f64 / total as f64) * 100.0;
+        let bar_len = (pct / 5.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!("  {:<20} {:>4} ({:>5.1}%) {}", name, count, pct, bar);
+    }
+
+    // Cognitive alignment assessment
+    println!();
+    let unlocked = counts.get("None").copied().unwrap_or(0);
+    let tentative = counts.get("?").copied().unwrap_or(0)
+        + counts.get("??").copied().unwrap_or(0);
+    let locked = counts.get("$").copied().unwrap_or(0)
+        + counts.get("$$").copied().unwrap_or(0);
+
+    if total > 0 {
+        let tentative_pct = tentative as f64 / total as f64;
+        let locked_pct = locked as f64 / total as f64;
+
+        if tentative_pct > 0.3 {
+            println!("⚠ High uncertainty: {:.0}% of items are tentative (?/??).", tentative_pct * 100.0);
+            println!("  Consider reviewing uncertain designs before proceeding.");
+        }
+        if locked_pct > 0.5 {
+            println!("⚠ High lock-in: {:.0}% of items are locked ($/$$).", locked_pct * 100.0);
+            println!("  Consider whether this level of lock-in is appropriate.");
+        }
+        if tentative_pct < 0.1 && locked_pct > 0.3 {
+            println!("✓ Good balance: low uncertainty with moderate lock-in.");
+        }
+    }
+
+    Ok(())
+}
+
+fn count_commitments(items: &[ast::Item], counts: &mut std::collections::HashMap<String, usize>) {
+    for item in items {
+        match item {
+            ast::Item::Func(f) => {
+                *counts.entry(format_commitment(f.commitment)).or_insert(0) += 1;
+                count_commitments_in_block(&f.body, counts);
+            }
+            ast::Item::Type(t) => {
+                *counts.entry(format_commitment(t.commitment)).or_insert(0) += 1;
+            }
+            ast::Item::Module(m) => {
+                *counts.entry(format_commitment(m.commitment)).or_insert(0) += 1;
+                count_commitments(&m.items, counts);
+            }
+            ast::Item::Actor(a) => {
+                *counts.entry(format_commitment(a.commitment)).or_insert(0) += 1;
+            }
+            ast::Item::Trait(t) => {
+                *counts.entry(format_commitment(t.commitment)).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn count_commitments_in_block(block: &[ast::Stmt], counts: &mut std::collections::HashMap<String, usize>) {
+    for stmt in block {
+        match stmt {
+            ast::Stmt::If { then_, else_, .. } => {
+                count_commitments_in_block(then_, counts);
+                if let Some(else_) = else_ {
+                    count_commitments_in_block(else_, counts);
+                }
+            }
+            ast::Stmt::While { body, .. } | ast::Stmt::For { body, .. } => {
+                count_commitments_in_block(body, counts);
+            }
+            ast::Stmt::Block(block) => {
+                count_commitments_in_block(block, counts);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn format_commitment(c: ast::Commitment) -> String {
+    match c {
+        ast::Commitment::None => "None".into(),
+        ast::Commitment::Question => "?".into(),
+        ast::Commitment::QuestionQuestion => "??".into(),
+        ast::Commitment::Locked => "$".into(),
+        ast::Commitment::StrongLocked => "$$".into(),
+        ast::Commitment::LockedQuestion => "$?".into(),
+        ast::Commitment::StrongLockedQuestion => "$$?".into(),
+        ast::Commitment::LockedQuestionQuestion => "$??".into(),
+        ast::Commitment::StrongLockedQuestionQuestion => "$$??".into(),
+    }
+}
+
 fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: bool, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
@@ -735,14 +857,26 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     if results.is_empty() {
         println!("No contracts to verify in {}", path.display());
     } else {
+        let use_color = colors_enabled();
+        let src_ref = Some(source.as_str());
+        let filename = &path.display().to_string();
         let mut all_passed = true;
         for r in &results {
             let icon = match r.status {
-                verifier::VerifStatus::Verified => "✓",
-                verifier::VerifStatus::Failed => "✗",
-                verifier::VerifStatus::Unknown => "?",
+                verifier::VerifStatus::Verified => "\x1b[32m✓\x1b[0m",
+                verifier::VerifStatus::Failed => "\x1b[31m✗\x1b[0m",
+                verifier::VerifStatus::Unknown => "\x1b[33m?\x1b[0m",
             };
-            println!("  {} {}: {}", icon, r.func_name, r.message);
+            if let Some(diag) = &r.diagnostic {
+                let formatted = format_diagnostic(diag, src_ref, filename);
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
+            } else {
+                println!("  {} {}: {}", icon, r.func_name, r.message);
+            }
             if r.status == verifier::VerifStatus::Failed {
                 all_passed = false;
             }

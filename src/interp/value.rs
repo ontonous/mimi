@@ -296,6 +296,9 @@ pub(crate) fn is_copy(v: &Value) -> bool {
         Value::Tuple(elems) => elems.iter().all(is_copy),
         Value::Newtype(inner) => is_copy(inner),
         Value::Shared(_) | Value::LocalShared(_) => true,
+        Value::Record(_, fields) => fields.values().all(is_copy),
+        Value::Variant(_, args) => args.iter().all(is_copy),
+        Value::Array(elems) => elems.iter().all(is_copy),
         _ => false,
     }
 }

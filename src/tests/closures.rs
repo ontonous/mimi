@@ -375,6 +375,8 @@ func main() -> i32 {
 
 #[test]
 fn move_semantics_variant_use_after_move() {
+    // With auto-Copy: Some(42) has all Copy args, so it IS Copy.
+    // Using it after move should succeed.
     let src = r#"
 type Opt {
     Some(i32)
@@ -391,9 +393,7 @@ func main() -> i32 {
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("use of moved value"), "Expected 'use of moved value' error, got: {}", err);
+    assert!(result.is_ok(), "Some(42) should be Copy (all args are Copy): {:?}", result);
 }
 
 #[test]

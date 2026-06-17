@@ -1220,6 +1220,25 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unit".into(), vec![]);
             }
+            "str_to_c_str" => {
+                if args.len() != 1 {
+                    self.emit("str_to_c_str expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Tuple(vec![
+                    Type::Name("i64".into(), vec![]),
+                    Type::Name("i64".into(), vec![]),
+                ]);
+            }
+            "c_str_to_string" => {
+                if args.len() != 1 {
+                    self.emit("c_str_to_string expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             _ => {}
         }
 

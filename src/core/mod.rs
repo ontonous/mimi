@@ -782,6 +782,48 @@ impl<'a> Checker<'a> {
         matches!(name, "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "List" | "Future" | "Result" | "Option")
     }
 
+    /// Check if a type is Copy (all fields are Copy for records, all variants Copy for enums).
+    fn is_copy_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Name(name, _) => {
+                // Built-in scalar types are Copy
+                if matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "unit") {
+                    return true;
+                }
+                // Check user-defined types
+                if let Some(type_def) = self.types.get(name) {
+                    match &type_def.kind {
+                        TypeDefKind::Record(fields) => {
+                            fields.iter().all(|f| self.is_copy_type(&f.ty))
+                        }
+                        TypeDefKind::Enum(variants) => {
+                            variants.iter().all(|v| {
+                                match &v.payload {
+                                    None => true,
+                                    Some(VariantPayload::Tuple(types)) => {
+                                        types.iter().all(|t| self.is_copy_type(t))
+                                    }
+                                    Some(VariantPayload::Record(fields)) => {
+                                        fields.iter().all(|f| self.is_copy_type(&f.ty))
+                                    }
+                                }
+                            })
+                        }
+                        TypeDefKind::Alias(inner) => self.is_copy_type(inner),
+                        TypeDefKind::Newtype(inner) => self.is_copy_type(inner),
+                    }
+                } else {
+                    false
+                }
+            }
+            Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_type(e)),
+            Type::Shared(_) | Type::LocalShared(_) => true,
+            Type::Ref(_) | Type::RefMut(_) => true,
+            Type::Array(inner, _) => self.is_copy_type(inner),
+            _ => false,
+        }
+    }
+
     fn check_type_well_formed(&mut self, ty: &Type, context: &str) {
         match ty {
             Type::Name(name, args) => {

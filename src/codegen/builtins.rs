@@ -166,5 +166,6 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_split" | "str_join" | "str_replace"
         | "has_key" | "map_new" | "map_get" | "map_set" | "map_remove" | "map_size" | "map_from_list"
         | "type_name" | "type_fields" | "type_variants"
+        | "str_to_c_str" | "c_str_to_string"
     )
 }
