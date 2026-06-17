@@ -455,6 +455,8 @@ pub enum Type {
     Result(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),
     Func(Vec<Type>, Box<Type>),
+    /// C-compatible function pointer: extern "C" fn(Args...) -> Ret
+    ExternFunc(Vec<Type>, Box<Type>),
     /// Capability type for linear capabilities
     Cap(String),
     /// Shared ownership (atomic refcount, thread-safe)

@@ -45,6 +45,10 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // raw string is passed as *mut c_char
             Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
         }
+        Type::ExternFunc(_, _) => {
+            // Function pointer - represented as void* in LLVM
+            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
+        }
         Type::Cap(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Newtype(_, inner) => mimi_type_to_llvm(ctx, inner),
         Type::Allocator => Some(BasicTypeEnum::IntType(ctx.i64_type())),

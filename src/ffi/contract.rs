@@ -121,6 +121,10 @@ impl FfiArgContract {
             Type::CBorrow(inner) => FfiArgContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiArgContract::CBorrowMut(inner.clone()),
             Type::RawString => FfiArgContract::StringTransfer,
+            Type::ExternFunc(_, _) => {
+                // Function pointer - pass as opaque handle
+                FfiArgContract::RawPtr(Box::new(Type::Name("unit".to_string(), vec![])))
+            }
             other => FfiArgContract::Unsupported(format!("{:?}", other)),
         }
     }
@@ -142,6 +146,10 @@ impl FfiRetContract {
             Type::CBorrow(inner) => FfiRetContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiRetContract::CBorrowMut(inner.clone()),
             Type::RawString => FfiRetContract::String,
+            Type::ExternFunc(_, _) => {
+                // Function pointer - return as opaque handle
+                FfiRetContract::RawPtr(Box::new(Type::Name("unit".to_string(), vec![])))
+            }
             other => FfiRetContract::Unsupported(format!("{:?}", other)),
         }
     }

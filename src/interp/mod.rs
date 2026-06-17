@@ -415,6 +415,10 @@ impl<'a> Interpreter<'a> {
             Type::CBorrow(inner) => format!("c_borrow {}", self.resolve_type_name(inner)),
             Type::CBorrowMut(inner) => format!("c_borrow_mut {}", self.resolve_type_name(inner)),
             Type::RawString => "raw_string".into(),
+            Type::ExternFunc(args, ret) => {
+                let args_str: Vec<String> = args.iter().map(|a| self.resolve_type_name(a)).collect();
+                format!("extern \"C\" fn({}) -> {}", args_str.join(", "), self.resolve_type_name(ret))
+            }
             Type::Newtype(name, _) => name.clone(),
             Type::Nothing => "nothing".into(),
             Type::Allocator => "Allocator".into(),
