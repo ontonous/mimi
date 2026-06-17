@@ -5,3 +5,16 @@ pub func sum(xs: List<i32>) -> i32 {
     }
     total
 }
+
+pub func contains<T>(xs: List<T>, x: T) -> bool {
+    for elem in xs {
+        if elem == x {
+            return true
+        }
+    }
+    false
+}
+
+pub func is_empty<T>(xs: List<T>) -> bool {
+    len(xs) == 0
+}

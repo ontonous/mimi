@@ -1445,3 +1445,66 @@ fn codegen_async_func_returns_i64() {
     // The spawner function (same name) should exist
     assert!(ir.contains("define i64 @compute"), "Spawner should return i64:\n{}", ir);
 }
+
+// ===================== End-to-End Stdlib Codegen Tests =====================
+
+#[test]
+fn codegen_stdlib_mymath_functions() {
+    // Compile mymath::square, cube, clamp functions via codegen
+    assert_compiles(r#"
+        func square(x: i32) -> i32 { x * x }
+        func cube(x: i32) -> i32 { x * x * x }
+        func clamp(value: i32, min_val: i32, max_val: i32) -> i32 {
+            if value < min_val { min_val }
+            else if value > max_val { max_val }
+            else { value }
+        }
+        func main() -> i32 { square(3) }
+    "#);
+}
+
+#[test]
+fn codegen_stdlib_prelude() {
+    // Compile prelude-style utility functions
+    assert_compiles(r#"
+        func is_even(x: i32) -> bool { x % 2 == 0 }
+        func is_odd(x: i32) -> bool { x % 2 != 0 }
+        func main() -> i32 { if is_even(42) { 1 } else { 0 } }
+    "#);
+}
+
+#[test]
+fn codegen_stdlib_collections_parse_only() {
+    // Verify collections.mimi parses successfully (for-loop over List not yet in codegen)
+    use std::path::PathBuf;
+    let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
+    assert!(std_dir.exists());
+    
+    std::env::set_var("MIMI_STDLIB", &std_dir);
+    let coll_path = std_dir.join("collections.mimi");
+    let mut loader = crate::loader::ModuleLoader::new(std_dir.clone());
+    let loaded = loader.load_main(&coll_path)
+        .expect("should load collections.mimi");
+    assert!(!loaded.file.items.is_empty(), "collections.mimi should have items");
+    std::env::remove_var("MIMI_STDLIB");
+}
+
+#[test]
+fn codegen_stdlib_loader_roundtrip() {
+    // End-to-end: load a stdlib file that uses only codegen-supported features
+    use std::path::PathBuf;
+    let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
+    assert!(std_dir.exists());
+    
+    std::env::set_var("MIMI_STDLIB", &std_dir);
+    // mymath.mimi uses only basic arithmetic + if — supported by codegen
+    let math_path = std_dir.join("mymath.mimi");
+    let mut loader = crate::loader::ModuleLoader::new(std_dir.clone());
+    let _ = loader.load_main(&math_path).expect("should load mymath.mimi");
+    
+    let merged = loader.merge_all();
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "stdlib_test");
+    assert!(codegen.compile_file(&merged).is_ok(), "mymath.mimi should compile");
+    std::env::remove_var("MIMI_STDLIB");
+}

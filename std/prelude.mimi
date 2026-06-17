@@ -1,3 +1,15 @@
-pub fn is_even(x: i32) -> bool {
+pub func is_even(x: i32) -> bool {
     x % 2 == 0
+}
+
+pub func is_odd(x: i32) -> bool {
+    x % 2 != 0
+}
+
+pub func identity<T>(x: T) -> T {
+    x
+}
+
+pub func const<T, U>(x: T, _y: U) -> T {
+    x
 }

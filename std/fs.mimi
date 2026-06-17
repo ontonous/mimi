@@ -1,3 +1,11 @@
 pub func exists(path: string) -> bool {
-    false
+    file_exists(path)
+}
+
+pub func read(path: string) -> string {
+    read_file(path)
+}
+
+pub func write(path: string, content: string) {
+    write_file(path, content)
 }

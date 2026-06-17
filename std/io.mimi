@@ -1,3 +1,8 @@
 pub func input(prompt: string) -> string {
-    ""
+    print(prompt)
+    input()
+}
+
+pub func print_line(s: string) {
+    println(s)
 }

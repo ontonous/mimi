@@ -1,3 +1,7 @@
 pub func is_empty(s: string) -> bool {
     len(s) == 0
 }
+
+pub func char_at(s: string, index: i32) -> string {
+    str_char_at(s, index)
+}
