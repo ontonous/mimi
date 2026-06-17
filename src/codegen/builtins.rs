@@ -96,9 +96,56 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External));
     module.add_function("pthread_join",
         i32.fn_type(&[
-            BasicMetadataTypeEnum::IntType(i64),  // pthread_t
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),  // pthread_t
             BasicMetadataTypeEnum::PointerType(i8_ptr),  // retval (NULL)
         ], false),
+        Some(inkwell::module::Linkage::External));
+
+    // Map/Record runtime functions
+    // MapHandle = i64 (pointer cast)
+    module.add_function("mimi_map_new",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_destroy",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_size",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_has_key",
+        i32.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_get",
+        i64.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_set",
+        void.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::IntType(i64),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_remove",
+        i32.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_map_from_list",
+        i64.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::IntType(i64),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_value_type_name",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External));
 }
 
@@ -117,6 +164,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_to_upper" | "str_to_lower" | "str_substring"
         | "contains" | "sum" | "reverse" | "flatten" | "sort" | "zip" | "enumerate"
         | "str_split" | "str_join" | "str_replace"
+        | "has_key" | "map_new" | "map_get" | "map_set" | "map_remove" | "map_size" | "map_from_list"
         | "type_name" | "type_fields" | "type_variants"
     )
 }
