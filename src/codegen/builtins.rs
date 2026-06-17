@@ -109,5 +109,6 @@ pub fn is_builtin(name: &str) -> bool {
         | "push" | "pop" | "sqrt" | "floor" | "ceil" | "round"
         | "int_to_string" | "float_to_string" | "string_to_int"
         | "exit" | "lexer" | "parse"
+        | "input" | "file_exists" | "read_file" | "write_file" | "str_char_at"
     )
 }
