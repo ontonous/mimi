@@ -6,6 +6,8 @@
 //! behave identically: argument marshalling, lifetime extension, and return
 //! value translation are driven by the same description.
 
+use std::collections::HashSet;
+
 use crate::ast::{ExternFunc, Expr, Type};
 
 /// Contract for one extern function.
@@ -87,15 +89,28 @@ impl FfiContract {
     /// validated by the type checker (`is_valid_extern_type`).  This function
     /// panics on unexpected types so that contract bugs surface early.
     pub fn from_extern(func: &ExternFunc) -> Self {
+        Self::from_extern_with_caps(func, &HashSet::new())
+    }
+
+    /// Build a contract from an extern function declaration, with knowledge of
+    /// which type names refer to declared capabilities.
+    pub fn from_extern_with_caps(func: &ExternFunc, cap_names: &HashSet<String>) -> Self {
         let args = func
             .params
             .iter()
-            .map(|p| FfiArgContract::from_type(&p.ty))
+            .map(|p| {
+                // If the parameter has a cap_mode annotation (cap @), treat it as Cap
+                if p.cap_mode.is_some() {
+                    FfiArgContract::Cap
+                } else {
+                    FfiArgContract::from_type_with_caps(&p.ty, cap_names)
+                }
+            })
             .collect();
         let ret = func
             .ret
             .as_ref()
-            .map(FfiRetContract::from_type)
+            .map(|ty| FfiRetContract::from_type_with_caps(ty, cap_names))
             .unwrap_or(FfiRetContract::Unit);
 
         // Auto-enable errno checking if return type is Result-like
@@ -121,14 +136,23 @@ impl FfiContract {
 
 impl FfiArgContract {
     fn from_type(ty: &Type) -> Self {
+        Self::from_type_with_caps(ty, &HashSet::new())
+    }
+
+    fn from_type_with_caps(ty: &Type, cap_names: &HashSet<String>) -> Self {
         match ty {
-            Type::Name(name, _) => match name.as_str() {
-                "i32" | "i64" | "bool" => FfiArgContract::Int,
-                "f64" => FfiArgContract::Float,
-                "string" => FfiArgContract::StringBorrow,
-                "unit" => FfiArgContract::Int,
-                other => FfiArgContract::Unsupported(other.to_string()),
-            },
+            Type::Name(name, _) => {
+                if cap_names.contains(name.as_str()) {
+                    return FfiArgContract::Cap;
+                }
+                match name.as_str() {
+                    "i32" | "i64" | "bool" => FfiArgContract::Int,
+                    "f64" => FfiArgContract::Float,
+                    "string" => FfiArgContract::StringBorrow,
+                    "unit" => FfiArgContract::Int,
+                    other => FfiArgContract::Unsupported(other.to_string()),
+                }
+            }
             Type::Cap(_) => FfiArgContract::Cap,
             Type::RawPtr(inner) => FfiArgContract::RawPtr(inner.clone()),
             Type::RawPtrMut(inner) => FfiArgContract::RawPtrMut(inner.clone()),
@@ -151,6 +175,10 @@ impl FfiArgContract {
 
 impl FfiRetContract {
     fn from_type(ty: &Type) -> Self {
+        Self::from_type_with_caps(ty, &HashSet::new())
+    }
+
+    fn from_type_with_caps(ty: &Type, _cap_names: &HashSet<String>) -> Self {
         match ty {
             Type::Name(name, _) => match name.as_str() {
                 "i32" | "i64" | "bool" => FfiRetContract::Int,

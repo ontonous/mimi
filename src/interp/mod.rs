@@ -102,7 +102,7 @@ impl<'a> Interpreter<'a> {
         let mut type_defs: HashMap<String, TypeDef> = HashMap::new();
         for item in &file.items {
             Self::collect_traits(item, &mut trait_defs, &mut type_impls);
-            Self::collect_extern_funcs(item, &mut extern_funcs, &mut ffi_contracts);
+            Self::collect_extern_funcs(item, &mut extern_funcs, &mut ffi_contracts, &cap_defs);
             Self::collect_type_defs(item, &mut type_defs);
         }
         // Expand built-in derive macros
@@ -180,17 +180,19 @@ impl<'a> Interpreter<'a> {
         item: &Item,
         out: &mut HashMap<String, ExternFunc>,
         contracts: &mut HashMap<String, FfiContract>,
+        cap_defs: &HashMap<String, Vec<String>>,
     ) {
+        let cap_names: std::collections::HashSet<String> = cap_defs.keys().cloned().collect();
         match item {
             Item::ExternBlock(block) => {
                 for func in &block.funcs {
                     out.insert(func.name.clone(), func.clone());
-                    contracts.insert(func.name.clone(), FfiContract::from_extern(func));
+                    contracts.insert(func.name.clone(), FfiContract::from_extern_with_caps(func, &cap_names));
                 }
             }
             Item::Module(m) => {
                 for inner in &m.items {
-                    Self::collect_extern_funcs(inner, out, contracts);
+                    Self::collect_extern_funcs(inner, out, contracts, cap_defs);
                 }
             }
             _ => {}

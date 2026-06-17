@@ -9,7 +9,7 @@
 ## 1. 设计理念重述
 
 Mimi 的**唯一事实源**是从模糊意图到极致精确的连续光谱。  
-`.mimis`（MimiSpec）定稿为 L1~L3 描述层，`.mimi`（Mimi）在 L4 层提供**零成本抽象的精确实现**，且两者语法兼容、文件可无缝演进。
+`.mms`（MimiSpec）定稿为 L1~L3 描述层，`.mimi`（Mimi）在 L4 层提供**零成本抽象的精确实现**，且两者语法兼容、文件可无缝演进。
 
 本规范聚焦 **`.mimi` 生产模式**的深度设计，遵循以下核心承诺：
 
@@ -330,8 +330,8 @@ my_project/
 │       └── payment.mimi
 ├── tests/
 │   └── integration.mimi
-└── sketches/           # .mimis 草图文件（可选，构建时忽略或仅校验）
-    └── design.mimis
+└── sketches/           # .mms 草图文件（可选，构建时忽略或仅校验）
+    └── design.mms
 ```
 
 ### 11.2 mimi.toml 示例
@@ -348,8 +348,8 @@ payment-sdk = { path = "../payment-sdk" }
 ### 11.3 构建与运行
 - `mimi build`：编译整个包，输出可执行文件或库。
 - `mimi check`：仅进行语法和类型检查，适用于草图模式也适用于 `.mimi`。
-- `mimi promote <file>`：将 `.mimis` 转换为 `.mimi`（实际是重命名，并清理一些 `.mimis` 特有的语法提示）。
-- `mimi doc`：提取 `desc` 和签名生成文档（可输出 `.mimis` 或 Markdown）。
+- `mimi promote <file>`：将 `.mms` 转换为 `.mimi`（实际是重命名，并清理一些 `.mms` 特有的语法提示）。
+- `mimi doc`：提取 `desc` 和签名生成文档（可输出 `.mms` 或 Markdown）。
 - `mimi test`：运行测试。
 
 ---

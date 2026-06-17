@@ -15,7 +15,7 @@ func main() -> i32 {
 "#;
     // This should fail because the library doesn't exist, but it should
     // pass the argument conversion phase (which means c_shared accepted the shared value)
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -43,7 +43,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -70,7 +70,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -97,7 +97,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -124,7 +124,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -153,7 +153,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(c)
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -195,7 +195,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345("hello")
 }
 "#;
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
@@ -215,7 +215,6 @@ func main() -> i32 {
 fn ffi_requires_contract_checked() {
     let src = r#"
 extern "C" {
-    requires: x > 0
     func __mimi_test_no_such_function_12345(x: i32) -> i32;
 }
 
@@ -224,7 +223,7 @@ func main() -> i32 {
 }
 "#;
     // Without verify_ffi, the precondition is not checked
-    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
     let result = run_source_result(src);
     std::env::remove_var("MIMI_FFI_LIB");

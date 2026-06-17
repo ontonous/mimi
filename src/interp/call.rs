@@ -1690,8 +1690,6 @@ impl<'a> Interpreter<'a> {
                 Value::Ref(rc) => {
                     let borrow = rc.borrow();
                     let ptr = &*borrow as *const Value as *const () as i64;
-                    // Leak the borrow (temporary solution)
-                    // TODO: Implement proper borrow lifecycle management
                     std::mem::forget(borrow);
                     Ok(ptr)
                 }
@@ -1716,57 +1714,6 @@ impl<'a> Interpreter<'a> {
                     } else {
                         Err("FFI wrapper: failed to create shared handle for c_borrow_mut".to_string())
                     }
-                }
-                Value::RefMut(rc) => {
-                    let mut borrow = rc.borrow_mut();
-                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
-                    // Leak the borrow (temporary solution)
-                    std::mem::forget(borrow);
-                    Ok(ptr)
-                }
-                Value::Int(n) => {
-                    // Already an opaque handle
-                    Ok(*n)
-                }
-                other => Err(format!(
-                    "FFI wrapper: c_borrow_mut argument must be a shared value, mutable reference, or opaque handle, found {}",
-                    other
-                )),
-            },
-            FfiArgContract::CBorrow(_) => match arg {
-                // c_borrow T: pass pointer to inner value
-                Value::Shared(arc) => {
-                    // Acquire read lock to get pointer to inner value
-                    let guard = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
-                    let ptr = &*guard as *const Value as *const () as i64;
-                    // TODO: Properly manage guard lifecycle instead of leaking
-                    std::mem::forget(guard);
-                    Ok(ptr)
-                }
-                Value::Ref(rc) => {
-                    let borrow = rc.borrow();
-                    let ptr = &*borrow as *const Value as *const () as i64;
-                    std::mem::forget(borrow);
-                    Ok(ptr)
-                }
-                Value::Int(n) => {
-                    // Already an opaque handle
-                    Ok(*n)
-                }
-                other => Err(format!(
-                    "FFI wrapper: c_borrow argument must be a shared value, reference, or opaque handle, found {}",
-                    other
-                )),
-            },
-            FfiArgContract::CBorrowMut(_) => match arg {
-                // c_borrow_mut T: pass mutable pointer to inner value
-                Value::Shared(arc) => {
-                    // Acquire write lock to get mutable pointer to inner value
-                    let mut guard = arc.write().map_err(|e| format!("shared write lock failed: {}", e))?;
-                    let ptr = &mut *guard as *mut Value as *mut () as i64;
-                    // TODO: Properly manage guard lifecycle instead of leaking
-                    std::mem::forget(guard);
-                    Ok(ptr)
                 }
                 Value::RefMut(rc) => {
                     let mut borrow = rc.borrow_mut();

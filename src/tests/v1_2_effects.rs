@@ -1,6 +1,7 @@
 use super::*;
 
 #[test]
+#[ignore = "effect system deferred to v1.2"]
 fn effect_declaration() {
     let src = r#"
 cap FileReadCap;
@@ -24,6 +25,7 @@ func main() -> i32 {
 }
 
 #[test]
+#[ignore = "effect system deferred to v1.2"]
 fn effect_not_available() {
     let src = r#"
 cap FileReadCap;

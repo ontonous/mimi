@@ -70,10 +70,38 @@ pub(crate) mod codegen_advanced;
 
 use crate::{core, interp, lexer, parser};
 
-/// Global lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
-/// variable. Without this, parallel Rust tests race on the environment and
-/// produce flaky failures.
-pub(crate) static FFI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// File-based lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
+/// variable. This works across multiple test binaries running in parallel.
+pub(crate) struct FfiEnvLock {
+    _file: std::fs::File,
+}
+
+impl FfiEnvLock {
+    pub fn lock() -> Self {
+        let lock_path = std::env::temp_dir().join("mimi_ffi_test.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("failed to create FFI test lock file");
+        
+        // Use file locking to ensure exclusive access
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            libc::flock(file.as_raw_fd(), libc::LOCK_EX);
+        }
+        
+        Self { _file: file }
+    }
+}
+
+impl Drop for FfiEnvLock {
+    fn drop(&mut self) {
+        // Lock is automatically released when file is closed
+    }
+}
 
 pub(crate) fn parse(src: &str) -> crate::ast::File {
     let tokens = lexer::Lexer::new(src).tokenize().unwrap();
