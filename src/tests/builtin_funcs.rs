@@ -186,3 +186,47 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(0));
 }
+
+// ===================== MimiSpec Runtime Functions Tests =====================
+
+#[test]
+fn builtin_lexer_basic() {
+    let src = r#"
+func main() -> i32 {
+    let tokens = lexer("module Test:")
+    len(tokens)
+}
+"#;
+    let v = run_source(src);
+    // Should return a list of tokens
+    match v {
+        interp::Value::Int(n) => assert!(n > 0, "lexer should return tokens"),
+        _ => panic!("lexer should return a list"),
+    }
+}
+
+#[test]
+fn builtin_parse_basic() {
+    let src = r#"
+func main() -> i32 {
+    let result = parse("module Test:")
+    0
+}
+"#;
+    let v = run_source(src);
+    // Should return without error
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn builtin_parse_with_error() {
+    let src = r#"
+func main() -> i32 {
+    let result = parse("module Test")
+    0
+}
+"#;
+    let v = run_source(src);
+    // Should return without crashing
+    assert_eq!(v, interp::Value::Int(0));
+}

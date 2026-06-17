@@ -90,6 +90,6 @@ pub fn is_builtin(name: &str) -> bool {
         | "assert_approx_eq" | "range" | "len" | "to_string" | "abs" | "min" | "max"
         | "push" | "pop" | "sqrt" | "floor" | "ceil" | "round"
         | "int_to_string" | "float_to_string" | "string_to_int"
-        | "exit"
+        | "exit" | "lexer" | "parse"
     )
 }
