@@ -705,14 +705,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Create a record value
                 let type_name = ty.as_deref().unwrap_or("unknown");
                 let llvm_ty = self.type_llvm.get(type_name)
-                    .ok_or_else(|| format!("unknown type '{}'", type_name))?;
+                    .ok_or_else(|| format!("unknown type '{}'", type_name))?
+                    .clone();
                 if let BasicTypeEnum::StructType(sty) = llvm_ty {
-                    let alloca = self.builder.build_alloca(*sty, type_name)
+                    let alloca = self.builder.build_alloca(sty, type_name)
                         .map_err(|e| format!("alloca error: {}", e))?;
                     // Store field values
                     for (i, field) in fields.iter().enumerate() {
                         let val = self.compile_expr(&field.value, vars)?;
-                        let gep = self.builder.build_struct_gep(*sty, alloca, i as u32, &field.name)
+                        let gep = self.builder.build_struct_gep(sty, alloca, i as u32, &field.name)
                             .map_err(|e| format!("gep error: {}", e))?;
                         self.builder.build_store(gep, val)
                             .map_err(|e| format!("store error: {}", e))?;

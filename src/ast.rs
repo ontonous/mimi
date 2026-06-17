@@ -334,6 +334,12 @@ pub enum Expr {
     TypeOf(Box<Expr>),
     /// TypeInfo(Type) - get type metadata (fields, variants, methods)
     TypeInfo(Type),
+    /// If expression: if cond { then } else { else }
+    If {
+        cond: Box<Expr>,
+        then_: Block,
+        else_: Option<Block>,
+    },
     /// Lambda/closure expression: fn(params) -> Ret { body }
     Lambda {
         params: Vec<Param>,

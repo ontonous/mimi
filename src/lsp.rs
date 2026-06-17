@@ -719,7 +719,7 @@ impl LspServer {
                 if !before && !after {
                     // Skip definition location if we already added it
                     if let Some(dl) = def_line {
-                        if i == dl && def_col.map_or(false, |dc| abs_pos == dc) {
+                        if i == dl && (def_col == Some(abs_pos)) {
                             start = abs_pos + 1;
                             continue;
                         }

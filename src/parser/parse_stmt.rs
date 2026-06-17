@@ -309,6 +309,7 @@ impl Parser {
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         let then_ = self.parse_block()?;
+        self.skip_newlines();
         let else_ = if self.at(&TokenKind::Else) {
             self.advance();
             self.skip_newlines();

@@ -39,6 +39,7 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         match self.peek_kind() {
+            TokenKind::If => self.parse_if_expr(),
             TokenKind::Minus => {
                 self.advance();
                 Ok(Expr::Unary(UnOp::Neg, Box::new(self.parse_unary()?)))
@@ -69,6 +70,35 @@ impl Parser {
             }
             _ => self.parse_primary(),
         }
+    }
+
+    fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume `if`
+        let cond = self.parse_expr(0)?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{` for if expression")?;
+        let then_ = self.parse_block()?;
+        let else_ = if self.at(&TokenKind::Else) {
+            self.advance();
+            self.skip_newlines();
+            if self.at(&TokenKind::LBrace) {
+                self.advance();
+                let else_body = self.parse_block()?;
+                Some(else_body)
+            } else if self.at(&TokenKind::If) {
+                let elif = self.parse_if_expr()?;
+                Some(vec![Stmt::Expr(elif)])
+            } else {
+                return Err(ParseError::new("`{` or `if` expected after `else`", self.peek().line, self.peek().col));
+            }
+        } else {
+            None
+        };
+        Ok(Expr::If {
+            cond: Box::new(cond),
+            then_,
+            else_,
+        })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -481,9 +511,14 @@ impl Parser {
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let name = self.expect_ident()?;
-            self.expect(TokenKind::Colon, "`:`")?;
-            let value = self.parse_expr(0)?;
-            fields.push(RecordFieldExpr { name, value });
+            if self.at(&TokenKind::Colon) {
+                self.advance();
+                let value = self.parse_expr(0)?;
+                fields.push(RecordFieldExpr { name, value });
+            } else {
+                // Shorthand: field_name instead of field_name: field_name
+                fields.push(RecordFieldExpr { name: name.clone(), value: Expr::Ident(name) });
+            }
             self.skip_newlines();
             if self.at(&TokenKind::Comma) {
                 self.advance();

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Lock file entry for a resolved dependency
 #[derive(Debug, Deserialize, Serialize, Clone)]

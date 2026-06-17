@@ -37,6 +37,7 @@ pub enum QuotedAst {
     Tuple(Vec<QuotedAst>),
     List(Vec<QuotedAst>),
     Match(Box<QuotedAst>, Vec<MatchArmQuoted>),
+    If(Box<QuotedAst>, Box<QuotedAst>, Option<Box<QuotedAst>>),
     Record {
         ty: Option<String>,
         fields: Vec<RecordFieldExprQuoted>,

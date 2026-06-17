@@ -216,6 +216,18 @@ impl<'a> Checker<'a> {
                 }
                 Type::Name("List".into(), vec![expr_ty])
             }
+            Expr::If { cond, then_, else_ } => {
+                self.infer_expr(cond, scopes);
+                let then_ty = self.infer_block_expr(then_, scopes);
+                if let Some(eb) = else_ {
+                    let else_ty = self.infer_block_expr(eb, scopes);
+                    let then_name = format!("{:?}", then_ty);
+                    let else_name = format!("{:?}", else_ty);
+                    if then_name == else_name { then_ty } else { Type::Name("unknown".into(), vec![]) }
+                } else {
+                    then_ty
+                }
+            }
             Expr::Match(subject, arms) => {
                 let subject_ty = self.infer_expr(subject, scopes);
                 if arms.is_empty() {
@@ -959,5 +971,20 @@ impl<'a> Checker<'a> {
                 (Vec::new(), false)
             }
         }
+    }
+
+    fn infer_block_expr(&mut self, block: &Block, scopes: &mut Vec<HashMap<String, Type>>) -> Type {
+        scopes.push(HashMap::new());
+        let mut result_type = Type::Name("unit".into(), vec![]);
+        for stmt in block {
+            match stmt {
+                Stmt::Expr(e) => { result_type = self.infer_expr(e, scopes); }
+                Stmt::Return(Some(e)) => { result_type = self.infer_expr(e, scopes); break; }
+                Stmt::Let { init: Some(e), .. } => { result_type = self.infer_expr(e, scopes); }
+                _ => {}
+            }
+        }
+        scopes.pop();
+        result_type
     }
 }

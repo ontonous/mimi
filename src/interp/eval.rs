@@ -669,6 +669,22 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::List(result))
             }
+            Expr::If { cond, then_, else_ } => {
+                let c = self.eval_expr(cond)?;
+                if is_truthy(&c) {
+                    self.push_scope();
+                    let r = self.eval_block(then_);
+                    self.pop_scope();
+                    r.map(|v| v.unwrap_or(Value::Unit))
+                } else if let Some(eb) = else_ {
+                    self.push_scope();
+                    let r = self.eval_block(eb);
+                    self.pop_scope();
+                    r.map(|v| v.unwrap_or(Value::Unit))
+                } else {
+                    Ok(Value::Unit)
+                }
+            }
             Expr::Match(subject, arms) => {
                 let val = self.eval_expr(subject)?;
                 for arm in arms {

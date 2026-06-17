@@ -134,6 +134,12 @@ impl<'a> Interpreter<'a> {
                 }).collect();
                 Ok(QuotedAst::Match(q_subject, q_arms?))
             }
+            Expr::If { cond, then_, else_ } => {
+                let q_cond = Box::new(self.quote_expr(cond)?);
+                let q_then = Box::new(self.quote_block(then_)?);
+                let q_else = else_.as_ref().map(|e| self.quote_block(e).map(Box::new)).transpose()?;
+                Ok(QuotedAst::If(q_cond, q_then, q_else))
+            }
             Expr::Lambda { params: _, ret: _, body } => {
                 // Quote the lambda body as a block
                 let quoted_body = self.quote_block(body)?;
