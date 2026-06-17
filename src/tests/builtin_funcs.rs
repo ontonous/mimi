@@ -439,3 +439,50 @@ func main() -> bool {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Bool(true));
 }
+
+// ===================== Result Return Tests =====================
+
+#[test]
+fn builtin_read_file_returns_result_ok() {
+    let src = r#"
+func main() -> i32 {
+    let result = read_file("/etc/hostname")
+    match result {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+#[test]
+fn builtin_read_file_returns_result_err() {
+    let src = r#"
+func main() -> i32 {
+    let result = read_file("/nonexistent/file/path.txt")
+    match result {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+#[test]
+fn builtin_write_file_returns_result() {
+    let src = r#"
+func main() -> i32 {
+    let result = write_file("/tmp/mimi_test_result.txt", "hello")
+    match result {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}

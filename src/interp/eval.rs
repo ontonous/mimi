@@ -952,6 +952,10 @@ impl<'a> Interpreter<'a> {
                             Ok(vals.into_iter().next().unwrap_or(Value::Unit))
                         }
                     }
+                    Value::Error(msg) => {
+                        // ? on an already-propagated error: re-propagate
+                        Ok(Value::Error(msg))
+                    }
                     _ => {
                         Ok(Value::Error(format!("? operator requires Result or Option, found {}", v)))
                     }

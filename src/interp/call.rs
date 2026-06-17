@@ -181,7 +181,7 @@ impl<'a> Interpreter<'a> {
                     Value::List(l) => Ok(Value::Int(l.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
                     Value::Slice { start, end, .. } => Ok(Value::Int((end - start) as i64)),
-                    _ => Err("len expects a string, list, array, or slice".into()),
+                    other => Err(format!("len: argument must be a string, list, array, or slice, found {}", super::value::type_name(other))),
                 }
             }
             "to_string" => {
@@ -210,7 +210,7 @@ impl<'a> Interpreter<'a> {
                         new_list.push(args[1].clone());
                         Ok(Value::List(new_list))
                     }
-                    _ => Err("push first argument must be a list".into()),
+                    other => Err(format!("push: first argument must be a list, found {}", super::value::type_name(other))),
                 }
             }
             "pop" => {
@@ -224,10 +224,9 @@ impl<'a> Interpreter<'a> {
                         }
                         let mut new_list = l.clone();
                         let popped = new_list.pop().expect("checked non-empty above");
-                        // Return (popped, new_list) as a tuple
                         Ok(Value::Tuple(vec![popped, Value::List(new_list)]))
                     }
-                    _ => Err("pop expects a list".into()),
+                    other => Err(format!("pop: argument must be a list, found {}", super::value::type_name(other))),
                 }
             }
             "min" => {
@@ -262,24 +261,23 @@ impl<'a> Interpreter<'a> {
                     Value::String(s) => {
                         match &args[1] {
                             Value::String(sub) => Ok(Value::Bool(s.contains(sub.as_str()))),
-                            _ => Err("contains on string expects a string needle".into()),
+                            other => Err(format!("contains on string expects a string needle, found {}", super::value::type_name(other))),
                         }
                     }
-                    _ => Err("contains expects a list or string".into()),
+                    other => Err(format!("contains: first argument must be a list or string, found {}", super::value::type_name(other))),
                 }
             }
             "input" => {
                 use std::io::{self, BufRead};
                 let mut line = String::new();
-                io::stdin().lock().read_line(&mut line).map_err(|e| format!("input error: {}", e))?;
-                // Remove trailing newline
-                if line.ends_with('\n') {
-                    line.pop();
+                match io::stdin().lock().read_line(&mut line) {
+                    Ok(_) => {
+                        if line.ends_with('\n') { line.pop(); }
+                        if line.ends_with('\r') { line.pop(); }
+                        Ok(Value::Variant("Ok".into(), vec![Value::String(line)]))
+                    }
+                    Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(format!("input error: {}", e))])),
                 }
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-                Ok(Value::String(line))
             }
             "assert_eq" => {
                 if args.len() != 2 {
@@ -298,6 +296,31 @@ impl<'a> Interpreter<'a> {
                     return Err(format!("assertion failed: {} == {}", args[0], args[1]));
                 }
                 Ok(Value::Unit)
+            }
+            "assert_approx_eq" => {
+                if args.len() != 2 {
+                    return Err("assert_approx_eq expects 2 arguments".into());
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Float(a), Value::Float(b)) => {
+                        if (a - b).abs() > f64::EPSILON {
+                            return Err(format!("assertion failed: {} != {} (difference: {})", a, b, (a - b).abs()));
+                        }
+                        Ok(Value::Unit)
+                    }
+                    (Value::Int(a), Value::Int(b)) => {
+                        if a != b {
+                            return Err(format!("assertion failed: {} != {}", a, b));
+                        }
+                        Ok(Value::Unit)
+                    }
+                    _ => {
+                        if !values_equal(&args[0], &args[1]) {
+                            return Err(format!("assertion failed: {} != {}", args[0], args[1]));
+                        }
+                        Ok(Value::Unit)
+                    }
+                }
             }
             "map" => {
                 if args.len() != 2 {
@@ -717,9 +740,10 @@ impl<'a> Interpreter<'a> {
                 if args.len() != 1 { return Err("read_file expects 1 argument (path)".into()); }
                 match &args[0] {
                     Value::String(path) => {
-                        std::fs::read_to_string(path)
-                            .map(Value::String)
-                            .map_err(|e| format!("read_file error: {}", e))
+                        match std::fs::read_to_string(path) {
+                            Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
+                            Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(format!("read_file error: {}", e))])),
+                        }
                     }
                     _ => Err("read_file expects a string path".into()),
                 }
@@ -728,9 +752,10 @@ impl<'a> Interpreter<'a> {
                 if args.len() != 2 { return Err("write_file expects 2 arguments (path, content)".into()); }
                 match (&args[0], &args[1]) {
                     (Value::String(path), Value::String(content)) => {
-                        std::fs::write(path, content)
-                            .map(|_| Value::Unit)
-                            .map_err(|e| format!("write_file error: {}", e))
+                        match std::fs::write(path, content) {
+                            Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
+                            Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(format!("write_file error: {}", e))])),
+                        }
                     }
                     _ => Err("write_file expects (string, string)".into()),
                 }

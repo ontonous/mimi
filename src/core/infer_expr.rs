@@ -925,7 +925,10 @@ impl<'a> Checker<'a> {
                 return Type::Name("unit".into(), vec![]);
             }
             "input" => {
-                return Type::Name("string".into(), vec![]);
+                return Type::Result(
+                    Box::new(Type::Name("string".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
             }
             "map" | "filter" => {
                 if args.len() != 2 {
@@ -959,11 +962,12 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
             }
-            "zip" | "enumerate" => {
-                if args.len() != 1 {
-                    self.emit(&format!("{} expects 1 argument", name));
+            "zip" => {
+                if args.len() != 2 {
+                    self.emit("zip expects 2 arguments (list, list)");
                 } else {
                     self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
                 }
                 return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
             }
@@ -1067,6 +1071,150 @@ impl<'a> Checker<'a> {
                 return Type::Name("unknown".into(), vec![]);
             }
             "arena_reset" | "bump_used" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("unit".into(), vec![]);
+            }
+            "read_file" => {
+                if args.len() != 1 {
+                    self.emit("read_file expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("string".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
+            "write_file" => {
+                if args.len() != 2 {
+                    self.emit("write_file expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("unit".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
+            "file_exists" => {
+                if args.len() != 1 {
+                    self.emit("file_exists expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "str_split" => {
+                if args.len() != 2 {
+                    self.emit("str_split expects 2 arguments (string, delimiter)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+            }
+            "str_join" => {
+                if args.len() != 2 {
+                    self.emit("str_join expects 2 arguments (list, separator)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_trim" | "str_to_upper" | "str_to_lower" => {
+                if args.len() != 1 {
+                    self.emit(&format!("{} expects 1 argument", name));
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_starts_with" | "str_ends_with" | "str_contains" => {
+                if args.len() != 2 {
+                    self.emit(&format!("{} expects 2 arguments", name));
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "str_replace" => {
+                if args.len() != 3 {
+                    self.emit("str_replace expects 3 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    self.infer_expr(&args[2], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_repeat" => {
+                if args.len() != 2 {
+                    self.emit("str_repeat expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_char_at" => {
+                if args.len() != 2 {
+                    self.emit("str_char_at expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_substring" => {
+                if args.len() != 3 {
+                    self.emit("str_substring expects 3 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    self.infer_expr(&args[2], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "str_index_of" => {
+                if args.len() != 2 {
+                    self.emit("str_index_of expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("i32".into(), vec![])),
+                    Box::new(Type::Name("i32".into(), vec![])),
+                );
+            }
+            "str_parse_int" => {
+                if args.len() != 1 {
+                    self.emit("str_parse_int expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("i32".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
+            "str_parse_float" => {
+                if args.len() != 1 {
+                    self.emit("str_parse_float expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("f64".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
+            "eprintln" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }

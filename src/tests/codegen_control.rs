@@ -1783,3 +1783,26 @@ fn e2e_reduce_fn_ref() {
     "#).unwrap();
     assert_eq!(stdout.trim(), "15");
 }
+
+#[test]
+fn codegen_fstring_text_only() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            let s = "hello world"
+            println(s)
+            0
+        }
+    "#);
+}
+
+#[test]
+fn codegen_fstring_with_interp() {
+    let stdout = super::compile_and_run(r#"
+        func main() -> i32 {
+            let x = 42
+            println(f"x = {x}")
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "x = 42");
+}

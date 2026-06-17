@@ -382,7 +382,7 @@ where
 }
 
 /// Get a human-readable type name for a value.
-fn type_name(val: &Value) -> &'static str {
+pub(crate) fn type_name(val: &Value) -> &'static str {
     match val {
         Value::Int(_) => "int",
         Value::Float(_) => "float",

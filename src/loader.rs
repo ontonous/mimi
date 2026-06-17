@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::{core, lexer, parser};
+use crate::{core, lexer, parser, manifest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -51,15 +51,32 @@ pub struct ModuleLoader {
     loaded: HashMap<PathBuf, LoadedModule>,
     /// Cache of loaded modules by module name
     modules: HashMap<String, LoadedModule>,
+    /// Dependency paths from mimi.toml: dep_name -> resolved path
+    dep_paths: HashMap<String, PathBuf>,
 }
 
 impl ModuleLoader {
     pub fn new(base_dir: PathBuf) -> Self {
-        Self {
-            base_dir,
+        let mut loader = Self {
+            base_dir: base_dir.clone(),
             loaded: HashMap::new(),
             modules: HashMap::new(),
+            dep_paths: HashMap::new(),
+        };
+        // Try to load mimi.toml and resolve dependency paths
+        if let Ok(Some((dir, manifest))) = manifest::Manifest::find(&base_dir) {
+            if let Some(deps) = &manifest.dependencies {
+                for dep in deps {
+                    if let Some(path_str) = &dep.path {
+                        let dep_path = dir.join(path_str);
+                        if dep_path.exists() {
+                            loader.dep_paths.insert(dep.name.clone(), dep_path);
+                        }
+                    }
+                }
+            }
         }
+        loader
     }
 
     /// Load the main file and all its transitive imports
@@ -131,6 +148,22 @@ impl ModuleLoader {
         let base_path = self.base_dir.join(&relative).with_extension("mimi");
         if base_path.exists() {
             return Ok(base_path);
+        }
+
+        // Try dependency paths from mimi.toml
+        if let Some(first) = path.first() {
+            if let Some(dep_dir) = self.dep_paths.get(first) {
+                let dep_relative: PathBuf = path.iter().skip(1).collect();
+                let dep_path = dep_dir.join(&dep_relative).with_extension("mimi");
+                if dep_path.exists() {
+                    return Ok(dep_path);
+                }
+                // Try with the dep_dir itself as the module root
+                let dep_root = dep_dir.with_extension("mimi");
+                if dep_root.exists() && path.len() == 1 {
+                    return Ok(dep_root);
+                }
+            }
         }
 
         // Try built-in stdlib (import "std/io.mimi" or @import "std/io.mimi")

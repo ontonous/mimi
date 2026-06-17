@@ -229,11 +229,12 @@ impl<'a> Checker<'a> {
             }
             Stmt::For { var, iterable, body } => {
                 let it = self.infer_expr(iterable, scopes);
-                let elem_ty = match it {
+                let elem_ty = match &it {
                     Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
+                    Type::Name(n, _) if n == "Range" => Type::Name("i32".into(), vec![]),
                     _ => {
                         self.emit_code(crate::diagnostic::codes::E0212, format!(
-                            "for loop requires a List, found {}",
+                            "for loop requires a List or Range, found {}",
                             fmt_type(&it)
                         ));
                         Type::Name("unknown".into(), vec![])
@@ -367,10 +368,34 @@ impl<'a> Checker<'a> {
                         }
                     }
                     Expr::Field(obj, field) => {
-                        // Field assignment: check that the object type has that field
                         let obj_ty = self.infer_expr(obj, scopes);
-                        // For now just allow it - the type checker will verify field exists
-                        let _ = (obj_ty, field);
+                        // Validate field exists on the object type
+                        match &obj_ty {
+                            Type::Name(name, _) => {
+                                if let Some(type_def) = self.types.get(name) {
+                                    match &type_def.kind {
+                                        TypeDefKind::Record(fields) => {
+                                            if !fields.iter().any(|f| f.name == *field) {
+                                                let available: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                                                if available.is_empty() {
+                                                    self.emit(format!("field '{}' not found in record '{}' (record has no fields)", field, name));
+                                                } else {
+                                                    self.emit(format!("field '{}' not found in record '{}' — available fields: {}", field, name, available.join(", ")));
+                                                }
+                                            }
+                                        }
+                                        TypeDefKind::Enum(variants) => {
+                                            if !variants.iter().any(|v| v.name == *field) {
+                                                let available: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+                                                self.emit(format!("variant '{}' not found in enum '{}' — available: {}", field, name, available.join(", ")));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     _ => self.emit_code(crate::diagnostic::codes::E0219, "assignment target must be a variable"),
                 }
