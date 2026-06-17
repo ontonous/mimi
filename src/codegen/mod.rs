@@ -364,10 +364,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicTypeEnum::ArrayType(t) => t.fn_type(&param_tys, false),
                 _ => self.context.i64_type().fn_type(&param_tys, false),
             };
-            // Register the real extern symbol under an internal name so that
-            // user code cannot call it directly.  We then generate a wrapper
-            // function with the original name that performs boundary
-            // marshalling and (in later phases) cap/lifetime checks.
             let extern_name = format!("__mimi_extern_{}", ef.name);
             let extern_fn = self.module.add_function(&extern_name, fn_type, Some(inkwell::module::Linkage::External));
             let wrapper_fn = self.module.add_function(&ef.name, fn_type, Some(inkwell::module::Linkage::Internal));
@@ -376,6 +372,79 @@ impl<'ctx> CodeGenerator<'ctx> {
             let previous_block = self.builder.get_insert_block();
             self.builder.position_at_end(entry);
 
+            let i64_ty = self.context.i64_type();
+            let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+
+            // Phase 1: Retain c_shared params before C call
+            let mut shared_params: Vec<(usize, BasicValueEnum<'ctx>)> = Vec::new();
+            for (i, p) in ef.params.iter().enumerate() {
+                if matches!(p.ty, crate::ast::Type::CShared(_)) {
+                    let param = wrapper_fn.get_nth_param(i as u32)
+                        .ok_or(format!("missing param {}", i))?;
+                    if let Some(retain_fn) = self.module.get_function("mimi_shared_retain") {
+                        // c_shared is compiled as i8*, need to bitcast to i64 for the runtime call
+                        let param_i64 = match param {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            BasicValueEnum::PointerValue(pv) => {
+                                self.builder.build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_{}", i))
+                                    .map_err(|e| format!("bitcast error: {}", e))?
+                                    .into_int_value()
+                            }
+                            _ => return Err(format!("c_shared param {} must be pointer or int", i)),
+                        };
+                        self.builder.build_call(retain_fn, &[
+                            BasicMetadataValueEnum::IntValue(param_i64),
+                        ], &format!("retain_{}", i))
+                            .map_err(|e| format!("retain error: {}", e))?;
+                    }
+                    shared_params.push((i, param));
+                }
+            }
+
+            // Phase 2: Check cap params
+            for (i, p) in ef.params.iter().enumerate() {
+                if let crate::ast::Type::Cap(cap_name) = &p.ty {
+                    let param = wrapper_fn.get_nth_param(i as u32)
+                        .ok_or(format!("missing param {}", i))?;
+                    if let Some(check_fn) = self.module.get_function("mimi_cap_check") {
+                        let cap_name_global = self.builder.build_global_string_ptr(
+                            &format!("{}\0", cap_name), &format!("cap_name_{}", i))
+                            .map_err(|e| format!("string global error: {}", e))?;
+                        let cap_name_ptr = cap_name_global.as_pointer_value();
+                        let check_result = self.builder.build_call(check_fn, &[
+                            BasicMetadataValueEnum::IntValue(param.into_int_value()),
+                            BasicMetadataValueEnum::PointerValue(cap_name_ptr),
+                        ], &format!("cap_check_{}", i))
+                            .map_err(|e| format!("cap_check error: {}", e))?
+                            .try_as_basic_value().left()
+                            .ok_or("cap_check returned void")?
+                            .into_int_value();
+                        // If cap_check returns false (0), abort
+                        let is_valid = self.builder.build_int_compare(
+                            inkwell::IntPredicate::NE, check_result,
+                            self.context.bool_type().const_int(0, false),
+                            "cap_valid")
+                            .map_err(|e| format!("compare error: {}", e))?;
+                        let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                        let ok_bb = self.context.append_basic_block(function, &format!("cap_ok_{}", i));
+                        let fail_bb = self.context.append_basic_block(function, &format!("cap_fail_{}", i));
+                        self.builder.build_conditional_branch(is_valid, ok_bb, fail_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                        self.builder.position_at_end(fail_bb);
+                        if let Some(exit_fn) = self.module.get_function("exit") {
+                            self.builder.build_call(exit_fn, &[
+                                BasicMetadataValueEnum::IntValue(self.context.i32_type().const_int(1, false)),
+                            ], "cap_fail_exit")
+                                .map_err(|e| format!("exit error: {}", e))?;
+                        }
+                        self.builder.build_unconditional_branch(ok_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                        self.builder.position_at_end(ok_bb);
+                    }
+                }
+            }
+
+            // Phase 3: Build wrapper args and call extern function
             let wrapper_args: Vec<BasicMetadataValueEnum<'ctx>> = wrapper_fn
                 .get_param_iter()
                 .map(|p| match p {
@@ -392,6 +461,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_call(extern_fn, &wrapper_args, "extern_call")
                 .map_err(|e| format!("failed to build extern wrapper call: {}", e))?;
 
+            // Phase 4: Release c_shared params after C call
+            for (i, _param) in &shared_params {
+                if let Some(release_fn) = self.module.get_function("mimi_shared_release") {
+                    let orig_param = wrapper_fn.get_nth_param(*i as u32)
+                        .ok_or(format!("missing param {}", i))?;
+                    let param_i64 = match orig_param {
+                        BasicValueEnum::IntValue(iv) => iv,
+                        BasicValueEnum::PointerValue(pv) => {
+                            self.builder.build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_rel_{}", i))
+                                .map_err(|e| format!("bitcast error: {}", e))?
+                                .into_int_value()
+                        }
+                        _ => return Err(format!("c_shared param {} must be pointer or int", i)),
+                    };
+                    self.builder.build_call(release_fn, &[
+                        BasicMetadataValueEnum::IntValue(param_i64),
+                    ], &format!("release_{}", i))
+                        .map_err(|e| format!("release error: {}", e))?;
+                }
+            }
+
+            // Phase 5: Return
             if fn_type.get_return_type().is_some() {
                 let ret = call.try_as_basic_value().left().ok_or_else(|| {
                     "extern wrapper call did not return a value".to_string()

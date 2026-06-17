@@ -177,6 +177,23 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     module.add_function("mimi_try_exit",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External));
+
+    // FFI runtime functions (defined in Rust ffi/runtime.rs)
+    // mimi_shared_retain(handle) -> handle
+    module.add_function("mimi_shared_retain",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_shared_release(handle)
+    module.add_function("mimi_shared_release",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_cap_check(cap, name) -> bool
+    module.add_function("mimi_cap_check",
+        i32.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
 }
 
 pub fn is_builtin(name: &str) -> bool {

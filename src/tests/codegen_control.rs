@@ -879,6 +879,46 @@ fn codegen_extern_in_module() {
     "#);
 }
 
+#[test]
+fn codegen_extern_block_c_shared() {
+    let ir = compile_to_ir(r#"
+        extern "C" {
+            func process_data(data: c_shared i64) -> i32;
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    assert!(ir.contains("mimi_shared_retain"), "IR should contain retain call for c_shared param");
+    assert!(ir.contains("mimi_shared_release"), "IR should contain release call for c_shared param");
+}
+
+#[test]
+fn codegen_extern_block_cap() {
+    let ir = compile_to_ir(r#"
+        cap FileReadCap;
+        extern "C" {
+            func read_file(c: FileReadCap) -> i32;
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    assert!(ir.contains("mimi_cap_check"), "IR should contain cap_check call for cap param");
+}
+
+#[test]
+fn codegen_extern_block_c_borrow() {
+    assert_compiles(r#"
+        extern "C" {
+            func process(data: c_borrow i64) -> i32;
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+}
+
 // ===================== Phase B: Stdlib Module Tests =====================
 
 #[test]
