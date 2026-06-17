@@ -361,6 +361,7 @@ dependencies = [
  "cc",
  "clap",
  "inkwell",
+ "libc",
  "libloading",
  "mimispec",
  "proptest",
