@@ -28,6 +28,8 @@ pub struct CodeGenerator<'ctx> {
     type_map: HashMap<String, crate::ast::Type>,
     /// Store function definitions for monomorphization lookup
     func_defs: HashMap<String, FuncDef>,
+    /// Track variable name -> Mimi type name for field access resolution
+    var_type_names: HashMap<String, String>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -37,7 +39,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new() }
     }
 
     /// Push a new capability scope
@@ -318,6 +320,249 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.build_return(Some(&ret_val))
             .map_err(|e| format!("return error: {}", e))?;
         
+        // Compile all actor methods
+        for method in &actor.methods {
+            self.compile_actor_method(actor, method)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn compile_actor_method(&mut self, actor: &crate::ast::ActorDef, method: &FuncDef) -> Result<(), String> {
+        let actor_ty = self.type_llvm.get(&actor.name)
+            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?
+            .clone();
+        
+        // Method name: ActorName__methodName
+        let mangled = format!("{}__{}__method", actor.name, method.name);
+        
+        // Build function type: self (ptr to actor struct) + params -> ret
+        let actor_ptr_ty = match actor_ty {
+            BasicTypeEnum::StructType(sty) => BasicTypeEnum::PointerType(sty.ptr_type(inkwell::AddressSpace::default())),
+            _ => return Err(format!("actor '{}' type is not a struct", actor.name)),
+        };
+        
+        let mut param_metadata = vec![types::basic_to_metadata(self.context, actor_ptr_ty)];
+        let mut param_llvm = vec![actor_ptr_ty];
+        for p in &method.params {
+            let ty = types::mimi_type_to_llvm(self.context, &p.ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            param_llvm.push(ty);
+            param_metadata.push(types::basic_to_metadata(self.context, ty));
+        }
+        
+        let ret_llvm = match &method.ret {
+            Some(ty) => types::mimi_type_to_llvm(self.context, ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+            None => BasicTypeEnum::IntType(self.context.i64_type()),
+        };
+        
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_metadata, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_metadata, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&param_metadata, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&param_metadata, false),
+            BasicTypeEnum::ArrayType(t) => t.fn_type(&param_metadata, false),
+            _ => self.context.i64_type().fn_type(&param_metadata, false),
+        };
+        
+        let function = self.module.add_function(&mangled, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        
+        self.push_cap_scope();
+        
+        let mut vars: HashMap<String, VarEntry> = HashMap::new();
+        
+        // Bind self: allocate space for actor struct and store pointer
+        let self_alloca = self.builder.build_alloca(actor_ptr_ty, "self")
+            .map_err(|e| format!("alloca error: {}", e))?;
+        self.builder.build_store(self_alloca, function.get_nth_param(0).unwrap())
+            .map_err(|e| format!("store error: {}", e))?;
+        vars.insert("self".to_string(), (self_alloca, actor_ptr_ty));
+        
+        // Bind method params
+        let param_offset = 1; // param 0 is self
+        for (i, param) in method.params.iter().enumerate() {
+            let ty = types::mimi_type_to_llvm(self.context, &param.ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            let alloca = self.builder.build_alloca(ty, &param.name)
+                .map_err(|e| format!("alloca error: {}", e))?;
+            self.builder.build_store(alloca, function.get_nth_param((i + param_offset) as u32).unwrap())
+                .map_err(|e| format!("store error: {}", e))?;
+            vars.insert(param.name.clone(), (alloca, ty));
+        }
+        
+        let mut last_val: BasicValueEnum = self.context.i64_type().const_int(0, false).into();
+        for stmt in &method.body {
+            match stmt {
+                Stmt::Expr(expr) => {
+                    last_val = self.compile_expr(expr, &vars)?;
+                }
+                Stmt::Return(Some(expr)) => {
+                    let val = self.compile_expr(expr, &vars)?;
+                    self.builder.build_return(Some(&val)).map_err(|e| format!("return error: {}", e))?;
+                    return Ok(());
+                }
+                Stmt::Return(None) => {
+                    self.builder.build_return(None).map_err(|e| format!("return error: {}", e))?;
+                    return Ok(());
+                }
+                Stmt::Let { pat, init: Some(init), .. } => {
+                    let val = self.compile_expr(init, &vars)?;
+                    let name = match pat {
+                        Pattern::Variable(n) => n.clone(),
+                        _ => continue,
+                    };
+                    let llvm_ty = val.get_type();
+                    let alloca = self.builder.build_alloca(llvm_ty, &name)
+                        .map_err(|e| format!("alloca error: {}", e))?;
+                    self.builder.build_store(alloca, val)
+                        .map_err(|e| format!("store error: {}", e))?;
+                    // Track type name from record expressions
+                    if let Expr::Record { ty: Some(tn), .. } = init {
+                        self.var_type_names.insert(name.clone(), tn.clone());
+                    }
+                    vars.insert(name, (alloca, llvm_ty));
+                }
+                Stmt::Assign { target: Expr::Ident(name), value } => {
+                    let val = self.compile_expr(value, &vars)?;
+                    if let Some(&(alloca, _)) = vars.get(name) {
+                        self.builder.build_store(alloca, val)
+                            .map_err(|e| format!("store error: {}", e))?;
+                    }
+                }
+                Stmt::If { cond, then_, else_ } => {
+                    let cond_val = self.compile_expr(cond, &vars)?;
+                    let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
+                        iv
+                    } else {
+                        return Err("if condition must be boolean".into());
+                    };
+                    let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                    let then_bb = self.context.append_basic_block(function, "then");
+                    let else_bb = self.context.append_basic_block(function, "else");
+                    let merge_bb = self.context.append_basic_block(function, "ifcont");
+                    self.builder.build_conditional_branch(cond_bool, then_bb, else_bb)
+                        .map_err(|e| format!("branch error: {}", e))?;
+                    self.builder.position_at_end(then_bb);
+                    self.compile_block(then_, &mut vars)?;
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                    }
+                    self.builder.position_at_end(else_bb);
+                    if let Some(else_block) = else_ {
+                        self.compile_block(else_block, &mut vars)?;
+                    }
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                    }
+                    self.builder.position_at_end(merge_bb);
+                }
+                Stmt::For { var, iterable, body } => {
+                    let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                    if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable {
+                        let start_val = self.compile_expr(start_expr, &vars)?;
+                        let end_val = self.compile_expr(end_expr, &vars)?;
+                        let start_iv = if let BasicValueEnum::IntValue(iv) = start_val { iv } else { return Err("range start must be i64".into()); };
+                        let end_iv = if let BasicValueEnum::IntValue(iv) = end_val { iv } else { return Err("range end must be i64".into()); };
+                        let idx_alloca = self.builder.build_alloca(self.context.i64_type(), "idx")
+                            .map_err(|e| format!("alloca error: {}", e))?;
+                        self.builder.build_store(idx_alloca, start_iv)
+                            .map_err(|e| format!("store error: {}", e))?;
+                        let loop_bb = self.context.append_basic_block(function, "forloop");
+                        let body_bb = self.context.append_basic_block(function, "forbody");
+                        let merge_bb = self.context.append_basic_block(function, "forcont");
+                        self.builder.build_unconditional_branch(loop_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                        self.builder.position_at_end(loop_bb);
+                        let idx_val = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), idx_alloca, "idx")
+                            .map_err(|e| format!("load error: {}", e))?;
+                        let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err("idx must be i64".into()); };
+                        let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx_iv, end_iv, "cmp")
+                            .map_err(|e| format!("cmp error: {}", e))?;
+                        self.builder.build_conditional_branch(cmp, body_bb, merge_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                        self.builder.position_at_end(body_bb);
+                        let elem_alloca = self.builder.build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
+                            .map_err(|e| format!("alloca error: {}", e))?;
+                        let old_break = self.loop_break.replace(merge_bb);
+                        let old_continue = self.loop_continue.replace(loop_bb);
+                        self.builder.build_store(elem_alloca, idx_val)
+                            .map_err(|e| format!("store error: {}", e))?;
+                        vars.insert(var.clone(), (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())));
+                        self.compile_block(body, &mut vars)?;
+                        vars.remove(var);
+                        self.loop_break = old_break;
+                        self.loop_continue = old_continue;
+                        let idx_val = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), idx_alloca, "idx")
+                            .map_err(|e| format!("load error: {}", e))?;
+                        let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err("idx must be i64".into()); };
+                        let one = self.context.i64_type().const_int(1, false);
+                        let next_idx = self.builder.build_int_add(idx_iv, one, "next_idx")
+                            .map_err(|e| format!("add error: {}", e))?;
+                        self.builder.build_store(idx_alloca, next_idx)
+                            .map_err(|e| format!("store error: {}", e))?;
+                        self.builder.build_unconditional_branch(loop_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                        self.builder.position_at_end(merge_bb);
+                    } else {
+                        return Err("for loop requires range in codegen".into());
+                    }
+                }
+                Stmt::While { cond, body } => {
+                    let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                    let loop_bb = self.context.append_basic_block(function, "loop");
+                    let body_bb = self.context.append_basic_block(function, "loopbody");
+                    let merge_bb = self.context.append_basic_block(function, "loopcont");
+                    self.builder.build_unconditional_branch(loop_bb)
+                        .map_err(|e| format!("branch error: {}", e))?;
+                    self.builder.position_at_end(loop_bb);
+                    let cond_val = self.compile_expr(cond, &vars)?;
+                    let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val { iv } else { return Err("while condition must be boolean".into()); };
+                    self.builder.build_conditional_branch(cond_bool, body_bb, merge_bb)
+                        .map_err(|e| format!("branch error: {}", e))?;
+                    self.builder.position_at_end(body_bb);
+                    let old_break = self.loop_break.replace(merge_bb);
+                    let old_continue = self.loop_continue.replace(loop_bb);
+                    self.compile_block(body, &mut vars)?;
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(loop_bb)
+                            .map_err(|e| format!("branch error: {}", e))?;
+                    }
+                    self.loop_break = old_break;
+                    self.loop_continue = old_continue;
+                    self.builder.position_at_end(merge_bb);
+                }
+                Stmt::MmsBlock { .. } => {}
+                Stmt::Parasteps(block) => {
+                    self.compile_block(block, &mut vars)?;
+                }
+                Stmt::Drop(expr) => {
+                    self.compile_expr(expr, &vars)?;
+                }
+                Stmt::OnFailure(block) => {
+                    self.compile_block(block, &mut vars)?;
+                }
+                Stmt::Arena(block) | Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
+                    self.compile_block(block, &mut vars)?;
+                }
+                Stmt::SharedLet { init, .. } => {
+                    self.compile_expr(init, &vars)?;
+                }
+                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {}
+                _ => {}
+            }
+        }
+        
+        self.check_unconsumed_caps()?;
+        self.pop_cap_scope();
+        
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.builder.build_return(Some(&last_val)).map_err(|e| format!("return error: {}", e))?;
+        }
         Ok(())
     }
 
@@ -395,6 +640,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| format!("alloca error: {}", e))?;
                     self.builder.build_store(alloca, val)
                         .map_err(|e| format!("store error: {}", e))?;
+                    // Track type name from explicit annotation or record expression
+                    if let Some(Type::Name(tn, _)) = ty {
+                        self.var_type_names.insert(name.clone(), tn.clone());
+                    } else if let Expr::Record { ty: Some(tn), .. } = init {
+                        self.var_type_names.insert(name.clone(), tn.clone());
+                    }
                     vars.insert(name.clone(), (alloca, llvm_ty));
                     
                     // Track capability variables
@@ -843,12 +1094,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         Pattern::Variable(n) => n.clone(),
                         _ => continue,
                     };
-                    let ty = val.get_type();
-                    let alloca = self.builder.build_alloca(ty, &name)
+                    let llvm_ty = val.get_type();
+                    let alloca = self.builder.build_alloca(llvm_ty, &name)
                         .map_err(|e| format!("alloca error: {}", e))?;
                     self.builder.build_store(alloca, val)
                         .map_err(|e| format!("store error: {}", e))?;
-                    vars.insert(name, (alloca, ty));
+                    if let Expr::Record { ty: Some(tn), .. } = init {
+                        self.var_type_names.insert(name.clone(), tn.clone());
+                    }
+                    vars.insert(name, (alloca, llvm_ty));
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, vars)?;
@@ -1018,10 +1272,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expr::Call(callee, args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
-                    self.compile_call(name, args, vars)
-                } else {
-                    Err("only direct function calls supported in codegen".into())
+                match callee.as_ref() {
+                    Expr::Ident(name) => {
+                        self.compile_call(name, args, vars)
+                    }
+                    Expr::Field(obj, method_name) => {
+                        // Actor method call: obj.method(args)
+                        // Determine the type of the object to find the actor name
+                        let obj_type = self.infer_object_type(obj, vars);
+                        let actor_method = format!("{}__{}__method", obj_type, method_name);
+                        if self.module.get_function(&actor_method).is_some() {
+                            let obj_val = self.compile_expr(obj, vars)?;
+                            let mut compiled_args = Vec::new();
+                            // prepend self
+                            compiled_args.push(obj_val);
+                            for arg in args {
+                                compiled_args.push(self.compile_expr(arg, vars)?);
+                            }
+                            let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                                BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                                BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                                BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                                BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                                BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                                BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            }).collect();
+                            let function = self.module.get_function(&actor_method).unwrap();
+                            let call = self.builder.build_call(function, &metadata_args, "method_call")
+                                .map_err(|e| format!("method call error: {}", e))?;
+                            Ok(call.try_as_basic_value().left().unwrap_or(
+                                self.context.i64_type().const_int(0, false).into()
+                            ))
+                        } else if self.type_defs.contains_key(&obj_type) {
+                            // Field access on a record/actor: obj.field (no call)
+                            // Check if it's a method that isn't compiled yet
+                            Err(format!("method '{}' not compiled for type '{}' (missing crate?)", method_name, obj_type))
+                        } else {
+                            Err(format!("cannot call method '{}' on unknown type '{}'", method_name, obj_type))
+                        }
+                    }
+                    _ => Err(format!("only direct function calls and method calls supported in codegen")),
                 }
             }
             Expr::Turbofish(name, type_args, args) => {
@@ -1200,61 +1490,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expr::Field(obj, field_name) => {
+                // Field access: obj.field
                 let obj_val = self.compile_expr(obj, vars)?;
-                match obj_val {
-                    BasicValueEnum::PointerValue(pv) => {
-                        // Try to determine the struct type from the pointer
-                        // We need to look up the type from the AST or type annotations
-                        // For now, try to find the type name from the object expression
-                        let type_name = match obj.as_ref() {
-                            Expr::Ident(name) => {
-                                // Look up the variable's type in type_llvm
-                                vars.get(name).map(|(_, ty)| ty)
-                            }
-                            Expr::Record { ty: Some(name), .. } => {
-                                self.type_llvm.get(name)
-                            }
-                            _ => None,
-                        };
-                        if let Some(BasicTypeEnum::StructType(sty)) = type_name {
-                            // Find field index by looking up the type definition
-                            let type_name_str = match obj.as_ref() {
-                                Expr::Ident(_name) => {
-                                    // Try to find the type from type_defs
-                                    self.type_defs.iter().find(|(_, td)| {
-                                        matches!(&td.kind, TypeDefKind::Record(fields) if fields.iter().any(|f| &f.name == field_name))
-                                    }).map(|(n, _)| n.clone())
-                                }
-                                Expr::Record { ty: Some(name), .. } => Some(name.clone()),
-                                _ => None,
-                            };
-                            if let Some(tn) = type_name_str {
-                                if let Some(td) = self.type_defs.get(&tn) {
-                                    if let TypeDefKind::Record(fields) = &td.kind {
-                                        if let Some(idx) = fields.iter().position(|f| &f.name == field_name) {
-                                            let gep = self.builder.build_struct_gep(*sty, pv, idx as u32, field_name)
-                                                .map_err(|e| format!("gep error: {}", e))?;
-                                            let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
-                                                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                                            return self.builder.build_load(field_ty, gep, field_name)
-                                                .map_err(|e| format!("load error: {}", e));
-                                        }
-                                    }
-                                }
-                            }
-                            // Fallback: try field name as index (for anonymous structs)
-                            if let Ok(idx) = field_name.parse::<u32>() {
-                                let gep = self.builder.build_struct_gep(*sty, pv, idx, field_name)
-                                    .map_err(|e| format!("gep error: {}", e))?;
-                                return self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), gep, field_name)
-                                    .map_err(|e| format!("load error: {}", e));
-                            }
+                let obj_type = self.infer_object_type(obj, vars);
+                let field_ptr = match obj_val {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    BasicValueEnum::StructValue(sv) => {
+                        if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(&obj_type) {
+                            let alloca = self.builder.build_alloca(*sty, "tmp")
+                                .map_err(|e| format!("alloca error: {}", e))?;
+                            self.builder.build_store(alloca, sv)
+                                .map_err(|e| format!("store error: {}", e))?;
+                            alloca
+                        } else {
+                            return Err(format!("cannot access field on type '{}'", obj_type));
                         }
-                        // Fallback: return 0 placeholder
-                        Ok(self.context.i64_type().const_int(0, false).into())
                     }
-                    _ => Err("field access on non-struct type".to_string()),
+                    _ => return Err(format!("field access requires struct/actor type, got {:?}", obj_val.get_type())),
+                };
+                let sty = match self.type_llvm.get(&obj_type) {
+                    Some(BasicTypeEnum::StructType(s)) => *s,
+                    _ => return Err(format!("type '{}' is not a struct", obj_type)),
+                };
+                if let Some(td) = self.type_defs.get(&obj_type) {
+                    if let TypeDefKind::Record(fields) = &td.kind {
+                        if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
+                            let gep = self.builder.build_struct_gep(sty, field_ptr, idx as u32, field_name)
+                                .map_err(|e| format!("gep error: {}", e))?;
+                            let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
+                                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                            return self.builder.build_load(field_ty, gep, field_name)
+                                .map_err(|e| format!("load error: {}", e));
+                        }
+                    }
                 }
+                // Fallback: numeric field index
+                if let Ok(idx) = field_name.parse::<u32>() {
+                    let gep = self.builder.build_struct_gep(sty, field_ptr, idx, field_name)
+                        .map_err(|e| format!("gep error: {}", e))?;
+                    return self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), gep, field_name)
+                        .map_err(|e| format!("load error: {}", e));
+                }
+                Err(format!("field '{}' not found on type '{}'", field_name, obj_type))
             }
             Expr::List(elems) => {
                 // Create a list struct: { i64 len, i64* data }
@@ -1350,8 +1627,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expr::Spawn(expr) => {
                 // Spawn: execute expression sequentially (fallback for concurrent execution)
-                // Future: implement true concurrent execution with threads/futures
-                // For now, just compile the inner expression
                 self.compile_expr(expr, vars)
             }
             Expr::Await(expr) => {
@@ -1359,6 +1634,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_expr(expr, vars)
             }
             _ => Err(format!("unsupported expression in codegen: {:?}", expr)),
+        }
+    }
+
+    /// Infer the type name of an object expression from the codegen's type definitions
+    fn infer_object_type(&self, expr: &Expr, vars: &HashMap<String, VarEntry<'ctx>>) -> String {
+        match expr {
+            Expr::Ident(name) => {
+                // Look up variable's type name from our tracking map
+                if let Some(ty_name) = self.var_type_names.get(name) {
+                    ty_name.clone()
+                } else {
+                    name.clone()
+                }
+            }
+            Expr::Record { ty: Some(name), .. } => name.clone(),
+            Expr::Call(callee, _) => {
+                // constructor call like ActorName(args) -> return type is the name
+                if let Expr::Ident(name) = callee.as_ref() {
+                    // Try to strip _new suffix used by our codegen constructors
+                    if let Some(stripped) = name.strip_suffix("_new") {
+                        stripped.to_string()
+                    } else {
+                        name.clone()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            Expr::Field(obj, _) => self.infer_object_type(obj, vars),
+            _ => String::new(),
         }
     }
 
