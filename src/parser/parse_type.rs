@@ -49,6 +49,13 @@ impl Parser {
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let tok = self.peek();
         match tok.kind {
+            TokenKind::Ident(ref name) if name == "CBuffer" => {
+                self.advance();
+                self.expect(TokenKind::Lt, "`<`")?;
+                let inner = self.parse_type()?;
+                self.expect(TokenKind::Gt, "`>`")?;
+                Ok(Type::CBuffer(Box::new(inner)))
+            }
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
@@ -135,13 +142,6 @@ impl Parser {
             TokenKind::RawString => {
                 self.advance();
                 Ok(Type::RawString)
-            }
-            TokenKind::Ident(ref name) if name == "CBuffer" => {
-                self.advance();
-                self.expect(TokenKind::Lt, "`<`")?;
-                let inner = self.parse_type()?;
-                self.expect(TokenKind::Gt, "`>`")?;
-                Ok(Type::CBuffer(Box::new(inner)))
             }
             TokenKind::Star => {
                 self.advance();
