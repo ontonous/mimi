@@ -213,6 +213,7 @@ impl<'a> Interpreter<'a> {
                     }).collect()),
                     generics: Vec::new(),
                     derives: Vec::new(),
+                    attributes: Vec::new(),
                 };
                 out.insert(actor.name.clone(), actor_type_def);
             }

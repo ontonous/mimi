@@ -124,6 +124,13 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Generate C header file from extern declarations
+    EmitCHeaders {
+        path: Option<PathBuf>,
+        /// Output path for the C header file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
         path: PathBuf,
@@ -178,6 +185,7 @@ fn main() {
         Command::Lsp => lsp(),
         Command::Verify { path } => verify(path.as_deref()),
         Command::Build { path, output, emit_ir, strict } => build(path.as_deref(), output.as_deref(), emit_ir, strict),
+        Command::EmitCHeaders { path, output } => emit_c_headers(path.as_deref(), output.as_deref()),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
@@ -1064,4 +1072,103 @@ fn doc(path: &Path, format: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    if is_sketch(&path) {
+        return Err("cannot generate C headers from .mms sketch file; promote to .mimi first".into());
+    }
+    if !is_production(&path) {
+        return Err(format!(
+            "expected .mimi production file, got {}",
+            path.display()
+        ));
+    }
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    // Load imports if any
+    let merged_file = if !file.imports.is_empty() {
+        let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+        let mut loader = loader::ModuleLoader::new(base_dir);
+        loader.load_main(&path)?;
+        loader.merge_all()
+    } else {
+        file
+    };
+
+    // Type check
+    let check_result = core::check(&merged_file);
+    if let Err(diagnostics) = check_result {
+        eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
+        let use_color = colors_enabled();
+        let src = fs::read_to_string(&path).ok();
+        let src_ref = src.as_deref();
+        for d in &diagnostics {
+            let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
+            if use_color {
+                eprint!("{}", formatted);
+            } else {
+                eprint!("{}", strip_ansi(&formatted));
+            }
+        }
+        return Err("type checking failed".into());
+    }
+
+    // Collect extern functions and type definitions
+    let mut extern_funcs = Vec::new();
+    let mut type_defs = HashMap::new();
+    collect_extern_and_types(&merged_file, &mut extern_funcs, &mut type_defs);
+
+    if extern_funcs.is_empty() {
+        return Err("no extern function declarations found".into());
+    }
+
+    // Generate C header
+    let header = ffi::generate_c_header(&extern_funcs, type_defs)?;
+
+    // Write to file or stdout
+    match output {
+        Some(output_path) => {
+            fs::write(output_path, &header)
+                .map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
+            println!("✓ C header generated: {}", output_path.display());
+        }
+        None => {
+            print!("{}", header);
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_extern_and_types(
+    file: &File,
+    extern_funcs: &mut Vec<ast::ExternFunc>,
+    type_defs: &mut HashMap<String, ast::TypeDef>,
+) {
+    for item in &file.items {
+        match item {
+            Item::ExternBlock(block) => {
+                extern_funcs.extend(block.funcs.iter().cloned());
+            }
+            Item::Type(t) => {
+                type_defs.insert(t.name.clone(), t.clone());
+            }
+            Item::Module(m) => {
+                collect_extern_and_types(
+                    &ast::File {
+                        imports: Vec::new(),
+                        items: m.items.clone(),
+                    },
+                    extern_funcs,
+                    type_defs,
+                );
+            }
+            _ => {}
+        }
+    }
 }

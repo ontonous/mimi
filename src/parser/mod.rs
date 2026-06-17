@@ -292,11 +292,12 @@ impl Parser {
         } else {
             false
         };
-        // Parse optional #[derive(...)] attribute
-        let derives = if self.at(&TokenKind::Hash) && self.pos + 1 < self.tokens.len() && self.tokens[self.pos + 1].kind == TokenKind::LBracket {
+        // Parse optional #[derive(...)] and #[repr(...)] attributes
+        let mut derives = Vec::new();
+        let mut attributes = Vec::new();
+        while self.at(&TokenKind::Hash) && self.pos + 1 < self.tokens.len() && self.tokens[self.pos + 1].kind == TokenKind::LBracket {
             self.advance(); // skip #
             self.advance(); // skip [
-            let mut derives = Vec::new();
             if self.at(&TokenKind::Ident("derive".to_string())) {
                 self.advance(); // skip "derive"
                 self.expect(TokenKind::LParen, "`(`")?;
@@ -308,13 +309,20 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen, "`)`")?;
+            } else if self.at(&TokenKind::Ident("repr".to_string())) {
+                self.advance(); // skip "repr"
+                self.expect(TokenKind::LParen, "`(`")?;
+                let repr_name = self.expect_ident()?;
+                match repr_name.as_str() {
+                    "C" => attributes.push(crate::ast::TypeAttribute::ReprC),
+                    "transparent" => attributes.push(crate::ast::TypeAttribute::ReprTransparent),
+                    _ => { /* unknown repr, ignore */ }
+                }
+                self.expect(TokenKind::RParen, "`)`")?;
             }
             self.expect(TokenKind::RBracket, "`]`")?;
             self.skip_newlines();
-            derives
-        } else {
-            Vec::new()
-        };
+        }
         match self.peek_kind() {
             TokenKind::Comptime => {
                 // comptime func ... — comptime function modifier
@@ -339,7 +347,7 @@ impl Parser {
             }
             TokenKind::Module => Ok(Item::Module(self.parse_module()?)),
             TokenKind::Type => {
-                let mut t = self.parse_type_def(derives)?;
+                let mut t = self.parse_type_def(derives, attributes)?;
                 t.pub_ = pub_;
                 Ok(Item::Type(t))
             }

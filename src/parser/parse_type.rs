@@ -255,7 +255,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_type_def(&mut self, derives: Vec<String>) -> Result<TypeDef, ParseError> {
+    pub(crate) fn parse_type_def(&mut self, derives: Vec<String>, attributes: Vec<crate::ast::TypeAttribute>) -> Result<TypeDef, ParseError> {
         let commitment = self.expect_keyword(TokenKind::Type)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -294,7 +294,7 @@ impl Parser {
                 let variants = self.parse_enum_variants()?;
                 TypeDefKind::Enum(variants)
             };
-            return Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives });
+            return Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives, attributes });
         }
         if self.at(&TokenKind::Eq) {
             self.advance();
@@ -307,6 +307,7 @@ impl Parser {
                 kind: TypeDefKind::Alias(ty),
                 generics,
                 derives,
+                attributes,
             });
         }
         self.expect(TokenKind::LBrace, "`{`")?;
@@ -320,7 +321,7 @@ impl Parser {
         };
         self.skip_newlines();
         self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives })
+        Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives, attributes })
     }
 
     fn lookahead_is_record(&self) -> bool {
@@ -413,6 +414,7 @@ impl Parser {
             kind: TypeDefKind::Newtype(ty),
             generics,
             derives: Vec::new(),
+            attributes: Vec::new(),
         })
     }
 }

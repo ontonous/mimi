@@ -460,6 +460,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }).collect()),
             generics: Vec::new(),
             derives: Vec::new(),
+            attributes: Vec::new(),
         };
         self.type_defs.insert(actor.name.clone(), type_def);
         Ok(())

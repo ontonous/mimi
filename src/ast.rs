@@ -180,6 +180,17 @@ pub struct TypeDef {
     pub kind: TypeDefKind,
     pub generics: Vec<GenericParam>,
     pub derives: Vec<String>,
+    /// Attributes like #[repr(C)], #[repr(transparent)], etc.
+    pub attributes: Vec<TypeAttribute>,
+}
+
+/// Type-level attributes (e.g., #[repr(C)])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeAttribute {
+    /// C-compatible memory layout
+    ReprC,
+    /// Transparent wrapper (same layout as inner type)
+    ReprTransparent,
 }
 
 #[derive(Debug, Clone)]

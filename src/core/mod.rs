@@ -575,6 +575,7 @@ impl<'a> Checker<'a> {
                     }).collect()),
                     generics: Vec::new(),
                     derives: Vec::new(),
+                    attributes: Vec::new(),
                 };
                 self.types.insert(actor.name.clone(), actor_type_def);
 
