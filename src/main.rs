@@ -56,6 +56,9 @@ enum Command {
         /// Enable runtime contract verification
         #[arg(long)]
         verify_contracts: bool,
+        /// Enable FFI contract verification (requires/ensures checking)
+        #[arg(long)]
+        verify_ffi: bool,
         /// Default allocator type: system, arena, or bump
         #[arg(long, default_value = "system")]
         allocator: String,
@@ -166,7 +169,7 @@ fn main() {
     let args = Args::parse();
     let result = match args.cmd {
         Command::Check { path, extract_contracts, strict, verify_rules } => check(path.as_deref(), extract_contracts, strict, verify_rules),
-        Command::Run { path, verify_contracts, allocator, strict } => run(path.as_deref(), verify_contracts, &allocator, strict),
+        Command::Run { path, verify_contracts, verify_ffi, allocator, strict } => run(path.as_deref(), verify_contracts, verify_ffi, &allocator, strict),
         Command::Test { path, allocator, filter, verbose, strict } => test(path.as_deref(), &allocator, filter.as_deref(), verbose, strict),
         Command::Init { name } => init(name.as_deref()),
         Command::Add { name, version, path } => add(&name, version.as_deref(), path.as_deref()),
@@ -480,7 +483,7 @@ fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, verify_rule
     Ok(())
 }
 
-fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str, strict: bool) -> Result<(), String> {
+fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool, allocator: &str, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -524,6 +527,7 @@ fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str, strict: boo
     }
     let mut interp = interp::Interpreter::new(&merged_file);
     interp.verify_contracts = verify_contracts;
+    interp.verify_ffi = verify_ffi;
     interp.default_allocator = match allocator {
         "arena" => interp::AllocatorKind::Arena,
         "bump" => interp::AllocatorKind::Bump,

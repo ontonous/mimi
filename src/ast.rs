@@ -65,6 +65,10 @@ pub struct ExternFunc {
     pub name: String,
     pub params: Vec<ExternParam>,
     pub ret: Option<Type>,
+    /// Precondition: must hold before the C function is called.
+    pub requires: Option<Expr>,
+    /// Postcondition: must hold after the C function returns.
+    pub ensures: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]

@@ -55,6 +55,8 @@ pub struct Interpreter<'a> {
     arena_depth: usize,
     /// Whether to verify contracts at runtime
     pub verify_contracts: bool,
+    /// Whether to verify FFI contracts (requires/ensures) at runtime
+    pub verify_ffi: bool,
     /// Trait definitions: trait_name -> TraitDef
     trait_defs: HashMap<String, TraitDef>,
     /// Trait implementations: type_name -> trait_name -> list of FuncDef methods
@@ -119,6 +121,7 @@ impl<'a> Interpreter<'a> {
             arenas: Vec::new(),
             arena_depth: 0,
             verify_contracts: false,
+            verify_ffi: false,
             trait_defs,
             type_impls,
             extern_funcs,

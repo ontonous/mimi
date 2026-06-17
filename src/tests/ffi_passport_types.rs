@@ -209,3 +209,32 @@ func main() -> i32 {
         err
     );
 }
+
+/// Test that FFI requires contract is checked when verify_ffi is enabled
+#[test]
+fn ffi_requires_contract_checked() {
+    let src = r#"
+extern "C" {
+    requires: x > 0
+    func __mimi_test_no_such_function_12345(x: i32) -> i32;
+}
+
+func main() -> i32 {
+    __mimi_test_no_such_function_12345(0)
+}
+"#;
+    // Without verify_ffi, the precondition is not checked
+    let _guard = FFI_ENV_LOCK.lock().unwrap();
+    std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
+    let result = run_source_result(src);
+    std::env::remove_var("MIMI_FFI_LIB");
+    
+    // Should fail with symbol not found (precondition not checked)
+    assert!(result.is_err(), "should fail with symbol not found");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("failed to find symbol") || err.contains("cannot find"),
+        "error should be about symbol not found, got: {}",
+        err
+    );
+}

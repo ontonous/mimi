@@ -6,7 +6,7 @@
 //! behave identically: argument marshalling, lifetime extension, and return
 //! value translation are driven by the same description.
 
-use crate::ast::{ExternFunc, Type};
+use crate::ast::{ExternFunc, Expr, Type};
 
 /// Contract for one extern function.
 #[derive(Debug, Clone)]
@@ -15,6 +15,10 @@ pub struct FfiContract {
     pub args: Vec<FfiArgContract>,
     /// Contract for the return value.
     pub ret: FfiRetContract,
+    /// Precondition: must hold before the C function is called.
+    pub requires: Option<Expr>,
+    /// Postcondition: must hold after the C function returns.
+    pub ensures: Option<Expr>,
 }
 
 /// How a single argument is translated from a Mimi value to a C ABI argument.
@@ -91,7 +95,12 @@ impl FfiContract {
             .as_ref()
             .map(FfiRetContract::from_type)
             .unwrap_or(FfiRetContract::Unit);
-        Self { args, ret }
+        Self {
+            args,
+            ret,
+            requires: func.requires.clone(),
+            ensures: func.ensures.clone(),
+        }
     }
 }
 

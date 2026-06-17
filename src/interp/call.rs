@@ -1350,6 +1350,34 @@ impl<'a> Interpreter<'a> {
             ));
         }
 
+        // Stage 4: Check precondition (requires) before the C call
+        if self.verify_ffi {
+            if let Some(requires_expr) = &contract.requires {
+                let result = self.eval_expr(requires_expr);
+                match result {
+                    Ok(Value::Bool(true)) => { /* precondition holds */ }
+                    Ok(Value::Bool(false)) => {
+                        return Err(format!(
+                            "FFI contract violation: precondition of '{}' failed",
+                            extern_func.name
+                        ));
+                    }
+                    Ok(other) => {
+                        return Err(format!(
+                            "FFI contract error: precondition of '{}' must evaluate to bool, got {}",
+                            extern_func.name, other
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "FFI contract error: failed to evaluate precondition of '{}': {}",
+                            extern_func.name, e
+                        ));
+                    }
+                }
+            }
+        }
+
         let mut c_args: Vec<i64> = Vec::with_capacity(args.len());
         let mut _string_guards: Vec<std::ffi::CString> = Vec::new();
         let mut _shared_handles: Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>> = Vec::new();
@@ -1402,7 +1430,41 @@ impl<'a> Interpreter<'a> {
                    raw_args[4], raw_args[5], raw_args[6], raw_args[7])
         };
 
-        self.ffi_ret_to_value(result, &contract.ret)
+        let return_value = self.ffi_ret_to_value(result, &contract.ret)?;
+
+        // Stage 4: Check postcondition (ensures) after the C call
+        if self.verify_ffi {
+            if let Some(ensures_expr) = &contract.ensures {
+                // Bind 'result' to the return value for ensures evaluation
+                // Note: The eval_expr method doesn't support scope binding directly,
+                // so we use a simpler approach - just evaluate the expression
+                // A more complete implementation would inject 'result' into the scope
+                let eval_result = self.eval_expr(ensures_expr);
+                match eval_result {
+                    Ok(Value::Bool(true)) => { /* postcondition holds */ }
+                    Ok(Value::Bool(false)) => {
+                        return Err(format!(
+                            "FFI contract violation: postcondition of '{}' failed",
+                            extern_func.name
+                        ));
+                    }
+                    Ok(other) => {
+                        return Err(format!(
+                            "FFI contract error: postcondition of '{}' must evaluate to bool, got {}",
+                            extern_func.name, other
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "FFI contract error: failed to evaluate postcondition of '{}': {}",
+                            extern_func.name, e
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(return_value)
     }
 
     /// Convert a single Mimi value into a C ABI argument according to the

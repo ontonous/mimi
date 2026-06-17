@@ -541,11 +541,27 @@ impl Parser {
             } else {
                 None
             };
+            // Parse optional requires/ensures contracts
+            let mut requires = None;
+            let mut ensures = None;
+            loop {
+                if self.at(&TokenKind::Requires) {
+                    self.advance();
+                    requires = Some(self.parse_expr(0)?);
+                } else if self.at(&TokenKind::Ensures) {
+                    self.advance();
+                    ensures = Some(self.parse_expr(0)?);
+                } else {
+                    break;
+                }
+            }
             self.match_semi();
             funcs.push(ExternFunc {
                 name,
                 params,
                 ret,
+                requires,
+                ensures,
             });
         }
         self.expect(TokenKind::RBrace, "`}`")?;
