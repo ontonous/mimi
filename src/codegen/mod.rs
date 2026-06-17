@@ -32,6 +32,8 @@ pub struct CodeGenerator<'ctx> {
     var_type_names: HashMap<String, String>,
     /// Counter for generating unique spawn wrapper function names
     spawn_counter: u64,
+    /// Strict mode: skip non-locked ($/$$) fragments during compilation
+    pub strict: bool,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -41,7 +43,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0 }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false }
     }
 
     /// Push a new capability scope
@@ -130,6 +132,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         types::mimi_type_to_llvm(self.context, &resolved)
     }
 
+    /// Check if an item is committed ($/$$) in strict mode.
+    /// In loose mode (default), all items pass.
+    /// In strict mode, only items with Locked/StrongLocked commitment compile.
+    fn is_committed(&self, c: &Commitment) -> bool {
+        if !self.strict { return true; }
+        c.is_locked()
+    }
+
+    /// Get the commitment of a top-level item for strict-mode filtering.
+    fn item_commitment(item: &Item) -> Commitment {
+        match item {
+            Item::Func(f) => f.commitment,
+            Item::Type(t) => t.commitment,
+            Item::Actor(a) => a.commitment,
+            Item::Module(m) => m.commitment,
+            _ => Commitment::None,
+        }
+    }
+
     pub fn compile_file(&mut self, file: &File) -> Result<(), String> {
         // First pass: collect type definitions and function definitions
         for item in &file.items {
@@ -168,8 +189,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::ExternBlock(block) => {
                     self.register_extern_block(block)?;
                 }
-                Item::Func(f) if !f.is_comptime => self.compile_func(f)?,
-                Item::Actor(actor) => {
+                Item::Func(f) if !f.is_comptime && self.is_committed(&f.commitment) => {
+                    self.compile_func(f)?;
+                }
+                Item::Actor(actor) if self.is_committed(&actor.commitment) => {
                     self.compile_actor(actor)?;
                 }
                 Item::Module(m) => {
@@ -178,13 +201,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Item::ExternBlock(block) => {
                                 self.register_extern_block(block)?;
                             }
-                            Item::Func(f) if !f.is_comptime => self.compile_func(f)?,
-                            Item::Actor(actor) => {
+                            Item::Func(f) if !f.is_comptime && self.is_committed(&f.commitment) => {
+                                self.compile_func(f)?;
+                            }
+                            Item::Actor(actor) if self.is_committed(&actor.commitment) => {
                                 self.compile_actor(actor)?;
+                            }
+                            Item::Type(t) if self.is_committed(&t.commitment) => {
+                                self.register_type_def(t)?;
                             }
                             _ => {}
                         }
                     }
+                }
+                Item::Type(t) if self.is_committed(&t.commitment) => {
+                    self.register_type_def(t)?;
                 }
                 _ => {}
             }

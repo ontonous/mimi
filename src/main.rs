@@ -58,6 +58,9 @@ enum Command {
         /// Default allocator type: system, arena, or bump
         #[arg(long, default_value = "system")]
         allocator: String,
+        /// Strict mode: only compile $/$$ locked fragments
+        #[arg(long)]
+        strict: bool,
     },
     /// Run test functions (functions named test_*)
     Test {
@@ -71,6 +74,9 @@ enum Command {
         /// Show verbose output for failed tests
         #[arg(long, short)]
         verbose: bool,
+        /// Strict mode: only execute $/$$ locked test functions
+        #[arg(long)]
+        strict: bool,
     },
     /// Initialize a new mimi.toml
     Init {
@@ -110,6 +116,9 @@ enum Command {
         /// Emit LLVM IR instead of compiling
         #[arg(long)]
         emit_ir: bool,
+        /// Strict mode: only compile $/$$ locked fragments
+        #[arg(long)]
+        strict: bool,
     },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
@@ -152,15 +161,15 @@ fn main() {
     let args = Args::parse();
     let result = match args.cmd {
         Command::Check { path, extract_contracts, strict, verify_rules } => check(path.as_deref(), extract_contracts, strict, verify_rules),
-        Command::Run { path, verify_contracts, allocator } => run(path.as_deref(), verify_contracts, &allocator),
-        Command::Test { path, allocator, filter, verbose } => test(path.as_deref(), &allocator, filter.as_deref(), verbose),
+        Command::Run { path, verify_contracts, allocator, strict } => run(path.as_deref(), verify_contracts, &allocator, strict),
+        Command::Test { path, allocator, filter, verbose, strict } => test(path.as_deref(), &allocator, filter.as_deref(), verbose, strict),
         Command::Init { name } => init(name.as_deref()),
         Command::Add { name, version, path } => add(&name, version.as_deref(), path.as_deref()),
         Command::Remove { name } => remove(&name),
         Command::List => list(),
         Command::Lsp => lsp(),
         Command::Verify { path } => verify(path.as_deref()),
-        Command::Build { path, output, emit_ir } => build(path.as_deref(), output.as_deref(), emit_ir),
+        Command::Build { path, output, emit_ir, strict } => build(path.as_deref(), output.as_deref(), emit_ir, strict),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
@@ -465,7 +474,7 @@ fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, verify_rule
     Ok(())
 }
 
-fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str) -> Result<(), String> {
+fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -491,7 +500,8 @@ fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str) -> Result<(
         file
     };
 
-    if let Err(diagnostics) = core::check(&merged_file) {
+    let check_result = if strict { core::check_strict(&merged_file) } else { core::check(&merged_file) };
+    if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
         let use_color = colors_enabled();
         let src = fs::read_to_string(&path).ok();
@@ -534,7 +544,7 @@ fn run(path: Option<&Path>, verify_contracts: bool, allocator: &str) -> Result<(
     }
 }
 
-fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: bool) -> Result<(), String> {
+fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: bool, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -554,7 +564,8 @@ fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: boo
         file
     };
 
-    if let Err(diagnostics) = core::check(&merged_file) {
+    let check_result = if strict { core::check_strict(&merged_file) } else { core::check(&merged_file) };
+    if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
         let use_color = colors_enabled();
         let src = fs::read_to_string(&path).ok();
@@ -573,7 +584,7 @@ fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: boo
     // Find test functions (functions starting with "test_")
     let test_funcs: Vec<String> = merged_file.items.iter().filter_map(|item| {
         match item {
-            Item::Func(f) if f.name.starts_with("test_") => Some(f.name.clone()),
+            Item::Func(f) if f.name.starts_with("test_") && (!strict || f.commitment.is_locked()) => Some(f.name.clone()),
             _ => None,
         }
     }).collect();
@@ -744,7 +755,7 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool) -> Result<(), String> {
+fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -761,7 +772,8 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool) -> Result<()
         file
     };
 
-    if let Err(diagnostics) = core::check(&merged_file) {
+    let check_result = if strict { core::check_strict(&merged_file) } else { core::check(&merged_file) };
+    if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
         let use_color = colors_enabled();
         let src = fs::read_to_string(&path).ok();
@@ -780,6 +792,7 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool) -> Result<()
     let context = inkwell::context::Context::create();
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
     let mut codegen = codegen::CodeGenerator::new(&context, module_name);
+    codegen.strict = strict;
 
     codegen.compile_file(&merged_file)?;
 
