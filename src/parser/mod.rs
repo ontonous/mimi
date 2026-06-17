@@ -25,6 +25,7 @@ impl ParseError {
         }
     }
 
+    #[allow(dead_code)]
     fn with_span(message: impl Into<String>, span: Span) -> Self {
         Self {
             message: message.into(),
@@ -99,12 +100,14 @@ impl Parser {
     }
 
     /// Get the current token's span.
+    #[allow(dead_code)]
     fn current_span(&self) -> Span {
         let tok = self.peek();
         Span::single(tok.line, tok.col)
     }
 
     /// Get a span from start token to current position.
+    #[allow(dead_code)]
     fn span_from(&self, start_line: usize, start_col: usize) -> Span {
         let tok = self.peek();
         Span::new(start_line, start_col, tok.line, tok.col)

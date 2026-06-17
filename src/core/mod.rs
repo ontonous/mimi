@@ -114,6 +114,7 @@ enum BorrowState {
 }
 
 impl BorrowState {
+    #[allow(dead_code)]
     fn is_borrowed(&self) -> bool {
         !matches!(self, BorrowState::Unborrowed)
     }

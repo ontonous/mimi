@@ -805,7 +805,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        let mut last_val: BasicValueEnum = self.context.i64_type().const_int(0, false).into();
+        let last_val: BasicValueEnum = self.context.i64_type().const_int(0, false).into();
         self.compile_block(&func.body, &mut vars)?;
 
         self.check_unconsumed_caps()?;
@@ -2060,16 +2060,19 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_to_object(&self, output_path: &Path) -> Result<(), String> {
         Target::initialize_native(&InitializationConfig::default())
             .map_err(|e| format!("failed to initialize target: {}", e))?;
-        let target = Target::from_name("x86-64")
-            .ok_or("failed to find x86-64 target")?;
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple)
+            .map_err(|e| format!("failed to find target for triple '{}': {}", triple, e))?;
+        let cpu = TargetMachine::get_host_cpu_name().to_string();
+        let features = TargetMachine::get_host_cpu_features().to_string();
         let tm = target.create_target_machine(
-            &TargetMachine::get_default_triple(),
-            "x86-64",
-            TargetMachine::get_host_cpu_features().to_string().as_str(),
+            &triple,
+            &cpu,
+            &features,
             OptimizationLevel::Aggressive,
             RelocMode::Default,
             CodeModel::Default,
-        ).ok_or("failed to create target machine")?;
+        ).ok_or_else(|| format!("failed to create target machine for triple '{}'", triple))?;
 
         tm.write_to_file(&self.module, inkwell::targets::FileType::Object, output_path)
             .map_err(|e| format!("failed to write object file: {}", e))

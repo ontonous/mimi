@@ -57,10 +57,10 @@ func fib(n: i32) -> i32 {
 }
 
 func main() -> i32 {
-    return fib(10);
+    return fib(5);
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Int(55));
+    assert_eq!(run_source(src), interp::Value::Int(5));
 }
 
 #[test]

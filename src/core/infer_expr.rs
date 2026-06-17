@@ -118,7 +118,7 @@ impl<'a> Checker<'a> {
                                 }
                                 // Check enum variant access (e.g., TokenKind::Func)
                                 if let TypeDefKind::Enum(variants) = &tdef.kind {
-                                    if let Some(v) = variants.iter().find(|v| v.name == *method_name) {
+                                    if variants.iter().any(|v| v.name == *method_name) {
                                         // Enum variant access — return the enum type
                                         return Type::Name(type_name.clone(), vec![]);
                                     }

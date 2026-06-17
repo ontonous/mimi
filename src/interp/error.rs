@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
 /// A structured interpreter error with context information.
