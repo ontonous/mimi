@@ -1508,3 +1508,49 @@ fn codegen_stdlib_loader_roundtrip() {
     assert!(codegen.compile_file(&merged).is_ok(), "mymath.mimi should compile");
     std::env::remove_var("MIMI_STDLIB");
 }
+
+// ===================== For-Loop List Iteration Tests =====================
+
+#[test]
+fn codegen_for_list_parameter() {
+    // Test for x in list where list is a function parameter (opaque i64 pointer)
+    assert_compiles(r#"
+        func sum(xs: List<i32>) -> i32 {
+            let mut total = 0
+            for x in xs {
+                total = total + x
+            }
+            total
+        }
+        func main() -> i32 { sum([1, 2, 3]) }
+    "#);
+}
+
+#[test]
+fn codegen_for_list_inline() {
+    // Test for x in list with inline literal
+    assert_compiles(r#"
+        func main() -> i32 {
+            let mut total = 0
+            for x in [1, 2, 3] {
+                total = total + x
+            }
+            total
+        }
+    "#);
+}
+
+#[test]
+fn codegen_for_list_empty() {
+    // Test for x in [] (empty list)
+    assert_compiles(r#"
+        func main() -> i32 {
+            let xs: List<i32> = []
+            let mut total = 0
+            for x in xs {
+                total = total + x
+            }
+            total
+        }
+    "#);
+}

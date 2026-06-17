@@ -1034,8 +1034,17 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                         self.builder.position_at_end(merge_bb);
                     } else {
+                        // Handle list iteration: accept both PointerValue (inline list)
+                        // and IntValue (list parameter passed as opaque i64 pointer)
+                        let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                         let list_ptr = match iterable_val {
                             BasicValueEnum::PointerValue(pv) => pv,
+                            BasicValueEnum::IntValue(iv) => {
+                                // Cast i64 (opaque pointer) to struct pointer
+                                let int_ptr = self.builder.build_int_to_ptr(iv, i8_ptr_ty, "list_as_ptr")
+                                    .map_err(|e| format!("int_to_ptr error: {}", e))?;
+                                int_ptr
+                            }
                             _ => return Err("for loop requires a list or range".into()),
                         };
 
@@ -3183,6 +3192,169 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_store(len_gep, self.context.i64_type().const_int(1, false))
                     .map_err(|e| format!("store error: {}", e))?;
                 Ok(str_alloca.into())
+            }
+            "str_contains" => {
+                if args.len() != 2 { return Err("str_contains expects 2 arguments".into()); }
+                let s_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_contains: first arg must be string".into()),
+                };
+                let sub_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_contains: second arg must be string".into()),
+                };
+                // strstr(s, sub) -> i8* (or NULL if not found)
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let strstr_fn = self.module.get_function("strstr")
+                    .or_else(|| {
+                        let ty = i8_ptr.fn_type(&[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        ], false);
+                        Some(self.module.add_function("strstr", ty, Some(inkwell::module::Linkage::External)))
+                    }).unwrap();
+                let result = self.builder.build_call(strstr_fn, &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(sub_ptr),
+                ], "strstr_call")
+                    .map_err(|e| format!("strstr error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strstr returned void")?;
+                let cmp = self.builder.build_is_not_null(result.into_pointer_value(), "found")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                let ext: BasicValueEnum = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "result")
+                    .map_err(|e| format!("zext error: {}", e))?.into();
+                Ok(ext)
+            }
+            "str_starts_with" => {
+                if args.len() != 2 { return Err("str_starts_with expects 2 arguments".into()); }
+                let s_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_starts_with: first arg must be string".into()),
+                };
+                let prefix_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_starts_with: second arg must be string".into()),
+                };
+                let i8_ty = self.context.i8_type();
+                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                // Call C helper: strncmp(s, prefix, strlen(prefix)) == 0
+                let strlen_fn = self.module.get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let prefix_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(prefix_ptr),
+                ], "prefix_len")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                let strncmp_fn = self.module.get_function("strncmp")
+                    .or_else(|| {
+                        let ty = self.context.i32_type().fn_type(&[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                        ], false);
+                        Some(self.module.add_function("strncmp", ty, Some(inkwell::module::Linkage::External)))
+                    }).unwrap();
+                let cmp_result = self.builder.build_call(strncmp_fn, &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(prefix_ptr),
+                    BasicMetadataValueEnum::IntValue(prefix_len),
+                ], "strncmp_call")
+                    .map_err(|e| format!("strncmp error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strncmp returned void")?;
+                let zero = self.context.i32_type().const_int(0, false);
+                let eq = self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "starts_with")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                let ext: BasicValueEnum = self.builder.build_int_z_extend(eq, self.context.i64_type(), "result")
+                    .map_err(|e| format!("zext error: {}", e))?.into();
+                Ok(ext)
+            }
+            "str_ends_with" => {
+                if args.len() != 2 { return Err("str_ends_with expects 2 arguments".into()); }
+                let s_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_ends_with: first arg must be string".into()),
+                };
+                let suffix_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_ends_with: second arg must be string".into()),
+                };
+                let i8_ty = self.context.i8_type();
+                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i64_ty = self.context.i64_type();
+                // s_len = strlen(s), suffix_len = strlen(suffix)
+                let strlen_fn = self.module.get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let s_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                ], "s_len")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                let suffix_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(suffix_ptr),
+                ], "suffix_len")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                // If suffix_len > s_len, return false
+                let gt = self.builder.build_int_compare(inkwell::IntPredicate::SGT, suffix_len, s_len, "gt")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let check_bb = self.context.append_basic_block(function, "check_suffix");
+                let false_bb = self.context.append_basic_block(function, "suffix_false");
+                let merge_bb = self.context.append_basic_block(function, "suffix_done");
+                self.builder.build_conditional_branch(gt, false_bb, check_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // Compare s + (s_len - suffix_len) with suffix
+                self.builder.position_at_end(check_bb);
+                let start_pos = self.builder.build_int_sub(s_len, suffix_len, "start_pos")
+                    .map_err(|e| format!("sub error: {}", e))?;
+                let s_suffix_ptr = unsafe {
+                    self.builder.build_gep(i8_ty, s_ptr, &[start_pos], "s_suffix")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let strncmp_fn = self.module.get_function("strncmp")
+                    .or_else(|| {
+                        let ty = self.context.i32_type().fn_type(&[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                        ], false);
+                        Some(self.module.add_function("strncmp", ty, Some(inkwell::module::Linkage::External)))
+                    }).unwrap();
+                let cmp_result = self.builder.build_call(strncmp_fn, &[
+                    BasicMetadataValueEnum::PointerValue(s_suffix_ptr),
+                    BasicMetadataValueEnum::PointerValue(suffix_ptr),
+                    BasicMetadataValueEnum::IntValue(suffix_len),
+                ], "strncmp_call")
+                    .map_err(|e| format!("strncmp error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strncmp returned void")?;
+                let zero = self.context.i32_type().const_int(0, false);
+                let eq = self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "ends_with")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                let eq_ext = self.builder.build_int_z_extend(eq, i64_ty, "ext")
+                    .map_err(|e| format!("zext error: {}", e))?;
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // False path
+                self.builder.position_at_end(false_bb);
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // Merge
+                self.builder.position_at_end(merge_bb);
+                let phi = self.builder.build_phi(i64_ty, "result")
+                    .map_err(|e| format!("phi error: {}", e))?;
+                phi.add_incoming(&[
+                    (&self.context.i64_type().const_int(0, false), false_bb),
+                    (&eq_ext, check_bb),
+                ]);
+                Ok(phi.as_basic_value().into())
             }
             "lexer" | "parse" => {
                 // lexer/parse are runtime-only functions - generate a call to external runtime
