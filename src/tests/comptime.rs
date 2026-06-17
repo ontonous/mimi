@@ -234,3 +234,53 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(15));
 }
+
+// ===================== Comptime Function Tests =====================
+
+#[test]
+fn comptime_function_evaluation() {
+    let src = r#"
+comptime func get_magic_number() -> i32 {
+    42
+}
+
+func main() -> i32 {
+    get_magic_number()
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn comptime_function_used_in_runtime() {
+    let src = r#"
+comptime func get_size() -> i32 {
+    10
+}
+
+func main() -> i32 {
+    let size = get_size()
+    size * 2
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(20));
+}
+
+#[test]
+fn comptime_function_with_computation() {
+    let src = r#"
+comptime func compute() -> i32 {
+    let x = 5
+    let y = 10
+    x + y
+}
+
+func main() -> i32 {
+    compute()
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(15));
+}
