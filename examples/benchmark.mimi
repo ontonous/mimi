@@ -1,0 +1,60 @@
+#!/usr/bin/env mimi
+// Basic benchmark suite for Mimi interpreter
+
+func fib(n: i32) -> i32 {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+func factorial(n: i32) -> i32 {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+func sum_list(n: i32) -> i32 {
+    let total = 0
+    for i in range(0, n) {
+        total = total + i
+    }
+    total
+}
+
+func string_concat(n: i32) -> string {
+    let result = ""
+    for i in range(0, n) {
+        result = result + "a"
+    }
+    result
+}
+
+func main() -> i32 {
+    println("=== Mimi Benchmark Suite ===")
+    println("")
+    
+    // Fibonacci benchmark
+    let start = 0
+    let result = fib(30)
+    println("fib(30) = " + to_string(result))
+    
+    // Factorial benchmark
+    let fact_result = factorial(20)
+    println("factorial(20) = " + to_string(fact_result))
+    
+    // List summation benchmark
+    let sum = sum_list(10000)
+    println("sum_list(10000) = " + to_string(sum))
+    
+    // String concatenation benchmark
+    let s = string_concat(1000)
+    println("string_concat(1000) length = " + to_string(len(s)))
+    
+    println("")
+    println("=== Benchmark Complete ===")
+    0
+}
