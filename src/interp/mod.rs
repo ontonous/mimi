@@ -410,6 +410,7 @@ impl<'a> Interpreter<'a> {
             Type::CShared(inner) => format!("c_shared {}", self.resolve_type_name(inner)),
             Type::CBorrow(inner) => format!("c_borrow {}", self.resolve_type_name(inner)),
             Type::CBorrowMut(inner) => format!("c_borrow_mut {}", self.resolve_type_name(inner)),
+            Type::RawString => "raw_string".into(),
             Type::Newtype(name, _) => name.clone(),
             Type::Nothing => "nothing".into(),
             Type::Allocator => "Allocator".into(),

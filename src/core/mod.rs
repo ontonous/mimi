@@ -702,7 +702,7 @@ impl<'a> Checker<'a> {
             ),
             Type::Cap(_) | Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_)
                 | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
-                | Type::RawPtr(_) | Type::RawPtrMut(_) | Type::Allocator => ty.clone(),
+                | Type::RawPtr(_) | Type::RawPtrMut(_) | Type::RawString | Type::Allocator => ty.clone(),
             Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(self.resolve_type(inner))),
             Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve_type(inner))),
@@ -721,6 +721,8 @@ impl<'a> Checker<'a> {
             Type::Cap(_) => true,
             // Raw pointers and FFI passport types
             Type::RawPtr(_) | Type::RawPtrMut(_) | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => true,
+            // Raw string ownership transfer
+            Type::RawString => true,
             // References are not allowed directly; must use c_borrow / c_borrow_mut
             Type::Ref(_) | Type::RefMut(_) => false,
             // Shared ownership is not allowed directly; must use c_shared
@@ -927,6 +929,7 @@ impl<'a> Checker<'a> {
                 | Type::CShared(inner) | Type::CBorrow(inner) | Type::CBorrowMut(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
+            Type::RawString => { /* no inner type to check */ }
             Type::Result(ok, err) => {
                 self.check_type_well_formed_inner(ok, context, allow_passport);
                 self.check_type_well_formed_inner(err, context, allow_passport);
@@ -967,7 +970,8 @@ impl<'a> Checker<'a> {
     fn type_contains_passport(ty: &Type) -> bool {
         match ty {
             Type::RawPtr(_) | Type::RawPtrMut(_)
-                | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => true,
+                | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
+                | Type::RawString => true,
             Type::Name(_, args) => args.iter().any(|a| Self::type_contains_passport(a)),
             Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner)
                 | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
@@ -1484,7 +1488,7 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
         Type::CBorrow(inner) => Type::CBorrow(Box::new(subst_type_params(inner, generics, type_map))),
         Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(subst_type_params(inner, generics, type_map))),
         Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(subst_type_params(inner, generics, type_map))),
-        Type::Cap(_) | Type::Nothing | Type::Allocator => ty.clone(),
+        Type::Cap(_) | Type::Nothing | Type::RawString | Type::Allocator => ty.clone(),
         Type::Array(inner, size) => Type::Array(Box::new(subst_type_params(inner, generics, type_map)), *size),
         Type::Slice(inner) => Type::Slice(Box::new(subst_type_params(inner, generics, type_map))),
         Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
@@ -1569,5 +1573,6 @@ pub fn fmt_type(t: &Type) -> String {
         Type::CShared(inner) => format!("c_shared {}", fmt_type(inner)),
         Type::CBorrow(inner) => format!("c_borrow {}", fmt_type(inner)),
         Type::CBorrowMut(inner) => format!("c_borrow_mut {}", fmt_type(inner)),
+        Type::RawString => "raw_string".to_string(),
     }
 }

@@ -132,6 +132,10 @@ impl Parser {
                 let inner = self.parse_type()?;
                 Ok(Type::CBorrowMut(Box::new(inner)))
             }
+            TokenKind::RawString => {
+                self.advance();
+                Ok(Type::RawString)
+            }
             TokenKind::Star => {
                 self.advance();
                 let mut_ = self.at(&TokenKind::Mut);

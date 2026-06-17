@@ -150,7 +150,8 @@ func main() -> i32 {
 }
 
 #[test]
-fn cap_not_allowed_in_ffi_yet() {
+fn cap_allowed_in_ffi_with_cap_table() {
+    // After STAGE2, caps are registered in the CapTable and passed as i64 handles
     let src = r#"
 cap FileReadCap;
 
@@ -163,7 +164,8 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(c)
 }
 "#;
-    expect_ffi_safety_error(src, "cap");
+    // Cap is now allowed - the function just doesn't exist, so we get symbol-not-found
+    expect_symbol_not_found(src);
 }
 
 #[test]
@@ -405,6 +407,34 @@ impl PtrTrait for MyType {
     func get(x: c_borrow i32) -> i32 {
         x
     }
+}
+
+func main() -> i32 {
+    0
+}
+"#;
+    expect_type_error(src, "FFI passport type");
+}
+
+#[test]
+fn raw_string_rejected_in_function_signature() {
+    let src = r#"
+func bad(s: raw_string) -> i32 {
+    0
+}
+
+func main() -> i32 {
+    0
+}
+"#;
+    expect_type_error(src, "FFI passport type");
+}
+
+#[test]
+fn raw_string_rejected_in_function_return() {
+    let src = r#"
+func bad() -> raw_string {
+    "hello"
 }
 
 func main() -> i32 {

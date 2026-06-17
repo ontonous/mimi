@@ -27,6 +27,8 @@ pub enum FfiArgContract {
     Float,
     /// A Mimi `string` passed as a temporary borrowed `char*`.
     StringBorrow,
+    /// A Mimi `string` whose ownership is transferred to C (C must free).
+    StringTransfer,
     /// A linear capability passed as an opaque handle.
     Cap,
     /// Raw immutable pointer `*T`.
@@ -109,6 +111,7 @@ impl FfiArgContract {
             Type::CShared(inner) => FfiArgContract::CShared(inner.clone()),
             Type::CBorrow(inner) => FfiArgContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiArgContract::CBorrowMut(inner.clone()),
+            Type::RawString => FfiArgContract::StringTransfer,
             other => FfiArgContract::Unsupported(format!("{:?}", other)),
         }
     }
@@ -129,6 +132,7 @@ impl FfiRetContract {
             Type::CShared(inner) => FfiRetContract::CShared(inner.clone()),
             Type::CBorrow(inner) => FfiRetContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiRetContract::CBorrowMut(inner.clone()),
+            Type::RawString => FfiRetContract::String,
             other => FfiRetContract::Unsupported(format!("{:?}", other)),
         }
     }

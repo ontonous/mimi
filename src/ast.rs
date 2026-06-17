@@ -470,6 +470,8 @@ pub enum Type {
     CBorrow(Box<Type>),
     /// C-compatible mutable borrow: c_borrow_mut T
     CBorrowMut(Box<Type>),
+    /// Raw string ownership transfer: raw string (C must free via mimi_string_free_raw)
+    RawString,
 }
 
 /// Kind of allocator for alloc blocks

@@ -41,6 +41,10 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
             | Type::RawPtr(_) | Type::RawPtrMut(_) =>
             Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default()))),
+        Type::RawString => {
+            // raw string is passed as *mut c_char
+            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
+        }
         Type::Cap(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Newtype(_, inner) => mimi_type_to_llvm(ctx, inner),
         Type::Allocator => Some(BasicTypeEnum::IntType(ctx.i64_type())),

@@ -49,6 +49,7 @@ pub(crate) mod manifest;
 pub(crate) mod lsp;
 pub(crate) mod extern_calls;
 pub(crate) mod ffi_safety;
+pub(crate) mod ffi_passport_types;
 pub(crate) mod actor_concurrent;
 pub(crate) mod derive_methods;
 pub(crate) mod builtin_extended;

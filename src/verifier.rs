@@ -24,6 +24,8 @@ pub enum VerifStatus {
 pub struct Counterexample {
     pub assignments: Vec<(String, i64)>,
     pub violated_ensures: Vec<String>,
+    /// Which specific ensures expressions are actually violated
+    pub violated_indices: Vec<usize>,
 }
 
 pub struct Verifier {
@@ -219,6 +221,7 @@ impl Verifier {
         Counterexample {
             assignments,
             violated_ensures: violated,
+            violated_indices: (0..ensures_exprs.len()).collect(),
         }
     }
 

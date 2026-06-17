@@ -1,5 +1,5 @@
 use super::*;
-use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract};
+use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract, CAP_TABLE, SHARED_TABLE};
 
 impl<'a> Interpreter<'a> {
     pub(crate) fn call_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, String> {
@@ -1352,8 +1352,18 @@ impl<'a> Interpreter<'a> {
 
         let mut c_args: Vec<i64> = Vec::with_capacity(args.len());
         let mut _string_guards: Vec<std::ffi::CString> = Vec::new();
+        let mut _shared_handles: Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>> = Vec::new();
+        let mut _borrow_guards_read: Vec<Box<dyn std::any::Any>> = Vec::new();
+        let mut _borrow_guards_write: Vec<Box<dyn std::any::Any>> = Vec::new();
         for (arg, arg_contract) in args.iter().zip(&contract.args) {
-            let c_arg = self.value_to_ffi_arg(arg, arg_contract, &mut _string_guards)?;
+            let c_arg = self.value_to_ffi_arg(
+                arg,
+                arg_contract,
+                &mut _string_guards,
+                &mut _shared_handles,
+                &mut _borrow_guards_read,
+                &mut _borrow_guards_write,
+            )?;
             c_args.push(c_arg);
         }
 
@@ -1402,6 +1412,9 @@ impl<'a> Interpreter<'a> {
         arg: &Value,
         contract: &FfiArgContract,
         string_guards: &mut Vec<std::ffi::CString>,
+        _shared_handles: &mut Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>>,
+        _borrow_guards_read: &mut Vec<Box<dyn std::any::Any>>,
+        _borrow_guards_write: &mut Vec<Box<dyn std::any::Any>>,
     ) -> Result<i64, String> {
         match contract {
             FfiArgContract::Int => match arg {
@@ -1433,12 +1446,27 @@ impl<'a> Interpreter<'a> {
                     other
                 )),
             },
+            FfiArgContract::StringTransfer => match arg {
+                Value::String(s) => {
+                    // Transfer ownership: create a CString that C must free
+                    let c_str = std::ffi::CString::new(s.as_str())
+                        .map_err(|e| format!("failed to convert string to C string: {}", e))?;
+                    // Convert to raw pointer - C is now responsible for freeing
+                    let ptr = c_str.into_raw() as i64;
+                    Ok(ptr)
+                }
+                other => Err(format!(
+                    "FFI wrapper: expected string argument for ownership transfer, found {}",
+                    other
+                )),
+            },
             FfiArgContract::Cap => match arg {
-                Value::Cap(_) => Err(
-                    "FFI safety: cap cannot be passed directly to extern functions yet. \
-                     Cap cross-boundary authentication (via a runtime CapTable) is planned for Phase 3."
-                        .to_string()
-                ),
+                Value::Cap(names) => {
+                    // Register the cap in the CapTable and return its ID
+                    let cap_name = names.first().unwrap_or(&String::new()).clone();
+                    let cap_id = CAP_TABLE.register(&cap_name);
+                    Ok(cap_id)
+                }
                 other => Err(format!(
                     "FFI safety: expected cap argument, found {}",
                     other
@@ -1450,22 +1478,183 @@ impl<'a> Interpreter<'a> {
                 // Mimi value categories.
                 Err(self.unsupported_ffi_arg_error(arg, ty))
             }
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => match arg {
-                // Passport pointers are currently represented as opaque integers.
-                // A real runtime pointer type will be introduced in Phase 3.
+            FfiArgContract::RawPtr(_) => match arg {
+                // *T: immutable raw pointer
+                Value::Shared(arc) => {
+                    // Create a handle to keep the shared value alive
+                    let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                    // Get a pointer to the inner value
+                    if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        let ptr = handle.as_ptr() as *const () as i64;
+                        Ok(ptr)
+                    } else {
+                        Err("FFI wrapper: failed to create shared handle for raw pointer".to_string())
+                    }
+                }
+                Value::Ref(rc) => {
+                    let borrow = rc.borrow();
+                    let ptr = &*borrow as *const Value as *const () as i64;
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
                 Value::Int(n) => Ok(*n),
                 other => Err(format!(
-                    "FFI wrapper: passport pointer argument must be an opaque integer handle, found {}",
+                    "FFI wrapper: raw pointer argument must be a shared value, reference, or opaque handle, found {}",
                     other
                 )),
             },
-            FfiArgContract::CShared(_)
-            | FfiArgContract::CBorrow(_)
-            | FfiArgContract::CBorrowMut(_) => match arg {
-                // Passport boundary handles are currently represented as opaque integers.
+            FfiArgContract::RawPtrMut(_) => match arg {
+                // *mut T: mutable raw pointer
+                Value::Shared(arc) => {
+                    // Create a handle to keep the shared value alive
+                    let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                    // Get a mutable pointer to the inner value
+                    if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        let ptr = handle.as_mut_ptr() as *mut () as i64;
+                        Ok(ptr)
+                    } else {
+                        Err("FFI wrapper: failed to create shared handle for mutable raw pointer".to_string())
+                    }
+                }
+                Value::RefMut(rc) => {
+                    let mut borrow = rc.borrow_mut();
+                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
                 Value::Int(n) => Ok(*n),
                 other => Err(format!(
-                    "FFI wrapper: passport boundary handle must be an opaque integer handle, found {}",
+                    "FFI wrapper: mutable raw pointer argument must be a shared value, mutable reference, or opaque handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CShared(_) => match arg {
+                // c_shared T: create a handle in SHARED_TABLE and return the handle ID
+                Value::Shared(arc) => {
+                    let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                    Ok(handle_id)
+                }
+                Value::LocalShared(rc) => {
+                    // Convert LocalShared to Shared for handle creation
+                    // Note: This is a limitation - LocalShared cannot be directly used with SharedHandleTable
+                    // For now, return an error
+                    Err("FFI wrapper: c_shared does not support local_shared values yet. Use shared instead.".to_string())
+                }
+                Value::Int(n) => {
+                    // Already an opaque handle (from previous conversion)
+                    Ok(*n)
+                }
+                other => Err(format!(
+                    "FFI wrapper: c_shared argument must be a shared value or opaque handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CBorrow(_) => match arg {
+                // c_borrow T: create a handle and return a pointer to the inner value
+                Value::Shared(arc) => {
+                    // Create a handle to keep the shared value alive
+                    let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                    // Get a pointer to the inner value
+                    if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        let ptr = handle.as_ptr() as *const () as i64;
+                        Ok(ptr)
+                    } else {
+                        Err("FFI wrapper: failed to create shared handle for c_borrow".to_string())
+                    }
+                }
+                Value::Ref(rc) => {
+                    let borrow = rc.borrow();
+                    let ptr = &*borrow as *const Value as *const () as i64;
+                    // Leak the borrow (temporary solution)
+                    // TODO: Implement proper borrow lifecycle management
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
+                Value::Int(n) => {
+                    // Already an opaque handle
+                    Ok(*n)
+                }
+                other => Err(format!(
+                    "FFI wrapper: c_borrow argument must be a shared value, reference, or opaque handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CBorrowMut(_) => match arg {
+                // c_borrow_mut T: create a handle and return a mutable pointer to the inner value
+                Value::Shared(arc) => {
+                    // Create a handle to keep the shared value alive
+                    let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                    // Get a mutable pointer to the inner value
+                    if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        let ptr = handle.as_mut_ptr() as *mut () as i64;
+                        Ok(ptr)
+                    } else {
+                        Err("FFI wrapper: failed to create shared handle for c_borrow_mut".to_string())
+                    }
+                }
+                Value::RefMut(rc) => {
+                    let mut borrow = rc.borrow_mut();
+                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
+                    // Leak the borrow (temporary solution)
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
+                Value::Int(n) => {
+                    // Already an opaque handle
+                    Ok(*n)
+                }
+                other => Err(format!(
+                    "FFI wrapper: c_borrow_mut argument must be a shared value, mutable reference, or opaque handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CBorrow(_) => match arg {
+                // c_borrow T: pass pointer to inner value
+                Value::Shared(arc) => {
+                    // Acquire read lock to get pointer to inner value
+                    let guard = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
+                    let ptr = &*guard as *const Value as *const () as i64;
+                    // TODO: Properly manage guard lifecycle instead of leaking
+                    std::mem::forget(guard);
+                    Ok(ptr)
+                }
+                Value::Ref(rc) => {
+                    let borrow = rc.borrow();
+                    let ptr = &*borrow as *const Value as *const () as i64;
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
+                Value::Int(n) => {
+                    // Already an opaque handle
+                    Ok(*n)
+                }
+                other => Err(format!(
+                    "FFI wrapper: c_borrow argument must be a shared value, reference, or opaque handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CBorrowMut(_) => match arg {
+                // c_borrow_mut T: pass mutable pointer to inner value
+                Value::Shared(arc) => {
+                    // Acquire write lock to get mutable pointer to inner value
+                    let mut guard = arc.write().map_err(|e| format!("shared write lock failed: {}", e))?;
+                    let ptr = &mut *guard as *mut Value as *mut () as i64;
+                    // TODO: Properly manage guard lifecycle instead of leaking
+                    std::mem::forget(guard);
+                    Ok(ptr)
+                }
+                Value::RefMut(rc) => {
+                    let mut borrow = rc.borrow_mut();
+                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
+                    std::mem::forget(borrow);
+                    Ok(ptr)
+                }
+                Value::Int(n) => {
+                    // Already an opaque handle
+                    Ok(*n)
+                }
+                other => Err(format!(
+                    "FFI wrapper: c_borrow_mut argument must be a shared value, mutable reference, or opaque handle, found {}",
                     other
                 )),
             },
