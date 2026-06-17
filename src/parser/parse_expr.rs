@@ -619,8 +619,7 @@ fn is_keyword_token(kind: &TokenKind) -> bool {
         TokenKind::Ref | TokenKind::Shared | TokenKind::LocalShared | TokenKind::Weak |
         TokenKind::Arena | TokenKind::Cap | TokenKind::Trait | TokenKind::Impl |
         TokenKind::Where | TokenKind::Extern | TokenKind::Use | TokenKind::Pub |
-        TokenKind::Drop | TokenKind::Steps | TokenKind::Parasteps | TokenKind::Flow |
-        TokenKind::Ui | TokenKind::Binds | TokenKind::On | TokenKind::Failure |
+        TokenKind::Drop | TokenKind::Steps | TokenKind::Parasteps | TokenKind::Failure |
         TokenKind::Requires | TokenKind::Ensures | TokenKind::Math | TokenKind::Desc |
         TokenKind::Rule | TokenKind::Mms | TokenKind::With | TokenKind::And |
         TokenKind::Or | TokenKind::Not | TokenKind::I32 | TokenKind::I64 |

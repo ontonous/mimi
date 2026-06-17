@@ -68,7 +68,7 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Parasteps(body))
             }
-            TokenKind::On => {
+            TokenKind::Ident(s) if s == "on" => {
                 self.advance();
                 self.expect(TokenKind::Failure, "`failure`")?;
                 self.skip_newlines();
