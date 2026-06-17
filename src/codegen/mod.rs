@@ -364,7 +364,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicTypeEnum::ArrayType(t) => t.fn_type(&param_tys, false),
                 _ => self.context.i64_type().fn_type(&param_tys, false),
             };
-            self.module.add_function(&ef.name, fn_type, Some(inkwell::module::Linkage::External));
+            // Register the real extern symbol under an internal name so that
+            // user code cannot call it directly.  We then generate a wrapper
+            // function with the original name that performs boundary
+            // marshalling and (in later phases) cap/lifetime checks.
+            let extern_name = format!("__mimi_extern_{}", ef.name);
+            let extern_fn = self.module.add_function(&extern_name, fn_type, Some(inkwell::module::Linkage::External));
+            let wrapper_fn = self.module.add_function(&ef.name, fn_type, Some(inkwell::module::Linkage::Internal));
+
+            let entry = self.context.append_basic_block(wrapper_fn, "entry");
+            let previous_block = self.builder.get_insert_block();
+            self.builder.position_at_end(entry);
+
+            let wrapper_args: Vec<BasicMetadataValueEnum<'ctx>> = wrapper_fn
+                .get_param_iter()
+                .map(|p| match p {
+                    BasicValueEnum::IntValue(v) => BasicMetadataValueEnum::IntValue(v),
+                    BasicValueEnum::FloatValue(v) => BasicMetadataValueEnum::FloatValue(v),
+                    BasicValueEnum::PointerValue(v) => BasicMetadataValueEnum::PointerValue(v),
+                    BasicValueEnum::StructValue(v) => BasicMetadataValueEnum::StructValue(v),
+                    BasicValueEnum::ArrayValue(v) => BasicMetadataValueEnum::ArrayValue(v),
+                    BasicValueEnum::VectorValue(v) => BasicMetadataValueEnum::VectorValue(v),
+                })
+                .collect();
+
+            let call = self.builder
+                .build_call(extern_fn, &wrapper_args, "extern_call")
+                .map_err(|e| format!("failed to build extern wrapper call: {}", e))?;
+
+            if fn_type.get_return_type().is_some() {
+                let ret = call.try_as_basic_value().left().ok_or_else(|| {
+                    "extern wrapper call did not return a value".to_string()
+                })?;
+                self.builder.build_return(Some(&ret))
+                    .map_err(|e| format!("failed to build extern wrapper return: {}", e))?;
+            } else {
+                self.builder.build_return(None)
+                    .map_err(|e| format!("failed to build extern wrapper return: {}", e))?;
+            }
+
+            if let Some(block) = previous_block {
+                self.builder.position_at_end(block);
+            }
         }
         Ok(())
     }

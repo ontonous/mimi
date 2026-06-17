@@ -164,6 +164,8 @@ struct Checker<'a> {
     module_path: Vec<String>,
     /// Track loop nesting depth for break/continue validation
     loop_depth: usize,
+    /// Track generic parameters in scope while checking signatures
+    generic_scope: Vec<String>,
 }
 
 mod check_stmt;
@@ -196,6 +198,7 @@ impl<'a> Checker<'a> {
             use_imports: Vec::new(),
             module_path: Vec::new(),
             loop_depth: 0,
+            generic_scope: Vec::new(),
         }
     }
 
@@ -471,12 +474,19 @@ impl<'a> Checker<'a> {
                     self.emit_code(crate::diagnostic::codes::E0402, format!("duplicate function definition '{}'", qualified_name));
                     return;
                 }
+                let generic_names: Vec<String> = f.generics.iter().map(|g| g.name.clone()).collect();
+                self.generic_scope.extend(generic_names.iter().cloned());
                 let params: Vec<Type> = f.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
                 let ret = f
                     .ret
                     .as_ref()
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                for (i, p) in f.params.iter().enumerate() {
+                    self.check_type_well_formed(&params[i], &format!("parameter '{}' of function '{}'", p.name, qualified_name));
+                }
+                self.check_type_well_formed(&ret, &format!("return type of function '{}'", qualified_name));
+                self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                 self.funcs.insert(qualified_name.clone(), (params, ret));
                 // Store generic parameters if present
                 if !f.generics.is_empty() {
@@ -499,9 +509,12 @@ impl<'a> Checker<'a> {
                     self.emit_code(crate::diagnostic::codes::E0402, format!("duplicate type definition '{}'", t.name));
                     return;
                 }
+                let generic_names: Vec<String> = t.generics.iter().map(|g| g.name.clone()).collect();
+                self.generic_scope.extend(generic_names.iter().cloned());
                 match &t.kind {
                     TypeDefKind::Alias(ty) => {
                         let resolved = self.resolve_type(ty);
+                        self.check_type_well_formed(&resolved, &format!("alias '{}'", t.name));
                         self.aliases.insert(t.name.clone(), resolved);
                     }
                     TypeDefKind::Newtype(ty) => {
@@ -509,6 +522,7 @@ impl<'a> Checker<'a> {
                         self.newtypes.insert(t.name.clone(), ty.clone());
                         // The inner type is what the constructor takes as input
                         let inner = self.resolve_type(ty);
+                        self.check_type_well_formed(&inner, &format!("newtype '{}'", t.name));
                         // The return type is the newtype itself, wrapped in Type::Newtype with name
                         let self_ty = Type::Newtype(t.name.clone(), Box::new(inner.clone()));
                         self.funcs.insert(t.name.clone(), (vec![inner], self_ty));
@@ -522,11 +536,20 @@ impl<'a> Checker<'a> {
                                 Some(VariantPayload::Tuple(types)) => types.iter().map(|ty| self.resolve_type(ty)).collect(),
                                 Some(VariantPayload::Record(fields)) => fields.iter().map(|f| self.resolve_type(&f.ty)).collect(),
                             };
+                            for p in &params {
+                                self.check_type_well_formed(p, &format!("variant '{}' of enum '{}'", v.name, t.name));
+                            }
                             self.funcs.insert(v.name.clone(), (params, ret));
                         }
                     }
-                    _ => {}
+                    TypeDefKind::Record(fields) => {
+                        for field in fields {
+                            let field_ty = self.resolve_type(&field.ty);
+                            self.check_type_well_formed(&field_ty, &format!("field '{}' of record '{}'", field.name, t.name));
+                        }
+                    }
                 }
+                self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                 self.types.insert(t.name.clone(), t.clone());
                 // Store generic parameters for type definitions
                 if !t.generics.is_empty() {
@@ -561,6 +584,8 @@ impl<'a> Checker<'a> {
                         self.emit(format!("duplicate function definition '{}'", method.name));
                         return;
                     }
+                    let generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
+                    self.generic_scope.extend(generic_names.iter().cloned());
                     // Add implicit self parameter as first param
                     let self_type = Type::Name(actor.name.clone(), vec![]);
                     let mut params = vec![self_type];
@@ -570,6 +595,11 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    for (i, p) in method.params.iter().enumerate() {
+                        self.check_type_well_formed(&params[i + 1], &format!("parameter '{}' of actor method '{}'", p.name, method.name));
+                    }
+                    self.check_type_well_formed(&ret, &format!("return type of actor method '{}'", method.name));
+                    self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                     self.funcs.insert(method.name.clone(), (params, ret));
                 }
             }
@@ -604,6 +634,8 @@ impl<'a> Checker<'a> {
                 }
                 // Also register impl methods as functions with self parameter
                 for method in &impl_def.methods {
+                    let generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
+                    self.generic_scope.extend(generic_names.iter().cloned());
                     let mut params = vec![Type::Name(impl_def.type_name.clone(), vec![])];
                     params.extend(method.params.iter().map(|p| self.resolve_type(&p.ty)));
                     let ret = method
@@ -611,6 +643,11 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    for (i, p) in method.params.iter().enumerate() {
+                        self.check_type_well_formed(&params[i + 1], &format!("parameter '{}' of impl method '{}'", p.name, method.name));
+                    }
+                    self.check_type_well_formed(&ret, &format!("return type of impl method '{}'", method.name));
+                    self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                     let key = format!("{}_{}", impl_def.type_name, method.name);
                     self.funcs.insert(key, (params, ret));
                 }
@@ -618,6 +655,16 @@ impl<'a> Checker<'a> {
             Item::ExternBlock(block) => {
                 // Register extern functions for type checking
                 for func in &block.funcs {
+                    for param in &func.params {
+                        let resolved = self.resolve_type(&param.ty);
+                        if !self.is_valid_extern_type(&resolved, false) {
+                            self.emit_code(crate::diagnostic::codes::E0231, format!(
+                                "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. \
+                                 Use scalar types, *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, or #[repr(C)] records.",
+                                param.name, fmt_type(&resolved)
+                            ));
+                        }
+                    }
                     let params: Vec<Type> = func.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
                     let ret = func.ret.as_ref()
                         .map(|t| self.resolve_type(t))
@@ -653,12 +700,42 @@ impl<'a> Checker<'a> {
                 args.iter().map(|a| self.resolve_type(a)).collect(),
                 Box::new(self.resolve_type(ret)),
             ),
-            Type::Cap(_) | Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) | Type::Allocator => ty.clone(),
+            Type::Cap(_) | Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_)
+                | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
+                | Type::RawPtr(_) | Type::RawPtrMut(_) | Type::Allocator => ty.clone(),
             Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(self.resolve_type(inner))),
             Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve_type(inner))),
             Type::Nothing => Type::Nothing,
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
+        }
+    }
+
+    /// Check whether a type is allowed to cross the C ABI boundary in an
+    /// extern function signature.
+    fn is_valid_extern_type(&self, ty: &Type, in_pointer: bool) -> bool {
+        match ty {
+            // Scalars
+            Type::Name(name, _) => matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit"),
+            // Capabilities
+            Type::Cap(_) => true,
+            // Raw pointers and FFI passport types
+            Type::RawPtr(_) | Type::RawPtrMut(_) | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => true,
+            // References are not allowed directly; must use c_borrow / c_borrow_mut
+            Type::Ref(_) | Type::RefMut(_) => false,
+            // Shared ownership is not allowed directly; must use c_shared
+            Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) => false,
+            // Composite Mimi types are not allowed
+            Type::Tuple(_) => false,
+            Type::Option(_) | Type::Result(_, _) => false,
+            Type::Array(_, _) | Type::Slice(_) => false,
+            Type::Func(_, _) => false,
+            Type::Newtype(_, _) => {
+                // TODO: allow #[repr(C)] newtypes once attributes are tracked
+                false
+            }
+            Type::ImplTrait(_) => false,
+            Type::Nothing | Type::Allocator => false,
         }
     }
 
@@ -681,20 +758,7 @@ impl<'a> Checker<'a> {
                 for field in &actor.fields {
                     let field_ty = self.resolve_type(&field.ty);
                     // Validate field type is well-formed
-                    if let Type::Name(name, args) = &field_ty {
-                        // Check that the type exists (unless it's a built-in)
-                        if !Self::is_builtin_type(name) && !self.types.contains_key(name) {
-                            self.emit_code(crate::diagnostic::codes::E0231, format!("unknown type '{}' in actor field '{}'", name, field.name));
-                        }
-                        // Also check type arguments
-                        for arg in args {
-                            if let Type::Name(arg_name, _) = arg {
-                                if !Self::is_builtin_type(arg_name) && !self.types.contains_key(arg_name) {
-                                    self.emit(format!("unknown type '{}' in actor field type", arg_name));
-                                }
-                            }
-                        }
-                    }
+                    self.check_type_well_formed(&field_ty, &format!("actor field '{}'", field.name));
                     // Check field initialization if present
                     if let Some(init) = &field.init {
                         let init_ty = self.infer_expr(init, &mut vec![HashMap::new()]);
@@ -735,6 +799,8 @@ impl<'a> Checker<'a> {
             Item::Rule(_) | Item::Desc(_) => {}
             Item::Trait(trait_def) => {
                 // Check that all trait method types are well-formed
+                let generic_names: Vec<String> = trait_def.generics.iter().map(|g| g.name.clone()).collect();
+                self.generic_scope.extend(generic_names.iter().cloned());
                 for method in &trait_def.methods {
                     for param in &method.params {
                         let resolved = self.resolve_type(&param.ty);
@@ -745,6 +811,7 @@ impl<'a> Checker<'a> {
                         self.check_type_well_formed(&resolved, &format!("trait '{}' method '{}' return", trait_def.name, method.name));
                     }
                 }
+                self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
                 // Check that the trait exists
@@ -783,6 +850,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Check if a type is Copy (all fields are Copy for records, all variants Copy for enums).
+    #[allow(dead_code)]
     fn is_copy_type(&self, ty: &Type) -> bool {
         match ty {
             Type::Name(name, _) => {
@@ -825,42 +893,64 @@ impl<'a> Checker<'a> {
     }
 
     fn check_type_well_formed(&mut self, ty: &Type, context: &str) {
+        self.check_type_well_formed_inner(ty, context, false);
+    }
+
+    #[allow(dead_code)]
+    fn check_type_well_formed_allow_passport(&mut self, ty: &Type, context: &str) {
+        self.check_type_well_formed_inner(ty, context, true);
+    }
+
+    fn check_type_well_formed_inner(&mut self, ty: &Type, context: &str, allow_passport: bool) {
+        if !allow_passport && Self::type_contains_passport(ty) {
+            self.emit_code(crate::diagnostic::codes::E0231, format!(
+                "FFI passport type '{}' is not allowed in {}",
+                fmt_type(ty), context
+            ));
+            return;
+        }
         match ty {
             Type::Name(name, args) => {
-                if !Self::is_builtin_type(name) && !self.types.contains_key(name) {
+                if !Self::is_builtin_type(name)
+                    && !self.types.contains_key(name)
+                    && !self.generic_scope.contains(name)
+                {
                     self.emit_code(crate::diagnostic::codes::E0231, format!("unknown type '{}' in {}", name, context));
                 }
                 for arg in args {
-                    self.check_type_well_formed(arg, context);
+                    self.check_type_well_formed_inner(arg, context, allow_passport);
                 }
             }
-            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner) | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) => {
-                self.check_type_well_formed(inner, context);
+            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner)
+                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
+                | Type::RawPtr(inner) | Type::RawPtrMut(inner)
+                | Type::CShared(inner) | Type::CBorrow(inner) | Type::CBorrowMut(inner) => {
+                self.check_type_well_formed_inner(inner, context, allow_passport);
             }
             Type::Result(ok, err) => {
-                self.check_type_well_formed(ok, context);
-                self.check_type_well_formed(err, context);
+                self.check_type_well_formed_inner(ok, context, allow_passport);
+                self.check_type_well_formed_inner(err, context, allow_passport);
             }
             Type::Tuple(elems) => {
                 for elem in elems {
-                    self.check_type_well_formed(elem, context);
+                    self.check_type_well_formed_inner(elem, context, allow_passport);
                 }
             }
             Type::Func(args, ret) => {
                 for arg in args {
-                    self.check_type_well_formed(arg, context);
+                    self.check_type_well_formed_inner(arg, context, allow_passport);
                 }
-                self.check_type_well_formed(ret, context);
+                self.check_type_well_formed_inner(ret, context, allow_passport);
             }
             Type::Newtype(name, inner) => {
                 if !self.types.contains_key(name) && !self.newtypes.contains_key(name) {
                     self.emit(format!("unknown newtype '{}' in {}", name, context));
                 }
-                self.check_type_well_formed(inner, context);
+                self.check_type_well_formed_inner(inner, context, allow_passport);
             }
             Type::Cap(_) | Type::Nothing | Type::Allocator => {}
             Type::Array(inner, _) | Type::Slice(inner) => {
-                self.check_type_well_formed(inner, context);
+                self.check_type_well_formed_inner(inner, context, allow_passport);
             }
             Type::ImplTrait(traits) => {
                 for trait_name in traits {
@@ -869,6 +959,25 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// Returns true if the type (or any type nested inside it) is one of the
+    /// FFI boundary passport types.
+    fn type_contains_passport(ty: &Type) -> bool {
+        match ty {
+            Type::RawPtr(_) | Type::RawPtrMut(_)
+                | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_) => true,
+            Type::Name(_, args) => args.iter().any(|a| Self::type_contains_passport(a)),
+            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner)
+                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
+                | Type::Array(inner, _) | Type::Slice(inner) => Self::type_contains_passport(inner),
+            Type::Result(ok, err) => Self::type_contains_passport(ok) || Self::type_contains_passport(err),
+            Type::Tuple(elems) => elems.iter().any(|e| Self::type_contains_passport(e)),
+            Type::Func(args, ret) => args.iter().any(|a| Self::type_contains_passport(a)) || Self::type_contains_passport(ret),
+            Type::Newtype(_, inner) => Self::type_contains_passport(inner),
+            Type::Cap(_) | Type::Nothing | Type::Allocator => false,
+            Type::ImplTrait(_) => false,
         }
     }
 
@@ -1369,6 +1478,11 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
         Type::Shared(inner) => Type::Shared(Box::new(subst_type_params(inner, generics, type_map))),
         Type::LocalShared(inner) => Type::LocalShared(Box::new(subst_type_params(inner, generics, type_map))),
         Type::Weak(inner) => Type::Weak(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::RawPtr(inner) => Type::RawPtr(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::CShared(inner) => Type::CShared(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::CBorrow(inner) => Type::CBorrow(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(subst_type_params(inner, generics, type_map))),
         Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(subst_type_params(inner, generics, type_map))),
         Type::Cap(_) | Type::Nothing | Type::Allocator => ty.clone(),
         Type::Array(inner, size) => Type::Array(Box::new(subst_type_params(inner, generics, type_map)), *size),
@@ -1450,5 +1564,10 @@ pub fn fmt_type(t: &Type) -> String {
         Type::Array(inner, size) => format!("[{}; {}]", fmt_type(inner), size),
         Type::Slice(inner) => format!("[{}]", fmt_type(inner)),
         Type::ImplTrait(traits) => format!("impl {}", traits.join(" + ")),
+        Type::RawPtr(inner) => format!("*{}", fmt_type(inner)),
+        Type::RawPtrMut(inner) => format!("*mut {}", fmt_type(inner)),
+        Type::CShared(inner) => format!("c_shared {}", fmt_type(inner)),
+        Type::CBorrow(inner) => format!("c_borrow {}", fmt_type(inner)),
+        Type::CBorrowMut(inner) => format!("c_borrow_mut {}", fmt_type(inner)),
     }
 }

@@ -460,6 +460,16 @@ pub enum Type {
     Slice(Box<Type>),
     /// impl Trait return type — opaque type implementing listed traits
     ImplTrait(Vec<String>),
+    /// Raw C pointer: *T
+    RawPtr(Box<Type>),
+    /// Raw mutable C pointer: *mut T
+    RawPtrMut(Box<Type>),
+    /// C-compatible shared ownership handle: c_shared T
+    CShared(Box<Type>),
+    /// C-compatible immutable borrow: c_borrow T
+    CBorrow(Box<Type>),
+    /// C-compatible mutable borrow: c_borrow_mut T
+    CBorrowMut(Box<Type>),
 }
 
 /// Kind of allocator for alloc blocks

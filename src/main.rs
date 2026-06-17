@@ -3,6 +3,7 @@ mod codegen;
 mod contracts;
 pub mod core;
 pub mod diagnostic;
+mod ffi;
 mod interp;
 mod lexer;
 mod loader;

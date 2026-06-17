@@ -48,6 +48,7 @@ pub(crate) mod loader;
 pub(crate) mod manifest;
 pub(crate) mod lsp;
 pub(crate) mod extern_calls;
+pub(crate) mod ffi_safety;
 pub(crate) mod actor_concurrent;
 pub(crate) mod derive_methods;
 pub(crate) mod builtin_extended;
@@ -65,6 +66,11 @@ pub(crate) mod codegen_ir;
 pub(crate) mod codegen_advanced;
 
 use crate::{core, interp, lexer, parser};
+
+/// Global lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
+/// variable. Without this, parallel Rust tests race on the environment and
+/// produce flaky failures.
+pub(crate) static FFI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn parse(src: &str) -> crate::ast::File {
     let tokens = lexer::Lexer::new(src).tokenize().unwrap();

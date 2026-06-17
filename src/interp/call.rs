@@ -1,4 +1,5 @@
 use super::*;
+use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract};
 
 impl<'a> Interpreter<'a> {
     pub(crate) fn call_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, String> {
@@ -110,9 +111,11 @@ impl<'a> Interpreter<'a> {
             return self.spawn_actor(actor_name, args);
         }
 
-        // Handle extern function calls
+        // Handle extern function calls via their FFI contract (wrapper layer).
         if let Some(extern_func) = self.extern_funcs.get(name).cloned() {
-            return self.call_extern(&extern_func, args);
+            let contract = self.ffi_contracts.get(name).cloned()
+                .unwrap_or_else(|| FfiContract::from_extern(&extern_func));
+            return self.call_extern(&extern_func, &contract, args);
         }
 
         if let Some(&arity) = self.constructors.get(name) {
@@ -1323,7 +1326,37 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Call an extern function via FFI
-    fn call_extern(&mut self, extern_func: &ExternFunc, args: Vec<Value>) -> Result<Value, String> {
+    ///
+    /// Phase 0 FFI safety: only scalar types (i32/i64/f64/bool) and borrowed
+    /// strings are allowed to cross the C ABI boundary directly. Complex Mimi
+    /// objects such as shared, borrowed references, records, lists, closures,
+    /// etc. must be explicitly converted to passport types before being passed
+    /// to extern functions.
+    fn call_extern(
+        &mut self,
+        extern_func: &ExternFunc,
+        contract: &FfiContract,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        // Stage 2 wrapper layer: validate and convert arguments according to the
+        // FFI contract before loading any shared library.  This keeps the
+        // interpreter FFI path aligned with the codegen wrapper path.
+        if contract.args.len() != args.len() {
+            return Err(format!(
+                "FFI wrapper: extern function '{}' expects {} arguments, got {}",
+                extern_func.name,
+                contract.args.len(),
+                args.len()
+            ));
+        }
+
+        let mut c_args: Vec<i64> = Vec::with_capacity(args.len());
+        let mut _string_guards: Vec<std::ffi::CString> = Vec::new();
+        for (arg, arg_contract) in args.iter().zip(&contract.args) {
+            let c_arg = self.value_to_ffi_arg(arg, arg_contract, &mut _string_guards)?;
+            c_args.push(c_arg);
+        }
+
         let lib_path = std::env::var("MIMI_FFI_LIB")
             .map_err(|_| "MIMI_FFI_LIB environment variable not set for extern function call".to_string())?;
 
@@ -1340,40 +1373,6 @@ impl<'a> Interpreter<'a> {
                 self.loaded_libs.len() - 1
             }
         };
-
-        // Convert Mimi args to raw bytes for FFI (auto pin+borrow for Shared values)
-        let mut c_args: Vec<i64> = Vec::new();
-        let _pin_guards: Vec<std::sync::RwLockReadGuard<std::sync::RwLock<Value>>> = Vec::new(); // prevent drop during call
-        for arg in &args {
-            match arg {
-                Value::Int(n) => c_args.push(*n),
-                Value::Float(f) => c_args.push(f.to_bits() as i64),
-                Value::Bool(b) => c_args.push(*b as i64),
-                Value::String(s) => {
-                    let c_str = std::ffi::CString::new(s.as_str())
-                        .map_err(|e| format!("failed to convert string to C string: {}", e))?;
-                    c_args.push(c_str.into_raw() as i64);
-                }
-                Value::Shared(arc) => {
-                    // Auto pin+borrow: acquire read lock, pass pointer to inner value
-                    let guard = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
-                    // Leak the guard to keep it alive during the call
-                    // We'll collect guards and they'll be dropped at end of scope
-                    let ptr = &*guard as *const Value as i64;
-                    c_args.push(ptr);
-                    // Note: we can't store the guard in _pin_guards because it's declared before the loop
-                    // The guard will be dropped when the match arm ends, which is too early.
-                    // For now, we accept this limitation - the caller must ensure the Shared value
-                    // outlives the FFI call.
-                }
-                Value::LocalShared(rc) => {
-                    let inner = rc.0.borrow();
-                    let ptr = &*inner as *const Value as i64;
-                    c_args.push(ptr);
-                }
-                _ => return Err(format!("unsupported FFI argument type: {:?}", arg)),
-            }
-        }
 
         let func_name = extern_func.name.clone();
 
@@ -1393,13 +1392,94 @@ impl<'a> Interpreter<'a> {
                    raw_args[4], raw_args[5], raw_args[6], raw_args[7])
         };
 
-        // Convert result back to Mimi Value
-        match &extern_func.ret {
-            Some(Type::Name(name, _)) if name == "i32" => Ok(Value::Int(result as i64)),
-            Some(Type::Name(name, _)) if name == "i64" => Ok(Value::Int(result)),
-            Some(Type::Name(name, _)) if name == "f64" => Ok(Value::Float(f64::from_bits(result as u64))),
-            Some(Type::Name(name, _)) if name == "bool" => Ok(Value::Bool(result != 0)),
-            Some(Type::Name(name, _)) if name == "string" => {
+        self.ffi_ret_to_value(result, &contract.ret)
+    }
+
+    /// Convert a single Mimi value into a C ABI argument according to the
+    /// argument's FFI contract.
+    fn value_to_ffi_arg(
+        &self,
+        arg: &Value,
+        contract: &FfiArgContract,
+        string_guards: &mut Vec<std::ffi::CString>,
+    ) -> Result<i64, String> {
+        match contract {
+            FfiArgContract::Int => match arg {
+                Value::Int(n) => Ok(*n),
+                Value::Bool(b) => Ok(*b as i64),
+                other => Err(format!(
+                    "FFI wrapper: expected scalar integer/bool argument, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::Float => match arg {
+                Value::Float(f) => Ok(f.to_bits() as i64),
+                Value::Int(n) => Ok((*n as f64).to_bits() as i64),
+                other => Err(format!(
+                    "FFI wrapper: expected f64 argument, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::StringBorrow => match arg {
+                Value::String(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str())
+                        .map_err(|e| format!("failed to convert string to C string: {}", e))?;
+                    let ptr = c_str.as_ptr() as i64;
+                    string_guards.push(c_str); // keep the CString alive during the C call
+                    Ok(ptr)
+                }
+                other => Err(format!(
+                    "FFI wrapper: expected string argument, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::Cap => match arg {
+                Value::Cap(_) => Err(
+                    "FFI safety: cap cannot be passed directly to extern functions yet. \
+                     Cap cross-boundary authentication (via a runtime CapTable) is planned for Phase 3."
+                        .to_string()
+                ),
+                other => Err(format!(
+                    "FFI safety: expected cap argument, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::Unsupported(ty) => {
+                // Runtime fallback for declarations that bypass the type checker.
+                // Preserve the old Phase 0 error messages for the common unsafe
+                // Mimi value categories.
+                Err(self.unsupported_ffi_arg_error(arg, ty))
+            }
+            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => match arg {
+                // Passport pointers are currently represented as opaque integers.
+                // A real runtime pointer type will be introduced in Phase 3.
+                Value::Int(n) => Ok(*n),
+                other => Err(format!(
+                    "FFI wrapper: passport pointer argument must be an opaque integer handle, found {}",
+                    other
+                )),
+            },
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => match arg {
+                // Passport boundary handles are currently represented as opaque integers.
+                Value::Int(n) => Ok(*n),
+                other => Err(format!(
+                    "FFI wrapper: passport boundary handle must be an opaque integer handle, found {}",
+                    other
+                )),
+            },
+        }
+    }
+
+    /// Convert the raw i64 returned by a C function into a Mimi value according
+    /// to the return-value contract.
+    fn ffi_ret_to_value(&self, result: i64, contract: &FfiRetContract) -> Result<Value, String> {
+        match contract {
+            FfiRetContract::Unit => Ok(Value::Unit),
+            FfiRetContract::Int => Ok(Value::Int(result)),
+            FfiRetContract::Float => Ok(Value::Float(f64::from_bits(result as u64))),
+            FfiRetContract::String => {
                 if result == 0 {
                     Ok(Value::String(String::new()))
                 } else {
@@ -1407,8 +1487,63 @@ impl<'a> Interpreter<'a> {
                     Ok(Value::String(c_str.to_string_lossy().into_owned()))
                 }
             }
-            None => Ok(Value::Unit),
-            _ => Ok(Value::Int(result)),
+            FfiRetContract::RawPtr(_)
+            | FfiRetContract::RawPtrMut(_)
+            | FfiRetContract::CShared(_)
+            | FfiRetContract::CBorrow(_)
+            | FfiRetContract::CBorrowMut(_) => {
+                // Passport pointers/handles are returned as opaque integers for now.
+                Ok(Value::Int(result))
+            }
+            FfiRetContract::Unsupported(ty) => Err(format!(
+                "FFI safety: extern function declared with unsupported return type '{}'",
+                ty
+            )),
+        }
+    }
+
+    /// Produce a Phase-0-compatible error for Mimi values that cannot cross the
+    /// C ABI boundary.  Used when an extern declaration bypassed the type
+    /// checker (e.g. in tests that call run_source_result directly).
+    fn unsupported_ffi_arg_error(&self, arg: &Value, _ty: &str) -> String {
+        match arg {
+            Value::Shared(_) | Value::LocalShared(_) | Value::WeakShared(_) | Value::WeakLocal(_) => {
+                format!(
+                    "FFI safety: cannot pass shared value '{}' directly to extern function. \
+                     Use a passport type such as c_shared T or c_borrow T instead.",
+                    arg
+                )
+            }
+            Value::Ref(_) | Value::RefMut(_) => {
+                format!(
+                    "FFI safety: cannot pass borrowed reference '{}' directly to extern function. \
+                     Use a passport type such as c_borrow T or c_borrow_mut T instead.",
+                    arg
+                )
+            }
+            Value::Cap(_) => {
+                "FFI safety: cap cannot be passed directly to extern functions yet. \
+                 Cap cross-boundary authentication (via a runtime CapTable) is planned for Phase 3."
+                    .to_string()
+            }
+            Value::Record(_, _) | Value::Variant(_, _) | Value::List(_) | Value::Tuple(_) => {
+                format!(
+                    "FFI safety: unsupported argument type '{}' for extern function call. \
+                     Only scalar types (i32/i64/f64/bool) and borrowed strings are allowed. \
+                     Complex Mimi values must be converted to passport types (c_shared T, \
+                     c_borrow T, c_borrow_mut T, *T, *mut T) before crossing the FFI boundary.",
+                    arg
+                )
+            }
+            other => {
+                format!(
+                    "FFI safety: unsupported argument type '{}' for extern function call. \
+                     Only scalar types (i32/i64/f64/bool) and borrowed strings are allowed. \
+                     Complex Mimi values must be converted to passport types (c_shared T, \
+                     c_borrow T, c_borrow_mut T, *T, *mut T) before crossing the FFI boundary.",
+                    other
+                )
+            }
         }
     }
 

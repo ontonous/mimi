@@ -14,6 +14,7 @@ pub use value::*;
 pub use error::InterpError;
 
 use crate::ast::*;
+use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -60,6 +61,8 @@ pub struct Interpreter<'a> {
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
     /// Extern function declarations: func_name -> ExternFunc
     extern_funcs: HashMap<String, ExternFunc>,
+    /// Pre-computed FFI contracts for extern functions.
+    ffi_contracts: HashMap<String, FfiContract>,
     /// Type definitions for reflection: type_name -> (fields, variants)
     type_defs: HashMap<String, TypeDef>,
     /// Pre-computed results for comptime functions (no-arg functions evaluated at startup)
@@ -93,10 +96,11 @@ impl<'a> Interpreter<'a> {
         let mut trait_defs = HashMap::new();
         let mut type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>> = HashMap::new();
         let mut extern_funcs: HashMap<String, ExternFunc> = HashMap::new();
+        let mut ffi_contracts: HashMap<String, FfiContract> = HashMap::new();
         let mut type_defs: HashMap<String, TypeDef> = HashMap::new();
         for item in &file.items {
             Self::collect_traits(item, &mut trait_defs, &mut type_impls);
-            Self::collect_extern_funcs(item, &mut extern_funcs);
+            Self::collect_extern_funcs(item, &mut extern_funcs, &mut ffi_contracts);
             Self::collect_type_defs(item, &mut type_defs);
         }
         // Expand built-in derive macros
@@ -118,6 +122,7 @@ impl<'a> Interpreter<'a> {
             trait_defs,
             type_impls,
             extern_funcs,
+            ffi_contracts,
             type_defs,
             comptime_results: HashMap::new(),
             loaded_libs: Vec::new(),
@@ -168,16 +173,21 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn collect_extern_funcs(item: &Item, out: &mut HashMap<String, ExternFunc>) {
+    fn collect_extern_funcs(
+        item: &Item,
+        out: &mut HashMap<String, ExternFunc>,
+        contracts: &mut HashMap<String, FfiContract>,
+    ) {
         match item {
             Item::ExternBlock(block) => {
                 for func in &block.funcs {
                     out.insert(func.name.clone(), func.clone());
+                    contracts.insert(func.name.clone(), FfiContract::from_extern(func));
                 }
             }
             Item::Module(m) => {
                 for inner in &m.items {
-                    Self::collect_extern_funcs(inner, out);
+                    Self::collect_extern_funcs(inner, out, contracts);
                 }
             }
             _ => {}
@@ -395,6 +405,11 @@ impl<'a> Interpreter<'a> {
             Type::Shared(inner) => format!("shared {}", self.resolve_type_name(inner)),
             Type::LocalShared(inner) => format!("local_shared {}", self.resolve_type_name(inner)),
             Type::Weak(inner) => format!("weak {}", self.resolve_type_name(inner)),
+            Type::RawPtr(inner) => format!("*{}", self.resolve_type_name(inner)),
+            Type::RawPtrMut(inner) => format!("*mut {}", self.resolve_type_name(inner)),
+            Type::CShared(inner) => format!("c_shared {}", self.resolve_type_name(inner)),
+            Type::CBorrow(inner) => format!("c_borrow {}", self.resolve_type_name(inner)),
+            Type::CBorrowMut(inner) => format!("c_borrow_mut {}", self.resolve_type_name(inner)),
             Type::Newtype(name, _) => name.clone(),
             Type::Nothing => "nothing".into(),
             Type::Allocator => "Allocator".into(),

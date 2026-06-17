@@ -117,6 +117,34 @@ impl Parser {
                 let inner = self.parse_type()?;
                 Ok(Type::Weak(Box::new(inner)))
             }
+            TokenKind::CShared => {
+                self.advance();
+                let inner = self.parse_type()?;
+                Ok(Type::CShared(Box::new(inner)))
+            }
+            TokenKind::CBorrow => {
+                self.advance();
+                let inner = self.parse_type()?;
+                Ok(Type::CBorrow(Box::new(inner)))
+            }
+            TokenKind::CBorrowMut => {
+                self.advance();
+                let inner = self.parse_type()?;
+                Ok(Type::CBorrowMut(Box::new(inner)))
+            }
+            TokenKind::Star => {
+                self.advance();
+                let mut_ = self.at(&TokenKind::Mut);
+                if mut_ {
+                    self.advance();
+                }
+                let inner = self.parse_type()?;
+                if mut_ {
+                    Ok(Type::RawPtrMut(Box::new(inner)))
+                } else {
+                    Ok(Type::RawPtr(Box::new(inner)))
+                }
+            }
             TokenKind::Cap => {
                 self.advance();
                 let name_tok = self.peek();
