@@ -561,6 +561,13 @@ impl LspServer {
             ("keys", "fn keys(record) -> list"),
             ("values", "fn values(record) -> list"),
             ("has_key", "fn has_key(record, key) -> bool"),
+            ("contains", "fn contains(list, elem) -> bool"),
+            ("sum", "fn sum(list) -> i64"),
+            ("reverse", "fn reverse(list) -> list"),
+            ("flatten", "fn flatten(list) -> list"),
+            ("str_split", "fn str_split(s: string, sep: string) -> list"),
+            ("str_join", "fn str_join(list, sep: string) -> string"),
+            ("str_replace", "fn str_replace(s: string, from: string, to: string) -> string"),
         ];
 
         for (name, sig) in builtins {

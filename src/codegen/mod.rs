@@ -4485,6 +4485,372 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ]);
                 Ok(phi.as_basic_value().into())
             }
+            "sum" => {
+                if args.len() != 1 { return Err("sum expects 1 argument (list)".into()); }
+                let list_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("sum: first arg must be a list".into()),
+                };
+                let i64_ty = self.context.i64_type();
+                let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                ], false));
+                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let data_i8 = self.builder.build_load(
+                    BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
+                    data_gep, "data"
+                ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                let data_ptr = self.builder.build_bit_cast(data_i8,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                // Loop through list elements and sum
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let loop_bb = self.context.append_basic_block(function, "sum_loop");
+                let body_bb = self.context.append_basic_block(function, "sum_body");
+                let done_bb = self.context.append_basic_block(function, "sum_done");
+                let idx_alloca = self.builder.build_alloca(i64_ty, "si")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let sum_alloca = self.builder.build_alloca(i64_ty, "sum")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_store(sum_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(loop_bb);
+                let idx = self.builder.build_load(i64_ty, idx_alloca, "idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, list_len, "cmp")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                self.builder.build_conditional_branch(cmp, body_bb, done_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(body_bb);
+                let elem_ptr = unsafe {
+                    self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let elem = self.builder.build_load(i64_ty, elem_ptr, "elem_val")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let sum = self.builder.build_load(i64_ty, sum_alloca, "sum")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let new_sum = self.builder.build_int_add(sum, elem, "new_sum")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(sum_alloca, new_sum)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "next")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(idx_alloca, next)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(done_bb);
+                let result = self.builder.build_load(i64_ty, sum_alloca, "result_sum")
+                    .map_err(|e| format!("load error: {}", e))?;
+                Ok(result.into())
+            }
+            "reverse" => {
+                if args.len() != 1 { return Err("reverse expects 1 argument (list)".into()); }
+                let list_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("reverse: first arg must be a list".into()),
+                };
+                let i64_ty = self.context.i64_type();
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                ], false));
+                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let data_i8 = self.builder.build_load(
+                    BasicTypeEnum::PointerType(i8_ptr), data_gep, "data"
+                ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                let data_ptr = self.builder.build_bit_cast(data_i8,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                // Allocate new array
+                let sizeof_i64 = i64_ty.const_int(8, false);
+                let alloc_size = self.builder.build_int_mul(list_len, sizeof_i64, "alloc_size")
+                    .map_err(|e| format!("mul error: {}", e))?;
+                let malloc_fn = self.module.get_function("malloc")
+                    .ok_or_else(|| "malloc not declared".to_string())?;
+                let new_data = self.builder.build_call(malloc_fn, &[
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ], "malloc_call")
+                    .map_err(|e| format!("malloc error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("malloc returned void")?
+                    .into_pointer_value();
+                let new_data_i64 = self.builder.build_bit_cast(new_data,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                // Copy elements in reverse order
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let loop_bb = self.context.append_basic_block(function, "reverse_loop");
+                let body_bb = self.context.append_basic_block(function, "reverse_body");
+                let done_bb = self.context.append_basic_block(function, "reverse_done");
+                let idx_alloca = self.builder.build_alloca(i64_ty, "ri")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(loop_bb);
+                let idx = self.builder.build_load(i64_ty, idx_alloca, "idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, list_len, "cmp")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                self.builder.build_conditional_branch(cmp, body_bb, done_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(body_bb);
+                let idx_plus_1 = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "idx_plus_1")
+                    .map_err(|e| format!("add error: {}", e))?;
+                let src_idx = self.builder.build_int_sub(list_len, idx_plus_1, "src_idx")
+                    .map_err(|e| format!("sub error: {}", e))?;
+                let src_ptr = unsafe {
+                    self.builder.build_gep(i64_ty, data_ptr, &[src_idx], "src_elem")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let src_val = self.builder.build_load(i64_ty, src_ptr, "src_val")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let dst_ptr = unsafe {
+                    self.builder.build_gep(i64_ty, new_data_i64, &[idx], "dst_elem")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(dst_ptr, src_val)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "next")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(idx_alloca, next)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(done_bb);
+                // Build result list struct
+                let result_list_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                ], false);
+                let result_alloca = self.builder.build_alloca(result_list_ty, "reversed_list")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let result_len_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 0, "result_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(result_len_gep, list_len)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let result_data_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 1, "result_data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let new_data_void = self.builder.build_bit_cast(new_data,
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "new_data_void")
+                    .map_err(|e| format!("bitcast error: {}", e))?;
+                self.builder.build_store(result_data_gep, new_data_void)
+                    .map_err(|e| format!("store error: {}", e))?;
+                Ok(result_alloca.into())
+            }
+            "flatten" => {
+                if args.len() != 1 { return Err("flatten expects 1 argument (list of lists)".into()); }
+                let list_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("flatten: first arg must be a list".into()),
+                };
+                let i64_ty = self.context.i64_type();
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let list_struct_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                ], false);
+                let len_gep = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty), list_ptr, 0, "outer_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let outer_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "outer_len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "outer_data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let data_i8 = self.builder.build_load(
+                    BasicTypeEnum::PointerType(i8_ptr), data_gep, "outer_data"
+                ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                let data_ptr = self.builder.build_bit_cast(data_i8,
+                    list_struct_ty.ptr_type(inkwell::AddressSpace::default()), "data_list_ptr")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                // First pass: count total elements
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let count_loop_bb = self.context.append_basic_block(function, "flatten_count_loop");
+                let count_body_bb = self.context.append_basic_block(function, "flatten_count_body");
+                let count_done_bb = self.context.append_basic_block(function, "flatten_count_done");
+                let idx_alloca = self.builder.build_alloca(i64_ty, "fi")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let total_alloca = self.builder.build_alloca(i64_ty, "total")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_store(total_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(count_loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(count_loop_bb);
+                let idx = self.builder.build_load(i64_ty, idx_alloca, "idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx, outer_len, "cmp")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                self.builder.build_conditional_branch(cmp, count_body_bb, count_done_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(count_body_bb);
+                let inner_list_ptr = unsafe {
+                    self.builder.build_gep(list_struct_ty, data_ptr, &[idx], "inner_list")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let inner_len_gep = self.builder.build_struct_gep(list_struct_ty, inner_list_ptr, 0, "inner_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let inner_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), inner_len_gep, "inner_len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let total = self.builder.build_load(i64_ty, total_alloca, "total")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let new_total = self.builder.build_int_add(total, inner_len, "new_total")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(total_alloca, new_total)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "next")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(idx_alloca, next)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(count_loop_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(count_done_bb);
+                let total_len = self.builder.build_load(i64_ty, total_alloca, "total_len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                // Allocate new array
+                let sizeof_i64 = i64_ty.const_int(8, false);
+                let alloc_size = self.builder.build_int_mul(total_len, sizeof_i64, "alloc_size")
+                    .map_err(|e| format!("mul error: {}", e))?;
+                let malloc_fn = self.module.get_function("malloc")
+                    .ok_or_else(|| "malloc not declared".to_string())?;
+                let new_data = self.builder.build_call(malloc_fn, &[
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ], "malloc_call")
+                    .map_err(|e| format!("malloc error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("malloc returned void")?
+                    .into_pointer_value();
+                let new_data_i64 = self.builder.build_bit_cast(new_data,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                // Second pass: copy elements
+                let copy_outer_bb = self.context.append_basic_block(function, "flatten_copy_outer");
+                let copy_outer_body_bb = self.context.append_basic_block(function, "flatten_copy_outer_body");
+                let copy_inner_bb = self.context.append_basic_block(function, "flatten_copy_inner");
+                let copy_inner_body_bb = self.context.append_basic_block(function, "flatten_copy_inner_body");
+                let copy_done_bb = self.context.append_basic_block(function, "flatten_copy_done");
+                let outer_idx_alloca = self.builder.build_alloca(i64_ty, "foi")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let inner_idx_alloca = self.builder.build_alloca(i64_ty, "fii")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let dest_idx_alloca = self.builder.build_alloca(i64_ty, "fdi")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                self.builder.build_store(outer_idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_store(dest_idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(copy_outer_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(copy_outer_bb);
+                let outer_idx = self.builder.build_load(i64_ty, outer_idx_alloca, "outer_idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let outer_cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, outer_idx, outer_len, "outer_cmp")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                self.builder.build_conditional_branch(outer_cmp, copy_outer_body_bb, copy_done_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(copy_outer_body_bb);
+                let inner_list_ptr = unsafe {
+                    self.builder.build_gep(list_struct_ty, data_ptr, &[outer_idx], "inner_list")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let inner_len_gep = self.builder.build_struct_gep(list_struct_ty, inner_list_ptr, 0, "inner_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let inner_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), inner_len_gep, "inner_len")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let inner_data_gep = self.builder.build_struct_gep(list_struct_ty, inner_list_ptr, 1, "inner_data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let inner_data_i8 = self.builder.build_load(
+                    BasicTypeEnum::PointerType(i8_ptr), inner_data_gep, "inner_data"
+                ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                let inner_data_ptr = self.builder.build_bit_cast(inner_data_i8,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "inner_data_i64")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                self.builder.build_store(inner_idx_alloca, i64_ty.const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(copy_inner_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(copy_inner_bb);
+                let inner_idx = self.builder.build_load(i64_ty, inner_idx_alloca, "inner_idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let inner_cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, inner_idx, inner_len, "inner_cmp")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                self.builder.build_conditional_branch(inner_cmp, copy_inner_body_bb, copy_outer_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(copy_inner_body_bb);
+                let src_ptr = unsafe {
+                    self.builder.build_gep(i64_ty, inner_data_ptr, &[inner_idx], "inner_elem")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                let src_val = self.builder.build_load(i64_ty, src_ptr, "inner_elem_val")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let dest_idx = self.builder.build_load(i64_ty, dest_idx_alloca, "dest_idx")
+                    .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                let dest_ptr = unsafe {
+                    self.builder.build_gep(i64_ty, new_data_i64, &[dest_idx], "dest_elem")
+                }.map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(dest_ptr, src_val)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let next_dest = self.builder.build_int_add(dest_idx, i64_ty.const_int(1, false), "next_dest")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(dest_idx_alloca, next_dest)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let next_inner = self.builder.build_int_add(inner_idx, i64_ty.const_int(1, false), "next_inner")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(inner_idx_alloca, next_inner)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(copy_inner_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // After inner loop: increment outer_idx and continue
+                self.builder.position_at_end(copy_outer_bb);
+                let next_outer = self.builder.build_int_add(outer_idx, i64_ty.const_int(1, false), "next_outer")
+                    .map_err(|e| format!("add error: {}", e))?;
+                self.builder.build_store(outer_idx_alloca, next_outer)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.position_at_end(copy_done_bb);
+                // Build result list struct
+                let result_list_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                ], false);
+                let result_alloca = self.builder.build_alloca(result_list_ty, "flattened_list")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let result_len_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 0, "result_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(result_len_gep, total_len)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let result_data_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 1, "result_data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let new_data_void = self.builder.build_bit_cast(new_data,
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "new_data_void")
+                    .map_err(|e| format!("bitcast error: {}", e))?;
+                self.builder.build_store(result_data_gep, new_data_void)
+                    .map_err(|e| format!("store error: {}", e))?;
+                Ok(result_alloca.into())
+            }
+            "str_split" | "str_join" | "str_replace" => {
+                // String operations that require runtime library support
+                Err(format!("'{}' is a runtime-only function, not available in pure LLVM codegen", name))
+            }
             // ========== map/filter/reduce handled in compile_expr (compile-time) ==========
             "lexer" | "parse" => {
                 // lexer/parse are runtime-only functions - generate a call to external runtime
