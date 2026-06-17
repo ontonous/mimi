@@ -806,47 +806,36 @@ impl<'a> Interpreter<'a> {
                 let idx = self.eval_expr(idx)?;
                 match (obj, idx) {
                     (Value::List(list), Value::Int(i)) => {
-                        let i = if i < 0 {
-                            list.len() as i64 + i
-                        } else {
-                            i
-                        } as usize;
-                        list.get(i)
-                            .cloned()
-                            .ok_or_else(|| "index out of bounds".into())
+                        let len = list.len() as i64;
+                        let i = if i < 0 { len + i } else { i };
+                        if i < 0 || i >= len {
+                            return Err(format!("index out of bounds: index {} is not valid for list of length {}", i, len));
+                        }
+                        Ok(list[i as usize].clone())
                     }
                     (Value::Array(arr), Value::Int(i)) => {
-                        let i = if i < 0 {
-                            arr.len() as i64 + i
-                        } else {
-                            i
-                        } as usize;
-                        arr.get(i)
-                            .cloned()
-                            .ok_or_else(|| "array index out of bounds".into())
+                        let len = arr.len() as i64;
+                        let i = if i < 0 { len + i } else { i };
+                        if i < 0 || i >= len {
+                            return Err(format!("array index out of bounds: index {} is not valid for array of length {}", i, len));
+                        }
+                        Ok(arr[i as usize].clone())
                     }
                     (Value::Slice { source, start, end }, Value::Int(i)) => {
-                        let slice_len = end - start;
-                        let i = if i < 0 {
-                            slice_len as i64 + i
-                        } else {
-                            i
-                        } as usize;
-                        if i >= slice_len {
-                            return Err("slice index out of bounds".into());
+                        let slice_len = (end - start) as i64;
+                        let i = if i < 0 { slice_len + i } else { i };
+                        if i < 0 || i >= slice_len {
+                            return Err(format!("slice index out of bounds: index {} is not valid for slice of length {}", i, slice_len));
                         }
-                        Ok(source[start + i].clone())
+                        Ok(source[start + i as usize].clone())
                     }
                     (Value::String(s), Value::Int(i)) => {
-                        let i = if i < 0 {
-                            s.len() as i64 + i
-                        } else {
-                            i
-                        } as usize;
-                        s.chars()
-                            .nth(i)
-                            .map(|c| Value::String(c.to_string()))
-                            .ok_or_else(|| "index out of bounds".into())
+                        let len = s.chars().count() as i64;
+                        let i = if i < 0 { len + i } else { i };
+                        if i < 0 || i >= len {
+                            return Err(format!("string index out of bounds: index {} is not valid for string of length {}", i, len));
+                        }
+                        Ok(Value::String(s.chars().nth(i as usize).unwrap().to_string()))
                     }
                     _ => Err("invalid index operation".into()),
                 }
@@ -1092,7 +1081,11 @@ impl<'a> Interpreter<'a> {
         let v = self.eval_expr(e)?;
         match op {
             UnOp::Neg => match v {
-                Value::Int(x) => Ok(Value::Int(-x)),
+                Value::Int(x) => {
+                    crate::safe_arith::checked_neg(x)
+                        .ok_or_else(|| format!("integer overflow in negation: -{}", x))
+                        .map(Value::Int)
+                }
                 Value::Float(x) => Ok(Value::Float(-x)),
                 _ => Err("cannot negate non-number".into()),
             },
@@ -1130,23 +1123,59 @@ impl<'a> Interpreter<'a> {
         match op {
             BinOp::Add => match (&left, &right) {
                 (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
-                _ => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_add(*a, *b)
+                        .ok_or_else(|| format!("integer overflow in addition: {} + {}", a, b))
+                        .map(Value::Int)
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                _ => Err("addition requires numbers or strings".into()),
             },
-            BinOp::Sub => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
-            BinOp::Mul => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
+            BinOp::Sub => match (&left, &right) {
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_sub(*a, *b)
+                        .ok_or_else(|| format!("integer overflow in subtraction: {} - {}", a, b))
+                        .map(Value::Int)
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+                _ => Err("subtraction requires numbers".into()),
+            },
+            BinOp::Mul => match (&left, &right) {
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_mul(*a, *b)
+                        .ok_or_else(|| format!("integer overflow in multiplication: {} * {}", a, b))
+                        .map(Value::Int)
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                _ => Err("multiplication requires numbers".into()),
+            },
             BinOp::Div => match (&left, &right) {
                 (Value::Int(_), Value::Int(0)) => Err("division by zero".into()),
                 (Value::Float(_), Value::Float(b)) if *b == 0.0 => Err("division by zero".into()),
-                _ => numeric_op(left, right, |a, b| a / b, |a, b| a / b),
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_div(*a, *b)
+                        .ok_or_else(|| format!("integer overflow in division: {} / {}", a, b))
+                        .map(Value::Int)
+                }
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                _ => Err("division requires numbers".into()),
             },
             BinOp::Mod => match (&left, &right) {
                 (Value::Int(_), Value::Int(0)) => Err("modulo by zero".into()),
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_rem(*a, *b)
+                        .ok_or_else(|| format!("integer overflow in modulo: {} % {}", a, b))
+                        .map(Value::Int)
+                }
                 _ => Err("modulo requires integers".into()),
             },
             BinOp::Pow => match (&left, &right) {
                 (Value::Int(_), Value::Int(b)) if *b < 0 => Err("negative exponent not supported for integers".into()),
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(*b as u32))),
+                (Value::Int(a), Value::Int(b)) => {
+                    crate::safe_arith::checked_pow(*a, *b as u32)
+                        .ok_or_else(|| format!("integer overflow in power: {} ^ {}", a, b))
+                        .map(Value::Int)
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
                 _ => Err("power requires numbers".into()),
             },

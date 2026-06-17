@@ -10,6 +10,7 @@ mod lockfile;
 mod lsp;
 mod manifest;
 mod parser;
+pub mod safe_arith;
 pub mod span;
 mod verifier;
 #[cfg(test)]
