@@ -213,3 +213,127 @@ const char* mimi_value_type_name(ValueHandle handle) {
     (void)handle;
     return "unknown";
 }
+
+/* ========== String functions ========== */
+
+MimiList* mimi_str_split(const char* s, const char* delim) {
+    MimiList* result = (MimiList*)calloc(1, sizeof(MimiList));
+    if (!result || !s || !delim) return result;
+
+    /* Count parts first */
+    int64_t count = 0;
+    size_t delim_len = strlen(delim);
+    if (delim_len == 0) {
+        /* Empty delimiter: split into individual characters */
+        for (const char* p = s; *p; p++) count++;
+        if (count == 0) count = 1;
+    } else {
+        const char* p = s;
+        count = 1;
+        while ((p = strstr(p, delim)) != NULL) {
+            count++;
+            p += delim_len;
+        }
+    }
+
+    result->data = (const char**)calloc(count, sizeof(const char*));
+    if (!result->data) { free(result); return NULL; }
+    result->len = count;
+
+    if (delim_len == 0) {
+        /* Empty delimiter: each character is a part */
+        int64_t i = 0;
+        for (const char* p = s; *p; p++) {
+            char* part = (char*)malloc(2);
+            part[0] = *p;
+            part[1] = '\0';
+            result->data[i++] = part;
+        }
+    } else {
+        int64_t i = 0;
+        const char* start = s;
+        const char* found;
+        while ((found = strstr(start, delim)) != NULL) {
+            size_t part_len = found - start;
+            char* part = (char*)malloc(part_len + 1);
+            memcpy(part, start, part_len);
+            part[part_len] = '\0';
+            result->data[i++] = part;
+            start = found + delim_len;
+        }
+        /* Last part (or the whole string if no delimiter found) */
+        result->data[i] = strdup(start);
+    }
+
+    return result;
+}
+
+const char* mimi_str_join(const MimiList* list, const char* sep) {
+    if (!list || !list->data || list->len == 0) return strdup("");
+    if (!sep) sep = "";
+
+    /* Calculate total length */
+    size_t total = 0;
+    size_t sep_len = strlen(sep);
+    for (int64_t i = 0; i < list->len; i++) {
+        total += strlen(list->data[i] ? list->data[i] : "");
+        if (i < list->len - 1) total += sep_len;
+    }
+
+    char* result = (char*)malloc(total + 1);
+    if (!result) return strdup("");
+
+    char* p = result;
+    for (int64_t i = 0; i < list->len; i++) {
+        const char* s = list->data[i] ? list->data[i] : "";
+        size_t len = strlen(s);
+        memcpy(p, s, len);
+        p += len;
+        if (i < list->len - 1) {
+            memcpy(p, sep, sep_len);
+            p += sep_len;
+        }
+    }
+    *p = '\0';
+    return result;
+}
+
+const char* mimi_str_replace(const char* s, const char* from, const char* to) {
+    if (!s) return strdup("");
+    if (!from || from[0] == '\0') return strdup(s);
+    if (!to) to = "";
+
+    /* Count occurrences */
+    size_t from_len = strlen(from);
+    size_t to_len = strlen(to);
+    int64_t count = 0;
+    const char* p = s;
+    while ((p = strstr(p, from)) != NULL) {
+        count++;
+        p += from_len;
+    }
+
+    if (count == 0) return strdup(s);
+
+    /* Calculate result length */
+    size_t s_len = strlen(s);
+    size_t result_len = s_len + count * (to_len - from_len);
+    char* result = (char*)malloc(result_len + 1);
+    if (!result) return strdup(s);
+
+    /* Build result */
+    char* out = result;
+    const char* scan = s;
+    const char* found;
+    while ((found = strstr(scan, from)) != NULL) {
+        size_t prefix_len = found - scan;
+        memcpy(out, scan, prefix_len);
+        out += prefix_len;
+        memcpy(out, to, to_len);
+        out += to_len;
+        scan = found + from_len;
+    }
+    /* Copy remainder */
+    strcpy(out, scan);
+    return result;
+}

@@ -5603,8 +5603,113 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| format!("store error: {}", e))?;
                 Ok(result_alloca.into())
             }
-            "str_split" | "str_join" | "str_replace" => {
-                Err(format!("'{}' is a runtime-only function, not available in pure LLVM codegen", name))
+            "str_split" => {
+                if args.len() != 2 { return Err("str_split expects 2 arguments (string, delimiter)".into()); }
+                let s_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_split: first arg must be string".into()),
+                };
+                let delim_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_split: second arg must be string".into()),
+                };
+                let func = self.module.get_function("mimi_str_split")
+                    .ok_or("mimi_str_split not declared")?;
+                let result_ptr = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(delim_ptr),
+                ], "str_split_call")
+                    .map_err(|e| format!("str_split error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("mimi_str_split returned void")?
+                    .into_pointer_value();
+                // MimiList* is {i64 len, const char** data} — same layout as our list struct
+                let i64_ty = self.context.i64_type();
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let list_struct_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(i8_ptr),
+                ], false);
+                let list_ptr = self.builder.build_bit_cast(result_ptr,
+                    list_struct_ty.ptr_type(inkwell::AddressSpace::default()), "list_ptr")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let len_val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len_val")
+                    .map_err(|e| format!("load error: {}", e))?;
+                let data_val = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data_val")
+                    .map_err(|e| format!("load error: {}", e))?;
+                let result_struct = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(i8_ptr),
+                ], false);
+                let result_alloca = self.builder.build_alloca(result_struct, "str_split_result")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let r_len_gep = self.builder.build_struct_gep(result_struct, result_alloca, 0, "r_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let r_data_gep = self.builder.build_struct_gep(result_struct, result_alloca, 1, "r_data")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(r_len_gep, len_val)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_store(r_data_gep, data_val)
+                    .map_err(|e| format!("store error: {}", e))?;
+                Ok(result_alloca.into())
+            }
+            "str_join" => {
+                if args.len() != 2 { return Err("str_join expects 2 arguments (list, separator)".into()); }
+                let list_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_join: first arg must be list".into()),
+                };
+                let sep_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_join: second arg must be string".into()),
+                };
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                // Bitcast list pointer to i8* for C function
+                let c_list_ptr = self.builder.build_bit_cast(list_ptr,
+                    i8_ptr, "c_list_ptr")
+                    .map_err(|e| format!("bitcast error: {}", e))?
+                    .into_pointer_value();
+                let func = self.module.get_function("mimi_str_join")
+                    .ok_or("mimi_str_join not declared")?;
+                let result = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(c_list_ptr),
+                    BasicMetadataValueEnum::PointerValue(sep_ptr),
+                ], "str_join_call")
+                    .map_err(|e| format!("str_join error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("mimi_str_join returned void")?;
+                Ok(result)
+            }
+            "str_replace" => {
+                if args.len() != 3 { return Err("str_replace expects 3 arguments".into()); }
+                let s_ptr = match args[0] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_replace: first arg must be string".into()),
+                };
+                let from_ptr = match args[1] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_replace: second arg must be string".into()),
+                };
+                let to_ptr = match args[2] {
+                    BasicMetadataValueEnum::PointerValue(pv) => pv,
+                    _ => return Err("str_replace: third arg must be string".into()),
+                };
+                let func = self.module.get_function("mimi_str_replace")
+                    .ok_or("mimi_str_replace not declared")?;
+                let result = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(from_ptr),
+                    BasicMetadataValueEnum::PointerValue(to_ptr),
+                ], "str_replace_call")
+                    .map_err(|e| format!("str_replace error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("mimi_str_replace returned void")?;
+                Ok(result)
             }
             // ========== Map/Record runtime functions ==========
             "map_new" => {

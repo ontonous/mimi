@@ -16,4 +16,19 @@ int mimi_map_remove(MapHandle map, const char* key);
 MapHandle mimi_map_from_list(ValueHandle* keys, ValueHandle* values, int64_t n);
 const char* mimi_value_type_name(ValueHandle handle);
 
+/* String functions: str_split, str_join, str_replace.
+   Lists are represented as {i64 len, i64* data} where data[i] is a (char*).
+   The list struct is heap-allocated; caller owns the memory. */
+typedef struct { int64_t len; const char** data; } MimiList;
+
+/* str_split(s, delim) → heap-allocated MimiList* of substrings */
+MimiList* mimi_str_split(const char* s, const char* delim);
+
+/* str_join(list_ptr, sep) → heap-allocated joined string.
+   list_ptr points to a MimiList where each data[i] is a const char*. */
+const char* mimi_str_join(const MimiList* list, const char* sep);
+
+/* str_replace(s, from, to) → heap-allocated result string */
+const char* mimi_str_replace(const char* s, const char* from, const char* to);
+
 #endif

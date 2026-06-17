@@ -155,8 +155,20 @@ pub(crate) fn compile_and_run(src: &str) -> Result<String, String> {
 
     codegen.compile_to_object(&obj_path)?;
 
+    // Compile the C runtime
+    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
+    let runtime_o = tmp_dir.join("mimi_runtime.o");
+    let rt_status = Command::new("cc")
+        .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
+        .status()
+        .map_err(|e| format!("runtime compile: {}", e))?;
+    if !rt_status.success() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(format!("runtime compile failed with exit code {:?}", rt_status.code()));
+    }
+
     let status = Command::new("cc")
-        .arg("-no-pie").arg(&obj_path).arg("-o").arg(&bin_path)
+        .arg("-no-pie").arg(&obj_path).arg(&runtime_o).arg("-o").arg(&bin_path)
         .status()
         .map_err(|e| format!("linker: {}", e))?;
     if !status.success() {

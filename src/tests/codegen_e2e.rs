@@ -434,4 +434,46 @@ fn e2e_factorial_while_iter() {
     assert_eq!(stdout.trim(), "120");
 }
 
+// ===================== String Functions =====================
 
+#[test]
+fn e2e_str_split() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let parts = str_split("a,b,c", ",")
+            println(len(parts))
+            let joined = str_join(parts, "+")
+            println(joined)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "3\na+b+c");
+}
+
+#[test]
+fn e2e_str_join() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let parts = str_split("hello world foo", " ")
+            let result = str_join(parts, "-")
+            println(result)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "hello-world-foo");
+}
+
+#[test]
+fn e2e_str_replace() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let result = str_replace("hello world", "world", "mimi")
+            println(result)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "hello mimi");
+}
