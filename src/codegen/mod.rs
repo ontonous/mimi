@@ -42,6 +42,10 @@ pub struct CodeGenerator<'ctx> {
     compensation_blocks: Vec<Vec<Stmt>>,
     /// Stack of scope start indices into compensation_blocks
     comp_scope_stack: Vec<usize>,
+    /// Trait definitions: trait_name -> TraitDef
+    trait_defs: HashMap<String, crate::ast::TraitDef>,
+    /// Trait implementations: type_name -> trait_name -> Vec<FuncDef> methods
+    type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -51,7 +55,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new() }
     }
 
     /// Enter parallel parasteps mode: track thread IDs for joining at block end
@@ -229,6 +233,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::Func(f) if !f.is_comptime => {
                     self.func_defs.insert(f.name.clone(), f.clone());
                 }
+                Item::Trait(t) => {
+                    self.trait_defs.insert(t.name.clone(), t.clone());
+                }
+                Item::Impl(imp) => {
+                    self.type_impls
+                        .entry(imp.type_name.clone())
+                        .or_default()
+                        .insert(imp.trait_name.clone(), imp.methods.clone());
+                }
                 Item::Module(m) => {
                     for inner in &m.items {
                         match inner {
@@ -241,6 +254,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Item::Func(f) if !f.is_comptime => {
                                 self.func_defs.insert(f.name.clone(), f.clone());
                             }
+                            Item::Trait(t) => {
+                                self.trait_defs.insert(t.name.clone(), t.clone());
+                            }
+                            Item::Impl(imp) => {
+                                self.type_impls
+                                    .entry(imp.type_name.clone())
+                                    .or_default()
+                                    .insert(imp.trait_name.clone(), imp.methods.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -248,6 +270,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {}
             }
         }
+        // Compile trait impl methods
+        self.compile_impl_methods()?;
         // Second pass: register extern functions and compile user functions
         for item in &file.items {
             match item {
@@ -283,6 +307,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_type_def(t)?;
                 }
                 _ => {}
+            }
+        }
+        // Second pass: compile impl methods for committed trait implementations
+        self.compile_impl_methods()?;
+        Ok(())
+    }
+
+    /// Compile all trait impl methods as standalone functions with mangled names
+    fn compile_impl_methods(&mut self) -> Result<(), String> {
+        for (type_name, trait_impls) in self.type_impls.clone() {
+            for (trait_name, methods) in &trait_impls {
+                for method in methods {
+                    // Skip non-committed methods
+                    if !self.is_committed(&method.commitment) {
+                        continue;
+                    }
+                    // Mangle name: {type_name}__{trait_name}__{method_name}
+                    let mangled = format!("{}__{}__{}", type_name, trait_name, method.name);
+                    // Build function: prepend self: &type_name as first param
+                    let mut impl_method = method.clone();
+                    impl_method.name = mangled;
+                    // Prepend self param: self: &type_name
+                    impl_method.params.insert(0, crate::ast::Param {
+                        name: "self".into(),
+                        ty: crate::ast::Type::Ref(Box::new(
+                            crate::ast::Type::Name(type_name.clone(), vec![])
+                        )),
+                        mut_: false,
+                    });
+                    self.compile_func(&impl_method)?;
+                }
             }
         }
         Ok(())
@@ -1464,14 +1519,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.compile_call(name, args, vars)
                     }
                     Expr::Field(obj, method_name) => {
-                        // Actor method call: obj.method(args)
-                        // Determine the type of the object to find the actor name
+                        // Method call: obj.method(args)
+                        // Determine the type of the object to find the actor/trait name
                         let obj_type = self.infer_object_type(obj, vars);
                         let actor_method = format!("{}__{}__method", obj_type, method_name);
-                        if self.module.get_function(&actor_method).is_some() {
+                        
+                        // 1. Try actor method dispatch
+                        if let Some(function) = self.module.get_function(&actor_method) {
                             let obj_val = self.compile_expr(obj, vars)?;
                             let mut compiled_args = Vec::new();
-                            // prepend self
                             compiled_args.push(obj_val);
                             for arg in args {
                                 compiled_args.push(self.compile_expr(arg, vars)?);
@@ -1484,15 +1540,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                                 BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
                             }).collect();
-                            let function = self.module.get_function(&actor_method).unwrap();
                             let call = self.builder.build_call(function, &metadata_args, "method_call")
                                 .map_err(|e| format!("method call error: {}", e))?;
-                            Ok(call.try_as_basic_value().left().unwrap_or(
+                            return Ok(call.try_as_basic_value().left().unwrap_or(
                                 self.context.i64_type().const_int(0, false).into()
-                            ))
-                        } else if self.type_defs.contains_key(&obj_type) {
-                            // Field access on a record/actor: obj.field (no call)
-                            // Check if it's a method that isn't compiled yet
+                            ));
+                        }
+                        
+                        // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
+                        if let Some(trait_impls) = self.type_impls.get(&obj_type) {
+                            for (trait_name, methods) in trait_impls {
+                                if methods.iter().any(|m| m.name == *method_name) {
+                                    let mangled = format!("{}__{}__{}", obj_type, trait_name, method_name);
+                                    if let Some(function) = self.module.get_function(&mangled) {
+                                        let obj_val = self.compile_expr(obj, vars)?;
+                                        let mut compiled_args = Vec::new();
+                                        compiled_args.push(obj_val);
+                                        for arg in args {
+                                            compiled_args.push(self.compile_expr(arg, vars)?);
+                                        }
+                                        let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                                            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                                            BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                                            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                                            BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                                            BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                                            BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                                        }).collect();
+                                        let call = self.builder.build_call(function, &metadata_args, "trait_call")
+                                            .map_err(|e| format!("trait method call error: {}", e))?;
+                                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                                            self.context.i64_type().const_int(0, false).into()
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 3. Fallback: field access or error
+                        if self.type_defs.contains_key(&obj_type) {
                             Err(format!("method '{}' not compiled for type '{}' (missing crate?)", method_name, obj_type))
                         } else {
                             Err(format!("cannot call method '{}' on unknown type '{}'", method_name, obj_type))
