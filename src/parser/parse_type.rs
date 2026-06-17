@@ -117,6 +117,20 @@ impl Parser {
                 let inner = self.parse_type()?;
                 Ok(Type::Weak(Box::new(inner)))
             }
+            TokenKind::Cap => {
+                self.advance();
+                let name_tok = self.peek();
+                let name = match &name_tok.kind {
+                    TokenKind::Ident(n) => n.clone(),
+                    _ => return Err(ParseError::new(
+                        "expected capability name after `cap`",
+                        name_tok.line,
+                        name_tok.col,
+                    )),
+                };
+                self.advance();
+                Ok(Type::Cap(name))
+            }
             TokenKind::LBracket => {
                 self.advance();
                 let elem_type = self.parse_type()?;

@@ -41,10 +41,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::Type(t) => {
                     self.register_type_def(t)?;
                 }
+                Item::Actor(actor) => {
+                    self.register_actor_def(actor)?;
+                }
                 Item::Module(m) => {
                     for inner in &m.items {
-                        if let Item::Type(t) = inner {
-                            self.register_type_def(t)?;
+                        match inner {
+                            Item::Type(t) => {
+                                self.register_type_def(t)?;
+                            }
+                            Item::Actor(actor) => {
+                                self.register_actor_def(actor)?;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -58,6 +67,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_extern_block(block)?;
                 }
                 Item::Func(f) if !f.is_comptime => self.compile_func(f)?,
+                Item::Actor(actor) => {
+                    self.compile_actor(actor)?;
+                }
                 Item::Module(m) => {
                     for inner in &m.items {
                         match inner {
@@ -65,6 +77,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.register_extern_block(block)?;
                             }
                             Item::Func(f) if !f.is_comptime => self.compile_func(f)?,
+                            Item::Actor(actor) => {
+                                self.compile_actor(actor)?;
+                            }
                             _ => {}
                         }
                     }
@@ -126,6 +141,85 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         self.type_llvm.insert(t.name.clone(), llvm_ty);
         self.type_defs.insert(t.name.clone(), t.clone());
+        Ok(())
+    }
+
+    fn register_actor_def(&mut self, actor: &crate::ast::ActorDef) -> Result<(), String> {
+        // Represent actor as a struct with fields
+        let mut field_tys = Vec::new();
+        for f in &actor.fields {
+            let ty = types::mimi_type_to_llvm(self.context, &f.ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            field_tys.push(ty);
+        }
+        let llvm_ty = BasicTypeEnum::StructType(self.context.struct_type(&field_tys, false));
+        self.type_llvm.insert(actor.name.clone(), llvm_ty);
+        
+        // Also register as a type definition for field access
+        let type_def = crate::ast::TypeDef {
+            name: actor.name.clone(),
+            commitment: actor.commitment,
+            pub_: actor.pub_,
+            kind: crate::ast::TypeDefKind::Record(actor.fields.iter().map(|f| crate::ast::Field {
+                name: f.name.clone(),
+                ty: f.ty.clone(),
+            }).collect()),
+            generics: Vec::new(),
+            derives: Vec::new(),
+        };
+        self.type_defs.insert(actor.name.clone(), type_def);
+        Ok(())
+    }
+
+    fn compile_actor(&mut self, actor: &crate::ast::ActorDef) -> Result<(), String> {
+        // Generate constructor function: ActorName(field1, field2, ...) -> Actor
+        let mut param_types = Vec::new();
+        for f in &actor.fields {
+            let ty = types::mimi_type_to_llvm(self.context, &f.ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            param_types.push(ty);
+        }
+        
+        let metadata_params: Vec<_> = param_types.iter().map(|t| types::basic_to_metadata(self.context, *t)).collect();
+        
+        // Return type is a pointer to the actor struct
+        let actor_ty = self.type_llvm.get(&actor.name)
+            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?
+            .clone();
+        
+        let fn_type = match actor_ty {
+            BasicTypeEnum::StructType(sty) => sty.fn_type(&metadata_params, false),
+            _ => return Err(format!("actor '{}' type is not a struct", actor.name)),
+        };
+        
+        let constructor_name = format!("{}_new", actor.name);
+        let function = self.module.add_function(&constructor_name, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        
+        // Allocate actor struct
+        let alloca = match actor_ty {
+            BasicTypeEnum::StructType(sty) => self.builder.build_alloca(sty, &actor.name)
+                .map_err(|e| format!("alloca error: {}", e))?,
+            _ => return Err("actor type error".into()),
+        };
+        
+        // Store field values
+        for (i, param) in function.get_params().iter().enumerate() {
+            if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(&actor.name) {
+                let gep = self.builder.build_struct_gep(*sty, alloca, i as u32, &actor.fields[i].name)
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(gep, *param)
+                    .map_err(|e| format!("store error: {}", e))?;
+            }
+        }
+        
+        // Return the actor struct
+        let ret_val = self.builder.build_load(actor_ty, alloca, &actor.name)
+            .map_err(|e| format!("load error: {}", e))?;
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| format!("return error: {}", e))?;
+        
         Ok(())
     }
 
@@ -417,6 +511,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Err("continue outside of loop".into());
                     }
                 }
+                Stmt::MmsBlock { .. } => {
+                    // Skip MMS blocks in codegen (they're for documentation/contracts)
+                }
+                Stmt::Parasteps(block) => {
+                    // Parasteps: execute statements sequentially (fallback for parallel execution)
+                    // Future: implement true parallel execution with threads
+                    self.compile_block(block, &mut vars)?;
+                }
+                Stmt::Drop(expr) => {
+                    // Drop: evaluate expression and discard result (for linear capabilities)
+                    self.compile_expr(expr, &vars)?;
+                }
+                Stmt::SharedLet { init, .. } => {
+                    // SharedLet: evaluate init expression (simplified - no actual shared ownership in codegen)
+                    self.compile_expr(init, &vars)?;
+                }
+                Stmt::OnFailure(_) => {
+                    // OnFailure: skip compensation blocks in codegen (runtime-only feature)
+                }
+                Stmt::Arena(block) => {
+                    // Arena: execute block sequentially (simplified - no region-based memory in codegen)
+                    self.compile_block(block, &mut vars)?;
+                }
+                Stmt::Alloc { body, .. } => {
+                    // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
+                    self.compile_block(body, &mut vars)?;
+                }
+                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {
+                    // Skip contract-related statements in codegen
+                }
                 _ => {}
             }
         }
@@ -499,6 +623,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(merge_bb);
                 }
                 Stmt::Break(_) | Stmt::Continue => {}
+                Stmt::MmsBlock { .. } => {
+                    // Skip MMS blocks in codegen (they're for documentation/contracts)
+                }
+                Stmt::Parasteps(block) => {
+                    // Parasteps: execute statements sequentially (fallback for parallel execution)
+                    self.compile_block(block, vars)?;
+                }
+                Stmt::Drop(expr) => {
+                    // Drop: evaluate expression and discard result (for linear capabilities)
+                    self.compile_expr(expr, vars)?;
+                }
+                Stmt::SharedLet { init, .. } => {
+                    // SharedLet: evaluate init expression (simplified)
+                    self.compile_expr(init, vars)?;
+                }
+                Stmt::OnFailure(_) => {
+                    // OnFailure: skip compensation blocks in codegen (runtime-only feature)
+                }
+                Stmt::Arena(block) => {
+                    // Arena: execute block sequentially (simplified)
+                    self.compile_block(block, vars)?;
+                }
+                Stmt::Alloc { body, .. } => {
+                    // Alloc: execute body sequentially (simplified)
+                    self.compile_block(body, vars)?;
+                }
+                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {
+                    // Skip contract-related statements in codegen
+                }
                 _ => {}
             }
         }
@@ -871,6 +1024,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     _ => Err("index requires a list/array pointer".into()),
                 }
+            }
+            Expr::Spawn(expr) => {
+                // Spawn: execute expression sequentially (fallback for concurrent execution)
+                // Future: implement true concurrent execution with threads/futures
+                // For now, just compile the inner expression
+                self.compile_expr(expr, vars)
+            }
+            Expr::Await(expr) => {
+                // Await: for sequential fallback, just compile the inner expression
+                self.compile_expr(expr, vars)
             }
             _ => Err(format!("unsupported expression in codegen: {:?}", expr)),
         }

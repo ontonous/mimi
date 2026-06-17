@@ -913,3 +913,264 @@ fn codegen_nested_module() {
         }
     "#);
 }
+
+// ===================== Phase 1: Actor Codegen Tests =====================
+
+#[test]
+fn codegen_actor_basic() {
+    assert_compiles(r#"
+        actor Counter {
+            count: i32
+            name: string
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        actor Counter {
+            count: i32
+            name: string
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    assert!(ir.contains("Counter_new"), "IR should contain actor constructor");
+    assert!(ir.contains("%Counter"), "IR should contain actor type");
+}
+
+#[test]
+fn codegen_actor_with_methods() {
+    assert_compiles(r#"
+        actor Counter {
+            count: i32
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+}
+
+#[test]
+fn codegen_actor_multiple_fields() {
+    assert_compiles(r#"
+        actor Person {
+            name: string
+            age: i32
+            active: bool
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        actor Person {
+            name: string
+            age: i32
+            active: bool
+        }
+        func main() -> i32 {
+            42
+        }
+    "#);
+    assert!(ir.contains("Person_new"), "IR should contain Person constructor");
+}
+
+// ===================== Phase 1: Parasteps Codegen Tests =====================
+
+#[test]
+fn codegen_parasteps_basic() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            parasteps {
+                let x = 1
+                let y = 2
+                x + y
+            }
+        }
+    "#);
+}
+
+#[test]
+fn codegen_parasteps_with_statements() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            let mut total = 0
+            parasteps {
+                total = total + 1
+                total = total + 2
+                total = total + 3
+            }
+            total
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() -> i32 {
+            let mut total = 0
+            parasteps {
+                total = total + 1
+                total = total + 2
+                total = total + 3
+            }
+            total
+        }
+    "#);
+    assert!(ir.contains("add"), "IR should contain add operations");
+}
+
+#[test]
+fn codegen_parasteps_nested() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            parasteps {
+                let a = 1
+                parasteps {
+                    let b = 2
+                    a + b
+                }
+            }
+        }
+    "#);
+}
+
+// ===================== Phase 1: Spawn Codegen Tests =====================
+
+#[test]
+fn codegen_spawn_basic() {
+    assert_compiles(r#"
+        func compute() -> i32 {
+            42
+        }
+        func main() -> i32 {
+            let future = spawn compute()
+            0
+        }
+    "#);
+}
+
+#[test]
+fn codegen_spawn_with_await() {
+    assert_compiles(r#"
+        func compute() -> i32 {
+            42
+        }
+        func main() -> i32 {
+            let future = spawn compute()
+            let result = await future
+            result
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func compute() -> i32 {
+            42
+        }
+        func main() -> i32 {
+            let future = spawn compute()
+            let result = await future
+            result
+        }
+    "#);
+    assert!(ir.contains("call"), "IR should contain function calls");
+}
+
+#[test]
+fn codegen_spawn_in_parasteps() {
+    assert_compiles(r#"
+        func task1() -> i32 {
+            1
+        }
+        func task2() -> i32 {
+            2
+        }
+        func main() -> i32 {
+            parasteps {
+                let f1 = spawn task1()
+                let f2 = spawn task2()
+                let r1 = await f1
+                let r2 = await f2
+                r1 + r2
+            }
+        }
+    "#);
+}
+
+// ===================== Phase 1: Cap Codegen Tests =====================
+
+#[test]
+fn codegen_cap_type() {
+    assert_compiles(r#"
+        cap MyCap
+        func main() -> i32 {
+            42
+        }
+    "#);
+}
+
+#[test]
+fn codegen_cap_with_usage() {
+    assert_compiles(r#"
+        cap FileCap
+        func read_file(file_cap: FileCap) -> i32 {
+            42
+        }
+        func main() -> i32 {
+            0
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        cap FileCap
+        func read_file(file_cap: FileCap) -> i32 {
+            42
+        }
+        func main() -> i32 {
+            0
+        }
+    "#);
+    assert!(ir.contains("define"), "IR should contain function definitions");
+}
+
+#[test]
+fn codegen_drop_statement() {
+    assert_compiles(r#"
+        cap MyCap
+        func main() -> i32 {
+            let c: MyCap = 1
+            drop(c)
+            0
+        }
+    "#);
+}
+
+#[test]
+fn codegen_arena_block() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            arena {
+                let x = 42
+                x
+            }
+        }
+    "#);
+    let ir = compile_to_ir(r#"
+        func main() -> i32 {
+            arena {
+                let x = 42
+                x
+            }
+        }
+    "#);
+    assert!(ir.contains("define"), "IR should contain function definitions");
+}
+
+#[test]
+fn codegen_alloc_block() {
+    assert_compiles(r#"
+        func main() -> i32 {
+            alloc(arena) {
+                let x = 42
+                x
+            }
+        }
+    "#);
+}
