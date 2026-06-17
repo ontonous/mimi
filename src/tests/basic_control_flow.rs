@@ -890,3 +890,31 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), interp::Value::Int(99));
 }
+
+#[test]
+fn unsafe_block_basic() {
+    let src = r#"
+func main() -> i32 {
+    let x = 42;
+    unsafe {
+        let y = x + 1;
+        y
+    }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(43));
+}
+
+#[test]
+fn unsafe_block_with_mutation() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 10;
+    unsafe {
+        x = x * 2;
+    }
+    x
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(20));
+}

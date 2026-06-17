@@ -24,6 +24,10 @@ pub struct CodeGenerator<'ctx> {
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
     /// Track linear capabilities in scope: name -> (pointer, consumed)
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
+    /// Generic type substitution map for current monomorphization
+    type_map: HashMap<String, crate::ast::Type>,
+    /// Store function definitions for monomorphization lookup
+    func_defs: HashMap<String, FuncDef>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -33,7 +37,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()] }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], type_map: HashMap::new(), func_defs: HashMap::new() }
     }
 
     /// Push a new capability scope
@@ -92,8 +96,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Mangle a generic function name with concrete type arguments
+    /// e.g., "identity" with type_map {T: i64} -> "identity__i64"
+    fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {
+        if type_map.is_empty() {
+            return base.to_string();
+        }
+        let mut parts: Vec<String> = type_map.iter()
+            .map(|(k, v)| format!("{}_{}", k, crate::core::fmt_type(v)))
+            .collect();
+        parts.sort();
+        format!("{}__{}", base, parts.join("__"))
+    }
+
+    /// Resolve a type through the current type_map (substitute generic params)
+    fn resolve_type(&self, ty: &crate::ast::Type) -> crate::ast::Type {
+        if self.type_map.is_empty() {
+            return ty.clone();
+        }
+        let generics: Vec<crate::ast::GenericParam> = self.type_map.keys()
+            .map(|k| crate::ast::GenericParam { name: k.clone(), bounds: vec![] })
+            .collect();
+        crate::core::subst_type_params(ty, &generics, &self.type_map)
+    }
+
+    /// Resolve a type to its LLVM representation, applying generic substitution
+    fn resolve_type_llvm(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
+        let resolved = self.resolve_type(ty);
+        types::mimi_type_to_llvm(self.context, &resolved)
+    }
+
     pub fn compile_file(&mut self, file: &File) -> Result<(), String> {
-        // First pass: collect type definitions
+        // First pass: collect type definitions and function definitions
         for item in &file.items {
             match item {
                 Item::Type(t) => {
@@ -101,6 +135,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Item::Actor(actor) => {
                     self.register_actor_def(actor)?;
+                }
+                Item::Func(f) if !f.is_comptime => {
+                    self.func_defs.insert(f.name.clone(), f.clone());
                 }
                 Item::Module(m) => {
                     for inner in &m.items {
@@ -110,6 +147,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             Item::Actor(actor) => {
                                 self.register_actor_def(actor)?;
+                            }
+                            Item::Func(f) if !f.is_comptime => {
+                                self.func_defs.insert(f.name.clone(), f.clone());
                             }
                             _ => {}
                         }
@@ -676,6 +716,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Arena: execute block sequentially (simplified - no region-based memory in codegen)
                     self.compile_block(block, &mut vars)?;
                 }
+                Stmt::Unsafe(block) => {
+                    // Unsafe: execute block (no restrictions in codegen)
+                    self.compile_block(block, &mut vars)?;
+                }
                 Stmt::Alloc { body, .. } => {
                     // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
                     self.compile_block(body, &mut vars)?;
@@ -694,6 +738,83 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_cap_scope();
 
         self.builder.build_return(Some(&last_val)).map_err(|e| format!("return error: {}", e))?;
+        Ok(())
+    }
+
+    /// Compile a generic function with concrete type arguments (monomorphization)
+    fn compile_generic_func(&mut self, func: &FuncDef, type_map: &HashMap<String, crate::ast::Type>) -> Result<(), String> {
+        // Save and set the type_map
+        let prev_type_map = self.type_map.clone();
+        self.type_map = type_map.clone();
+
+        let mangled = Self::mangle_name(&func.name, type_map);
+
+        // Skip if already compiled
+        if self.module.get_function(&mangled).is_some() {
+            self.type_map = prev_type_map;
+            return Ok(());
+        }
+
+        // Substitute generic params in ret type and param types
+        let ret_type = match &func.ret {
+            Some(ty) => {
+                let resolved = self.resolve_type(ty);
+                types::mimi_type_to_llvm(self.context, &resolved)
+                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+            }
+            None => BasicTypeEnum::IntType(self.context.i64_type()),
+        };
+
+        let mut param_types = Vec::new();
+        for param in &func.params {
+            let resolved = self.resolve_type(&param.ty);
+            if let Some(ty) = types::mimi_type_to_llvm(self.context, &resolved) {
+                param_types.push(ty);
+            }
+        }
+
+        let metadata_params: Vec<_> = param_types.iter().map(|t| types::basic_to_metadata(self.context, *t)).collect();
+
+        let fn_type = match ret_type {
+            BasicTypeEnum::IntType(t) => t.fn_type(&metadata_params, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&metadata_params, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&metadata_params, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&metadata_params, false),
+            BasicTypeEnum::ArrayType(t) => t.fn_type(&metadata_params, false),
+            _ => self.context.i64_type().fn_type(&metadata_params, false),
+        };
+
+        let function = self.module.add_function(&mangled, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        self.push_cap_scope();
+
+        let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
+        for (i, param) in func.params.iter().enumerate() {
+            let resolved = self.resolve_type(&param.ty);
+            if let Some(ty) = types::mimi_type_to_llvm(self.context, &resolved) {
+                let alloca = self.builder.build_alloca(ty, &param.name)
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                self.builder.build_store(alloca, function.get_nth_param(i as u32).expect("param index matches"))
+                    .map_err(|e| format!("store error: {}", e))?;
+                vars.insert(param.name.clone(), (alloca, ty));
+                if matches!(&param.ty, Type::Cap(_)) {
+                    self.register_cap(&param.name, alloca);
+                }
+            }
+        }
+
+        let mut last_val: BasicValueEnum = self.context.i64_type().const_int(0, false).into();
+        self.compile_block(&func.body, &mut vars)?;
+
+        self.check_unconsumed_caps()?;
+        self.pop_cap_scope();
+
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.builder.build_return(Some(&last_val)).map_err(|e| format!("return error: {}", e))?;
+        }
+        self.type_map = prev_type_map;
         Ok(())
     }
 
@@ -795,6 +916,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Arena: execute block sequentially (simplified)
                     self.compile_block(block, vars)?;
                 }
+                Stmt::Unsafe(block) => {
+                    // Unsafe: execute block (no restrictions in codegen)
+                    self.compile_block(block, vars)?;
+                }
                 Stmt::Alloc { body, .. } => {
                     // Alloc: execute body sequentially (simplified)
                     self.compile_block(body, vars)?;
@@ -809,7 +934,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn compile_expr(
-        &self,
+        &mut self,
         expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -873,8 +998,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     UnOp::Deref => {
                         if let BasicValueEnum::PointerValue(ptr) = v {
-                            let i64_ty = self.context.i64_type();
-                            Ok(self.builder.build_load(i64_ty, ptr, "deref")
+                            // Try to determine the pointee type from the inner expression's variable entry
+                            let pointee_ty = match inner.as_ref() {
+                                Expr::Ident(name) => {
+                                    if let Some(&(_, ty)) = vars.get(name) {
+                                        ty
+                                    } else {
+                                        BasicTypeEnum::IntType(self.context.i64_type())
+                                    }
+                                }
+                                _ => BasicTypeEnum::IntType(self.context.i64_type()),
+                            };
+                            Ok(self.builder.build_load(pointee_ty, ptr, "deref")
                                 .map_err(|e| format!("load error: {}", e))?.into())
                         } else {
                             Err("deref requires pointer type".into())
@@ -888,6 +1023,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     Err("only direct function calls supported in codegen".into())
                 }
+            }
+            Expr::Turbofish(name, type_args, args) => {
+                // Monomorphized call: func::<Type>(args)
+                // Build type_map from explicit type args
+                let func = self.find_func_def(name)?;
+                if func.generics.len() != type_args.len() {
+                    return Err(format!("turbofish for '{}' expects {} type args, got {}", name, func.generics.len(), type_args.len()));
+                }
+                let mut turbo_map: HashMap<String, crate::ast::Type> = HashMap::new();
+                for (gp, ta) in func.generics.iter().zip(type_args.iter()) {
+                    turbo_map.insert(gp.name.clone(), ta.clone());
+                }
+                // Merge with current type_map (for nested generics)
+                let mut merged_map = self.type_map.clone();
+                merged_map.extend(turbo_map);
+                let mangled = Self::mangle_name(name, &merged_map);
+                // Compile the specialized version if not yet compiled
+                if self.module.get_function(&mangled).is_none() {
+                    self.compile_generic_func(&func, &merged_map)?;
+                }
+                // Call the mangled function
+                self.compile_call_mangled(&mangled, args, vars)
             }
             Expr::Match(scrutinee, arms) => {
                 let scrutinee_val = self.compile_expr(scrutinee, vars)?;
@@ -1299,7 +1456,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn compile_call(
-        &self,
+        &mut self,
         name: &str,
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
@@ -1332,8 +1489,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.context.i64_type().const_int(0, false).into()
             ))
         } else {
-            Err(format!("undefined function '{}' in codegen", name))
+            // Try mangled name with current type_map
+            let mangled = Self::mangle_name(name, &self.type_map);
+            if let Some(function) = self.module.get_function(&mangled) {
+                let call = self.builder.build_call(function, &metadata_args, "call")
+                    .map_err(|e| format!("call error: {}", e))?;
+                Ok(call.try_as_basic_value().left().unwrap_or(
+                    self.context.i64_type().const_int(0, false).into()
+                ))
+            } else {
+                Err(format!("undefined function '{}' in codegen", name))
+            }
         }
+    }
+
+    /// Call a function by its mangled name
+    fn compile_call_mangled(
+        &mut self,
+        mangled: &str,
+        args: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut compiled_args = Vec::new();
+        for arg in args {
+            compiled_args.push(self.compile_expr(arg, vars)?);
+        }
+
+        let metadata_args: Vec<_> = compiled_args.iter().map(|v| {
+            match v {
+                BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+            }
+        }).collect();
+
+        if let Some(function) = self.module.get_function(mangled) {
+            let call = self.builder.build_call(function, &metadata_args, "call")
+                .map_err(|e| format!("call error: {}", e))?;
+            Ok(call.try_as_basic_value().left().unwrap_or(
+                self.context.i64_type().const_int(0, false).into()
+            ))
+        } else {
+            Err(format!("undefined function '{}' in codegen", mangled))
+        }
+    }
+
+    /// Find a FuncDef by name from the codegen's stored func_defs
+    fn find_func_def(&self, name: &str) -> Result<FuncDef, String> {
+        self.func_defs.get(name)
+            .cloned()
+            .ok_or_else(|| format!("function '{}' definition not available for monomorphization", name))
     }
 
     fn compile_builtin_call(

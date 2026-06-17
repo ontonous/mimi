@@ -314,22 +314,23 @@ impl LspServer {
             }
         };
 
-        let file = match parser::Parser::new(tokens).parse_file() {
-            Ok(f) => f,
-            Err(e) => {
-                diagnostics.push(serde_json::json!({
-                    "range": {
-                        "start": { "line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1) },
-                        "end": { "line": e.line.saturating_sub(1), "character": e.col }
-                    },
-                    "severity": 1,
-                    "message": e.message
-                }));
-                return diagnostics;
-            }
-        };
+        // Use recovery parser to get partial AST + all parse errors
+        let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
 
-        // Type check
+        // Report all parse errors
+        for e in &parse_errors {
+            diagnostics.push(serde_json::json!({
+                "range": {
+                    "start": { "line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1) },
+                    "end": { "line": e.line.saturating_sub(1), "character": e.col }
+                },
+                "severity": 1,
+                "source": "mimi",
+                "message": e.message
+            }));
+        }
+
+        // Type check the partial AST (even if parse had errors)
         if let Err(errs) = core::check(&file) {
             for err in errs {
                 diagnostics.push(serde_json::json!({
@@ -347,11 +348,17 @@ impl LspServer {
         diagnostics
     }
 
+    /// Parse text with error recovery, returning partial AST even on errors
+    fn parse_with_recovery(&self, text: &str) -> Option<crate::ast::File> {
+        let tokens = lexer::Lexer::new(text).tokenize().ok()?;
+        let (file, _errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+        Some(file)
+    }
+
     pub fn compute_document_symbols(&self, text: &str) -> Vec<serde_json::Value> {
         let mut symbols = Vec::new();
 
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) => {
@@ -403,7 +410,6 @@ impl LspServer {
                         _ => {}
                     }
                 }
-            }
         }
 
         symbols
@@ -426,8 +432,7 @@ impl LspServer {
         }
 
         // Try to parse and find the symbol definition
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) if f.name == word => {
@@ -464,7 +469,6 @@ impl LspServer {
                         _ => {}
                     }
                 }
-            }
         }
 
         // Builtins don't have definitions in user code
@@ -488,8 +492,7 @@ impl LspServer {
         }
 
         // Try to parse and find the symbol
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) if f.name == word => {
@@ -523,7 +526,6 @@ impl LspServer {
                         _ => {}
                     }
                 }
-            }
         }
 
         // Check builtins
@@ -596,8 +598,7 @@ impl LspServer {
         }
 
         // Try to parse and extract function names
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) => {
@@ -649,7 +650,6 @@ impl LspServer {
                         _ => {}
                     }
                 }
-            }
         }
 
         // Builtins (updated with v5.0 additions)
@@ -694,8 +694,7 @@ impl LspServer {
         let lines: Vec<&str> = text.lines().collect();
 
         // First, find the definition location
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) if f.name == word => {
@@ -716,7 +715,6 @@ impl LspServer {
                         _ => {}
                     }
                 }
-            }
         }
 
         // Add definition if requested
@@ -831,8 +829,7 @@ impl LspServer {
         // Find function signature
         let mut signatures = Vec::new();
 
-        if let Ok(tokens) = lexer::Lexer::new(text).tokenize() {
-            if let Ok(file) = parser::Parser::new(tokens).parse_file() {
+        if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     if let Item::Func(f) = item {
                         if f.name == func_name {
@@ -851,7 +848,6 @@ impl LspServer {
                         }
                     }
                 }
-            }
         }
 
         // Check builtins

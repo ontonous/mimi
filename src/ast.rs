@@ -270,6 +270,8 @@ pub enum Stmt {
     },
     /// Arena block for region-based memory management
     Arena(Block),
+    /// Unsafe block — allows operations that are normally forbidden
+    Unsafe(Block),
     /// Drop a capability
     Drop(Expr),
     /// Shared ownership binding: shared x = expr;

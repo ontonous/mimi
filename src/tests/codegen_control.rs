@@ -1254,3 +1254,63 @@ fn codegen_on_failure_with_statements() {
         }
     "#);
 }
+
+#[test]
+fn codegen_turbofish_generic() {
+    // Turbofish should produce a mangled function name
+    let ir = compile_to_ir(r#"
+        func identity<T>(x: T) -> T {
+            x
+        }
+        func main() -> i32 {
+            identity::<i32>(42)
+        }
+    "#);
+    assert!(ir.contains("identity__T_i32"), "IR should contain mangled generic function name:\n{}", ir);
+}
+
+#[test]
+fn codegen_turbofish_multiple_instantiations() {
+    // Two different type instantiations should produce two mangled functions
+    let ir = compile_to_ir(r#"
+        func wrap<T>(x: T) -> T {
+            x
+        }
+        func main() -> i32 {
+            let a = wrap::<i32>(1);
+            let b = wrap::<i64>(2);
+            a
+        }
+    "#);
+    assert!(ir.contains("wrap__T_i32"), "IR should contain wrap__T_i32:\n{}", ir);
+    assert!(ir.contains("wrap__T_i64"), "IR should contain wrap__T_i64:\n{}", ir);
+}
+
+#[test]
+fn codegen_ref_type() {
+    // &T should compile to a pointer type
+    assert_compiles(r#"
+        func take_ref(x: &i32) -> i32 {
+            *x
+        }
+        func main() -> i32 {
+            let v = 42;
+            take_ref(&v)
+        }
+    "#);
+}
+
+#[test]
+fn codegen_ref_mut_type() {
+    // &mut T should compile
+    assert_compiles(r#"
+        func mutate(x: &mut i32) {
+            *x = 100
+        }
+        func main() -> i32 {
+            let mut v = 42;
+            mutate(&mut v);
+            v
+        }
+    "#);
+}

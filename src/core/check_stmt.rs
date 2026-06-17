@@ -6,13 +6,17 @@ impl<'a> Checker<'a> {
         self.cap_vars.push(HashMap::new());
         self.push_borrow_scope();
         let mut seen_return = false;
-        for stmt in block {
+        for (i, stmt) in block.iter().enumerate() {
             // Unreachable code detection
             if seen_return {
                 self.emit_code(crate::diagnostic::codes::E0236, "unreachable statement after return".to_string());
                 break;
             }
             if let Stmt::Return(_) = stmt { seen_return = true; }
+            // NLL: Release borrows whose last use was in a previous statement
+            if i > 0 {
+                self.release_borrows_at_last_use(block, i);
+            }
             self.check_stmt(stmt, ret, scopes);
         }
         // Check for unconsumed caps before popping
@@ -250,6 +254,12 @@ impl<'a> Checker<'a> {
             Stmt::Arena(block) => {
                 // Arena block is like a scope with special memory semantics
                 // For now, just check the block contents
+                scopes.push(HashMap::new());
+                self.check_block(block, ret, scopes);
+                scopes.pop();
+            }
+            Stmt::Unsafe(block) => {
+                // Unsafe block: check the body (no additional restrictions at type-check level)
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();

@@ -25,6 +25,7 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Arena => self.parse_arena(),
+            TokenKind::Unsafe => self.parse_unsafe(),
             TokenKind::Alloc if self.is_alloc_block() => self.parse_alloc(),
             TokenKind::Shared => self.parse_shared_let(SharedKind::Shared),
             TokenKind::LocalShared => self.parse_shared_let(SharedKind::LocalShared),
@@ -114,6 +115,14 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block()?;
         Ok(Stmt::Arena(body))
+    }
+
+    fn parse_unsafe(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::Unsafe, "`unsafe`")?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Unsafe(body))
     }
 
     fn parse_alloc(&mut self) -> Result<Stmt, ParseError> {

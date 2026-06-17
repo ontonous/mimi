@@ -284,6 +284,11 @@ impl<'a> Interpreter<'a> {
 
                 return result;
             }
+            Stmt::Unsafe(block) => {
+                // Unsafe block: execute body with no restrictions
+                // (at runtime, unsafe has no effect — it's a compile-time annotation)
+                return self.eval_block(block);
+            }
             Stmt::Alloc { kind, body } => {
                 // alloc(Kind) block: uses the specified allocator
                 return match kind {

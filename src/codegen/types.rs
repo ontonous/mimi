@@ -42,7 +42,51 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         Type::Cap(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Newtype(_, inner) => mimi_type_to_llvm(ctx, inner),
         Type::Allocator => Some(BasicTypeEnum::IntType(ctx.i64_type())),
-        _ => Some(BasicTypeEnum::IntType(ctx.i64_type())),
+        Type::Array(inner, size) => {
+            let elem = mimi_type_to_llvm(ctx, inner)?;
+            match elem {
+                BasicTypeEnum::IntType(t) => Some(BasicTypeEnum::ArrayType(t.array_type(*size as u32))),
+                BasicTypeEnum::FloatType(t) => Some(BasicTypeEnum::ArrayType(t.array_type(*size as u32))),
+                BasicTypeEnum::PointerType(t) => Some(BasicTypeEnum::ArrayType(t.array_type(*size as u32))),
+                BasicTypeEnum::StructType(t) => Some(BasicTypeEnum::ArrayType(t.array_type(*size as u32))),
+                BasicTypeEnum::ArrayType(t) => Some(BasicTypeEnum::ArrayType(t.array_type(*size as u32))),
+                _ => Some(BasicTypeEnum::ArrayType(ctx.i64_type().array_type(*size as u32))),
+            }
+        }
+        Type::Option(inner) => {
+            // Option<T> represented as {i1, T} — discriminant + payload
+            let inner_llvm = mimi_type_to_llvm(ctx, inner)?;
+            let disc = BasicTypeEnum::IntType(ctx.bool_type());
+            Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner_llvm], false)))
+        }
+        Type::Result(ok, err) => {
+            // Result<T, E> represented as {i1, T} — discriminant + ok payload (err ignored in codegen for now)
+            let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
+            let _err_llvm = mimi_type_to_llvm(ctx, err);
+            let disc = BasicTypeEnum::IntType(ctx.bool_type());
+            Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok_llvm], false)))
+        }
+        Type::Func(args, ret) => {
+            // Function pointers represented as i64 (opaque)
+            let _ = (args, ret);
+            Some(BasicTypeEnum::IntType(ctx.i64_type()))
+        }
+        Type::Slice(inner) => {
+            // Slice<T> represented as {ptr, len}
+            let elem = mimi_type_to_llvm(ctx, inner)?;
+            let ptr_ty = match elem {
+                BasicTypeEnum::IntType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
+                BasicTypeEnum::FloatType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
+                BasicTypeEnum::PointerType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
+                BasicTypeEnum::StructType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
+                BasicTypeEnum::ArrayType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
+                _ => BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())),
+            };
+            let len = BasicTypeEnum::IntType(ctx.i64_type());
+            Some(BasicTypeEnum::StructType(ctx.struct_type(&[ptr_ty, len], false)))
+        }
+        Type::Nothing => None,
+        Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
     }
 }
 
