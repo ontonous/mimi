@@ -770,6 +770,73 @@ impl<'a> Interpreter<'a> {
                     _ => Err("file_exists expects a string path".into()),
                 }
             }
+            // ========== Time functions ==========
+            "now" | "timestamp" => {
+                if !args.is_empty() { return Err("now/timestamp expects 0 arguments".into()); }
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| format!("time error: {}", e))?
+                    .as_secs() as i64;
+                Ok(Value::Int(ts))
+            }
+            "now_ms" | "timestamp_ms" => {
+                if !args.is_empty() { return Err("now_ms/timestamp_ms expects 0 arguments".into()); }
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| format!("time error: {}", e))?
+                    .as_millis() as i64;
+                Ok(Value::Int(ts))
+            }
+            "sleep" => {
+                if args.len() != 1 { return Err("sleep expects 1 argument (milliseconds)".into()); }
+                match &args[0] {
+                    Value::Int(ms) => {
+                        std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
+                        Ok(Value::Unit)
+                    }
+                    _ => Err("sleep expects an integer (milliseconds)".into()),
+                }
+            }
+            // ========== Environment/CLI functions ==========
+            "getenv" => {
+                if args.len() != 1 { return Err("getenv expects 1 argument (name)".into()); }
+                match &args[0] {
+                    Value::String(name) => {
+                        match std::env::var(name) {
+                            Ok(val) => Ok(Value::Variant("Ok".into(), vec![Value::String(val)])),
+                            Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String(format!("env var '{}' not set", name))])),
+                        }
+                    }
+                    _ => Err("getenv expects a string name".into()),
+                }
+            }
+            "args" => {
+                if !args.is_empty() { return Err("args expects 0 arguments".into()); }
+                let cli_args: Vec<Value> = std::env::args()
+                    .skip(1) // skip program name
+                    .map(|a| Value::String(a))
+                    .collect();
+                Ok(Value::List(cli_args))
+            }
+            // ========== JSON functions ==========
+            "to_json" => {
+                if args.len() != 1 { return Err("to_json expects 1 argument".into()); }
+                let json_val = self.value_to_json(&args[0])?;
+                let json_str = serde_json::to_string(&json_val)
+                    .map_err(|e| format!("to_json error: {}", e))?;
+                Ok(Value::String(json_str))
+            }
+            "from_json" => {
+                if args.len() != 1 { return Err("from_json expects 1 argument (json string)".into()); }
+                match &args[0] {
+                    Value::String(s) => {
+                        let json_val: serde_json::Value = serde_json::from_str(s)
+                            .map_err(|e| format!("from_json parse error: {}", e))?;
+                        Ok(self.json_to_value(&json_val))
+                    }
+                    _ => Err("from_json expects a string".into()),
+                }
+            }
             "str_char_at" => {
                 if args.len() != 2 { return Err("str_char_at expects 2 arguments (string, index)".into()); }
                 match (&args[0], &args[1]) {
@@ -2033,6 +2100,72 @@ impl<'a> Interpreter<'a> {
                      c_borrow T, c_borrow_mut T, *T, *mut T) before crossing the FFI boundary.",
                     other
                 )
+            }
+        }
+    }
+
+    fn value_to_json(&self, v: &Value) -> Result<serde_json::Value, String> {
+        match v {
+            Value::Int(n) => Ok(serde_json::Value::Number((*n).into())),
+            Value::Float(f) => {
+                let n = serde_json::Number::from_f64(*f)
+                    .ok_or_else(|| format!("float {} cannot be represented in JSON", f))?;
+                Ok(serde_json::Value::Number(n))
+            }
+            Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+            Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+            Value::Unit => Ok(serde_json::Value::Null),
+            Value::List(items) => {
+                let arr: Result<Vec<_>, _> = items.iter().map(|i| self.value_to_json(i)).collect();
+                Ok(serde_json::Value::Array(arr?))
+            }
+            Value::Record(_, fields) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in fields {
+                    map.insert(k.clone(), self.value_to_json(v)?);
+                }
+                Ok(serde_json::Value::Object(map))
+            }
+            Value::Tuple(items) => {
+                let arr: Result<Vec<_>, _> = items.iter().map(|i| self.value_to_json(i)).collect();
+                Ok(serde_json::Value::Array(arr?))
+            }
+            Value::Variant(name, payload) => {
+                if payload.is_empty() {
+                    Ok(serde_json::Value::String(name.clone()))
+                } else {
+                    let arr: Result<Vec<_>, _> = payload.iter().map(|i| self.value_to_json(i)).collect();
+                    let mut map = serde_json::Map::new();
+                    map.insert(name.clone(), serde_json::Value::Array(arr?));
+                    Ok(serde_json::Value::Object(map))
+                }
+            }
+            _ => Ok(serde_json::Value::String(format!("{}", v))),
+        }
+    }
+
+    fn json_to_value(&self, jv: &serde_json::Value) -> Value {
+        match jv {
+            serde_json::Value::Null => Value::Unit,
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::Unit
+                }
+            }
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Array(arr) => {
+                Value::List(arr.iter().map(|v| self.json_to_value(v)).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let fields: HashMap<String, Value> = map.iter()
+                    .map(|(k, v)| (k.clone(), self.json_to_value(v)))
+                    .collect();
+                Value::Record(None, fields)
             }
         }
     }

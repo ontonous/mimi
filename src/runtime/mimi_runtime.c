@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <time.h>
 #include "mimi_runtime.h"
 
 #define INITIAL_CAPACITY 16
@@ -494,4 +495,66 @@ void mimi_pool_join_all(void) {
         pthread_cond_wait(&pool_cond, &pool_mutex);
     }
     pthread_mutex_unlock(&pool_mutex);
+}
+
+/* ========== Time functions ========== */
+
+int64_t mimi_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec;
+}
+
+int64_t mimi_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
+}
+
+void mimi_sleep(int64_t ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+}
+
+/* ========== Environment/CLI functions ========== */
+
+static int stored_argc = 0;
+static char** stored_argv = NULL;
+
+void mimi_args_init(int argc, char** argv) {
+    stored_argc = argc;
+    stored_argv = argv;
+}
+
+const char* mimi_getenv(const char* name) {
+    if (!name) return NULL;
+    return getenv(name);
+}
+
+int64_t mimi_args_count(void) {
+    // Return argc - 1 (skip program name)
+    if (stored_argc <= 1) return 0;
+    return (int64_t)(stored_argc - 1);
+}
+
+const char* mimi_args_get(int64_t i) {
+    if (!stored_argv || i < 0 || i >= stored_argc - 1) return NULL;
+    return stored_argv[(int)i + 1]; // +1 to skip program name
+}
+
+/* ========== JSON stubs (actual implementation in Rust runtime) ========== */
+
+const char* mimi_to_json(void* value_ptr) {
+    (void)value_ptr;
+    /* Stub: returns empty JSON object */
+    char* result = strdup("{}");
+    return result;
+}
+
+void* mimi_from_json(const char* json_str) {
+    (void)json_str;
+    /* Stub: returns NULL (error) */
+    return NULL;
 }

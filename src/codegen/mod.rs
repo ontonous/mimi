@@ -79,6 +79,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         call.try_as_basic_value().left().ok_or_else(|| format!("codegen: expected basic value from {}", name))
     }
 
+    /// Create a structured codegen error with an error code.
+    fn codegen_err(&self, code: &str, msg: String) -> String {
+        format!("[{}] {}", code, msg)
+    }
+
     /// Enter parallel parasteps mode: track thread IDs for joining at block end
     fn enter_parasteps(&mut self) {
         self.in_parasteps = true;
@@ -3294,39 +3299,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(bb);
                 }
                 
-                // Create thread: pthread_create(&thread, NULL, wrapper, NULL)
-                let thread_alloca = self.builder.build_alloca(i64_ty, "thread")
-                    .map_err(|e| format!("alloca error: {}", e))?;
-                // Zero-initialize thread
-                self.builder.build_store(thread_alloca, i64_ty.const_int(0, false))
-                    .map_err(|e| format!("store error: {}", e))?;
-                
-                let pthread_create_fn = self.module.get_function("pthread_create")
-                    .ok_or("pthread_create not declared")?;
                 let wrapper_fn_ptr = self.builder.build_pointer_cast(
                     wrapper_fn.as_global_value().as_pointer_value(),
                     i8_ptr,
                     "wrapper_i8"
                 ).map_err(|e| format!("bitcast error: {}", e))?;
-                self.builder.build_call(pthread_create_fn, &[
-                    BasicMetadataValueEnum::PointerValue(thread_alloca),
-                    BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()),
-                    BasicMetadataValueEnum::PointerValue(wrapper_fn_ptr),
-                    BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()),
-                ], "pthread_create_call")
-                    .map_err(|e| format!("pthread_create error: {}", e))?;
-                
-                // Load the thread ID
-                let thread_id_val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), thread_alloca, "thread_id")
-                    .map_err(|e| format!("load error: {}", e))?;
-                let thread_id = if let BasicValueEnum::IntValue(iv) = thread_id_val {
-                    iv
-                } else {
-                    return Err("expected i64 thread ID".into());
-                };
-                // Track in parasteps mode for joining at block end
+
                 if self.in_parasteps {
-                    // Use thread pool for parasteps (avoids creating N OS threads)
+                    // Parasteps: submit to thread pool (avoids creating N OS threads)
                     let mimi_pool_submit_fn = self.module.get_function("mimi_pool_submit")
                         .ok_or("mimi_pool_submit not declared")?;
                     self.builder.build_call(mimi_pool_submit_fn, &[
@@ -3338,12 +3318,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let placeholder = i64_ty.const_int(0, false);
                     Ok(BasicValueEnum::IntValue(placeholder))
                 } else {
-                    // Non-parasteps: use raw pthread_create (for single spawn+await)
+                    // Non-parasteps (single spawn+await): use raw pthread_create
                     let thread_alloca = self.builder.build_alloca(i64_ty, "thread")
                         .map_err(|e| format!("alloca error: {}", e))?;
                     self.builder.build_store(thread_alloca, i64_ty.const_int(0, false))
                         .map_err(|e| format!("store error: {}", e))?;
-                    
+
                     let pthread_create_fn = self.module.get_function("pthread_create")
                         .ok_or("pthread_create not declared")?;
                     self.builder.build_call(pthread_create_fn, &[
@@ -3353,7 +3333,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()),
                     ], "pthread_create_call")
                         .map_err(|e| format!("pthread_create error: {}", e))?;
-                    
+
                     let thread_id_val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), thread_alloca, "thread_id")
                         .map_err(|e| format!("load error: {}", e))?;
                     Ok(thread_id_val)
@@ -5747,6 +5727,73 @@ impl<'ctx> CodeGenerator<'ctx> {
             "pi" => {
                 // Return constant pi as f64
                 Ok(self.context.f64_type().const_float(std::f64::consts::PI).into())
+            }
+            // ========== Time functions ==========
+            "now" | "timestamp" => {
+                if !args.is_empty() { return Err("now/timestamp expects 0 arguments".into()); }
+                let fn_val = self.module.get_function("mimi_now").unwrap();
+                let call = self.builder.build_call(fn_val, &[], "now_call")
+                    .map_err(|e| format!("now error: {}", e))?;
+                Ok(self.expect_basic_value(&call, "now")?)
+            }
+            "now_ms" | "timestamp_ms" => {
+                if !args.is_empty() { return Err("now_ms/timestamp_ms expects 0 arguments".into()); }
+                let fn_val = self.module.get_function("mimi_now_ms").unwrap();
+                let call = self.builder.build_call(fn_val, &[], "now_ms_call")
+                    .map_err(|e| format!("now_ms error: {}", e))?;
+                Ok(self.expect_basic_value(&call, "now_ms")?)
+            }
+            "sleep" => {
+                if args.len() != 1 { return Err("sleep expects 1 argument (milliseconds)".into()); }
+                let fn_val = self.module.get_function("mimi_sleep").unwrap();
+                self.builder.build_call(fn_val, &args, "sleep_call")
+                    .map_err(|e| format!("sleep error: {}", e))?;
+                Ok(self.context.i64_type().const_int(0, false).into())
+            }
+            // ========== Environment/CLI functions ==========
+            "getenv" => {
+                if args.len() != 1 { return Err("getenv expects 1 argument (name)".into()); }
+                let getenv_fn = self.module.get_function("mimi_getenv").unwrap();
+                let call = self.builder.build_call(getenv_fn, &args, "getenv_call")
+                    .map_err(|e| format!("getenv error: {}", e))?;
+                let ptr = match call.try_as_basic_value().left() {
+                    Some(BasicValueEnum::PointerValue(pv)) => pv,
+                    _ => return Err("getenv should return a pointer".into()),
+                };
+                // Check if NULL (env var not set)
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let is_null = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    ptr,
+                    i8_ptr.const_null(),
+                    "env_is_null",
+                ).map_err(|e| format!("compare error: {}", e))?;
+                // For now, return the pointer as-is (caller must handle NULL)
+                // A proper implementation would wrap in Ok/Err variant
+                Ok(ptr.into())
+            }
+            "args" => {
+                if !args.is_empty() { return Err("args expects 0 arguments".into()); }
+                // Return the args count (simplified: return as i64 for now)
+                let count_fn = self.module.get_function("mimi_args_count").unwrap();
+                let call = self.builder.build_call(count_fn, &[], "args_count_call")
+                    .map_err(|e| format!("args error: {}", e))?;
+                Ok(self.expect_basic_value(&call, "args")?)
+            }
+            // ========== JSON functions ==========
+            "to_json" => {
+                if args.len() != 1 { return Err("to_json expects 1 argument".into()); }
+                let to_json_fn = self.module.get_function("mimi_to_json").unwrap();
+                let call = self.builder.build_call(to_json_fn, &args, "to_json_call")
+                    .map_err(|e| format!("to_json error: {}", e))?;
+                Ok(self.expect_basic_value(&call, "to_json")?)
+            }
+            "from_json" => {
+                if args.len() != 1 { return Err("from_json expects 1 argument".into()); }
+                let from_json_fn = self.module.get_function("mimi_from_json").unwrap();
+                let call = self.builder.build_call(from_json_fn, &args, "from_json_call")
+                    .map_err(|e| format!("from_json error: {}", e))?;
+                Ok(self.expect_basic_value(&call, "from_json")?)
             }
             // ========== String parsing ==========
             "str_parse_int" | "to_int" => {

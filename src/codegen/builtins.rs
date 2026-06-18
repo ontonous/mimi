@@ -220,6 +220,51 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     module.add_function("mimi_pool_join_all",
         void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External));
+
+    // Time functions
+    // mimi_now() -> i64 (unix timestamp in seconds)
+    module.add_function("mimi_now",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_now_ms() -> i64 (unix timestamp in milliseconds)
+    module.add_function("mimi_now_ms",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_sleep(ms: i64) -> void
+    module.add_function("mimi_sleep",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+
+    // Environment/CLI functions
+    // mimi_getenv(name: i8*) -> i8*
+    module.add_function("mimi_getenv",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_args_init(argc: i64, argv: i8**) -> void
+    module.add_function("mimi_args_init",
+        void.fn_type(&[
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_args_count() -> i64
+    module.add_function("mimi_args_count",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_args_get(i: i64) -> i8*
+    module.add_function("mimi_args_get",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+
+    // JSON functions (stubs for codegen)
+    // mimi_to_json(value_ptr: i8*) -> i8* (heap-allocated JSON string)
+    module.add_function("mimi_to_json",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_from_json(json_str: i8*) -> i8* (heap-allocated Value pointer)
+    module.add_function("mimi_from_json",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
 }
 
 pub fn is_builtin(name: &str) -> bool {
@@ -240,5 +285,8 @@ pub fn is_builtin(name: &str) -> bool {
         | "has_key" | "map_new" | "map_get" | "map_set" | "map_remove" | "map_size" | "map_from_list"
         | "type_name" | "type_fields" | "type_variants"
         | "str_to_c_str" | "c_str_to_string"
+        | "now" | "timestamp" | "now_ms" | "timestamp_ms" | "sleep"
+        | "getenv" | "args"
+        | "to_json" | "from_json"
     )
 }

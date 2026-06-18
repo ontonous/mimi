@@ -49,4 +49,28 @@ int mimi_cap_consume(int64_t cap, const char* name);
 void mimi_pool_submit(void* fn_ptr, void* arg);
 void mimi_pool_join_all(void);
 
+/* Time functions.
+   mimi_now() returns current unix timestamp in seconds.
+   mimi_now_ms() returns current unix timestamp in milliseconds.
+   mimi_sleep(ms) sleeps for the given number of milliseconds. */
+int64_t mimi_now(void);
+int64_t mimi_now_ms(void);
+void mimi_sleep(int64_t ms);
+
+/* Environment/CLI functions.
+   mimi_getenv(name) returns a pointer to the env var value, or NULL.
+   mimi_args_init(argc, argv) stores CLI args for later access.
+   mimi_args_count() returns the number of CLI args (excluding program name).
+   mimi_args_get(i) returns the i-th CLI arg as a string, or NULL. */
+const char* mimi_getenv(const char* name);
+void mimi_args_init(int argc, char** argv);
+int64_t mimi_args_count(void);
+const char* mimi_args_get(int64_t i);
+
+/* JSON functions (stubs for codegen linking; actual impl in Rust runtime).
+   mimi_to_json(value_ptr) -> heap-allocated JSON string.
+   mimi_from_json(json_str) -> heap-allocated Value pointer (or NULL on error). */
+const char* mimi_to_json(void* value_ptr);
+void* mimi_from_json(const char* json_str);
+
 #endif

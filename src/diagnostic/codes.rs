@@ -115,6 +115,29 @@ pub const E0600: &str = "E0600"; // variable shadows outer variable (warning)
 pub const E0601: &str = "E0601"; // unused variable
 pub const E0602: &str = "E0602"; // unused import
 
+/// Codegen error codes (E07xx)
+pub const E0700: &str = "E0700"; // codegen internal error
+pub const E0701: &str = "E0701"; // unsupported expression in codegen
+pub const E0702: &str = "E0702"; // unsupported statement in codegen
+pub const E0703: &str = "E0703"; // type not representable in LLVM
+pub const E0704: &str = "E0704"; // function not found in codegen
+pub const E0705: &str = "E0705"; // actor not found in codegen
+pub const E0706: &str = "E0706"; // type not found in codegen
+pub const E0707: &str = "E0707"; // field access on non-record type
+pub const E0708: &str = "E0708"; // method not found on type
+pub const E0709: &str = "E0709"; // builtin function error
+pub const E0710: &str = "E0710"; // extern function not declared
+pub const E0711: &str = "E0711"; // argument count mismatch in codegen
+pub const E0712: &str = "E0712"; // argument type mismatch in codegen
+pub const E0713: &str = "E0713"; // LLVM IR generation error
+pub const E0714: &str = "E0714"; // linker error
+pub const E0715: &str = "E0715"; // pattern match compilation error
+pub const E0716: &str = "E0716"; // closure compilation error
+pub const E0717: &str = "E0717"; // spawn/await compilation error
+pub const E0718: &str = "E0718"; // capability compilation error
+pub const E0719: &str = "E0719"; // compensation block error
+pub const E0720: &str = "E0720"; // generic instantiation error
+
 /// Get a human-readable description for an error code.
 pub fn describe(code: &str) -> &'static str {
     match code {
@@ -217,6 +240,28 @@ pub fn describe(code: &str) -> &'static str {
         E0600 => "variable shadows outer variable",
         E0601 => "unused variable",
         E0602 => "unused import",
+
+        E0700 => "codegen internal error",
+        E0701 => "unsupported expression in codegen",
+        E0702 => "unsupported statement in codegen",
+        E0703 => "type not representable in LLVM",
+        E0704 => "function not found in codegen",
+        E0705 => "actor not found in codegen",
+        E0706 => "type not found in codegen",
+        E0707 => "field access on non-record type",
+        E0708 => "method not found on type",
+        E0709 => "builtin function error",
+        E0710 => "extern function not declared",
+        E0711 => "argument count mismatch in codegen",
+        E0712 => "argument type mismatch in codegen",
+        E0713 => "LLVM IR generation error",
+        E0714 => "linker error",
+        E0715 => "pattern match compilation error",
+        E0716 => "closure compilation error",
+        E0717 => "spawn/await compilation error",
+        E0718 => "capability compilation error",
+        E0719 => "compensation block error",
+        E0720 => "generic instantiation error",
 
         _ => "unknown error",
     }
