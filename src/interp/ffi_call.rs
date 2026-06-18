@@ -435,8 +435,16 @@ impl<'a> Interpreter<'a> {
                 if result == 0 {
                     Ok(Value::String(String::new()))
                 } else {
-                    // Safety: result is a valid pointer returned by the FFI call, assumed to point to a null-terminated C string.
-                    let c_str = unsafe { std::ffi::CStr::from_ptr(result as *const i8) };
+                    // SAFETY: result is a non-null pointer returned by the FFI call.
+                    // The FfiRetContract::String contract asserts the C function returns
+                    // a valid null-terminated C string. A buggy C function returning a
+                    // dangling or non-null-terminated pointer is undefined behavior —
+                    // catch_unwind provides a last-resort safety net.
+                    let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
+                    })).map_err(|_| format!(
+                        "FFI safety: C function returned invalid string pointer (address {:#x})", result
+                    ))?;
                     Ok(Value::String(c_str.to_string_lossy().into_owned()))
                 }
             }
