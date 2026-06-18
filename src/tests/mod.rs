@@ -68,6 +68,9 @@ pub(crate) mod codegen_e2e;
 pub(crate) mod codegen_ir;
 pub(crate) mod codegen_advanced;
 
+// === Fuzz test modules ===
+pub(crate) mod fuzz;
+
 use crate::{core, interp, lexer, parser};
 
 /// File-based lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
