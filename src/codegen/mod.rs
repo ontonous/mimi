@@ -6072,11 +6072,182 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             "from_json" => {
-                if args.len() != 1 { return Err("from_json expects 1 argument".into()); }
+                if args.len() != 1 { return Err("[E0711] from_json expects 1 argument".into()); }
+                let raw_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let from_json_fn = self.module.get_function("mimi_from_json").unwrap();
-                let call = self.builder.build_call(from_json_fn, &args, "from_json_call")
-                    .map_err(|e| format!("from_json error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "from_json")?)
+                let result = self.builder.build_call(from_json_fn, &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                ], "from_json_call")
+                    .map_err(|e| format!("from_json error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("mimi_from_json returned void")?
+                    .into_pointer_value();
+                // Check for NULL (parse error)
+                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let null_ptr = i8_ptr_ty.const_null();
+                let is_null = self.builder.build_is_null(result, "json_null")
+                    .map_err(|e| format!("is_null error: {}", e))?;
+                let function = self.current_function().unwrap();
+                let ok_bb = self.context.append_basic_block(function, "from_json_ok");
+                let err_bb = self.context.append_basic_block(function, "from_json_err");
+                let merge_bb = self.context.append_basic_block(function, "from_json_cont");
+                self.builder.build_conditional_branch(is_null, err_bb, ok_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(err_bb);
+                // On error: return empty string (caller checks with == "")
+                let empty_str = self.builder.build_global_string_ptr("", "empty_json")
+                    .map_err(|e| format!("global string error: {}", e))?;
+                let empty_str_ptr = empty_str.as_pointer_value();
+                let empty_alloca = self.builder.build_alloca(
+                    self.context.struct_type(&[BasicTypeEnum::PointerType(i8_ptr_ty), BasicTypeEnum::IntType(self.context.i64_type())], false),
+                    "empty_str_struct"
+                ).map_err(|e| format!("alloca error: {}", e))?;
+                let zero = self.context.i64_type().const_int(0, false);
+                let ep_gep = self.builder.build_struct_gep(
+                    self.context.struct_type(&[BasicTypeEnum::PointerType(i8_ptr_ty), BasicTypeEnum::IntType(self.context.i64_type())], false),
+                    empty_alloca, 0, "ep"
+                ).map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(ep_gep, empty_str_ptr)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let el_gep = self.builder.build_struct_gep(
+                    self.context.struct_type(&[BasicTypeEnum::PointerType(i8_ptr_ty), BasicTypeEnum::IntType(self.context.i64_type())], false),
+                    empty_alloca, 1, "el"
+                ).map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(el_gep, zero)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(ok_bb);
+                // Wrap result as Mimi string {i8*, i64}
+                let str_ty = self.context.struct_type(&[
+                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let str_alloca = self.builder.build_alloca(str_ty, "json_str")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let ptr_gep = self.builder.build_struct_gep(str_ty, str_alloca, 0, "str_ptr")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(ptr_gep, result)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let len_gep = self.builder.build_struct_gep(str_ty, str_alloca, 1, "str_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let strlen_fn = self.module.get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let str_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(result),
+                ], "json_strlen")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?;
+                self.builder.build_store(len_gep, str_len)
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // After merge, load the result (either empty string or parsed JSON)
+                self.builder.position_at_end(merge_bb);
+                let phi = self.builder.build_phi(str_ty, "from_json_result")
+                    .map_err(|e| format!("phi error: {}", e))?;
+                let empty_val: BasicValueEnum = self.builder.build_load(str_ty, empty_alloca, "empty_load")
+                    .map_err(|e| format!("load error: {}", e))?;
+                let str_val: BasicValueEnum = self.builder.build_load(str_ty, str_alloca, "str_load")
+                    .map_err(|e| format!("load error: {}", e))?;
+                phi.add_incoming(&[
+                    (&empty_val, err_bb),
+                    (&str_val, ok_bb),
+                ]);
+                let phi_val = phi.as_basic_value();
+                Ok(phi_val)
+            }
+            "json_get_string" => {
+                if args.len() != 2 { return Err("[E0711] json_get_string expects 2 arguments".into()); }
+                let json_ptr = self.extract_raw_str_ptr(&args[0])?;
+                let key_ptr = self.extract_raw_str_ptr(&args[1])?;
+                let func = self.module.get_function("json_get_string").unwrap();
+                let result = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(json_ptr),
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                ], "json_get_string_call")
+                    .map_err(|e| format!("json_get_string error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("json_get_string returned void")?
+                    .into_pointer_value();
+                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let str_ty = self.context.struct_type(&[
+                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let str_alloca = self.builder.build_alloca(str_ty, "jstr")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let ptr_gep = self.builder.build_struct_gep(str_ty, str_alloca, 0, "str_ptr")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(ptr_gep, result)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let len_gep = self.builder.build_struct_gep(str_ty, str_alloca, 1, "str_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let strlen_fn = self.module.get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let str_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(result),
+                ], "jstrlen")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?;
+                self.builder.build_store(len_gep, str_len)
+                    .map_err(|e| format!("store error: {}", e))?;
+                Ok(str_alloca.into())
+            }
+            "json_get_int" => {
+                if args.len() != 2 { return Err("[E0711] json_get_int expects 2 arguments".into()); }
+                let json_ptr = self.extract_raw_str_ptr(&args[0])?;
+                let key_ptr = self.extract_raw_str_ptr(&args[1])?;
+                let func = self.module.get_function("json_get_int").unwrap();
+                let result = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(json_ptr),
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                ], "json_get_int_call")
+                    .map_err(|e| format!("json_get_int error: {}", e))?;
+                Ok(self.expect_basic_value(&result, "json_get_int")?)
+            }
+            "json_get_element" => {
+                if args.len() != 2 { return Err("[E0711] json_get_element expects 2 arguments".into()); }
+                let json_ptr = self.extract_raw_str_ptr(&args[0])?;
+                let index = match args[1] {
+                    BasicMetadataValueEnum::IntValue(iv) => iv,
+                    _ => return Err("[E0712] json_get_element: index must be i32".into()),
+                };
+                let func = self.module.get_function("json_get_element").unwrap();
+                let result = self.builder.build_call(func, &[
+                    BasicMetadataValueEnum::PointerValue(json_ptr),
+                    BasicMetadataValueEnum::IntValue(index),
+                ], "json_get_element_call")
+                    .map_err(|e| format!("json_get_element error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("json_get_element returned void")?
+                    .into_pointer_value();
+                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let str_ty = self.context.struct_type(&[
+                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let str_alloca = self.builder.build_alloca(str_ty, "jelem")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let ptr_gep = self.builder.build_struct_gep(str_ty, str_alloca, 0, "str_ptr")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(ptr_gep, result)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let len_gep = self.builder.build_struct_gep(str_ty, str_alloca, 1, "str_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let strlen_fn = self.module.get_function("strlen")
+                    .ok_or_else(|| "strlen not declared".to_string())?;
+                let str_len = self.builder.build_call(strlen_fn, &[
+                    BasicMetadataValueEnum::PointerValue(result),
+                ], "jelen")
+                    .map_err(|e| format!("strlen error: {}", e))?
+                    .try_as_basic_value().left()
+                    .ok_or("strlen returned void")?;
+                self.builder.build_store(len_gep, str_len)
+                    .map_err(|e| format!("store error: {}", e))?;
+                Ok(str_alloca.into())
             }
             // ========== String parsing ==========
             "str_parse_int" | "to_int" | "string_to_int" => {

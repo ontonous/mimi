@@ -67,11 +67,17 @@ void mimi_args_init(int argc, char** argv);
 int64_t mimi_args_count(void);
 const char* mimi_args_get(int64_t i);
 
-/* JSON functions (stubs for codegen linking; actual impl in Rust runtime).
-    mimi_to_json(value_ptr) -> heap-allocated JSON string.
-    mimi_from_json(json_str) -> heap-allocated Value pointer (or NULL on error). */
+/* JSON functions.
+    mimi_to_json(value_ptr) -> heap-allocated JSON string (codegen inline impl).
+    mimi_from_json(json_str) -> heap-allocated validated JSON string, or NULL on error.
+    json_get_string(json_str, key) -> heap-allocated string field value, or NULL.
+    json_get_int(json_str, key, out) -> 1 on success, 0 on failure.
+    json_get_element(json_str, index) -> heap-allocated array element JSON, or NULL. */
 const char* mimi_to_json(void* value_ptr);
 void* mimi_from_json(const char* json_str);
+const char* json_get_string(const char* json_str, const char* key);
+int json_get_int(const char* json_str, const char* key, int64_t* out);
+const char* json_get_element(const char* json_str, int64_t index);
 
 /* ========== Network / Socket functions ========== */
 

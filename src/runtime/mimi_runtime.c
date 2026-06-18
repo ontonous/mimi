@@ -161,6 +161,9 @@ char* mimi_recv(int64_t fd, int64_t bs, int64_t* ol) { (void)fd; (void)bs; (void
 int64_t mimi_close(int64_t fd) { (void)fd; return -1; }
 char* mimi_http_get(const char* u) { (void)u; return (char*)0; }
 char* mimi_http_post(const char* u, const char* b) { (void)u; (void)b; return (char*)0; }
+const char* json_get_string(const char* j, const char* k) { (void)j; (void)k; return (const char*)0; }
+int json_get_int(const char* j, const char* k, int64_t* o) { (void)j; (void)k; (void)o; return 0; }
+const char* json_get_element(const char* j, int64_t i) { (void)j; (void)i; return (const char*)0; }
 
 /* Stubs for pthread (parasteps won't work in freestanding) */
 int pthread_create(void* tid, void* attr, void* (*fn)(void*), void* arg) {
@@ -748,9 +751,250 @@ const char* mimi_to_json(void* value_ptr) {
     return result;
 }
 
+/* ========== JSON parser (recursive descent, no external dependencies) ========== */
+
+/* Parser state */
+typedef struct {
+    const char* p;
+    const char* start;
+    const char* err_pos;
+} JsonParser;
+
+static void json_skip_ws(JsonParser* jp) {
+    while (*jp->p == ' ' || *jp->p == '\t' || *jp->p == '\n' || *jp->p == '\r') jp->p++;
+}
+
+static int json_parse_value(JsonParser* jp, char** out, size_t* out_len);
+
+static int json_parse_string(JsonParser* jp, char** out, size_t* out_len) {
+    json_skip_ws(jp);
+    if (*jp->p != '"') { jp->err_pos = jp->p; return 0; }
+    jp->p++; /* skip opening quote */
+    const char* start = jp->p;
+    size_t len = 0;
+    int esc = 0;
+    while (*jp->p) {
+        if (esc) { esc = 0; len++; jp->p++; continue; }
+        if (*jp->p == '\\') { esc = 1; len++; jp->p++; continue; }
+        if (*jp->p == '"') { len++; jp->p++; break; }
+        len++; jp->p++;
+    }
+    if (*(jp->p - 1) != '"') { jp->err_pos = start; return 0; }
+    if (out) {
+        *out = (char*)malloc(len + 1);
+        if (*out) {
+            memcpy(*out, start, len);
+            (*out)[len] = '\0';
+            /* Unescape JSON escapes (simplified) */
+            char* w = *out;
+            for (char* r = *out; *r; r++) {
+                if (*r == '\\') {
+                    r++;
+                    switch (*r) {
+                        case '"': *w++ = '"'; break;
+                        case '\\': *w++ = '\\'; break;
+                        case '/': *w++ = '/'; break;
+                        case 'b': *w++ = '\b'; break;
+                        case 'f': *w++ = '\f'; break;
+                        case 'n': *w++ = '\n'; break;
+                        case 'r': *w++ = '\r'; break;
+                        case 't': *w++ = '\t'; break;
+                        case 'u': { /* Simple: skip unicode escapes */ r += 4; *w++ = '?'; break; }
+                        default: *w++ = *r; break;
+                    }
+                } else {
+                    *w++ = *r;
+                }
+            }
+            *w = '\0';
+        }
+    }
+    if (out_len) *out_len = len;
+    return 1;
+}
+
+static int json_parse_number(JsonParser* jp, int64_t* out_int, double* out_float, int* is_float) {
+    json_skip_ws(jp);
+    const char* start = jp->p;
+    if (*jp->p == '-') jp->p++;
+    if (!*jp->p) { jp->err_pos = jp->p; return 0; }
+    int has_dot = 0;
+    while (*jp->p >= '0' && *jp->p <= '9') jp->p++;
+    if (*jp->p == '.') { has_dot = 1; jp->p++; while (*jp->p >= '0' && *jp->p <= '9') jp->p++; }
+    if (*jp->p == 'e' || *jp->p == 'E') { has_dot = 1; jp->p++; if (*jp->p == '+' || *jp->p == '-') jp->p++; while (*jp->p >= '0' && *jp->p <= '9') jp->p++; }
+    if (jp->p == start || (!has_dot && jp->p == start + 1 && *start == '-')) { jp->err_pos = start; return 0; }
+    size_t len = (size_t)(jp->p - start);
+    char buf[64];
+    if (len >= sizeof(buf)) return 0;
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    if (has_dot) {
+        *is_float = 1;
+        *out_float = strtod(buf, NULL);
+    } else {
+        *is_float = 0;
+        *out_int = strtoll(buf, NULL, 10);
+    }
+    return 1;
+}
+
+static int json_parse_value(JsonParser* jp, char** out, size_t* out_len) {
+    json_skip_ws(jp);
+    if (!*jp->p) return 0;
+    if (*jp->p == '"') {
+        return json_parse_string(jp, out, out_len);
+    } else if (*jp->p == '{') {
+        /* Object: record as raw JSON substring */
+        const char* start = jp->p;
+        int depth = 0;
+        while (*jp->p) {
+            if (*jp->p == '{') depth++;
+            if (*jp->p == '}') { depth--; if (depth == 0) { jp->p++; break; } }
+            jp->p++;
+        }
+        if (depth != 0) { jp->err_pos = start; return 0; }
+        if (out) { *out = strndup(start, (size_t)(jp->p - start)); }
+        if (out_len) *out_len = (size_t)(jp->p - start);
+        return 1;
+    } else if (*jp->p == '[') {
+        /* Array: record as raw JSON substring */
+        const char* start = jp->p;
+        int depth = 0;
+        while (*jp->p) {
+            if (*jp->p == '[') depth++;
+            if (*jp->p == ']') { depth--; if (depth == 0) { jp->p++; break; } }
+            jp->p++;
+        }
+        if (depth != 0) { jp->err_pos = start; return 0; }
+        if (out) { *out = strndup(start, (size_t)(jp->p - start)); }
+        if (out_len) *out_len = (size_t)(jp->p - start);
+        return 1;
+    } else if (*jp->p == 't' && strncmp(jp->p, "true", 4) == 0) {
+        jp->p += 4;
+        if (out) { *out = strdup("true"); }
+        if (out_len) *out_len = 4;
+        return 1;
+    } else if (*jp->p == 'f' && strncmp(jp->p, "false", 5) == 0) {
+        jp->p += 5;
+        if (out) { *out = strdup("false"); }
+        if (out_len) *out_len = 5;
+        return 1;
+    } else if (*jp->p == 'n' && strncmp(jp->p, "null", 4) == 0) {
+        jp->p += 4;
+        if (out) { *out = strdup("null"); }
+        if (out_len) *out_len = 4;
+        return 1;
+    } else if (*jp->p == '-' || (*jp->p >= '0' && *jp->p <= '9')) {
+        int64_t iv; double fv; int is_float;
+        if (!json_parse_number(jp, &iv, &fv, &is_float)) return 0;
+        if (out) {
+            if (is_float) {
+                char buf[32];
+                int n = snprintf(buf, sizeof(buf), "%f", fv);
+                /* Trim trailing zeros */
+                while (n > 1 && buf[n-1] == '0') n--;
+                if (buf[n-1] == '.') n--;
+                buf[n] = '\0';
+                *out = strdup(buf);
+            } else {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%lld", (long long)iv);
+                *out = strdup(buf);
+            }
+        }
+        if (out_len) *out_len = strlen(*out ? *out : "");
+        return 1;
+    }
+    jp->err_pos = jp->p;
+    return 0;
+}
+
+/* mimi_from_json: validate JSON and return validated string, or NULL on error.
+ * Codegen wraps the result as a Mimi string. */
 void* mimi_from_json(const char* json_str) {
-    (void)json_str;
-    /* Stub: returns NULL (error) */
+    if (!json_str) return NULL;
+    JsonParser jp;
+    jp.p = json_str;
+    jp.start = json_str;
+    jp.err_pos = NULL;
+    char* result = NULL;
+    size_t result_len = 0;
+    if (!json_parse_value(&jp, &result, &result_len)) return NULL;
+    /* Make sure there's no trailing garbage */
+    json_skip_ws(&jp);
+    if (*jp.p) { free(result); return NULL; }
+    return result;
+}
+
+/* json_get_string: extract a string field from a JSON object.
+ * Returns heap-allocated string or NULL if not found/error.
+ * json_str is the raw JSON text (object or value). */
+const char* json_get_string(const char* json_str, const char* key) {
+    if (!json_str || !key) return NULL;
+    JsonParser jp;
+    jp.p = json_str;
+    jp.start = json_str;
+    jp.err_pos = NULL;
+    json_skip_ws(&jp);
+    if (*jp.p != '{') return NULL;
+    jp.p++;
+    while (*jp.p && *jp.p != '}') {
+        json_skip_ws(&jp);
+        char* k = NULL;
+        if (!json_parse_string(&jp, &k, NULL)) return NULL;
+        json_skip_ws(&jp);
+        if (*jp.p != ':') { free(k); return NULL; }
+        jp.p++;
+        if (strcmp(k, key) == 0) {
+            free(k);
+            char* val = NULL;
+            if (!json_parse_value(&jp, &val, NULL)) return NULL;
+            return val;
+        }
+        free(k);
+        if (!json_parse_value(&jp, NULL, NULL)) return NULL;
+        json_skip_ws(&jp);
+        if (*jp.p == ',') jp.p++;
+    }
+    return NULL;
+}
+
+/* json_get_int: extract an integer field from a JSON object.
+ * Returns 1 on success, 0 on failure. */
+int json_get_int(const char* json_str, const char* key, int64_t* out) {
+    char* val = (char*)json_get_string(json_str, key);
+    if (!val) return 0;
+    char* end = NULL;
+    int64_t result = strtoll(val, &end, 10);
+    int ok = (end && *end == '\0');
+    free(val);
+    if (ok) *out = result;
+    return ok;
+}
+
+/* json_get_element: extract an element from a JSON array by index.
+ * Returns heap-allocated JSON substring or NULL. */
+const char* json_get_element(const char* json_str, int64_t index) {
+    if (!json_str) return NULL;
+    JsonParser jp;
+    jp.p = json_str;
+    jp.start = json_str;
+    jp.err_pos = NULL;
+    json_skip_ws(&jp);
+    if (*jp.p != '[') return NULL;
+    jp.p++;
+    int64_t i = 0;
+    while (*jp.p && *jp.p != ']') {
+        if (i == index) {
+            char* val = NULL;
+            if (!json_parse_value(&jp, &val, NULL)) return NULL;
+            return val;
+        }
+        if (!json_parse_value(&jp, NULL, NULL)) return NULL;
+        json_skip_ws(&jp);
+        if (*jp.p == ',') jp.p++;
+        i++;
+    }
     return NULL;
 }
 

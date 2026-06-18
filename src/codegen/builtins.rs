@@ -261,9 +261,30 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     module.add_function("mimi_to_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External));
-    // mimi_from_json(json_str: i8*) -> i8* (heap-allocated Value pointer)
+    // mimi_from_json(json_str: i8*) -> i8* (heap-allocated validated JSON string, or NULL)
     module.add_function("mimi_from_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
+    // json_get_string(json: i8*, key: i8*) -> i8*
+    module.add_function("json_get_string",
+        i8_ptr.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // json_get_int(json: i8*, key: i8*) -> i64
+    module.add_function("json_get_int",
+        i64.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // json_get_element(json: i8*, index: i64) -> i8*
+    module.add_function("json_get_element",
+        i8_ptr.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::IntType(i64),
+        ], false),
         Some(inkwell::module::Linkage::External));
 
     // ========== Network / Socket functions ==========
@@ -355,6 +376,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "now" | "timestamp" | "now_ms" | "timestamp_ms" | "sleep"
         | "getenv" | "args"
         | "to_json" | "from_json"
+        | "json_get_string" | "json_get_int" | "json_get_element"
         // Network builtins
         | "socket" | "connect" | "bind" | "listen" | "accept"
         | "send" | "recv" | "close_fd"
