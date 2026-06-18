@@ -101,6 +101,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         }
         Type::Nothing => None,
         Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
+        Type::DynTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
     }
 }
 

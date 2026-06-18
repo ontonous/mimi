@@ -261,6 +261,37 @@ impl Parser {
                 }
                 Ok(Type::ImplTrait(traits))
             }
+            TokenKind::Dyn => {
+                self.advance();
+                let mut traits = Vec::new();
+                let first_tok = self.peek();
+                let first_name = match &first_tok.kind {
+                    TokenKind::Ident(n) => n.clone(),
+                    _ => return Err(ParseError::new(
+                        "expected trait name after `dyn`",
+                        first_tok.line,
+                        first_tok.col,
+                    )),
+                };
+                self.advance();
+                traits.push(first_name);
+                // Parse additional traits: dyn Trait1 + Trait2
+                while self.at(&TokenKind::Plus) {
+                    self.advance();
+                    let next_tok = self.peek();
+                    let next_name = match &next_tok.kind {
+                        TokenKind::Ident(n) => n.clone(),
+                        _ => return Err(ParseError::new(
+                            "expected trait name after `+`",
+                            next_tok.line,
+                            next_tok.col,
+                        )),
+                    };
+                    self.advance();
+                    traits.push(next_name);
+                }
+                Ok(Type::DynTrait(traits))
+            }
             TokenKind::LBracket => {
                 self.advance();
                 let elem_type = self.parse_type()?;

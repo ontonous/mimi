@@ -433,6 +433,7 @@ impl<'a> Interpreter<'a> {
             Type::Array(inner, size) => format!("[{}; {}]", self.resolve_type_name(inner), size),
             Type::Slice(inner) => format!("[{}]", self.resolve_type_name(inner)),
             Type::ImplTrait(traits) => format!("impl {}", traits.join(" + ")),
+            Type::DynTrait(traits) => format!("dyn {}", traits.join(" + ")),
             Type::CBuffer(inner) => format!("CBuffer<{}>", self.resolve_type_name(inner)),
         }
     }

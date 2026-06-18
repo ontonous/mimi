@@ -483,6 +483,8 @@ pub enum Type {
     Slice(Box<Type>),
     /// impl Trait return type — opaque type implementing listed traits
     ImplTrait(Vec<String>),
+    /// dyn Trait — runtime trait object (fat pointer: data + vtable)
+    DynTrait(Vec<String>),
     /// Raw C pointer: *T
     RawPtr(Box<Type>),
     /// Raw mutable C pointer: *mut T

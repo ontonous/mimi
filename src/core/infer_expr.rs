@@ -165,6 +165,34 @@ impl<'a> Checker<'a> {
                             }
                             self.emit_code(crate::diagnostic::codes::E0221, format!("type '{}' has no method '{}'", type_name, method_name));
                             Type::Name("unknown".into(), vec![])
+                        } else if let Type::DynTrait(traits) = &obj_ty {
+                            // dyn Trait method resolution: look up method in each listed trait
+                            for trait_name in traits {
+                                if let Some((params, ret)) = self.trait_method_sigs.get(&(trait_name.clone(), method_name.clone())).cloned() {
+                                    let user_args = &args;
+                                    let method_params = if !params.is_empty() { &params[1..] } else { &params };
+                                    if user_args.len() != method_params.len() {
+                                        self.emit(format!(
+                                            "method '{}' of trait '{}' expects {} arguments, got {}",
+                                            method_name, trait_name, method_params.len(), user_args.len()
+                                        ));
+                                    } else {
+                                        for (i, (arg, param)) in user_args.iter().zip(method_params.iter()).enumerate() {
+                                            let at = self.infer_expr(arg, scopes);
+                                            if !same_type(&at, param) {
+                                                self.emit(format!(
+                                                    "argument {} of method '{}' expected {}, found {}",
+                                                    i + 1, method_name, fmt_type(param), fmt_type(&at)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    return ret;
+                                }
+                            }
+                            self.emit_code(crate::diagnostic::codes::E0221,
+                                format!("trait object does not have method '{}'", method_name));
+                            Type::Name("unknown".into(), vec![])
                         } else {
                             self.emit_code(crate::diagnostic::codes::E0222, format!("method call requires a named type, found {}", fmt_type(&obj_ty)));
                             Type::Name("unknown".into(), vec![])

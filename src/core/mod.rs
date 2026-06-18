@@ -715,7 +715,8 @@ impl<'a> Checker<'a> {
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve_type(inner))),
             Type::Nothing => Type::Nothing,
             Type::Infer => Type::Infer,
-            Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
+        Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
+        Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
         }
     }
 
@@ -749,6 +750,7 @@ impl<'a> Checker<'a> {
                 false
             }
             Type::ImplTrait(_) => false,
+            Type::DynTrait(_) => false,
             Type::Nothing | Type::Allocator | Type::Infer => false,
         }
     }
@@ -982,10 +984,12 @@ impl<'a> Checker<'a> {
             Type::Array(inner, _) | Type::Slice(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::ImplTrait(traits) => {
+            Type::ImplTrait(_traits) => {
+            }
+            Type::DynTrait(traits) => {
                 for trait_name in traits {
                     if !self.traits.contains_key(trait_name) {
-                        self.emit(format!("unknown trait '{}' in impl Trait in {}", trait_name, context));
+                        self.emit(format!("unknown trait '{}' in dyn Trait in {}", trait_name, context));
                     }
                 }
             }
@@ -1011,6 +1015,7 @@ impl<'a> Checker<'a> {
             Type::Newtype(_, inner) => Self::type_contains_passport(inner),
             Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer => false,
             Type::ImplTrait(_) => false,
+            Type::DynTrait(_) => false,
         }
     }
 
@@ -1546,6 +1551,7 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
         Type::Array(inner, size) => Type::Array(Box::new(subst_type_params(inner, generics, type_map)), *size),
         Type::Slice(inner) => Type::Slice(Box::new(subst_type_params(inner, generics, type_map))),
         Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
+            Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
     }
 }
 
@@ -1579,6 +1585,7 @@ fn same_type(a: &Type, b: &Type) -> bool {
         }
         (Type::Slice(a), Type::Slice(b)) => same_type(a, b),
         (Type::ImplTrait(a), Type::ImplTrait(b)) => a == b,
+        (Type::DynTrait(a), Type::DynTrait(b)) => a == b,
         _ => false,
     }
 }
@@ -1627,6 +1634,7 @@ pub fn fmt_type(t: &Type) -> String {
         Type::Array(inner, size) => format!("[{}; {}]", fmt_type(inner), size),
         Type::Slice(inner) => format!("[{}]", fmt_type(inner)),
         Type::ImplTrait(traits) => format!("impl {}", traits.join(" + ")),
+        Type::DynTrait(traits) => format!("dyn {}", traits.join(" + ")),
         Type::RawPtr(inner) => format!("*{}", fmt_type(inner)),
         Type::RawPtrMut(inner) => format!("*mut {}", fmt_type(inner)),
         Type::CShared(inner) => format!("c_shared {}", fmt_type(inner)),
