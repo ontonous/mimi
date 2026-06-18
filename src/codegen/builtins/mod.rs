@@ -1,3 +1,12 @@
+pub mod io;
+pub mod string;
+pub mod math;
+pub mod time_env;
+pub mod json;
+pub mod list;
+pub mod map;
+pub mod network;
+
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
@@ -382,4 +391,111 @@ pub fn is_builtin(name: &str) -> bool {
         | "send" | "recv" | "close_fd"
         | "http_get" | "http_post"
     )
+}
+
+
+use super::CodeGenerator;
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+
+
+impl<'ctx> CodeGenerator<'ctx> {
+    pub(super) fn compile_builtin_call(
+        &self,
+        name: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let libc_builtins: &[&str] = &[
+            "println", "print", "eprintln",
+            "assert", "assert_eq", "assert_ne", "assert_approx_eq",
+            "input", "file_exists", "read_file", "write_file",
+            "to_string", "int_to_string", "float_to_string",
+            "pow", "random", "pi", "sqrt", "floor", "ceil", "round",
+            "now", "timestamp", "now_ms", "timestamp_ms", "sleep",
+            "getenv", "args",
+        ];
+        if self.no_std && libc_builtins.contains(&name) {
+            self.require_std(name)?;
+        }
+        match name {
+            "println" => self.compile_println(args),
+            "print" => self.compile_print(args),
+            "eprintln" => self.compile_eprintln(args),
+            "assert" => self.compile_assert(args),
+            "assert_eq" => self.compile_assert_eq(args),
+            "assert_ne" => self.compile_assert_ne(args),
+            "assert_approx_eq" => self.compile_assert_approx_eq(args),
+            "input" => self.compile_input(args),
+            "file_exists" => self.compile_file_exists(args),
+            "read_file" => self.compile_read_file(args),
+            "write_file" => self.compile_write_file(args),
+            "to_string" | "int_to_string" | "float_to_string" => self.compile_to_string(args),
+            "str_char_at" => self.compile_str_char_at(args),
+            "str_contains" => self.compile_str_contains(args),
+            "str_starts_with" => self.compile_str_starts_with(args),
+            "str_ends_with" => self.compile_str_ends_with(args),
+            "str_parse_int" | "to_int" | "string_to_int" => self.compile_str_parse_int(args),
+            "str_parse_float" | "to_float" => self.compile_str_parse_float(args),
+            "str_index_of" => self.compile_str_index_of(args),
+            "str_repeat" => self.compile_str_repeat(args),
+            "str_trim" => self.compile_str_trim(args),
+            "str_to_upper" => self.compile_str_to_upper(args),
+            "str_to_lower" => self.compile_str_to_lower(args),
+            "str_substring" => self.compile_str_substring(args),
+            "str_split" => self.compile_str_split(args),
+            "str_join" => self.compile_str_join(args),
+            "str_replace" => self.compile_str_replace(args),
+            "str_to_c_str" => self.compile_str_to_c_str(args),
+            "c_str_to_string" => self.compile_c_str_to_string(args),
+            "abs" => self.compile_abs(args),
+            "sqrt" => self.compile_sqrt(args),
+            "min" | "max" => self.compile_min_max(args, name),
+            "floor" | "ceil" | "round" => self.compile_floor_ceil_round(args, name),
+            "pow" => self.compile_pow(args),
+            "random" => self.compile_random(args),
+            "pi" => self.compile_pi(args),
+            "now" | "timestamp" => self.compile_now(args),
+            "now_ms" | "timestamp_ms" => self.compile_now_ms(args),
+            "sleep" => self.compile_sleep(args),
+            "getenv" => self.compile_getenv(args),
+            "args" => self.compile_args(args),
+            "exit" => self.compile_exit(args),
+            "to_json" => self.compile_to_json(args),
+            "from_json" => self.compile_from_json(args),
+            "json_get_string" => self.compile_json_get_string(args),
+            "json_get_int" => self.compile_json_get_int(args),
+            "json_get_element" => self.compile_json_get_element(args),
+            "range" => self.compile_range(args),
+            "len" => self.compile_len(args),
+            "push" => self.compile_push(args),
+            "pop" => self.compile_pop(args),
+            "contains" => self.compile_contains(args),
+            "sum" => self.compile_sum(args),
+            "reverse" => self.compile_reverse(args),
+            "flatten" => self.compile_flatten(args),
+            "sort" => self.compile_sort(args),
+            "enumerate" => self.compile_enumerate(args),
+            "zip" => self.compile_zip(args),
+            "map_new" => self.compile_map_new(args),
+            "map_size" => self.compile_map_size(args),
+            "has_key" => self.compile_has_key(args),
+            "map_get" => self.compile_map_get(args),
+            "map_set" => self.compile_map_set(args),
+            "map_remove" => self.compile_map_remove(args),
+            "map_from_list" => self.compile_map_from_list(args),
+            "socket" => self.compile_socket(args),
+            "connect" => self.compile_connect(args),
+            "bind" => self.compile_bind(args),
+            "listen" => self.compile_listen(args),
+            "accept" => self.compile_accept(args),
+            "send" => self.compile_send(args),
+            "recv" => self.compile_recv(args),
+            "close_fd" => self.compile_close_fd(args),
+            "http_get" => self.compile_http_get(args),
+            "http_post" => self.compile_http_post(args),
+            "lexer" | "parse" => {
+                Err(format!("'{}' is a runtime-only function, not available in codegen", name))
+            }
+            _ => Err(format!("builtin '{}' not yet implemented in codegen", name)),
+        }
+    }
 }
