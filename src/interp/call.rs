@@ -1321,7 +1321,119 @@ impl<'a> Interpreter<'a> {
                     _ => Err(format!("cannot call method '{}' on record", method)),
                 }
             }
+            Value::Variant(name, vals) => {
+                // Option/Result combinator methods on enum variants
+                match (name.as_str(), method) {
+                    // ===== Option methods =====
+                    ("Some" | "Ok", "unwrap") | ("Some" | "Ok", "expect") => {
+                        if vals.is_empty() {
+                            Err(format!("{}::{} has no inner value", name, method))
+                        } else {
+                            Ok(vals[0].clone())
+                        }
+                    }
+                    ("None", "unwrap") => Err("called unwrap() on None".into()),
+                    ("None", "expect") => {
+                        let msg = if args.is_empty() { "called expect() on None" } else { &args[0].to_string() };
+                        Err(format!("{}", msg))
+                    }
+                    ("Err", "unwrap") | ("Err", "expect") => {
+                        let msg = if vals.is_empty() { "called unwrap() on Err".to_string() } else { format!("called unwrap() on Err({})", vals[0]) };
+                        Err(msg)
+                    }
+
+                    ("Some", "unwrap_or") | ("Ok", "unwrap_or") => {
+                        Ok(vals[0].clone())
+                    }
+                    ("None", "unwrap_or") | ("Err", "unwrap_or") => {
+                        args.into_iter().next().ok_or("unwrap_or requires a default value".to_string())
+                    }
+
+                    ("Some", "is_some") | ("Ok", "is_some") | ("Some", "is_ok") | ("Ok", "is_ok") => {
+                        Ok(Value::Bool(true))
+                    }
+                    ("None", "is_some") | ("Err", "is_some") | ("None", "is_ok") | ("Err", "is_ok") => {
+                        Ok(Value::Bool(false))
+                    }
+                    ("None", "is_none") | ("Err", "is_none") | ("None", "is_err") | ("Err", "is_err") => {
+                        Ok(Value::Bool(true))
+                    }
+                    ("Some", "is_none") | ("Ok", "is_none") | ("Some", "is_err") | ("Ok", "is_err") => {
+                        Ok(Value::Bool(false))
+                    }
+
+                    // ok_or: Option -> Result
+                    ("Some", "ok_or") => {
+                        Ok(Value::Variant("Ok".into(), vec![vals[0].clone()]))
+                    }
+                    ("None", "ok_or") => {
+                        let err = args.into_iter().next().ok_or("ok_or requires an error value")?;
+                        Ok(Value::Variant("Err".into(), vec![err]))
+                    }
+
+                    // map: apply closure to inner value
+                    ("Some", "map") => {
+                        let closure = args.into_iter().next().ok_or("map requires a function argument")?;
+                        let mapped = self.apply_closure(&closure, vec![vals[0].clone()])?;
+                        Ok(Value::Variant("Some".into(), vec![mapped]))
+                    }
+                    ("None", "map") => Ok(Value::Variant("None".into(), vec![])),
+                    ("Ok", "map") => {
+                        let closure = args.into_iter().next().ok_or("map requires a function argument")?;
+                        let mapped = self.apply_closure(&closure, vec![vals[0].clone()])?;
+                        Ok(Value::Variant("Ok".into(), vec![mapped]))
+                    }
+                    ("Err", "map") => Ok(obj.clone()),
+
+                    // and_then: apply closure returning same variant type
+                    ("Some", "and_then") => {
+                        let closure = args.into_iter().next().ok_or("and_then requires a function argument")?;
+                        self.apply_closure(&closure, vec![vals[0].clone()])
+                    }
+                    ("None", "and_then") => Ok(Value::Variant("None".into(), vec![])),
+                    ("Ok", "and_then") => {
+                        let closure = args.into_iter().next().ok_or("and_then requires a function argument")?;
+                        self.apply_closure(&closure, vec![vals[0].clone()])
+                    }
+                    ("Err", "and_then") => Ok(obj.clone()),
+
+                    // map_err: apply closure to error value
+                    ("Ok", "map_err") => Ok(obj.clone()),
+                    ("Err", "map_err") => {
+                        let closure = args.into_iter().next().ok_or("map_err requires a function argument")?;
+                        let err_val = if vals.is_empty() { Value::Unit } else { vals[0].clone() };
+                        let mapped = self.apply_closure(&closure, vec![err_val])?;
+                        Ok(Value::Variant("Err".into(), vec![mapped]))
+                    }
+                    ("Some", "map_err") => Ok(obj.clone()),
+                    ("None", "map_err") => Ok(Value::Variant("None".into(), vec![])),
+
+                    _ => Err(format!("variant '{}' has no method '{}'", name, method)),
+                }
+            }
             _ => Err(format!("cannot call method '{}' on value {}", method, obj)),
+        }
+    }
+
+    /// Apply a closure value to arguments
+    fn apply_closure(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
+        match closure {
+            Value::Closure { params, body, captured, .. } => {
+                if params.len() != args.len() {
+                    return Err(format!("closure expects {} arguments, got {}", params.len(), args.len()));
+                }
+                self.push_scope();
+                for (n, v) in captured {
+                    self.bind(n, v.clone());
+                }
+                for (param, arg) in params.iter().zip(args) {
+                    self.bind(&param.name, arg);
+                }
+                let result = self.eval_block(body)?;
+                self.pop_scope();
+                Ok(result.unwrap_or(Value::Unit))
+            }
+            _ => Err(format!("expected a closure, found {}", closure)),
         }
     }
 

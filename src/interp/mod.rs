@@ -95,6 +95,9 @@ impl<'a> Interpreter<'a> {
         constructors.insert("Err".to_string(), 1);
         constructors.insert("Some".to_string(), 1);
         constructors.insert("None".to_string(), 0);
+        // Also mark Err and None as failure variants for the ? operator
+        failure_variants.insert("Err".to_string(), true);
+        failure_variants.insert("None".to_string(), true);
         let mut trait_defs = HashMap::new();
         let mut type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>> = HashMap::new();
         let mut extern_funcs: HashMap<String, ExternFunc> = HashMap::new();

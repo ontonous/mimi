@@ -591,6 +591,119 @@ func main() -> i32 {
     assert!(err.message.contains("placeholder is not allowed in production mode"));
 }
 
+// ===== Option/Result combinator tests =====
+
+#[test]
+fn interp_option_unwrap() {
+    let src = r#"
+func main() -> i32 {
+    Some(42).unwrap()
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn interp_option_unwrap_none() {
+    let src = r#"
+func main() -> i32 {
+    let x = None;
+    x.unwrap()
+}
+"#;
+    let v = run_source_result(src);
+    assert!(v.is_err());
+    assert!(v.unwrap_err().contains("unwrap() on None"));
+}
+
+#[test]
+fn interp_option_is_some() {
+    let src = r#"
+func main() -> bool {
+    let x = Some(42);
+    x.is_some()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn interp_option_is_none() {
+    let src = r#"
+func main() -> bool {
+    let x: i32 = None;
+    x.is_none()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn interp_result_unwrap_ok() {
+    let src = r#"
+func main() -> i32 {
+    Ok(42).unwrap()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn interp_result_unwrap_err() {
+    let src = r#"
+func main() -> i32 {
+    Err("fail").unwrap()
+}
+"#;
+    let v = run_source_result(src);
+    assert!(v.is_err());
+}
+
+#[test]
+fn interp_result_is_ok() {
+    let src = r#"
+func main() -> bool {
+    Ok(42).is_ok()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn interp_result_is_err() {
+    let src = r#"
+func main() -> bool {
+    Err("fail").is_err()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn interp_option_map() {
+    let src = r#"
+func double(x: i32) -> i32 { x * 2 }
+
+func main() -> i32 {
+    Some(21).map(double).unwrap()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn interp_option_and_then() {
+    let src = r#"
+func wrap(x: i32) -> i32 { Some(x * 2) }
+
+func main() -> i32 {
+    Some(21).and_then(wrap).unwrap()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
 #[test]
 fn interp_parasteps_await_all() {
     let src = r#"
