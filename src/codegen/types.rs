@@ -101,7 +101,14 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         }
         Type::Nothing => None,
         Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
-        Type::DynTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
+        Type::DynTrait(_) => {
+            // Fat pointer: { data: i8*, vtable: i8* }
+            let i8_ptr = ctx.i8_type().ptr_type(inkwell::AddressSpace::default());
+            Some(BasicTypeEnum::StructType(ctx.struct_type(&[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::PointerType(i8_ptr),
+            ], false)))
+        }
     }
 }
 

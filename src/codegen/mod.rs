@@ -2392,40 +2392,105 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         
-                        // 3. Try vtable dispatch for dyn Trait objects
+                        // 3. True vtable indirect dispatch for dyn Trait objects
                         if obj_type.starts_with("dyn ") {
                             let trait_name = obj_type.strip_prefix("dyn ").unwrap_or("");
                             if !trait_name.is_empty() && !trait_name.contains(' ') {
-                                // For dyn Trait dispatch, iterate type_impls to find an impl
-                                // that provides this method.  This works when the concrete type
-                                // is known at compile time.
-                                for (type_name, trait_impls) in &self.type_impls {
-                                    if let Some(methods) = trait_impls.get(trait_name) {
-                                        if methods.iter().any(|m| m.name == *method_name) {
-                                            let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
-                                            if let Some(function) = self.module.get_function(&mangled) {
-                                                let obj_val = self.compile_expr(obj, vars)?;
-                                                let mut compiled_args = Vec::new();
-                                                compiled_args.push(obj_val);
-                                                for arg in args {
-                                                    compiled_args.push(self.compile_expr(arg, vars)?);
-                                                }
-                                                let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
-                                                    BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
-                                                    BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
-                                                    BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
-                                                    BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
-                                                    BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
-                                                    BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
-                                                }).collect();
-                                                let call = self.builder.build_call(function, &metadata_args, "dyn_trait_call")
-                                                    .map_err(|e| format!("dyn trait call error: {}", e))?;
-                                                return Ok(call.try_as_basic_value().left().unwrap_or(
-                                                    self.context.i64_type().const_int(0, false).into()
-                                                ));
+                                // Find method index within the trait definition
+                                let method_idx = self.trait_defs.get(trait_name)
+                                    .and_then(|tdef| tdef.methods.iter().position(|m| m.name == *method_name));
+                                if let Some(idx) = method_idx {
+                                    // Get the vtable struct type (clone to avoid borrow conflict)
+                                    let vtable_ty = self.vtable_types.get(trait_name)
+                                        .map(|s| *s).ok_or("no vtable type for trait")?;
+                                    // Fat pointer layout: { i8* data, i8* vtable }
+                                    let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                    let fat_ty = self.context.struct_type(&[
+                                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    ], false);
+                                    // The obj_val is a fat pointer struct { data: i8*, vtable: i8* }
+                                    let obj_val = self.compile_expr(obj, vars)?;
+                                    let fat_ptr = match obj_val {
+                                            BasicValueEnum::StructValue(_) => {
+                                                // Alloca the struct value so we can GEP into it
+                                                let alloca = self.builder.build_alloca(
+                                                    BasicTypeEnum::StructType(fat_ty), "fat_tmp"
+                                                ).map_err(|e| format!("alloca error: {}", e))?;
+                                                self.builder.build_store(alloca, obj_val)
+                                                    .map_err(|e| format!("store error: {}", e))?;
+                                                alloca
                                             }
+                                            BasicValueEnum::PointerValue(pv) => pv,
+                                            _ => return Err("dyn Trait value must be a struct or pointer".into()),
+                                        };
+                                        // Extract vtable pointer (field 1)
+                                        let vtable_gep = self.builder.build_struct_gep(
+                                            BasicTypeEnum::StructType(fat_ty), fat_ptr, 1, "vtable_gep"
+                                        ).map_err(|e| format!("gep error: {}", e))?;
+                                        let vtable_ptr = self.builder.build_load(
+                                            BasicTypeEnum::PointerType(i8_ptr_ty), vtable_gep, "vtable_ptr"
+                                        ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                                        // GEP into vtable at method index
+                                        let method_gep = self.builder.build_struct_gep(
+                                            BasicTypeEnum::StructType(vtable_ty), vtable_ptr, idx as u32, "method_gep"
+                                        ).map_err(|e| format!("gep error: {}", e))?;
+                                        // Load function pointer from vtable slot
+                                        let fn_ptr = self.builder.build_load(
+                                            BasicTypeEnum::PointerType(i8_ptr_ty), method_gep, "fn_ptr"
+                                        ).map_err(|e| format!("load error: {}", e))?.into_pointer_value();
+                                        // Extract data pointer (field 0) for passing as self arg
+                                        let data_gep = self.builder.build_struct_gep(
+                                            BasicTypeEnum::StructType(fat_ty), fat_ptr, 0, "data_gep"
+                                        ).map_err(|e| format!("gep error: {}", e))?;
+                                        let data_ptr = self.builder.build_load(
+                                            BasicTypeEnum::PointerType(i8_ptr_ty), data_gep, "data_ptr"
+                                        ).map_err(|e| format!("load error: {}", e))?;
+                                        // Get the mangled function's type for the indirect call signature
+                                        // Find any matching mangled function to extract fn type
+                                        let fn_sig = (|| -> Option<(inkwell::values::AnyValueEnum<'ctx>, String)> {
+                                            for (tn, timpls) in &self.type_impls {
+                                                if let Some(methods) = timpls.get(trait_name) {
+                                                    if methods.iter().any(|m| m.name == *method_name) {
+                                                        let mangled = format!("{}__{}__{}", tn, trait_name, method_name);
+                                                        if let Some(f) = self.module.get_function(&mangled) {
+                                                            return Some((inkwell::values::AnyValueEnum::FunctionValue(f), mangled));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            None
+                                        })();
+                                        if let Some((fn_val, _)) = fn_sig {
+                                            let fn_llvm = fn_val.into_function_value();
+                                            let fn_type = fn_llvm.get_type();
+                                            // Cast fn_ptr i8* to the right function pointer type
+                                            let fn_ptr_cast = self.builder.build_pointer_cast(
+                                                fn_ptr,
+                                                fn_type.ptr_type(inkwell::AddressSpace::default()),
+                                                "fn_cast"
+                                            ).map_err(|e| format!("cast error: {}", e))?;
+                                            // Compile additional args (start with data ptr as self)
+                                            let mut compiled_args = Vec::new();
+                                            compiled_args.push(data_ptr);
+                                            for arg in args {
+                                                compiled_args.push(self.compile_expr(arg, vars)?);
+                                            }
+                                            let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                                                BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                                                BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                                                BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                                                BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                                                BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                                                BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                                            }).collect();
+                                            let call = self.builder.build_indirect_call(
+                                                fn_type, fn_ptr_cast, &metadata_args, "dyn_call"
+                                            ).map_err(|e| format!("dyn indirect call error: {}", e))?;
+                                            return Ok(call.try_as_basic_value().left().unwrap_or(
+                                                self.context.i64_type().const_int(0, false).into()
+                                            ));
                                         }
-                                    }
                                 }
                             }
                             return Err(format!("cannot dispatch method '{}' on {}", method_name, obj_type));
