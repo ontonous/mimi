@@ -5987,15 +5987,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(self.expect_basic_value(&call, "pow")?)
             }
             "random" => {
-                // Use random() from libc (returns long, we use i64)
+                // Call libc random() and normalize to f64 in [0, 1)
+                let f64_ty = self.context.f64_type();
+                let i64_ty = self.context.i64_type();
                 let random_fn = self.module.get_function("random")
                     .or_else(|| {
-                        let ty = self.context.i64_type().fn_type(&[], false);
+                        let ty = i64_ty.fn_type(&[], false);
                         Some(self.module.add_function("random", ty, Some(inkwell::module::Linkage::External)))
                     }).unwrap();
                 let call = self.builder.build_call(random_fn, &[], "random_call")
                     .map_err(|e| format!("random error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "random")?)
+                let raw = self.expect_basic_value(&call, "random")?.into_int_value();
+                let raw_f = self.builder.build_signed_int_to_float(raw, f64_ty, "rand_f")
+                    .map_err(|e| format!("random int_to_float error: {}", e))?;
+                // RAND_MAX from glibc = 2^31-1 = 2147483647
+                let rand_max = f64_ty.const_float(2147483647.0);
+                let result = self.builder.build_float_div(raw_f, rand_max, "rand_norm")
+                    .map_err(|e| format!("random div error: {}", e))?;
+                Ok(result.into())
             }
             "pi" => {
                 // Return constant pi as f64
@@ -6246,9 +6255,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             // ========== String parsing ==========
             "str_parse_int" | "to_int" | "string_to_int" => {
                 if args.len() != 1 { return Err("[E0711] str_parse_int/to_int expects 1 argument".into()); }
+                let i64_ty = self.context.i64_type();
+                // Handle numeric types directly (int → int, float → int trunc)
+                match &args[0] {
+                    BasicMetadataValueEnum::IntValue(iv) => {
+                        return Ok((*iv).into());
+                    }
+                    BasicMetadataValueEnum::FloatValue(fv) => {
+                        let iv = self.builder.build_float_to_signed_int(*fv, i64_ty, "to_int_f")
+                            .map_err(|e| format!("to_int float->int error: {}", e))?;
+                        return Ok(iv.into());
+                    }
+                    _ => {}
+                }
                 let s_ptr = match args[0] {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err("[E0712] str_parse_int: first arg must be string".into()),
+                    _ => return Err("[E0712] str_parse_int: first arg must be string, int, or float".into()),
                 };
                 let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                 // strtol(s, NULL, 10)
@@ -6272,9 +6294,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             "str_parse_float" | "to_float" => {
                 if args.len() != 1 { return Err("[E0711] str_parse_float/to_float expects 1 argument".into()); }
+                let f64_ty = self.context.f64_type();
+                // Handle numeric types directly (float → float, int → float)
+                match &args[0] {
+                    BasicMetadataValueEnum::FloatValue(fv) => {
+                        return Ok((*fv).into());
+                    }
+                    BasicMetadataValueEnum::IntValue(iv) => {
+                        let fv = self.builder.build_signed_int_to_float(*iv, f64_ty, "to_float_i")
+                            .map_err(|e| format!("to_float int->float error: {}", e))?;
+                        return Ok(fv.into());
+                    }
+                    _ => {}
+                }
                 let s_ptr = match args[0] {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err("[E0712] str_parse_float: first arg must be string".into()),
+                    _ => return Err("[E0712] str_parse_float: first arg must be string, int, or float".into()),
                 };
                 let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                 // strtod(s, NULL)

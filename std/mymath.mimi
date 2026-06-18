@@ -51,8 +51,13 @@ pub func is_prime(n: i32) -> bool {
     true
 }
 
-// random_int disabled in codegen — uses to_float/to_int on numeric values
-// which codegen doesn't support. Re-enable when codegen handles numeric to_float.
+pub func random_int(lo: i32, hi: i32) -> i32 {
+    let ri_span = hi - lo
+    if ri_span <= 0 {
+        return lo
+    }
+    to_int(floor(random() * to_float(ri_span))) + lo
+}
 
 pub func mod_pow(base: i32, exp: i32, modulus: i32) -> i32 {
     let mut mp_acc = 1
@@ -81,17 +86,28 @@ pub func map_range(value: f64, in_min: f64, in_max: f64, out_min: f64, out_max: 
 }
 
 pub func is_power_of_two(n: i32) -> bool {
-    n > 0 && (n & (n - 1)) == 0
+    if n <= 0 {
+        return false
+    }
+    let mut pot_x = n
+    while pot_x > 1 {
+        if pot_x % 2 != 0 {
+            return false
+        }
+        pot_x = pot_x / 2
+    }
+    true
 }
 
 pub func next_power_of_two(n: i32) -> i32 {
-    let mut np_v = n - 1
-    np_v = np_v | (np_v >> 1)
-    np_v = np_v | (np_v >> 2)
-    np_v = np_v | (np_v >> 4)
-    np_v = np_v | (np_v >> 8)
-    np_v = np_v | (np_v >> 16)
-    np_v + 1
+    if n <= 0 {
+        return 1
+    }
+    let mut np_p = 1
+    while np_p < n {
+        np_p = np_p * 2
+    }
+    np_p
 }
 
 pub func count_digits(n: i32) -> i32 {

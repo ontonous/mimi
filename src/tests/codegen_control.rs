@@ -1585,7 +1585,9 @@ fn codegen_stdlib_loader_roundtrip() {
     let merged = loader.merge_all();
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "stdlib_test");
-    assert!(codegen.compile_file(&merged).is_ok(), "mymath.mimi should compile");
+    if let Err(ref e) = codegen.compile_file(&merged) {
+        panic!("mymath.mimi compile error: {}", e);
+    }
     std::env::remove_var("MIMI_STDLIB");
 }
 
