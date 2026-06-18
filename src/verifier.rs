@@ -137,10 +137,9 @@ impl Verifier {
             old_name_strings.push(old_name);
         }
         
-        for p in &func.params {
+        for (i, p) in func.params.iter().enumerate() {
             let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            let old_name = format!("old_{}", p.name);
-            let name_ref = old_name_strings.iter().find(|s| s.as_str() == old_name).unwrap().as_str();
+            let name_ref: &str = &old_name_strings[i];
             if is_float {
                 z3_real_vars.push((name_ref, Z3Real::new_const(name_ref)));
             } else {
