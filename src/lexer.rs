@@ -95,6 +95,9 @@ pub enum TokenKind {
     MinusEq,
     StarEq,
     SlashEq,
+    BitAndEq,
+    BitOrEq,
+    BitXorEq,
     EqEq,
     Ne,
     Lt,
@@ -265,6 +268,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Dedent => "DEDENT",
             TokenKind::Tick => "'",
             TokenKind::Eof => "EOF",
+            TokenKind::BitAndEq => "&=",
+            TokenKind::BitOrEq => "|=",
+            TokenKind::BitXorEq => "^=",
         };
         write!(f, "{}", s)
     }
@@ -394,6 +400,9 @@ impl TokenKind {
             TokenKind::Newline => "\n",
             TokenKind::Indent => "",
             TokenKind::Dedent => "",
+            TokenKind::BitAndEq => "&=",
+            TokenKind::BitOrEq => "|=",
+            TokenKind::BitXorEq => "^=",
             TokenKind::Eof => "",
         }
     }
@@ -993,6 +1002,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some('&') {
                         self.advance();
                         (TokenKind::AndAnd, Commitment::None)
+                    } else if self.peek() == Some('=') {
+                        self.advance();
+                        (TokenKind::BitAndEq, Commitment::None)
                     } else {
                         (TokenKind::BitAnd, Commitment::None)
                     }
@@ -1002,13 +1014,21 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some('|') {
                         self.advance();
                         (TokenKind::OrOr, Commitment::None)
+                    } else if self.peek() == Some('=') {
+                        self.advance();
+                        (TokenKind::BitOrEq, Commitment::None)
                     } else {
                         (TokenKind::BitOr, Commitment::None)
                     }
                 }
                 '^' => {
                     self.advance();
-                    (TokenKind::BitXor, Commitment::None)
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        (TokenKind::BitXorEq, Commitment::None)
+                    } else {
+                        (TokenKind::BitXor, Commitment::None)
+                    }
                 }
                 '~' => {
                     self.advance();

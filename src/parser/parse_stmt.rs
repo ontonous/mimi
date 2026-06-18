@@ -87,6 +87,9 @@ impl Parser {
                     || self.at(&TokenKind::MinusEq)
                     || self.at(&TokenKind::StarEq)
                     || self.at(&TokenKind::SlashEq)
+                    || self.at(&TokenKind::BitAndEq)
+                    || self.at(&TokenKind::BitOrEq)
+                    || self.at(&TokenKind::BitXorEq)
                 {
                     let op_token = self.peek().kind.clone();
                     self.advance();
@@ -97,6 +100,9 @@ impl Parser {
                         TokenKind::MinusEq => BinOp::Sub,
                         TokenKind::StarEq => BinOp::Mul,
                         TokenKind::SlashEq => BinOp::Div,
+                        TokenKind::BitAndEq => BinOp::BitAnd,
+                        TokenKind::BitOrEq => BinOp::BitOr,
+                        TokenKind::BitXorEq => BinOp::BitXor,
                         _ => unreachable!(),
                     };
                     let rhs = Expr::Binary(op, Box::new(expr.clone()), Box::new(value));

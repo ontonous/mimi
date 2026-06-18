@@ -161,3 +161,20 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(1));
 }
+
+#[test]
+fn interp_compound_bitwise_assign() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 12;
+    x |= 3;
+    let mut y = 12;
+    y &= 10;
+    let mut z = 12;
+    z ^= 5;
+    x + y + z
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(32));
+}
