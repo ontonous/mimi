@@ -4397,6 +4397,65 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_builtin_call(name, &metadata_args);
         }
 
+        // Handle built-in Option/Result constructors
+        match name {
+            "Ok" | "Some" => {
+                if compiled_args.len() != 1 {
+                    return Err(format!("[E0711] {} expects 1 argument", name));
+                }
+                let val = compiled_args[0];
+                let bool_ty = self.context.bool_type();
+                let disc = bool_ty.const_int(1, false);
+                let inner_ty = val.get_type();
+                let struct_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(bool_ty),
+                    inner_ty,
+                ], false);
+                let alloca = self.builder.build_alloca(struct_ty, "result_val")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(disc_gep, disc)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let val_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(val_gep, val)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let result = self.builder.build_load(struct_ty, alloca, "loaded")
+                    .map_err(|e| format!("load error: {}", e))?;
+                return Ok(result);
+            }
+            "Err" | "None" => {
+                if name == "Err" && compiled_args.len() != 1 {
+                    return Err("[E0711] Err expects 1 argument".into());
+                }
+                if name == "None" && compiled_args.len() != 0 {
+                    return Err("[E0711] None expects 0 arguments".into());
+                }
+                let bool_ty = self.context.bool_type();
+                let disc = bool_ty.const_int(0, false);
+                let payload_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                let struct_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(bool_ty),
+                    payload_ty,
+                ], false);
+                let alloca = self.builder.build_alloca(struct_ty, "result_val")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(disc_gep, disc)
+                    .map_err(|e| format!("store error: {}", e))?;
+                let val_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                self.builder.build_store(val_gep, self.context.i64_type().const_int(0, false))
+                    .map_err(|e| format!("store error: {}", e))?;
+                let result = self.builder.build_load(struct_ty, alloca, "loaded")
+                    .map_err(|e| format!("load error: {}", e))?;
+                return Ok(result);
+            }
+            _ => {}
+        }
+
         if let Some(function) = self.module.get_function(name) {
             let call = self.builder.build_call(function, &metadata_args, "call")
                 .map_err(|e| format!("call error: {}", e))?;
@@ -4639,6 +4698,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, l, r, "cmp")
                             .map_err(|e| format!("cmp error: {}", e))?
                     }
+                    (BasicMetadataValueEnum::PointerValue(l), BasicMetadataValueEnum::PointerValue(r)) => {
+                        let strcmp_fn = self.module.get_function("strcmp")
+                            .ok_or_else(|| "strcmp not declared".to_string())?;
+                        let cmp_result = self.builder.build_call(strcmp_fn, &[
+                            BasicMetadataValueEnum::PointerValue(l),
+                            BasicMetadataValueEnum::PointerValue(r),
+                        ], "strcmp_call")
+                            .map_err(|e| format!("strcmp error: {}", e))?
+                            .try_as_basic_value().left()
+                            .ok_or("strcmp returned void")?;
+                        let zero = self.context.i32_type().const_int(0, false);
+                        self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "streq")
+                            .map_err(|e| format!("cmp error: {}", e))?
+                    }
                     _ => return Err("assert_eq requires same types".into()),
                 };
                 let function = self.current_function().unwrap();
@@ -4681,6 +4754,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     (BasicMetadataValueEnum::FloatValue(l), BasicMetadataValueEnum::FloatValue(r)) => {
                         self.builder.build_float_compare(inkwell::FloatPredicate::ONE, l, r, "cmp")
+                            .map_err(|e| format!("cmp error: {}", e))?
+                    }
+                    (BasicMetadataValueEnum::PointerValue(l), BasicMetadataValueEnum::PointerValue(r)) => {
+                        let strcmp_fn = self.module.get_function("strcmp")
+                            .ok_or_else(|| "strcmp not declared".to_string())?;
+                        let cmp_result = self.builder.build_call(strcmp_fn, &[
+                            BasicMetadataValueEnum::PointerValue(l),
+                            BasicMetadataValueEnum::PointerValue(r),
+                        ], "strcmp_call")
+                            .map_err(|e| format!("strcmp error: {}", e))?
+                            .try_as_basic_value().left()
+                            .ok_or("strcmp returned void")?;
+                        let zero = self.context.i32_type().const_int(0, false);
+                        self.builder.build_int_compare(inkwell::IntPredicate::NE, cmp_result.into_int_value(), zero, "strne")
                             .map_err(|e| format!("cmp error: {}", e))?
                     }
                     _ => return Err("assert_ne requires same types".into()),
