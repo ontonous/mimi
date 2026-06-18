@@ -229,3 +229,28 @@ pub func indent(s: string, n: i32) -> string {
 pub func ellipsis(s: string, max_len: i32) -> string {
     truncate(s, max_len)
 }
+
+pub func count_substring(s: string, sub: string) -> i32 {
+    let mut cs_cnt = 0
+    let mut cs_pos = 0
+    let cs_sl = len(sub)
+    while cs_pos < len(s) {
+        let cs_found = str_index_of(str_substring(s, cs_pos, len(s)), sub)
+        if cs_found.0 {
+            cs_cnt += 1
+            cs_pos = cs_pos + cs_found.1 + cs_sl
+        } else {
+            break
+        }
+    }
+    cs_cnt
+}
+
+pub func is_blank(s: string) -> bool {
+    let trimmed = str_trim(s)
+    len(trimmed) == 0
+}
+
+pub func replace_all(s: string, from: string, to: string) -> string {
+    str_replace(s, from, to)
+}

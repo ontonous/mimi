@@ -2,6 +2,14 @@ pub func print_line(s: string) {
     println(s)
 }
 
+pub func print_raw(s: string) {
+    print(s)
+}
+
+pub func print_format(parts: List<string>) {
+    print(str_join(parts, ""))
+}
+
 pub func print_err(s: string) {
     eprintln(s)
 }
@@ -49,4 +57,19 @@ pub func input_int() -> i32 {
     } else {
         0
     }
+}
+
+pub func input_float() -> f64 {
+    let line = input_line()
+    let parsed = str_parse_float(line)
+    if parsed.0 {
+        parsed.1
+    } else {
+        0.0
+    }
+}
+
+pub func input_bool() -> bool {
+    let line = input_line()
+    line == "true" || line == "yes" || line == "1"
 }

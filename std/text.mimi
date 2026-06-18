@@ -1,0 +1,69 @@
+pub func is_blank(s: string) -> bool {
+    len(str_trim(s)) == 0
+}
+
+pub func is_numeric(s: string) -> bool {
+    let inn_parsed = str_parse_int(s)
+    inn_parsed.0
+}
+
+pub func count_lines(s: string) -> i32 {
+    len(str_split(s, "\n"))
+}
+
+pub func slugify(s: string) -> string {
+    let lower = str_to_lower(s)
+    let sl_parts = str_split(lower, " ")
+    str_join(sl_parts, "-")
+}
+
+pub func indent_text(s: string, n: i32) -> string {
+    let it_lines = str_split(s, "\n")
+    let mut it_res: List<string> = []
+    for it_line in it_lines {
+        push(it_res, str_repeat(" ", n) + it_line)
+    }
+    str_join(it_res, "\n")
+}
+
+pub func wrap_text(s: string, width: i32) -> List<string> {
+    let wt_words = str_split(s, " ")
+    let mut wt_lines: List<string> = []
+    let mut wt_current = ""
+    for wt_word in wt_words {
+        let wt_candidate = if len(wt_current) == 0 { wt_word } else { wt_current + " " + wt_word }
+        if len(wt_candidate) <= width {
+            wt_current = wt_candidate
+        } else {
+            if len(wt_current) > 0 {
+                push(wt_lines, wt_current)
+            }
+            wt_current = wt_word
+        }
+    }
+    if len(wt_current) > 0 {
+        push(wt_lines, wt_current)
+    }
+    wt_lines
+}
+
+pub func camel_to_snake(s: string) -> string {
+    let mut cts_res: List<string> = []
+    let mut cts_word = ""
+    let cts_len = len(s)
+    for cts_i in range(0, cts_len) {
+        let cts_ch = str_char_at(s, cts_i)
+        if str_to_upper(cts_ch) == cts_ch && cts_ch != str_to_lower(cts_ch) {
+            if len(cts_word) > 0 {
+                push(cts_res, str_to_lower(cts_word))
+            }
+            cts_word = cts_ch
+        } else {
+            cts_word = cts_word + cts_ch
+        }
+    }
+    if len(cts_word) > 0 {
+        push(cts_res, str_to_lower(cts_word))
+    }
+    str_join(cts_res, "_")
+}

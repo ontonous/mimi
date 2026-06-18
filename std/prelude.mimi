@@ -182,3 +182,13 @@ pub func times(n: i32, f: func() -> ()) {
         t_i += 1
     }
 }
+
+pub func to_int_safe(s: string, default: i32) -> i32 {
+    let tis_parsed = str_parse_int(s)
+    if tis_parsed.0 { tis_parsed.1 } else { default }
+}
+
+pub func to_float_safe(s: string, default: f64) -> f64 {
+    let tfs_parsed = str_parse_float(s)
+    if tfs_parsed.0 { tfs_parsed.1 } else { default }
+}

@@ -1,0 +1,50 @@
+pub func random_float(lo: f64, hi: f64) -> f64 {
+    random() * (hi - lo) + lo
+}
+
+pub func random_int(lo: i32, hi: i32) -> i32 {
+    let ri_span = hi - lo
+    if ri_span <= 0 {
+        return lo
+    }
+    to_int(floor(random() * to_float(ri_span))) + lo
+}
+
+pub func random_choice<T>(xs: List<T>) -> T {
+    let len = len(xs)
+    if len == 0 {
+        return xs[0]
+    }
+    let idx = to_int(floor(random() * to_float(len)))
+    xs[idx]
+}
+
+pub func random_bool() -> bool {
+    random() >= 0.5
+}
+
+pub func random_sample<T>(xs: List<T>, n: i32) -> List<T> {
+    let rs_len = len(xs)
+    let mut rs_result: List<T> = []
+    let mut rs_remaining = xs
+    let mut rs_k = 0
+    while rs_k < n && rs_k < rs_len {
+        let rs_idx = to_int(floor(random() * to_float(len(rs_remaining))))
+        rs_result = push(rs_result, rs_remaining[rs_idx])
+        rs_remaining = remove_at(rs_remaining, rs_idx)
+        rs_k += 1
+    }
+    rs_result
+}
+
+pub func shuffle<T>(xs: List<T>) -> List<T> {
+    let sh_len = len(xs)
+    let mut sh_rest = xs
+    let mut sh_res: List<T> = []
+    while len(sh_rest) > 0 {
+        let sh_idx = to_int(floor(random() * to_float(len(sh_rest))))
+        sh_res = push(sh_res, sh_rest[sh_idx])
+        sh_rest = remove_at(sh_rest, sh_idx)
+    }
+    sh_res
+}
