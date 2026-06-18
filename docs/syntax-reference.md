@@ -756,17 +756,18 @@ MyModule::helper()
 | `std::io` | I/O 操作：`print_line`, `print_err`, `print_lines`, `print_bool`, `print_int`, `print_float`, `print_list`, `input_line`, `input_int`, `print_raw`, `print_format`, `input_float`, `input_bool` |
 | `std::fs` | 文件系统：`exists`, `read`, `write`, `read_lines`, `write_lines`, `file_size` |
 | `std::strings` | 字符串操作：`is_empty`, `char_at`, `substring`, `to_upper`, `to_lower`, `trim`, `split`, `join`, `contains`, `capitalize`, `title`, `reverse_string`, `truncate`, `pad_left`, `pad_right`, `lines`, `words`, `count_char`, `indent`, `quote`, `count_substring`, `is_blank`, `replace_all` |
-| `std::collections` | 集合操作：`find`, `dedup`, `concat`, `take`, `drop_n`, `sort_list`, `sum`, `map_list`, `unique`, `any`, `all`, `partition`, `group_by`, `chunks`, `intersperse`, `min_list`, `max_list`, `remove_at`, `fill_list`, `range_step` |
+| `std::collections` | 集合操作：`find`, `dedup`, `concat`, `take`, `drop_n`, `sort_list`, `sum`, `map_list`, `unique`, `any`, `all`, `partition`, `group_by`, `chunks`, `intersperse`, `min_list`, `max_list`, `remove_at`, `fill_list`, `range_step`, `filter_list`, `reduce_list` |
 | `std::random` | 随机数工具：`random_float`, `random_int`, `random_choice`, `random_bool`, `random_sample`, `shuffle` |
 | `std::text` | 文本处理：`is_blank`, `is_numeric`, `count_lines`, `slugify`, `indent_text`, `wrap_text`, `camel_to_snake` |
-| `std::mymath` | 数学函数：`square`, `cube`, `factorial`, `fibonacci`, `is_prime`, `gcd`, `lcm`, `mean`, `median`, `hypot`, `power`, `sqrt_val`, `floor_val`, `ceil_val`, `round_val`, `clamp_int`, `lerp_int`, `collatz_steps`, `mod_pow`, `deg_to_rad`, `rad_to_deg`, `random_int`, `is_power_of_two`, `next_power_of_two` |
+| `std::result` | Result 组合子：`is_ok_result`, `is_err_result`, `result_unwrap`, `unwrap_or`, `expect_result`, `map_result`, `map_err_result` |
+| `std::mymath` | 数学函数：`square`, `cube`, `abs`, `abs_float`, `factorial`, `fibonacci`, `is_prime`, `gcd`, `lcm`, `hypot`, `power`, `sqrt_val`, `floor_val`, `ceil_val`, `round_val`, `clamp_int`, `collatz_steps`, `mod_pow`, `deg_to_rad`, `rad_to_deg`, `random_int`, `is_power_of_two`, `next_power_of_two` |
 | `std::net` | 网络操作：`tcp_socket`, `tcp_connect`, `tcp_listen`, `tcp_send`, `tcp_recv`, `fetch`, `fetch_post` |
 | `std::maps` | Map 操作：`new`, `get`, `set`, `has_key`, `remove`, `size`, `is_empty`, `get_or_default`, `merge`, `to_list`, `filter_keys`, `map_values`, `update`, `pick`, `omit` |
 | `std::json` | JSON 操作：`to_json`, `from_json`, `get_string`, `get_int`, `get_element`, `get_bool`, `get_float`, `is_valid_json`, `array_length` |
 | `std::time` | 时间操作：`timestamp`, `timestamp_ms`, `sleep_ms`, `elapsed`, `seconds_since`, `millis_since`, `duration` |
 | `std::datetime` | 日期时间：`format_duration_secs`, `format_duration_ms`, `days_from_now`, `hours_from_now`, `is_future`, `is_past`, `time_since`, `time_until`, `sleep_until` |
 | `std::env` | 环境操作：`get_var`, `cli_args`, `get_var_or`, `has_var`, `get_int`, `get_float`, `arg_count`, `first_arg` |
-| `std::testing` | 测试工具：`assert_eq`, `assert_ne`, `assert_approx_eq`, `assert_true`, `assert_false` |
+| `std::testing` | 测试工具：`assert_eq_int`, `assert_ne_int`, `assert_approx_eq_float`, `assert_true`, `assert_false`, `assert_eq_string`, `assert_eq_bool` |
 | `std::prelude` | 基础工具：`identity`, `const_val`, `is_even`, `is_odd`, `min3`, `max3`, `swap`, `clamp`, `lerp`, `compose`, `pipe`, `tap`, `fail`, `todo`, `unreachable`, `assert_msg`, `repeat_action`, `times`, `type_of`, `to_int_safe`, `to_float_safe` |
 
 > **Codegen 兼容性说明**：`random_int`、`is_power_of_two`、`next_power_of_two` 现已支持 codegen 编译。`to_int` / `to_float` 内置函数在 codegen 中可直接接受数值类型（不仅限于字符串）。

@@ -232,6 +232,24 @@ pub func max_list(xs: List<i32>) -> i32 {
     ml_max
 }
 
+pub func filter_list<T>(xs: List<T>, pred: func(T) -> bool) -> List<T> {
+    let mut fl_res: List<T> = []
+    for fl_x in xs {
+        if pred(fl_x) {
+            push(fl_res, fl_x)
+        }
+    }
+    fl_res
+}
+
+pub func reduce_list<T, U>(xs: List<T>, f: func(U, T) -> U, init: U) -> U {
+    let mut rl_acc = init
+    for rl_x in xs {
+        rl_acc = f(rl_acc, rl_x)
+    }
+    rl_acc
+}
+
 pub func min_index<T>(xs: List<T>) -> i32 {
     if len(xs) == 0 { return -1 }
     let mut mi_idx = 0

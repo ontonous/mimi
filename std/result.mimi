@@ -1,0 +1,31 @@
+pub func is_ok_result<T, E>(result: Result<T, E>) -> bool {
+    result.is_ok()
+}
+
+pub func is_err_result<T, E>(result: Result<T, E>) -> bool {
+    result.is_err()
+}
+
+pub func result_unwrap<T, E>(result: Result<T, E>) -> T {
+    result.unwrap()
+}
+
+pub func unwrap_or<T, E>(result: Result<T, E>, default: T) -> T {
+    if result.is_ok() { result.unwrap() } else { default }
+}
+
+pub func expect_result<T, E>(result: Result<T, E>, msg: string) -> T {
+    result.expect(msg)
+}
+
+pub func map_result<T, E, U>(result: Result<T, E>, f: func(T) -> U) -> Result<U, E> {
+    if result.is_ok() {
+        Result::Ok(f(result.unwrap()))
+    } else {
+        result
+    }
+}
+
+pub func map_err_result<T, E, F>(result: Result<T, E>, f: func(E) -> F) -> Result<T, F> {
+    result.map_err(f)
+}
