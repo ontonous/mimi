@@ -40,24 +40,14 @@ mod ffi_verification_tests {
 
     #[test]
     fn test_extern_fn_type_parsing() {
-        // extern "C" fn as a type alias is not yet supported in the parser
-        // Test contract generation directly instead
-        let func = ExternFunc {
-            name: "register_callback".to_string(),
-            params: vec![ExternParam {
-                name: "cb".to_string(),
-                ty: Type::ExternFunc(
-                    vec![Type::Name("i32".to_string(), vec![])],
-                    Box::new(Type::Name("i32".to_string(), vec![]))
-                ),
-                cap_mode: None,
-            }],
-            ret: Some(Type::Name("i32".to_string(), vec![])),
-            requires: None,
-            ensures: None,
-        };
-        let contract = FfiContract::from_extern(&func);
-        assert!(matches!(contract.args[0], FfiArgContract::RawPtr(_)));
+        let src = r#"
+            extern "C" {
+                func register_callback(cb: extern "C" fn(i32) -> i32) -> i32;
+            }
+        "#;
+        let file = parse_source(src).expect("should parse");
+        let result = crate::core::check(&file);
+        assert!(result.is_ok(), "extern C fn type should parse and type-check: {:?}", result.err());
     }
 
     #[test]

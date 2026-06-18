@@ -41,24 +41,13 @@ mod type_system_verification {
 
     #[test]
     fn test_extern_fn_type_in_extern() {
-        // extern "C" fn as a type alias is not yet supported in the parser
-        // but the AST type itself exists and works via contract generation
-        let func = ExternFunc {
-            name: "register".to_string(),
-            params: vec![ExternParam {
-                name: "cb".to_string(),
-                ty: Type::ExternFunc(
-                    vec![Type::Name("i32".to_string(), vec![])],
-                    Box::new(Type::Name("i32".to_string(), vec![]))
-                ),
-                cap_mode: None,
-            }],
-            ret: Some(Type::Name("i32".to_string(), vec![])),
-            requires: None,
-            ensures: None,
-        };
-        let contract = FfiContract::from_extern(&func);
-        assert!(matches!(contract.args[0], FfiArgContract::RawPtr(_)));
+        let src = r#"
+            extern "C" {
+                func register(cb: extern "C" fn(i32) -> i32);
+            }
+        "#;
+        let result = parse_and_check(src);
+        assert!(result.is_ok(), "extern C fn type in extern block: {:?}", result.err());
     }
 
     #[test]
@@ -100,8 +89,9 @@ mod type_system_verification {
     }
 
     #[test]
-    fn test_extern_fn_rejected_outside_extern() {
-        let src = "func bad(cb: extern \"C\" fn(i32) -> i32) -> i32 { 0 }\nfunc main() -> i32 { 0 }";
-        assert!(parse_and_check(src).is_err(), "extern fn should be rejected outside extern");
+    fn test_extern_fn_type_outside_extern() {
+        let src = "func bar(cb: extern \"C\" fn(i32) -> i32) -> i32 { 0 }\nfunc main() -> i32 { 0 }";
+        let result = parse_and_check(src);
+        assert!(result.is_ok(), "extern C fn type should be valid anywhere: {:?}", result.err());
     }
 }

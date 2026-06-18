@@ -209,7 +209,14 @@ impl Parser {
                 // extern "C" fn(ArgType, ...) -> RetType
                 self.advance();
                 self.expect(TokenKind::String("C".to_string()), "\"C\"")?;
-                self.expect(TokenKind::Func, "`fn`")?;
+                if !self.at(&TokenKind::Fn) && !self.at(&TokenKind::Func) {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!("expected `fn` or `func` after `extern \"C\"`, found {}", tok.kind),
+                        tok.line, tok.col,
+                    ));
+                }
+                self.advance();
                 self.expect(TokenKind::LParen, "`(` for function type parameters")?;
                 let mut param_types = Vec::new();
                 if !self.at(&TokenKind::RParen) {
