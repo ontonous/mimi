@@ -6,6 +6,7 @@ pub func random_float(lo: f64, hi: f64) -> f64 {
 }
 
 // random_int: Returns random integer in [lo, hi).
+// Duplicate of mymath::random_int — kept for compatibility.
 pub func random_int(lo: i32, hi: i32) -> i32 {
     let ri_span = hi - lo
     if ri_span <= 0 {

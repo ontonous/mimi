@@ -1,9 +1,11 @@
 // square: Returns x * x.
+// Duplicate of prelude::sqr — kept for compatibility.
 pub func square(x: i32) -> i32 {
     x * x
 }
 
 // cube: Returns x * x * x.
+// Duplicate of prelude::cube_int — kept for compatibility.
 pub func cube(x: i32) -> i32 {
     x * x * x
 }
@@ -244,12 +246,12 @@ pub func lcm(a: i32, b: i32) -> i32 {
     if a == 0 || b == 0 { 0 } else { a * b / gcd(a, b) }
 }
 
-// Duplicate of prelude::is_even — kept for compatibility
+// Duplicate of prelude::is_even — kept for compatibility.
 pub func is_even_number(n: i32) -> bool {
     n % 2 == 0
 }
 
-// Duplicate of prelude::is_odd — kept for compatibility
+// Duplicate of prelude::is_odd — kept for compatibility.
 pub func is_odd_number(n: i32) -> bool {
     n % 2 != 0
 }
@@ -288,7 +290,7 @@ pub func hypot(a: f64, b: f64) -> f64 {
     sqrt(a * a + b * b)
 }
 
-// Duplicate of prelude::clamp — kept for compatibility
+// Duplicate of prelude::clamp — kept for compatibility.
 pub func clamp_int(value: i32, lo: i32, hi: i32) -> i32 {
     if value < lo { lo } else if value > hi { hi } else { value }
 }

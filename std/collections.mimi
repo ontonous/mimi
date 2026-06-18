@@ -117,10 +117,14 @@ pub func sum_float(xs: List<f64>) -> f64 {
     }, 0.0)
 }
 
-// flatten — not yet implemented (requires nested generics List<List<T>>).
-// Workaround: let result = []
-//             for xs in xss { result = concat(result, xs) }
-//             result
+// flatten: Flattens a list of lists into a single list.
+pub func flatten<T>(xss: List<List<T> >) -> List<T> {
+    let mut result: List<T> = []
+    for xs in xss {
+        result = concat(result, xs)
+    }
+    result
+}
 
 // sort_list: Returns a sorted copy of xs (ascending).
 pub func sort_list(xs: List<i32>) -> List<i32> {

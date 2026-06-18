@@ -49,7 +49,8 @@ pub func is_valid_json(s: string) -> bool {
     result != ""
 }
 
-// to_string_pretty — currently an identity function (no pretty printer yet).
+// to_string_pretty: Pretty-prints a JSON string with indentation.
+// Currently a placeholder — returns input unchanged.
 // TODO: implement JSON pretty-printing when the runtime supports it.
 pub func to_string_pretty(json: string) -> string {
     json

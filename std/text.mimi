@@ -1,6 +1,7 @@
 // Text processing utilities
 
 // is_blank: Returns true if s is empty or whitespace-only.
+// Duplicate of strings::is_blank — kept for compatibility.
 pub func is_blank(s: string) -> bool {
     len(str_trim(s)) == 0
 }
@@ -12,6 +13,7 @@ pub func is_numeric(s: string) -> bool {
 }
 
 // count_lines: Returns the number of lines in s.
+// Duplicate of strings::count_lines — kept for compatibility.
 pub func count_lines(s: string) -> i32 {
     len(str_split(s, "\n"))
 }
@@ -24,6 +26,7 @@ pub func slugify(s: string) -> string {
 }
 
 // indent_text: Prepends n spaces to each line of s.
+// Duplicate of strings::indent — kept for compatibility.
 pub func indent_text(s: string, n: i32) -> string {
     let it_lines = str_split(s, "\n")
     let mut it_res: List<string> = []
