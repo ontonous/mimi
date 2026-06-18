@@ -364,7 +364,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Prepend self param: self: &type_name
                     impl_method.params.insert(0, crate::ast::Param {
                         name: "self".into(),
-                        ty: crate::ast::Type::Ref(Box::new(
+                        ty: crate::ast::Type::Ref(None, Box::new(
                             crate::ast::Type::Name(type_name.clone(), vec![])
                         )),
                         mut_: false,

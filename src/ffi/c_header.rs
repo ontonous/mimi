@@ -188,11 +188,12 @@ impl CHeaderGenerator {
             }
             Type::Cap(_) => "MimiCap".to_string(),
             Type::RawString => "char*".to_string(),
+            Type::Infer => "void".to_string(),
             Type::Shared(inner) | Type::LocalShared(inner) => {
                 let inner_type = self.mimi_type_to_c_type(inner);
                 format!("MimiShared* /* shared {} */", inner_type)
             }
-            Type::Ref(inner) | Type::RefMut(inner) => {
+            Type::Ref(_, inner) | Type::RefMut(_, inner) => {
                 let inner_type = self.mimi_type_to_c_type(inner);
                 format!("{}*", inner_type)
             }

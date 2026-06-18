@@ -80,6 +80,14 @@ impl Parser {
             }
             TokenKind::BitAnd => {
                 self.advance();
+                // Check for &'a lifetime annotation
+                let lifetime = if self.at(&TokenKind::Tick) {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    Some(name)
+                } else {
+                    None
+                };
                 let mut_ = self.at(&TokenKind::Mut);
                 if mut_ {
                     self.advance();
@@ -93,9 +101,9 @@ impl Parser {
                 }
                 let inner = self.parse_type()?;
                 if mut_ {
-                    Ok(Type::RefMut(Box::new(inner)))
+                    Ok(Type::RefMut(lifetime, Box::new(inner)))
                 } else {
-                    Ok(Type::Ref(Box::new(inner)))
+                    Ok(Type::Ref(lifetime, Box::new(inner)))
                 }
             }
             TokenKind::LParen => {

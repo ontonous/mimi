@@ -396,8 +396,12 @@ impl<'a> Interpreter<'a> {
     fn resolve_type_name(&self, ty: &Type) -> String {
         match ty {
             Type::Name(name, _) => name.clone(),
-            Type::Ref(inner) => format!("&{}", self.resolve_type_name(inner)),
-            Type::RefMut(inner) => format!("&mut {}", self.resolve_type_name(inner)),
+            Type::Ref(lt, inner) => {
+                if let Some(l) = lt { format!("&'{} {}", l, self.resolve_type_name(inner)) } else { format!("&{}", self.resolve_type_name(inner)) }
+            }
+            Type::RefMut(lt, inner) => {
+                if let Some(l) = lt { format!("&'{} mut {}", l, self.resolve_type_name(inner)) } else { format!("&mut {}", self.resolve_type_name(inner)) }
+            }
             Type::Option(inner) => format!("Option<{}>", self.resolve_type_name(inner)),
             Type::Result(ok, err) => format!("Result<{}, {}>", self.resolve_type_name(ok), self.resolve_type_name(err)),
             Type::Tuple(elems) => {
@@ -418,6 +422,7 @@ impl<'a> Interpreter<'a> {
             Type::CBorrow(inner) => format!("c_borrow {}", self.resolve_type_name(inner)),
             Type::CBorrowMut(inner) => format!("c_borrow_mut {}", self.resolve_type_name(inner)),
             Type::RawString => "raw_string".into(),
+            Type::Infer => "_".into(),
             Type::ExternFunc(args, ret) => {
                 let args_str: Vec<String> = args.iter().map(|a| self.resolve_type_name(a)).collect();
                 format!("extern \"C\" fn({}) -> {}", args_str.join(", "), self.resolve_type_name(ret))

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::span::Span;
+
 /// 意图锁后缀（直接复用 mimispec 的语义）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Commitment {
@@ -276,8 +278,8 @@ pub enum Stmt {
     },
     Block(Block),
     Desc(String),
-    Requires(Expr),
-    Ensures(Expr),
+    Requires(Expr, Span),
+    Ensures(Expr, Span),
     Math(Vec<Expr>),
     Assign {
         target: Expr,
@@ -449,8 +451,10 @@ pub enum UnOp {
 #[derive(Debug, Clone)]
 pub enum Type {
     Name(String, Vec<Type>),
-    Ref(Box<Type>),
-    RefMut(Box<Type>),
+    /// Reference type: &'lt T (lifetime is optional)
+    Ref(Option<String>, Box<Type>),
+    /// Mutable reference: &'lt mut T (lifetime is optional)
+    RefMut(Option<String>, Box<Type>),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),

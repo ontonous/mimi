@@ -46,7 +46,7 @@ impl<'a> Checker<'a> {
                             }
                             self.set_borrow(name, BorrowState::BorrowedImm { span: Span::single(0, 0) });
                         }
-                        Type::Ref(Box::new(t))
+                        Type::Ref(None, Box::new(t))
                     }
                     UnOp::RefMut => {
                         // Check borrow rules: cannot &mut if already borrowed (imm or mut)
@@ -78,11 +78,11 @@ impl<'a> Checker<'a> {
                             }
                             self.set_borrow(name, BorrowState::BorrowedMut { span: Span::single(0, 0) });
                         }
-                        Type::RefMut(Box::new(t))
+                        Type::RefMut(None, Box::new(t))
                     }
                     UnOp::Deref => {
                         match &t {
-                            Type::Ref(inner) | Type::RefMut(inner) => (**inner).clone(),
+                            Type::Ref(_, inner) | Type::RefMut(_, inner) => (**inner).clone(),
                             _ => {
                                 self.emit_code(crate::diagnostic::codes::E0204, format!("cannot dereference {}", fmt_type(&t)));
                                 Type::Name("unknown".into(), vec![])
@@ -516,6 +516,10 @@ impl<'a> Checker<'a> {
                             ));
                             Type::Name("unknown".into(), vec![])
                         }
+                    }
+                    Type::Infer => {
+                        // _ type in let binding: infer from init expression
+                        Type::Name("unknown".into(), vec![])
                     }
                     _ => {
                         self.emit_code(crate::diagnostic::codes::E0224, format!(

@@ -156,7 +156,7 @@ impl<'a> Checker<'a> {
                     None => {
                         if *ref_ {
                             // ref variables have reference type
-                            Type::Ref(Box::new(init_ty))
+                            Type::Ref(None, Box::new(init_ty))
                         } else {
                             init_ty
                         }
@@ -355,7 +355,7 @@ impl<'a> Checker<'a> {
                         // *r = value: check that inner is &mut T
                         let inner_ty = self.infer_expr(inner, scopes);
                         match &inner_ty {
-                            Type::RefMut(inner_inner) => {
+                            Type::RefMut(_, inner_inner) => {
                                 if !same_type(&value_ty, inner_inner) {
                                     self.emit(format!(
                                         "cannot assign {} through &mut reference of type {}",
@@ -422,7 +422,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
         }
     }
 }

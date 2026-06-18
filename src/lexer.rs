@@ -131,6 +131,7 @@ pub enum TokenKind {
     Ellipsis,
     At,
     Hash,
+    Tick,
 
     Newline,
     Indent,
@@ -260,6 +261,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Newline => "newline",
             TokenKind::Indent => "INDENT",
             TokenKind::Dedent => "DEDENT",
+            TokenKind::Tick => "'",
             TokenKind::Eof => "EOF",
         };
         write!(f, "{}", s)
@@ -385,6 +387,7 @@ impl TokenKind {
             TokenKind::Ellipsis => "...",
             TokenKind::At => "@",
             TokenKind::Hash => "#",
+            TokenKind::Tick => "'",
             TokenKind::Newline => "\n",
             TokenKind::Indent => "",
             TokenKind::Dedent => "",
@@ -1081,6 +1084,10 @@ impl<'a> Lexer<'a> {
                 '#' => {
                     self.advance();
                     (TokenKind::Hash, Commitment::None)
+                }
+                '\'' => {
+                    self.advance();
+                    (TokenKind::Tick, Commitment::None)
                 }
                 _ => return Err(format!("unexpected character '{}' at {}:{}", c, line, col)),
             };

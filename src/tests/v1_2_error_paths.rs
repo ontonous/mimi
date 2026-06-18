@@ -219,3 +219,29 @@ func main() -> i32 {
     let result = check_source(src);
     assert!(result.is_ok(), "let x: _ = 42 should type-check: {:?}", result.err());
 }
+
+#[test]
+fn parse_lifetime_annotation() {
+    let src = r#"
+func main() -> i32 {
+    let x = 42;
+    let r: &'a i32 = &x;
+    42
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "lifetime annotation 'a should parse: {:?}", result.err());
+}
+
+#[test]
+fn parse_lifetime_mut_annotation() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 42;
+    let r: &'a mut i32 = &mut x;
+    42
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "lifetime annotation 'a mut should parse: {:?}", result.err());
+}

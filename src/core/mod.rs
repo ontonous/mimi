@@ -346,7 +346,7 @@ impl<'a> Checker<'a> {
             Stmt::Block(block) => { for s in block { Self::collect_uses_in_stmt(s, uses); } }
             Stmt::Break(Some(e)) => Self::collect_uses_in_expr(e, uses),
             Stmt::Break(None) | Stmt::Continue => {}
-            Stmt::Requires(e) | Stmt::Ensures(e) | Stmt::Drop(e) => Self::collect_uses_in_expr(e, uses),
+            Stmt::Requires(e, _) | Stmt::Ensures(e, _) | Stmt::Drop(e) => Self::collect_uses_in_expr(e, uses),
             Stmt::SharedLet { init, .. } => Self::collect_uses_in_expr(init, uses),
             Stmt::Arena(block) | Stmt::OnFailure(block) | Stmt::Parasteps(block) | Stmt::Unsafe(block) => {
                 for s in block { Self::collect_uses_in_stmt(s, uses); }
@@ -689,8 +689,8 @@ impl<'a> Checker<'a> {
                     Type::Name(name.clone(), args.clone())
                 }
             }
-            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_type(inner))),
-            Type::RefMut(inner) => Type::RefMut(Box::new(self.resolve_type(inner))),
+            Type::Ref(_, inner) => Type::Ref(None, Box::new(self.resolve_type(inner))),
+            Type::RefMut(_, inner) => Type::RefMut(None, Box::new(self.resolve_type(inner))),
             Type::Option(inner) => Type::Option(Box::new(self.resolve_type(inner))),
             Type::Result(ok, err) => Type::Result(
                 Box::new(self.resolve_type(ok)),
@@ -735,7 +735,7 @@ impl<'a> Checker<'a> {
             // C buffer with automatic memory management
             Type::CBuffer(_) => true,
             // References are not allowed directly; must use c_borrow / c_borrow_mut
-            Type::Ref(_) | Type::RefMut(_) => false,
+            Type::Ref(_, _) | Type::RefMut(_, _) => false,
             // Shared ownership is not allowed directly; must use c_shared
             Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) => false,
             // Composite Mimi types are not allowed
@@ -899,7 +899,7 @@ impl<'a> Checker<'a> {
             }
             Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_type(e)),
             Type::Shared(_) | Type::LocalShared(_) => true,
-            Type::Ref(_) | Type::RefMut(_) => true,
+            Type::Ref(_, _) | Type::RefMut(_, _) => true,
             Type::Array(inner, _) => self.is_copy_type(inner),
             _ => false,
         }
@@ -934,7 +934,7 @@ impl<'a> Checker<'a> {
                     self.check_type_well_formed_inner(arg, context, allow_passport);
                 }
             }
-            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner)
+            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
                 | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
                 | Type::RawPtr(inner) | Type::RawPtrMut(inner)
                 | Type::CShared(inner) | Type::CBorrow(inner) | Type::CBorrowMut(inner) => {
@@ -993,7 +993,7 @@ impl<'a> Checker<'a> {
                 | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
                 | Type::RawString => true,
             Type::Name(_, args) => args.iter().any(|a| Self::type_contains_passport(a)),
-            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner)
+            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
                 | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
                 | Type::Array(inner, _) | Type::Slice(inner) => Self::type_contains_passport(inner),
             Type::Result(ok, err) => Self::type_contains_passport(ok) || Self::type_contains_passport(err),
@@ -1342,7 +1342,7 @@ impl<'a> Checker<'a> {
     fn type_uses_type_param(&self, ty: &Type, type_param: &str) -> bool {
         match ty {
             Type::Name(name, _) => name == type_param,
-            Type::Ref(inner) | Type::RefMut(inner) | Type::Option(inner) | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) => {
+            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner) | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) => {
                 self.type_uses_type_param(inner, type_param)
             }
             Type::Result(ok, err) => {
@@ -1487,8 +1487,8 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
                 Type::Name(name.clone(), new_args)
             }
         }
-        Type::Ref(inner) => Type::Ref(Box::new(subst_type_params(inner, generics, type_map))),
-        Type::RefMut(inner) => Type::RefMut(Box::new(subst_type_params(inner, generics, type_map))),
+        Type::Ref(_, inner) => Type::Ref(None, Box::new(subst_type_params(inner, generics, type_map))),
+        Type::RefMut(_, inner) => Type::RefMut(None, Box::new(subst_type_params(inner, generics, type_map))),
         Type::Option(inner) => Type::Option(Box::new(subst_type_params(inner, generics, type_map))),
         Type::Result(ok, err) => Type::Result(
             Box::new(subst_type_params(ok, generics, type_map)),
@@ -1525,8 +1525,8 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
 fn same_type(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Name(na, aa), Type::Name(nb, ab)) => na == nb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| same_type(x, y)),
-        (Type::Ref(a), Type::Ref(b)) => same_type(a, b),
-        (Type::RefMut(a), Type::RefMut(b)) => same_type(a, b),
+        (Type::Ref(_, a), Type::Ref(_, b)) => same_type(a, b),
+        (Type::RefMut(_, a), Type::RefMut(_, b)) => same_type(a, b),
         (Type::Option(a), Type::Option(b)) => same_type(a, b),
         (Type::Result(a1, a2), Type::Result(b1, b2)) => same_type(a1, b1) && same_type(a2, b2),
         (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| same_type(x, y)),
@@ -1577,8 +1577,12 @@ pub fn fmt_type(t: &Type) -> String {
     match t {
         Type::Name(n, args) if args.is_empty() => n.clone(),
         Type::Name(n, args) => format!("{}<{}>", n, args.iter().map(fmt_type).collect::<Vec<_>>().join(", ")),
-        Type::Ref(inner) => format!("&{}", fmt_type(inner)),
-        Type::RefMut(inner) => format!("&mut {}", fmt_type(inner)),
+        Type::Ref(lt, inner) => {
+            if let Some(l) = lt { format!("&'{} {}", l, fmt_type(inner)) } else { format!("&{}", fmt_type(inner)) }
+        }
+        Type::RefMut(lt, inner) => {
+            if let Some(l) = lt { format!("&'{} mut {}", l, fmt_type(inner)) } else { format!("&mut {}", fmt_type(inner)) }
+        }
         Type::Option(inner) => format!("{}?", fmt_type(inner)),
         Type::Result(ok, err) => format!("Result<{}, {}>", fmt_type(ok), fmt_type(err)),
         Type::Tuple(elems) => format!("({})", elems.iter().map(fmt_type).collect::<Vec<_>>().join(", ")),
