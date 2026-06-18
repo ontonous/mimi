@@ -423,6 +423,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
+            Stmt::Parasteps(block) => {
+                scopes.push(HashMap::new());
+                self.check_block(block, ret, scopes);
+                scopes.pop();
+            }
         }
     }
 }
