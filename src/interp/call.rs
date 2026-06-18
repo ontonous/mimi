@@ -1663,7 +1663,7 @@ impl<'a> Interpreter<'a> {
                     let handle_id = SHARED_TABLE.create(Arc::clone(arc));
                     Ok(handle_id)
                 }
-                Value::LocalShared(rc) => {
+                Value::LocalShared(_rc) => {
                     // Convert LocalShared to Shared for handle creation
                     // Note: This is a limitation - LocalShared cannot be directly used with SharedHandleTable
                     // For now, return an error

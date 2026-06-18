@@ -14,7 +14,7 @@ pub use value::*;
 pub use error::InterpError;
 
 use crate::ast::*;
-use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract};
+use crate::ffi::FfiContract;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -897,12 +897,12 @@ impl<'a> Checker<'a> {
             }
             "min" | "max" => {
                 if args.len() != 2 {
-                    self.emit(&format!("{} expects 2 arguments", name));
+                    self.emit(format!("{} expects 2 arguments", name));
                 } else {
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);
                     if !same_type(&t1, &t2) {
-                        self.emit(&format!("{} expects matching types, found {} and {}", name, fmt_type(&t1), fmt_type(&t2)));
+                        self.emit(format!("{} expects matching types, found {} and {}", name, fmt_type(&t1), fmt_type(&t2)));
                     }
                 }
                 return Type::Name("unknown".into(), vec![]);
@@ -918,12 +918,12 @@ impl<'a> Checker<'a> {
             }
             "assert_eq" | "assert_ne" => {
                 if args.len() != 2 {
-                    self.emit(&format!("{} expects 2 arguments", name));
+                    self.emit(format!("{} expects 2 arguments", name));
                 } else {
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);
                     if !same_type(&t1, &t2) {
-                        self.emit(&format!("{} expects matching types, found {} and {}", name, fmt_type(&t1), fmt_type(&t2)));
+                        self.emit(format!("{} expects matching types, found {} and {}", name, fmt_type(&t1), fmt_type(&t2)));
                     }
                 }
                 return Type::Name("unit".into(), vec![]);
@@ -936,7 +936,7 @@ impl<'a> Checker<'a> {
             }
             "map" | "filter" => {
                 if args.len() != 2 {
-                    self.emit(&format!("{} expects 2 arguments", name));
+                    self.emit(format!("{} expects 2 arguments", name));
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -960,7 +960,7 @@ impl<'a> Checker<'a> {
             }
             "sort" | "reverse" | "flatten" => {
                 if args.len() != 1 {
-                    self.emit(&format!("{} expects 1 argument", name));
+                    self.emit(format!("{} expects 1 argument", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -985,7 +985,7 @@ impl<'a> Checker<'a> {
             }
             "pow" | "floor" | "ceil" | "round" => {
                 if args.len() != 2 {
-                    self.emit(&format!("{} expects 2 arguments", name));
+                    self.emit(format!("{} expects 2 arguments", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -1000,7 +1000,7 @@ impl<'a> Checker<'a> {
             }
             "type_name" | "type_fields" | "type_variants" => {
                 if args.len() != 1 {
-                    self.emit(&format!("{} expects 1 argument", name));
+                    self.emit(format!("{} expects 1 argument", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -1008,7 +1008,7 @@ impl<'a> Checker<'a> {
             }
             "keys" | "values" => {
                 if args.len() != 1 {
-                    self.emit(&format!("{} expects 1 argument", name));
+                    self.emit(format!("{} expects 1 argument", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -1054,7 +1054,7 @@ impl<'a> Checker<'a> {
                 return Type::Name("unknown".into(), vec![]);
             }
             "None" => {
-                if args.len() != 0 {
+                if !args.is_empty() {
                     self.emit("None expects 0 arguments");
                 }
                 return Type::Name("unknown".into(), vec![]);
@@ -1131,7 +1131,7 @@ impl<'a> Checker<'a> {
             }
             "str_trim" | "str_to_upper" | "str_to_lower" => {
                 if args.len() != 1 {
-                    self.emit(&format!("{} expects 1 argument", name));
+                    self.emit(format!("{} expects 1 argument", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -1139,7 +1139,7 @@ impl<'a> Checker<'a> {
             }
             "str_starts_with" | "str_ends_with" | "str_contains" => {
                 if args.len() != 2 {
-                    self.emit(&format!("{} expects 2 arguments", name));
+                    self.emit(format!("{} expects 2 arguments", name));
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);

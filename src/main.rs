@@ -617,7 +617,7 @@ fn stats(path: Option<&Path>) -> Result<(), String> {
 
     // Cognitive alignment assessment
     println!();
-    let unlocked = counts.get("None").copied().unwrap_or(0);
+    let _unlocked = counts.get("None").copied().unwrap_or(0);
     let tentative = counts.get("?").copied().unwrap_or(0)
         + counts.get("??").copied().unwrap_or(0);
     let locked = counts.get("$").copied().unwrap_or(0)
@@ -668,6 +668,7 @@ fn count_commitments(items: &[ast::Item], counts: &mut std::collections::HashMap
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn count_commitments_in_block(block: &[ast::Stmt], counts: &mut std::collections::HashMap<String, usize>) {
     for stmt in block {
         match stmt {

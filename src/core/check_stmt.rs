@@ -375,31 +375,28 @@ impl<'a> Checker<'a> {
                     Expr::Field(obj, field) => {
                         let obj_ty = self.infer_expr(obj, scopes);
                         // Validate field exists on the object type
-                        match &obj_ty {
-                            Type::Name(name, _) => {
-                                if let Some(type_def) = self.types.get(name) {
-                                    match &type_def.kind {
-                                        TypeDefKind::Record(fields) => {
-                                            if !fields.iter().any(|f| f.name == *field) {
-                                                let available: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-                                                if available.is_empty() {
-                                                    self.emit(format!("field '{}' not found in record '{}' (record has no fields)", field, name));
-                                                } else {
-                                                    self.emit(format!("field '{}' not found in record '{}' — available fields: {}", field, name, available.join(", ")));
-                                                }
+                        if let Type::Name(name, _) = &obj_ty {
+                            if let Some(type_def) = self.types.get(name) {
+                                match &type_def.kind {
+                                    TypeDefKind::Record(fields) => {
+                                        if !fields.iter().any(|f| f.name == *field) {
+                                            let available: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                                            if available.is_empty() {
+                                                self.emit(format!("field '{}' not found in record '{}' (record has no fields)", field, name));
+                                            } else {
+                                                self.emit(format!("field '{}' not found in record '{}' — available fields: {}", field, name, available.join(", ")));
                                             }
                                         }
-                                        TypeDefKind::Enum(variants) => {
-                                            if !variants.iter().any(|v| v.name == *field) {
-                                                let available: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-                                                self.emit(format!("variant '{}' not found in enum '{}' — available: {}", field, name, available.join(", ")));
-                                            }
-                                        }
-                                        _ => {}
                                     }
+                                    TypeDefKind::Enum(variants) => {
+                                        if !variants.iter().any(|v| v.name == *field) {
+                                            let available: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+                                            self.emit(format!("variant '{}' not found in enum '{}' — available: {}", field, name, available.join(", ")));
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
-                            _ => {}
                         }
                     }
                     _ => self.emit_code(crate::diagnostic::codes::E0219, "assignment target must be a variable"),
@@ -423,6 +420,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
+            #[allow(unreachable_patterns)]
             Stmt::Parasteps(block) => {
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);

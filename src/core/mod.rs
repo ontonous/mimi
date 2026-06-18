@@ -4,6 +4,7 @@ use crate::span::Span;
 use std::collections::HashMap;
 
 /// Compute the Levenshtein edit distance between two strings.
+#[allow(clippy::needless_range_loop)]
 fn edit_distance(a: &str, b: &str) -> usize {
     let a_len = a.len();
     let b_len = b.len();
@@ -707,7 +708,7 @@ impl<'a> Checker<'a> {
             ),
             Type::Cap(_) | Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_)
                 | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
-                | Type::RawPtr(_) | Type::RawPtrMut(_) | Type::RawString | Type::Allocator | Type::Infer => ty.clone(),
+                | Type::RawPtr(_) | Type::RawPtrMut(_) | Type::RawString | Type::Allocator => ty.clone(),
             Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve_type(inner))),
             Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(self.resolve_type(inner))),
             Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
@@ -720,7 +721,7 @@ impl<'a> Checker<'a> {
 
     /// Check whether a type is allowed to cross the C ABI boundary in an
     /// extern function signature.
-    fn is_valid_extern_type(&self, ty: &Type, in_pointer: bool) -> bool {
+    fn is_valid_extern_type(&self, ty: &Type, _in_pointer: bool) -> bool {
         match ty {
             // Scalars
             Type::Name(name, _) => matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit"),
@@ -992,14 +993,14 @@ impl<'a> Checker<'a> {
             Type::RawPtr(_) | Type::RawPtrMut(_)
                 | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
                 | Type::RawString => true,
-            Type::Name(_, args) => args.iter().any(|a| Self::type_contains_passport(a)),
+            Type::Name(_, args) => args.iter().any(Self::type_contains_passport),
             Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
                 | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
                 | Type::Array(inner, _) | Type::Slice(inner) => Self::type_contains_passport(inner),
             Type::Result(ok, err) => Self::type_contains_passport(ok) || Self::type_contains_passport(err),
-            Type::Tuple(elems) => elems.iter().any(|e| Self::type_contains_passport(e)),
-            Type::Func(args, ret) => args.iter().any(|a| Self::type_contains_passport(a)) || Self::type_contains_passport(ret),
-            Type::ExternFunc(args, ret) => args.iter().any(|a| Self::type_contains_passport(a)) || Self::type_contains_passport(ret),
+            Type::Tuple(elems) => elems.iter().any(Self::type_contains_passport),
+            Type::Func(args, ret) => args.iter().any(Self::type_contains_passport) || Self::type_contains_passport(ret),
+            Type::ExternFunc(args, ret) => args.iter().any(Self::type_contains_passport) || Self::type_contains_passport(ret),
             Type::CBuffer(inner) => Self::type_contains_passport(inner),
             Type::Newtype(_, inner) => Self::type_contains_passport(inner),
             Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer => false,
@@ -1552,7 +1553,6 @@ fn same_type(a: &Type, b: &Type) -> bool {
         }
         (Type::Slice(a), Type::Slice(b)) => same_type(a, b),
         (Type::ImplTrait(a), Type::ImplTrait(b)) => a == b,
-        (Type::Infer, _) | (_, Type::Infer) => true,
         _ => false,
     }
 }
@@ -1609,7 +1609,7 @@ pub fn fmt_type(t: &Type) -> String {
         Type::RawString => "raw_string".to_string(),
         Type::Infer => "_".to_string(),
         Type::ExternFunc(args, ret) => {
-            let args_str: Vec<String> = args.iter().map(|a| fmt_type(a)).collect();
+            let args_str: Vec<String> = args.iter().map(fmt_type).collect();
             format!("extern \"C\" fn({}) -> {}", args_str.join(", "), fmt_type(ret))
         }
         Type::CBuffer(inner) => format!("CBuffer<{}>", fmt_type(inner)),

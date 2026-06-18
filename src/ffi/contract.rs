@@ -6,6 +6,8 @@
 //! behave identically: argument marshalling, lifetime extension, and return
 //! value translation are driven by the same description.
 
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use crate::ast::{ExternFunc, Expr, Type};

@@ -8,7 +8,8 @@
 //!   and use capabilities.
 //!
 //! - **SharedHandleTable**: Maps opaque handles (i64) to `Arc<RwLock<Value>>`
-//!   for `c_shared T` and `c_borrow T` / `c_borrow_mut T` boundary types.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};

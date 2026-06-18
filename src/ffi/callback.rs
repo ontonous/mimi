@@ -3,6 +3,8 @@
 //! This module provides the infrastructure for passing Mimi closures as C
 //! function pointers, with proper userdata and lifecycle management.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -86,13 +88,13 @@ use std::sync::LazyLock;
 /// # Safety
 /// The returned function pointer is only valid while the callback is registered.
 /// The callback must be explicitly unregistered when no longer needed.
-pub unsafe extern "C" fn callback_trampoline<F: Fn(*mut std::ffi::c_void, i64, i64) -> i64>(
+pub unsafe extern "C" fn callback_trampoline(
     callback_id: i64,
-    arg1: i64,
-    arg2: i64,
-    userdata: *mut std::ffi::c_void,
+    _arg1: i64,
+    _arg2: i64,
+    _userdata: *mut std::ffi::c_void,
 ) -> i64 {
-    if let Some(handle) = CALLBACK_TABLE.get(callback_id) {
+    if let Some(_handle) = CALLBACK_TABLE.get(callback_id) {
         // Call the Mimi closure
         // Note: This is a simplified implementation. A full implementation would
         // need to properly invoke the Mimi closure with the correct arguments.
@@ -109,14 +111,14 @@ pub unsafe extern "C" fn callback_trampoline<F: Fn(*mut std::ffi::c_void, i64, i
 /// The returned function pointer must only be used with the qsort function
 /// and only while the callback is registered.
 pub unsafe extern "C" fn qsort_trampoline(
-    a: *const std::ffi::c_void,
-    b: *const std::ffi::c_void,
+    _a: *const std::ffi::c_void,
+    _b: *const std::ffi::c_void,
     userdata: *mut std::ffi::c_void,
 ) -> i32 {
     // Extract the callback ID from userdata
     let callback_id = *(userdata as *const i64);
 
-    if let Some(handle) = CALLBACK_TABLE.get(callback_id) {
+    if let Some(_handle) = CALLBACK_TABLE.get(callback_id) {
         // Call the Mimi closure with the two pointers
         // Note: This is a simplified implementation. A full implementation would
         // need to properly invoke the Mimi closure with the correct arguments.

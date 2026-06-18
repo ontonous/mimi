@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, ExternParam, Type, TypeAttribute, TypeDef, TypeDefKind};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// C header generator

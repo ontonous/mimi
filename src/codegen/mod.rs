@@ -406,7 +406,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.position_at_end(entry);
 
             let i64_ty = self.context.i64_type();
-            let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let _i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
 
             // Phase 1: Retain c_shared params before C call
             let mut shared_params: Vec<(usize, BasicValueEnum<'ctx>)> = Vec::new();
@@ -602,9 +602,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let metadata_params: Vec<_> = param_types.iter().map(|t| types::basic_to_metadata(self.context, *t)).collect();
         
         // Return type is a pointer to the actor struct
-        let actor_ty = self.type_llvm.get(&actor.name)
-            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?
-            .clone();
+        let actor_ty = *self.type_llvm.get(&actor.name)
+            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?;
         
         let fn_type = match actor_ty {
             BasicTypeEnum::StructType(sty) => sty.fn_type(&metadata_params, false),
@@ -648,9 +647,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
     
     fn compile_actor_method(&mut self, actor: &crate::ast::ActorDef, method: &FuncDef) -> Result<(), String> {
-        let actor_ty = self.type_llvm.get(&actor.name)
-            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?
-            .clone();
+        let actor_ty = *self.type_llvm.get(&actor.name)
+            .ok_or_else(|| format!("actor type '{}' not found", actor.name))?;
         
         // Method name: ActorName__methodName
         let mangled = format!("{}__{}__method", actor.name, method.name);
@@ -906,7 +904,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body_name = format!("{}__async_body", func.name);
         let body_func = FuncDef {
             name: body_name,
-            commitment: func.commitment.clone(),
+            commitment: func.commitment,
             pub_: false,
             params: func.params.clone(),
             ret: func.ret.clone(),
@@ -932,7 +930,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ));
         let spawner_func = FuncDef {
             name: func.name.clone(),
-            commitment: func.commitment.clone(),
+            commitment: func.commitment,
             pub_: func.pub_,
             params: func.params.clone(),
             ret: Some(Type::Name("i64".into(), vec![])),
@@ -1354,7 +1352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Drop(expr) => {
                     // Drop: evaluate expression and mark capability as consumed
-                    let val = self.compile_expr(expr, &vars)?;
+                    let _val = self.compile_expr(expr, &vars)?;
                     // If the expression is a variable, mark it as consumed and call mimi_cap_consume
                     if let Expr::Ident(name) = expr {
                         self.consume_cap(name)?;
@@ -1784,7 +1782,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => BasicTypeEnum::IntType(self.context.i64_type()),
                             };
                             Ok(self.builder.build_load(pointee_ty, ptr, "deref")
-                                .map_err(|e| format!("load error: {}", e))?.into())
+                                .map_err(|e| format!("load error: {}", e))?)
                         } else {
                             Err("deref requires pointer type".into())
                         }
@@ -2262,7 +2260,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Err(format!("cannot call method '{}' on unknown type '{}'", method_name, obj_type))
                         }
                     }
-                    _ => Err(format!("only direct function calls and method calls supported in codegen")),
+                    _ => Err("only direct function calls and method calls supported in codegen".to_string()),
                 }
             }
             Expr::Turbofish(name, type_args, args) => {
@@ -2358,7 +2356,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| format!("branch error: {}", e))?;
                             else_bb = next_bb;
                         }
-                        Pattern::Tuple(inner_pats) => {
+                        Pattern::Tuple(_inner_pats) => {
                             // Tuple pattern: match each element of the tuple struct
                             // Treat as always-matching for now (full element-wise comparison is complex)
                             // but bind inner variables by loading from the struct
@@ -2372,7 +2370,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| format!("branch error: {}", e))?;
                             else_bb = next_bb;
                         }
-                        Pattern::Array(inner_pats) => {
+                        Pattern::Array(_inner_pats) => {
                             // Array pattern: match each element of the list
                             // Treat as always-matching for now, bind inner variables
                             self.builder.position_at_end(else_bb);
@@ -2385,7 +2383,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| format!("branch error: {}", e))?;
                             else_bb = next_bb;
                         }
-                        Pattern::Slice(inner_pats, rest) => {
+                        Pattern::Slice(_inner_pats, _rest) => {
                             // Slice pattern: match prefix elements, bind rest
                             self.builder.position_at_end(else_bb);
                             let next_bb = if i < arms.len() - 1 {
@@ -2435,7 +2433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => continue,
                             };
                             // Determine tuple element types from the struct
-                            let elem_count = inner_pats.len();
+                            let _elem_count = inner_pats.len();
                             for (j, inner_pat) in inner_pats.iter().enumerate() {
                                 if let Pattern::Variable(name) = inner_pat {
                                     let gep = self.builder.build_struct_gep(
@@ -2576,9 +2574,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Record { ty, fields } => {
                 // Create a record value
                 let type_name = ty.as_deref().unwrap_or("unknown");
-                let llvm_ty = self.type_llvm.get(type_name)
-                    .ok_or_else(|| format!("unknown type '{}'", type_name))?
-                    .clone();
+                let llvm_ty = *self.type_llvm.get(type_name)
+                    .ok_or_else(|| format!("unknown type '{}'", type_name))?;
                 if let BasicTypeEnum::StructType(sty) = llvm_ty {
                     let alloca = self.builder.build_alloca(sty, type_name)
                         .map_err(|e| format!("alloca error: {}", e))?;
@@ -2711,7 +2708,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                         ], false);
                         // Check if this looks like a list struct by trying to GEP field 0 (len)
-                        if let Ok(len_gep) = self.builder.build_struct_gep(list_ty, pv, 0, "list.len_check") {
+                        if let Ok(_len_gep) = self.builder.build_struct_gep(list_ty, pv, 0, "list.len_check") {
                             // It's a list struct - load data pointer and index into it
                             let data_gep = self.builder.build_struct_gep(list_ty, pv, 1, "list.data")
                                 .map_err(|e| format!("gep error: {}", e))?;
@@ -2738,9 +2735,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
                             .map_err(|e| format!("load error: {}", e))
                     }
-                    BasicValueEnum::ArrayValue(av) => {
+                    BasicValueEnum::ArrayValue(_av) => {
                         // Direct LLVM array value: extract element by index
-                        let idx = match idx_val {
+                        let _idx = match idx_val {
                             BasicValueEnum::IntValue(iv) => iv,
                             _ => return Err("index must be i64".into()),
                         };
@@ -3218,7 +3215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     param_types.push(ty);
                 }
                 // Add captured variables as extra parameters (all as i64 for simplicity)
-                for name in free_vars.keys() {
+                for _name in free_vars.keys() {
                     param_types.push(BasicTypeEnum::IntType(self.context.i64_type()));
                 }
                 let metadata_params: Vec<_> = param_types.iter().map(|t| types::basic_to_metadata(self.context, *t)).collect();
@@ -3441,6 +3438,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Quote(_) | Expr::QuoteInterpolate(_) | Expr::Comptime(_) => {
                 Err("quote/comptime expressions must be resolved before codegen".into())
             }
+            #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr)),
         }
     }
@@ -3586,6 +3584,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn infer_object_type(&self, expr: &Expr, vars: &HashMap<String, VarEntry<'ctx>>) -> String {
         match expr {
             Expr::Ident(name) => {
@@ -3620,7 +3619,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         parts: &[crate::ast::FStringPart],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
 
         if parts.is_empty() {
@@ -5191,7 +5190,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     (&self.context.i64_type().const_int(0, false), false_bb),
                     (&eq_ext, check_bb),
                 ]);
-                Ok(phi.as_basic_value().into())
+                Ok(phi.as_basic_value())
             }
             // ========== Math builtins ==========
             "pow" => {
@@ -5954,7 +5953,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     (&i64_ty.const_int(1, false), found_bb),
                     (&i64_ty.const_int(0, false), loop_bb),
                 ]);
-                Ok(phi.as_basic_value().into())
+                Ok(phi.as_basic_value())
             }
             "sum" => {
                 if args.len() != 1 { return Err("sum expects 1 argument (list)".into()); }
@@ -6024,7 +6023,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(done_bb);
                 let result = self.builder.build_load(i64_ty, sum_alloca, "result_sum")
                     .map_err(|e| format!("load error: {}", e))?;
-                Ok(result.into())
+                Ok(result)
             }
             "reverse" => {
                 if args.len() != 1 { return Err("reverse expects 1 argument (list)".into()); }
@@ -6330,11 +6329,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let len_gep = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty.clone()), list_ptr, 0, "sort_len")
+                let len_gep = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty), list_ptr, 0, "sort_len")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "sort_len_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                let data_gep = self.builder.build_struct_gep(list_struct_ty.clone(), list_ptr, 1, "sort_data")
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "sort_data")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "sort_data_val")
                     .map_err(|e| format!("load error: {}", e))?.into_pointer_value();
@@ -6573,11 +6572,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let len_gep_a = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty.clone()), *list_ptr_a, 0, "zip_len_a")
+                let len_gep_a = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty), *list_ptr_a, 0, "zip_len_a")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let len_a = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep_a, "zip_len_a_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                let len_gep_b = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty.clone()), *list_ptr_b, 0, "zip_len_b")
+                let len_gep_b = self.builder.build_struct_gep(BasicTypeEnum::StructType(list_struct_ty), *list_ptr_b, 0, "zip_len_b")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let len_b = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep_b, "zip_len_b_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
@@ -6586,7 +6585,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let min_len = self.builder.build_select(min_len, len_a, len_b, "zip_min_len")
                     .map_err(|e| format!("select error: {}", e))?
                     .into_int_value();
-                let data_gep_a = self.builder.build_struct_gep(list_struct_ty.clone(), *list_ptr_a, 1, "zip_data_a")
+                let data_gep_a = self.builder.build_struct_gep(list_struct_ty, *list_ptr_a, 1, "zip_data_a")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let data_i8_a = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep_a, "zip_data_a_val")
                     .map_err(|e| format!("load error: {}", e))?.into_pointer_value();

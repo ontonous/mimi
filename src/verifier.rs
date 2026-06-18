@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::contracts;
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::time::Instant;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
@@ -124,7 +124,7 @@ impl Verifier {
         
         for p in &func.params {
             let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            let is_bool = matches!(&p.ty, Type::Name(n, _) if n == "bool");
+            let _is_bool = matches!(&p.ty, Type::Name(n, _) if n == "bool");
             
             if is_float {
                 z3_real_vars.push((p.name.as_str(), Z3Real::new_const(p.name.as_str())));
@@ -165,7 +165,7 @@ impl Verifier {
             if let Some(param_z3) = z3_vars.iter().find(|(n, _)| *n == p.name).map(|(_, v)| v.clone()) {
                 let old_name = format!("old_{}", p.name);
                 if let Some(old_z3) = z3_vars.iter().find(|(n, _)| *n == old_name.as_str()).map(|(_, v)| v.clone()) {
-                    self.solver.assert(&old_z3._eq(&param_z3));
+                    self.solver.assert(old_z3.eq(&param_z3));
                 }
             }
         }
@@ -174,7 +174,7 @@ impl Verifier {
         // This is the critical link between the implementation and the contract.
         if let Some(ref return_expr) = body_return {
             if let Some(body_z3) = self.expr_to_z3_int(return_expr, &z3_vars) {
-                self.solver.assert(&z3_result._eq(&body_z3));
+                self.solver.assert(z3_result.eq(&body_z3));
             }
         }
 
@@ -334,7 +334,7 @@ impl Verifier {
         let func_name = &func.name;
 
         // Separate input params from result
-        let param_names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
+        let _param_names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
         let input_assignments: Vec<&(String, i64)> = counterexample.assignments.iter()
             .filter(|(name, _)| name != "result")
             .collect();
@@ -369,7 +369,7 @@ impl Verifier {
 
         // Show which postconditions were violated
         if !counterexample.violated_ensures.is_empty() {
-            for (i, &idx) in counterexample.violated_indices.iter().enumerate() {
+            for &idx in counterexample.violated_indices.iter() {
                 if let Some(ens) = ensures_exprs.get(idx) {
                     message.push_str(&format!(
                         "\n  but ensures {} = false",
@@ -388,7 +388,7 @@ impl Verifier {
 
         // Add precondition context with source locations
         if !requires_exprs.is_empty() {
-            let req_strs: Vec<String> = requires_exprs.iter().map(|e| format_expr(e)).collect();
+            let req_strs: Vec<String> = requires_exprs.iter().map(format_expr).collect();
             let req_span = requires_spans.first().copied()
                 .unwrap_or_else(|| Span::single(0, 0));
             diag = diag.with_note(
@@ -398,7 +398,7 @@ impl Verifier {
         }
 
         // Add per-ensures violation notes with source locations
-        for (i, &idx) in counterexample.violated_indices.iter().enumerate() {
+        for &idx in counterexample.violated_indices.iter() {
             if let Some(ens) = ensures_exprs.get(idx) {
                 let ens_span = ensures_spans.get(idx).copied()
                     .unwrap_or_else(|| Span::single(0, 0));
@@ -512,7 +512,7 @@ impl Verifier {
                     None
                 } else {
                     // Use the float's decimal string representation
-                    let s = format!("{}", f);
+                    let _s = format!("{}", f);
                     // Z3Real::from_real_str needs context; approximate with integer conversion
                     // For practical verification, convert to scaled integer
                     let scaled = (*f * 1000000.0) as i64;
@@ -523,11 +523,7 @@ impl Verifier {
                 // Check real vars first, then int vars (promote to real)
                 if let Some(v) = real_vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()) {
                     Some(v)
-                } else if let Some(v) = vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()) {
-                    Some(Z3Real::from_int(&v))
-                } else {
-                    None
-                }
+                } else { vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()).map(|v| Z3Real::from_int(&v)) }
             }
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
@@ -575,7 +571,7 @@ impl Verifier {
                     // Check int vars
                     if let Some(v) = vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
                         // Treat non-zero as true
-                        return Some(v._eq(&Z3Int::from_i64(0)).not());
+                        return Some(v.eq(Z3Int::from_i64(0)).not());
                     }
                     return None;
                 }
@@ -591,12 +587,12 @@ impl Verifier {
                     BinOp::EqCmp if use_real => {
                         let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
                         let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
-                        Some(l._eq(&r))
+                        Some(l.eq(&r))
                     }
                     BinOp::NeCmp if use_real => {
                         let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
                         let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
-                        Some(l._eq(&r).not())
+                        Some(l.eq(&r).not())
                     }
                     BinOp::Lt if use_real => {
                         let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
@@ -670,7 +666,7 @@ impl Verifier {
     }
     
     /// Check if an expression involves real (f64) variables.
-    fn is_real_expr(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> bool {
+    fn is_real_expr(&self, expr: &Expr, _vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> bool {
         match expr {
             Expr::Ident(name) => real_vars.iter().any(|(n, _)| *n == name.as_str()),
             Expr::Literal(Lit::Float(_)) => true,
@@ -691,6 +687,7 @@ impl Verifier {
 /// Handles patterns:
 ///   - `return expr;`
 ///   - last expression in body (implicit return)
+///
 /// Skips Requires/Ensures/Math/Desc/MmsBlock statements.
 fn extract_body_return(block: &Block) -> Option<Expr> {
     // First try explicit `return` statements
