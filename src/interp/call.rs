@@ -30,7 +30,7 @@ impl<'a> Interpreter<'a> {
         // Extract and check requires conditions
         if self.verify_contracts {
             for stmt in &func.body {
-                if let Stmt::Requires(expr) = stmt {
+                if let Stmt::Requires(expr, _) = stmt {
                     let cond = self.eval_expr(expr)?;
                     if !is_truthy(&cond) {
                         self.pop_scope();
@@ -54,7 +54,7 @@ impl<'a> Interpreter<'a> {
                 }
                 let ensures_ok = (|| {
                     for stmt in &func.body {
-                        if let Stmt::Ensures(expr) = stmt {
+                        if let Stmt::Ensures(expr, _) = stmt {
                             let cond = self.eval_expr(expr)?;
                             if !is_truthy(&cond) {
                                 return Err(format!("ensures condition failed for '{}': {}", func.name, cond));

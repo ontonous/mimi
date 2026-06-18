@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::span::Span;
 use std::collections::HashMap;
 
 /// Extracted contract from an mms block
@@ -41,12 +42,12 @@ fn bind_item_contracts(item: &mut Item, contracts: &HashMap<String, Contract>) {
                 for req in &contract.requires {
                     // Parse the condition as an expression if possible
                     if let Ok(expr) = parse_condition(req) {
-                        prefix.push(Stmt::Requires(expr));
+                        prefix.push(Stmt::Requires(expr, Span::single(0, 0)));
                     }
                 }
                 for ens in &contract.ensures {
                     if let Ok(expr) = parse_condition(ens) {
-                        prefix.push(Stmt::Ensures(expr));
+                        prefix.push(Stmt::Ensures(expr, Span::single(0, 0)));
                     }
                 }
                 if !contract.math.is_empty() {

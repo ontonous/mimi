@@ -37,7 +37,7 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(Some(QuotedAst::Return(inner)))
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => Ok(None),
+            Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => Ok(None),
             _ => Ok(None),
         }
     }

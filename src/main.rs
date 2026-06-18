@@ -897,12 +897,16 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
         let src_ref = Some(source.as_str());
         let filename = &path.display().to_string();
         let mut all_passed = true;
+        let mut total_duration_us: u64 = 0;
+        let mut total_constraints: usize = 0;
         for r in &results {
             let icon = match r.status {
                 verifier::VerifStatus::Verified => "\x1b[32m✓\x1b[0m",
                 verifier::VerifStatus::Failed => "\x1b[31m✗\x1b[0m",
                 verifier::VerifStatus::Unknown => "\x1b[33m?\x1b[0m",
             };
+            total_duration_us += r.duration_us;
+            total_constraints += r.constraint_count;
             if let Some(diag) = &r.diagnostic {
                 let formatted = format_diagnostic(diag, src_ref, filename);
                 if use_color {
@@ -911,13 +915,21 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
                     eprint!("{}", strip_ansi(&formatted));
                 }
             } else {
-                println!("  {} {}: {}", icon, r.func_name, r.message);
+                let time_str = if r.duration_us > 1000 {
+                    format!(" ({:.1}ms)", r.duration_us as f64 / 1000.0)
+                } else {
+                    format!(" ({}µs)", r.duration_us)
+                };
+                println!("  {} {}: {} [{} constraints]{}", icon, r.func_name, r.message, r.constraint_count, time_str);
             }
             if r.status == verifier::VerifStatus::Failed {
                 all_passed = false;
             }
         }
-        println!("\n{}/{} verified", results.iter().filter(|r| r.status == verifier::VerifStatus::Verified).count(), results.len());
+        let verified = results.iter().filter(|r| r.status == verifier::VerifStatus::Verified).count();
+        let total_time_ms = total_duration_us as f64 / 1000.0;
+        println!("\n{}/{} verified in {:.1}ms ({} total constraints)",
+            verified, results.len(), total_time_ms, total_constraints);
         if !all_passed {
             return Err("verification failed".into());
         }

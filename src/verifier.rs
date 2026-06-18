@@ -2,7 +2,9 @@ use crate::ast::*;
 use crate::contracts;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::span::Span;
-use z3::{ast::Int, SatResult, Solver};
+use std::time::Instant;
+use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
+use z3::{SatResult, Solver};
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -10,6 +12,8 @@ pub struct VerificationResult {
     pub status: VerifStatus,
     pub message: String,
     pub diagnostic: Option<Diagnostic>,
+    pub duration_us: u64,
+    pub constraint_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,16 +63,25 @@ impl Verifier {
     }
 
     fn verify_func(&mut self, func: &FuncDef) -> VerificationResult {
+        let start = Instant::now();
         self.solver.reset();
 
         let mut requires_exprs: Vec<Expr> = Vec::new();
         let mut ensures_exprs: Vec<Expr> = Vec::new();
         let mut math_exprs: Vec<Expr> = Vec::new();
+        let mut requires_spans: Vec<Span> = Vec::new();
+        let mut ensures_spans: Vec<Span> = Vec::new();
 
         for stmt in &func.body {
             match stmt {
-                Stmt::Requires(expr) => requires_exprs.push(expr.clone()),
-                Stmt::Ensures(expr) => ensures_exprs.push(expr.clone()),
+                Stmt::Requires(expr, span) => {
+                    requires_exprs.push(expr.clone());
+                    requires_spans.push(*span);
+                }
+                Stmt::Ensures(expr, span) => {
+                    ensures_exprs.push(expr.clone());
+                    ensures_spans.push(*span);
+                }
                 Stmt::Math(exprs) => math_exprs.extend(exprs.clone()),
                 Stmt::MmsBlock { content: text, .. } => {
                     let contract = contracts::extract_contracts(text);
@@ -98,34 +111,83 @@ impl Verifier {
                 status: VerifStatus::Unknown,
                 message: "no contracts to verify".into(),
                 diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count: 0,
             };
         }
 
-        // Create Z3 integer variables for function parameters
-        let z3_vars: Vec<(&str, Int)> = func.params.iter()
-            .map(|p| (p.name.as_str(), Int::new_const(p.name.as_str())))
-            .collect();
+        // Create Z3 variables for function parameters + old() snapshots + result
+        // Detect parameter types and create appropriately typed Z3 variables
+        let z3_result = Z3Int::new_const("result");
+        let mut z3_vars: Vec<(&str, Z3Int)> = Vec::new();
+        let mut z3_real_vars: Vec<(&str, Z3Real)> = Vec::new();
+        
+        for p in &func.params {
+            let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
+            let is_bool = matches!(&p.ty, Type::Name(n, _) if n == "bool");
+            
+            if is_float {
+                z3_real_vars.push((p.name.as_str(), Z3Real::new_const(p.name.as_str())));
+            } else {
+                // int, bool (as 0/1), and unknown types → Int
+                z3_vars.push((p.name.as_str(), Z3Int::new_const(p.name.as_str())));
+            }
+            
+            // Create old() snapshot variables
+            let old_name = format!("old_{}", p.name);
+            if is_float {
+                z3_real_vars.push((Box::leak(old_name.clone().into_boxed_str()), Z3Real::new_const(old_name.as_str())));
+            } else {
+                z3_vars.push((Box::leak(old_name.clone().into_boxed_str()), Z3Int::new_const(old_name.as_str())));
+            }
+        }
+        z3_vars.push(("result", z3_result.clone()));
+
+        // Extract the return value expression from the function body
+        let body_return = extract_body_return(&func.body);
 
         // Assert preconditions
         for req in &requires_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(req, &z3_vars) {
+            if let Some(z3_bool) = self.expr_to_z3_bool(req, &z3_vars, &z3_real_vars) {
                 self.solver.assert(&z3_bool);
             }
         }
 
         // Assert math constraints
         for math in &math_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(math, &z3_vars) {
+            if let Some(z3_bool) = self.expr_to_z3_bool(math, &z3_vars, &z3_real_vars) {
                 self.solver.assert(&z3_bool);
             }
         }
+
+        // Encode old() snapshots: old_x == x for each parameter (snapshot at function entry)
+        for p in &func.params {
+            if let Some(param_z3) = z3_vars.iter().find(|(n, _)| *n == p.name).map(|(_, v)| v.clone()) {
+                let old_name = format!("old_{}", p.name);
+                if let Some(old_z3) = z3_vars.iter().find(|(n, _)| *n == old_name.as_str()).map(|(_, v)| v.clone()) {
+                    self.solver.assert(&old_z3._eq(&param_z3));
+                }
+            }
+        }
+
+        // Encode function body: bind result == body(args)
+        // This is the critical link between the implementation and the contract.
+        if let Some(ref return_expr) = body_return {
+            if let Some(body_z3) = self.expr_to_z3_int(return_expr, &z3_vars) {
+                self.solver.assert(&z3_result._eq(&body_z3));
+            }
+        }
+
+        // Count total constraints: requires + math + old_snapshots + body
+        let constraint_count = requires_exprs.len() + math_exprs.len() + func.params.len()
+            + if body_return.is_some() { 1 } else { 0 };
 
         match self.solver.check() {
             SatResult::Sat => {
                 if !ensures_exprs.is_empty() {
                     self.solver.push();
                     for ens in &ensures_exprs {
-                        if let Some(z3_bool) = self.expr_to_z3_bool(ens, &z3_vars) {
+                        if let Some(z3_bool) = self.expr_to_z3_bool(ens, &z3_vars, &z3_real_vars) {
                             self.solver.assert(z3_bool.not());
                         }
                     }
@@ -137,10 +199,11 @@ impl Verifier {
                                 status: VerifStatus::Verified,
                                 message: "postconditions verified".into(),
                                 diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
                             }
                         }
                         SatResult::Sat => {
-                            // Extract counterexample model
                             let model = self.solver.get_model();
                             let counterexample = self.extract_counterexample(
                                 &model, &z3_vars, &ensures_exprs,
@@ -148,12 +211,15 @@ impl Verifier {
                             self.solver.pop(1);
                             let diagnostic = self.build_failure_narrative(
                                 func, &counterexample, &requires_exprs, &ensures_exprs,
+                                &requires_spans, &ensures_spans,
                             );
                             VerificationResult {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Failed,
                                 message: diagnostic.message.clone(),
                                 diagnostic: Some(diagnostic),
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
                             }
                         }
                         SatResult::Unknown => {
@@ -163,6 +229,8 @@ impl Verifier {
                                 status: VerifStatus::Unknown,
                                 message: "verification inconclusive".into(),
                                 diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
                             }
                         }
                     }
@@ -172,19 +240,25 @@ impl Verifier {
                         status: VerifStatus::Verified,
                         message: "preconditions satisfiable, no postconditions".into(),
                         diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
                     }
                 }
             }
             SatResult::Unsat => {
+                let req_span = requires_spans.first().copied()
+                    .unwrap_or_else(|| Span::single(0, 0));
                 let diagnostic = Diagnostic::error(
                     format!("preconditions are unsatisfiable for '{}'", func.name),
-                    Span::single(0, 0),
+                    req_span,
                 ).with_help("check that your requires conditions can actually be satisfied");
                 VerificationResult {
                     func_name: func.name.clone(),
                     status: VerifStatus::Failed,
                     message: "preconditions are unsatisfiable".into(),
                     diagnostic: Some(diagnostic),
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
                 }
             }
             SatResult::Unknown => VerificationResult {
@@ -192,6 +266,8 @@ impl Verifier {
                 status: VerifStatus::Unknown,
                 message: "precondition satisfiability unknown".into(),
                 diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
             },
         }
     }
@@ -200,7 +276,7 @@ impl Verifier {
     fn extract_counterexample(
         &self,
         model: &Option<z3::Model>,
-        z3_vars: &[(&str, Int)],
+        z3_vars: &[(&str, Z3Int)],
         ensures_exprs: &[Expr],
     ) -> Counterexample {
         let mut assignments = Vec::new();
@@ -215,13 +291,33 @@ impl Verifier {
             }
         }
 
-        // Identify which ensures were violated
-        let violated: Vec<String> = ensures_exprs.iter().map(|e| format_expr(e)).collect();
+        // Identify which ensures were violated by testing each one individually
+        let mut violated_indices = Vec::new();
+        if let Some(ref m) = model {
+            for (idx, ens) in ensures_exprs.iter().enumerate() {
+                if let Some(z3_bool) = self.expr_to_z3_bool(ens, z3_vars, &[]) {
+                    if let Some(val) = m.eval(&z3_bool, true) {
+                        if let Some(b) = val.as_bool() {
+                            if !b {
+                                violated_indices.push(idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if violated_indices.is_empty() {
+            violated_indices = (0..ensures_exprs.len()).collect();
+        }
+
+        let violated: Vec<String> = violated_indices.iter()
+            .map(|&i| format_expr(&ensures_exprs[i]))
+            .collect();
 
         Counterexample {
             assignments,
             violated_ensures: violated,
-            violated_indices: (0..ensures_exprs.len()).collect(),
+            violated_indices,
         }
     }
 
@@ -232,44 +328,85 @@ impl Verifier {
         counterexample: &Counterexample,
         requires_exprs: &[Expr],
         ensures_exprs: &[Expr],
+        requires_spans: &[Span],
+        ensures_spans: &[Span],
     ) -> Diagnostic {
         let func_name = &func.name;
 
-        // Build the main error message
+        // Separate input params from result
+        let param_names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
+        let input_assignments: Vec<&(String, i64)> = counterexample.assignments.iter()
+            .filter(|(name, _)| name != "result")
+            .collect();
+        let result_val = counterexample.assignments.iter()
+            .find(|(name, _)| name == "result")
+            .map(|(_, val)| *val);
+
+        // Build the main error message with causal chain
         let mut message = format!(
-            "verification failed for '{}': postcondition violation found",
+            "verification failed for '{}': postcondition violation",
             func_name
         );
 
-        // Add counterexample assignments
-        if !counterexample.assignments.is_empty() {
-            let assignments_str: Vec<String> = counterexample.assignments.iter()
+        // Show input values
+        if !input_assignments.is_empty() {
+            let inputs_str: Vec<String> = input_assignments.iter()
                 .map(|(name, val)| format!("{} = {}", name, val))
                 .collect();
             message.push_str(&format!(
-                "\n  counterexample: {}",
-                assignments_str.join(", ")
+                "\n  with inputs: {}",
+                inputs_str.join(", ")
             ));
         }
 
-        // Add which postconditions were violated
+        // Show what the body computes
+        if let Some(result) = result_val {
+            message.push_str(&format!(
+                "\n  body returns: result = {}",
+                result
+            ));
+        }
+
+        // Show which postconditions were violated
         if !counterexample.violated_ensures.is_empty() {
-            for ens in &counterexample.violated_ensures {
-                message.push_str(&format!("\n  violated: {}", ens));
+            for (i, &idx) in counterexample.violated_indices.iter().enumerate() {
+                if let Some(ens) = ensures_exprs.get(idx) {
+                    message.push_str(&format!(
+                        "\n  but ensures {} = false",
+                        format_expr(ens)
+                    ));
+                }
             }
         }
 
-        // Build the diagnostic
-        let mut diag = Diagnostic::error(message, Span::single(0, 0))
+        // Build the diagnostic with proper source location
+        // Use the first violated ensures span as the primary location
+        let primary_span = ensures_spans.first().copied()
+            .unwrap_or_else(|| Span::single(0, 0));
+        let mut diag = Diagnostic::error(message, primary_span)
             .with_code("E0500");
 
-        // Add precondition context
+        // Add precondition context with source locations
         if !requires_exprs.is_empty() {
             let req_strs: Vec<String> = requires_exprs.iter().map(|e| format_expr(e)).collect();
+            let req_span = requires_spans.first().copied()
+                .unwrap_or_else(|| Span::single(0, 0));
             diag = diag.with_note(
                 format!("preconditions satisfied: {}", req_strs.join(", ")),
-                Span::single(0, 0),
+                req_span,
             );
+        }
+
+        // Add per-ensures violation notes with source locations
+        for (i, &idx) in counterexample.violated_indices.iter().enumerate() {
+            if let Some(ens) = ensures_exprs.get(idx) {
+                let ens_span = ensures_spans.get(idx).copied()
+                    .unwrap_or_else(|| Span::single(0, 0));
+                diag = diag.with_note(
+                    format!("postcondition '{}' is false", format_expr(ens)),
+                    ens_span,
+                );
+            }
         }
 
         // Generate fix suggestion
@@ -282,26 +419,40 @@ impl Verifier {
 
     /// Generate a fix suggestion based on the counterexample and function structure.
     fn generate_fix_hint(&self, func: &FuncDef, counterexample: &Counterexample) -> Option<String> {
-        // Analyze the function body for missing branches
-        let has_if = func.body.iter().any(|s| matches!(s, Stmt::If { .. }));
-        let has_match = func.body.iter().any(|s| matches!(s, Stmt::Expr(Expr::Match(..))));
+        let param_names: Vec<String> = func.params.iter().map(|p| p.name.clone()).collect();
+        let result_val = counterexample.assignments.iter()
+            .find(|(name, _)| name == "result")
+            .map(|(_, val)| *val);
 
-        // Check if counterexample has negative values when ensures expect positive
-        let has_negative = counterexample.assignments.iter()
-            .any(|(_, val)| *val < 0);
+        // Pattern 1: body returns wrong constant
+        if let Some(result) = result_val {
+            let body_is_trivial = func.body.iter().all(|s| {
+                matches!(s, Stmt::Expr(Expr::Literal(..)) | Stmt::Return(Some(Expr::Literal(..))))
+            });
+            if body_is_trivial {
+                return Some(format!(
+                    "the function body returns a constant value ({}) regardless of input. \
+                     Consider computing the result from the parameters: e.g., `result = {}(...)`",
+                    result, func.name
+                ));
+            }
+        }
 
-        if has_negative && !has_if && !has_match {
-            // Suggest adding conditional handling
-            let param_names: Vec<String> = func.params.iter().map(|p| p.name.clone()).collect();
+        // Pattern 2: body doesn't use all parameters
+        let body_text: String = func.body.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>().join(" ");
+        let unused_params: Vec<&str> = param_names.iter()
+            .filter(|p| !body_text.contains(p.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+        if !unused_params.is_empty() {
             return Some(format!(
-                "the counterexample shows negative input values. \
-                 Consider adding an `if` or `match` branch to handle negative cases. \
-                 Example: `if {} < 0 {{ ... }} else {{ ... }}`",
-                param_names.first().unwrap_or(&"x".to_string())
+                "parameter(s) `{}` are not used in the function body. \
+                 Ensure the result depends on all required inputs.",
+                unused_params.join("`, `")
             ));
         }
 
-        // Check if the function body is too simple (just arithmetic)
+        // Pattern 3: body is too simple (just arithmetic) without edge-case handling
         let body_is_simple = func.body.iter().all(|s| {
             matches!(s, Stmt::Expr(Expr::Binary(..)) | Stmt::Return(Some(Expr::Binary(..))))
         });
@@ -317,19 +468,26 @@ impl Verifier {
         None
     }
 
-    fn expr_to_z3_int(&self, expr: &Expr, vars: &[(&str, Int)]) -> Option<Int> {
+    fn expr_to_z3_int(&self, expr: &Expr, vars: &[(&str, Z3Int)]) -> Option<Z3Int> {
         match expr {
-            Expr::Literal(Lit::Int(n)) => Some(Int::from_i64(*n)),
+            Expr::Literal(Lit::Int(n)) => Some(Z3Int::from_i64(*n)),
             Expr::Ident(name) => {
                 vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone())
+            }
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    return vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone());
+                }
+                None
             }
             Expr::Binary(op, lhs, rhs) => {
                 let l = self.expr_to_z3_int(lhs, vars)?;
                 let r = self.expr_to_z3_int(rhs, vars)?;
                 match op {
-                    BinOp::Add => Some(Int::add(&[&l, &r])),
-                    BinOp::Sub => Some(Int::sub(&[&l, &r])),
-                    BinOp::Mul => Some(Int::mul(&[&l, &r])),
+                    BinOp::Add => Some(Z3Int::add(&[&l, &r])),
+                    BinOp::Sub => Some(Z3Int::sub(&[&l, &r])),
+                    BinOp::Mul => Some(Z3Int::mul(&[&l, &r])),
                     BinOp::Div => Some(l.div(&r)),
                     BinOp::Mod => Some(l.modulo(&r)),
                     _ => None,
@@ -343,13 +501,123 @@ impl Verifier {
         }
     }
 
-    fn expr_to_z3_bool(&self, expr: &Expr, vars: &[(&str, Int)]) -> Option<z3::ast::Bool> {
+    /// Try to encode an expression as a Z3 Real (for f64 parameters).
+    fn expr_to_z3_real(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> Option<Z3Real> {
         match expr {
-            Expr::Literal(Lit::Bool(b)) => {
-                Some(z3::ast::Bool::from_bool(*b))
+            Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
+            Expr::Literal(Lit::Float(f)) => {
+                if *f == 0.0 {
+                    Some(Z3Real::from_int(&Z3Int::from_i64(0)))
+                } else if f.is_infinite() || f.is_nan() {
+                    None
+                } else {
+                    // Use the float's decimal string representation
+                    let s = format!("{}", f);
+                    // Z3Real::from_real_str needs context; approximate with integer conversion
+                    // For practical verification, convert to scaled integer
+                    let scaled = (*f * 1000000.0) as i64;
+                    Some(Z3Real::from_int(&Z3Int::from_i64(scaled)) / Z3Real::from_int(&Z3Int::from_i64(1000000)))
+                }
+            }
+            Expr::Ident(name) => {
+                // Check real vars first, then int vars (promote to real)
+                if let Some(v) = real_vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()) {
+                    Some(v)
+                } else if let Some(v) = vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()) {
+                    Some(Z3Real::from_int(&v))
+                } else {
+                    None
+                }
+            }
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    if let Some(v) = real_vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
+                        return Some(v);
+                    }
+                    if let Some(v) = vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
+                        return Some(Z3Real::from_int(&v));
+                    }
+                }
+                None
             }
             Expr::Binary(op, lhs, rhs) => {
+                let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
                 match op {
+                    BinOp::Add => Some(l + r),
+                    BinOp::Sub => Some(l - r),
+                    BinOp::Mul => Some(l * r),
+                    BinOp::Div => Some(l / r),
+                    _ => None,
+                }
+            }
+            Expr::Unary(UnOp::Neg, inner) => {
+                let v = self.expr_to_z3_real(inner, vars, real_vars)?;
+                Some(-v)
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_to_z3_bool(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> Option<Z3Bool> {
+        match expr {
+            Expr::Literal(Lit::Bool(b)) => {
+                Some(Z3Bool::from_bool(*b))
+            }
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    // Check if there's a real var for old_x
+                    if real_vars.iter().any(|(n, _)| *n == old_name.as_str()) {
+                        return None; // Can't convert Real to Bool directly
+                    }
+                    // Check int vars
+                    if let Some(v) = vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
+                        // Treat non-zero as true
+                        return Some(v._eq(&Z3Int::from_i64(0)).not());
+                    }
+                    return None;
+                }
+                None
+            }
+            Expr::Binary(op, lhs, rhs) => {
+                // Detect if operands are float expressions
+                let lhs_is_real = self.is_real_expr(lhs, vars, real_vars);
+                let rhs_is_real = self.is_real_expr(rhs, vars, real_vars);
+                let use_real = lhs_is_real || rhs_is_real;
+                
+                match op {
+                    BinOp::EqCmp if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l._eq(&r))
+                    }
+                    BinOp::NeCmp if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l._eq(&r).not())
+                    }
+                    BinOp::Lt if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l.lt(&r))
+                    }
+                    BinOp::Gt if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l.gt(&r))
+                    }
+                    BinOp::Le if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l.le(&r))
+                    }
+                    BinOp::Ge if use_real => {
+                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        Some(l.ge(&r))
+                    }
                     BinOp::EqCmp => {
                         let l = self.expr_to_z3_int(lhs, vars)?;
                         let r = self.expr_to_z3_int(rhs, vars)?;
@@ -381,25 +649,68 @@ impl Verifier {
                         Some(l.ge(&r))
                     }
                     BinOp::And => {
-                        let l = self.expr_to_z3_bool(lhs, vars)?;
-                        let r = self.expr_to_z3_bool(rhs, vars)?;
-                        Some(z3::ast::Bool::and(&[&l, &r]))
+                        let l = self.expr_to_z3_bool(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_bool(rhs, vars, real_vars)?;
+                        Some(Z3Bool::and(&[&l, &r]))
                     }
                     BinOp::Or => {
-                        let l = self.expr_to_z3_bool(lhs, vars)?;
-                        let r = self.expr_to_z3_bool(rhs, vars)?;
-                        Some(z3::ast::Bool::or(&[&l, &r]))
+                        let l = self.expr_to_z3_bool(lhs, vars, real_vars)?;
+                        let r = self.expr_to_z3_bool(rhs, vars, real_vars)?;
+                        Some(Z3Bool::or(&[&l, &r]))
                     }
                     _ => None,
                 }
             }
             Expr::Unary(UnOp::Not, inner) => {
-                let v = self.expr_to_z3_bool(inner, vars)?;
+                let v = self.expr_to_z3_bool(inner, vars, real_vars)?;
                 Some(v.not())
             }
             _ => None,
         }
     }
+    
+    /// Check if an expression involves real (f64) variables.
+    fn is_real_expr(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> bool {
+        match expr {
+            Expr::Ident(name) => real_vars.iter().any(|(n, _)| *n == name.as_str()),
+            Expr::Literal(Lit::Float(_)) => true,
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    real_vars.iter().any(|(n, _)| *n == old_name.as_str())
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Extract the return value expression from a function body.
+/// Handles patterns:
+///   - `return expr;`
+///   - last expression in body (implicit return)
+/// Skips Requires/Ensures/Math/Desc/MmsBlock statements.
+fn extract_body_return(block: &Block) -> Option<Expr> {
+    // First try explicit `return` statements
+    for stmt in block.iter().rev() {
+        match stmt {
+            Stmt::Return(Some(expr)) => return Some(expr.clone()),
+            Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
+            _ => {}
+        }
+    }
+    // Fall back to last expression statement
+    for stmt in block.iter().rev() {
+        match stmt {
+            Stmt::Expr(expr) => return Some(expr.clone()),
+            Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_)
+            | Stmt::Desc(_) | Stmt::MmsBlock { .. } => continue,
+            _ => break,
+        }
+    }
+    None
 }
 
 /// Format an expression as a human-readable string.
@@ -453,8 +764,6 @@ mod tests {
 
     #[test]
     fn verify_simple_pass() {
-        // With requires: true and ensures: true, verification should pass
-        // (no postcondition to violate)
         let src = r#"
 func identity(x: i32) -> i32 {
     requires: true
@@ -468,9 +777,58 @@ func identity(x: i32) -> i32 {
     }
 
     #[test]
+    fn verify_body_satisfies_ensures() {
+        // T1 core test: body return expression is encoded as result == body(args)
+        let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+        let results = verify_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "body `x * 2` should satisfy ensures `result == x * 2`: {}", results[0].message);
+    }
+
+    #[test]
+    fn verify_body_violates_ensures() {
+        // T1 core test: body return doesn't satisfy ensures
+        let src = r#"
+func wrong(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result == x * 2
+    x * 3
+}
+"#;
+        let results = verify_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Failed);
+        let diag = results[0].diagnostic.as_ref().unwrap();
+        assert!(diag.message.contains("result ="), "narrative should show result value: {}", diag.message);
+    }
+
+    #[test]
+    fn verify_result_binding_in_counterexample() {
+        // T1: counterexample should include result variable
+        let src = r#"
+func add_one(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > x
+    x
+}
+"#;
+        let results = verify_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Failed);
+        // The counterexample should show that body returns x, not x+1
+        let diag = results[0].diagnostic.as_ref().unwrap();
+        assert!(diag.message.contains("result ="), "should show result value in narrative");
+    }
+
+    #[test]
     fn verify_strong_postcondition_fails() {
-        // Without modeling function body, verifier correctly finds that
-        // x > 0 alone doesn't guarantee result > 0
         let src = r#"
 func abs(x: i32) -> i32 {
     requires: x > 0
@@ -480,10 +838,8 @@ func abs(x: i32) -> i32 {
 "#;
         let results = verify_source(src).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, VerifStatus::Failed);
-        // Should have a diagnostic with counterexample
-        let diag = results[0].diagnostic.as_ref().unwrap();
-        assert!(diag.message.contains("counterexample"));
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "x > 0 && result == x should satisfy result > 0");
     }
 
     #[test]
@@ -498,10 +854,9 @@ func abs(x: i32) -> i32 {
         let results = verify_source(src).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
-        // Should have a diagnostic with counterexample
         assert!(results[0].diagnostic.is_some());
         let diag = results[0].diagnostic.as_ref().unwrap();
-        assert!(diag.message.contains("counterexample"));
+        assert!(diag.message.contains("result ="), "should show result in narrative");
     }
 
     #[test]
@@ -518,6 +873,38 @@ func impossible(x: i32) -> i32 {
         assert_eq!(results[0].status, VerifStatus::Failed);
         let diag = results[0].diagnostic.as_ref().unwrap();
         assert!(diag.message.contains("unsatisfiable"));
+    }
+
+    #[test]
+    fn verify_old_snapshot() {
+        // T2: old(x) should capture pre-state value
+        let src = r#"
+func noop(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result == old(x)
+    x
+}
+"#;
+        let results = verify_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "body returns x unchanged, ensures result == old(x) should hold: {}", results[0].message);
+    }
+
+    #[test]
+    fn verify_old_snapshot_fails() {
+        // T2: old(x) should detect mutation
+        let src = r#"
+func mutate(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result == old(x)
+    x + 1
+}
+"#;
+        let results = verify_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Failed,
+            "body returns x+1, ensures result == old(x) should fail");
     }
 
     #[test]

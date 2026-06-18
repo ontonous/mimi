@@ -18,7 +18,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             "unit" | "nothing" => None,
             _ => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         },
-        Type::Ref(inner) | Type::RefMut(inner) => {
+        Type::Ref(_, inner) | Type::RefMut(_, inner) => {
             let inner_llvm = mimi_type_to_llvm(ctx, inner)?;
             let ptr = match inner_llvm {
                 BasicTypeEnum::IntType(t) => BasicTypeEnum::PointerType(t.ptr_type(AddressSpace::default())),
@@ -42,9 +42,9 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             | Type::RawPtr(_) | Type::RawPtrMut(_) =>
             Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default()))),
         Type::RawString => {
-            // raw string is passed as *mut c_char
             Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
         }
+        Type::Infer => None,
         Type::ExternFunc(_, _) => {
             // Function pointer - represented as void* in LLVM
             Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))

@@ -408,7 +408,7 @@ impl<'a> Interpreter<'a> {
                     _ => return Err("assignment target must be a variable".into()),
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
             Stmt::Math(exprs) => {
                 // Math block: evaluate constant expressions at compile time
                 for expr in exprs {

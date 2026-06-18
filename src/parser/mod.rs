@@ -832,17 +832,19 @@ impl Parser {
                 break;
             }
             if self.at(&TokenKind::Requires) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Requires(expr));
+                stmts.push(Stmt::Requires(expr, span));
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Ensures(expr));
+                stmts.push(Stmt::Ensures(expr, span));
                 continue;
             }
             if self.at(&TokenKind::Math) {
@@ -892,19 +894,21 @@ impl Parser {
                 break;
             }
             if self.at(&TokenKind::Requires) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 if self.expect(TokenKind::Colon, "`:`").is_ok() {
                     if let Ok(expr) = self.parse_expr(0) {
-                        stmts.push(Stmt::Requires(expr));
+                        stmts.push(Stmt::Requires(expr, span));
                     }
                 }
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 if self.expect(TokenKind::Colon, "`:`").is_ok() {
                     if let Ok(expr) = self.parse_expr(0) {
-                        stmts.push(Stmt::Ensures(expr));
+                        stmts.push(Stmt::Ensures(expr, span));
                     }
                 }
                 continue;
