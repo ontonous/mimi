@@ -48,6 +48,10 @@ pub struct CodeGenerator<'ctx> {
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     /// Trait implementations: type_name -> trait_name -> Vec<FuncDef> methods
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
+    /// Vtable global variables per (type, trait): key = "{type}__{trait}"
+    vtable_globals: HashMap<String, inkwell::values::GlobalValue<'ctx>>,
+    /// Vtable struct types per trait: key = trait_name
+    vtable_types: HashMap<String, inkwell::types::StructType<'ctx>>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -57,7 +61,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new() }
     }
 
     /// Get the current LLVM function, or None if no insert block.
@@ -305,6 +309,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Compile trait impl methods
         self.compile_impl_methods()?;
+        // Build vtable globals for dyn Trait dispatch
+        self.compile_vtables()?;
         // Second pass: register extern functions and compile user functions
         for item in &file.items {
             match item {
@@ -344,6 +350,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Second pass: compile impl methods for committed trait implementations
         self.compile_impl_methods()?;
+        self.compile_vtables()?;
         Ok(())
     }
 
@@ -371,6 +378,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                     });
                     self.compile_func(&impl_method)?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Build vtable struct types and global vtable instances for all trait impls.
+    /// Called after compile_impl_methods so mangled functions exist.
+    fn compile_vtables(&mut self) -> Result<(), String> {
+        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        // Phase 1: define vtable struct type per trait
+        let mut trait_method_list: HashMap<String, Vec<String>> = HashMap::new();
+        for (trait_name, trait_def) in &self.trait_defs {
+            let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
+            if method_names.is_empty() {
+                continue;
+            }
+            // Vtable struct: one i8* (function pointer) per method
+            let field_tys: Vec<BasicTypeEnum> = (0..method_names.len())
+                .map(|_| BasicTypeEnum::PointerType(i8_ptr))
+                .collect();
+            let vtable_ty = self.context.struct_type(&field_tys, false);
+            self.vtable_types.insert(trait_name.clone(), vtable_ty);
+            trait_method_list.insert(trait_name.clone(), method_names);
+        }
+
+        // Phase 2: emit a global vtable constant for each (type, trait) impl pair
+        for (type_name, trait_impls) in &self.type_impls {
+            for (trait_name, methods) in trait_impls {
+                let Some(vtable_ty) = self.vtable_types.get(trait_name) else { continue };
+                let Some(expected_methods) = trait_method_list.get(trait_name) else { continue };
+
+                // Build initializer: one bitcast(function) per method slot
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let mut fn_ptrs: Vec<BasicValueEnum> = Vec::new();
+                for method_name in expected_methods {
+                    if methods.iter().any(|m| &m.name == method_name) {
+                        let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
+                        if let Some(f) = self.module.get_function(&mangled) {
+                            let ptr = self.builder.build_bit_cast(
+                                f.as_global_value().as_pointer_value(),
+                                i8_ptr,
+                                &format!("{}_{}_cast", trait_name, method_name),
+                            ).map_err(|e| format!("bitcast error: {}", e))?;
+                            fn_ptrs.push(ptr.into());
+                            continue;
+                        }
+                    }
+                    fn_ptrs.push(i8_ptr.const_null().into());
+                }
+                if fn_ptrs.is_empty() {
+                    continue;
+                }
+                let init_val = vtable_ty.const_named_struct(&fn_ptrs);
+                let gv_name = format!("{}_{}_vtable", type_name, trait_name);
+                let gv = self.module.add_global(*vtable_ty, None, &gv_name);
+                gv.set_initializer(&init_val);
+                gv.set_constant(true);
+                self.vtable_globals.insert(format!("{}__{}", type_name, trait_name), gv);
             }
         }
         Ok(())
@@ -990,6 +1055,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_store(alloca, function.get_nth_param(i as u32).expect("param index matches function signature"))
                     .map_err(|e| format!("store error: {}", e))?;
                 vars.insert(param.name.clone(), (alloca, ty));
+                
+                // Track type name for method dispatch
+                if let Type::Name(tn, _) = &param.ty {
+                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                }
+                if let Type::DynTrait(_) = &param.ty {
+                    self.var_type_names.insert(param.name.clone(), crate::core::fmt_type(&param.ty));
+                }
                 
                 // Track capability parameters
                 if matches!(&param.ty, Type::Cap(_)) {
@@ -2316,7 +2389,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         
-                        // 3. Fallback: field access or error
+                        // 3. Try vtable dispatch for dyn Trait objects
+                        if obj_type.starts_with("dyn ") {
+                            let trait_name = obj_type.strip_prefix("dyn ").unwrap_or("");
+                            if !trait_name.is_empty() && !trait_name.contains(' ') {
+                                // For dyn Trait dispatch, iterate type_impls to find an impl
+                                // that provides this method.  This works when the concrete type
+                                // is known at compile time.
+                                for (type_name, trait_impls) in &self.type_impls {
+                                    if let Some(methods) = trait_impls.get(trait_name) {
+                                        if methods.iter().any(|m| m.name == *method_name) {
+                                            let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
+                                            if let Some(function) = self.module.get_function(&mangled) {
+                                                let obj_val = self.compile_expr(obj, vars)?;
+                                                let mut compiled_args = Vec::new();
+                                                compiled_args.push(obj_val);
+                                                for arg in args {
+                                                    compiled_args.push(self.compile_expr(arg, vars)?);
+                                                }
+                                                let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                                                    BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                                                    BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                                                    BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                                                    BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                                                    BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                                                    BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                                                }).collect();
+                                                let call = self.builder.build_call(function, &metadata_args, "dyn_trait_call")
+                                                    .map_err(|e| format!("dyn trait call error: {}", e))?;
+                                                return Ok(call.try_as_basic_value().left().unwrap_or(
+                                                    self.context.i64_type().const_int(0, false).into()
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            return Err(format!("cannot dispatch method '{}' on {}", method_name, obj_type));
+                        }
+
+                        // 4. Fallback: field access or error
                         if self.type_defs.contains_key(&obj_type) {
                             Err(format!("method '{}' not compiled for type '{}' (missing crate?)", method_name, obj_type))
                         } else {
