@@ -138,6 +138,7 @@ mod tests {
             None,
             Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args[0] + args[1] })),
         );
+        // Safety: callback_trampoline is a safe-to-call extern "C" function; id is a valid registered callback ID and args are simple integers.
         let result = unsafe { callback_trampoline(id, 3, 4, std::ptr::null_mut()) };
         assert_eq!(result, 7);
         CALLBACK_TABLE.remove(id);

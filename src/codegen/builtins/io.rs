@@ -544,6 +544,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], "fread_call")
                     .map_err(|e| format!("fread error: {}", e))?;
                 // Null-terminate
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let null_gep = unsafe {
                     self.builder.build_gep(
                         BasicTypeEnum::IntType(self.context.i8_type()),

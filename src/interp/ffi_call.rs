@@ -74,6 +74,7 @@ impl<'a> Interpreter<'a> {
         }) {
             idx
         } else {
+            // Safety: libloading::Library::new loads a shared library via FFI; the path is guaranteed valid by environment variable check above.
             unsafe {
                 let lib = libloading::Library::new(&lib_path)
                     .map_err(|e| format!("failed to load library '{}': {}", lib_path, e))?;
@@ -85,6 +86,7 @@ impl<'a> Interpreter<'a> {
         let func_name = extern_func.name.clone();
 
         // Call the function via libloading
+        // Safety: The symbol is resolved from a loaded library and transmuted to the expected function signature; arguments are converted from Mimi values to C-compatible i64 values, and errno is cleared before the call.
         let result = unsafe {
             // Clear errno before call to avoid stale errno
             if contract.check_errno {
@@ -106,6 +108,7 @@ impl<'a> Interpreter<'a> {
 
         // Priority 2: Capture errno after C call if enabled
         let errno_value = if contract.check_errno {
+            // Safety: libc::__errno_location returns a valid pointer to thread-local errno; dereferencing it is safe after an FFI call.
             Some(unsafe { *libc::__errno_location() })
         } else {
             None
@@ -427,6 +430,7 @@ impl<'a> Interpreter<'a> {
                 if result == 0 {
                     Ok(Value::String(String::new()))
                 } else {
+                    // Safety: result is a valid pointer returned by the FFI call, assumed to point to a null-terminated C string.
                     let c_str = unsafe { std::ffi::CStr::from_ptr(result as *const i8) };
                     Ok(Value::String(c_str.to_string_lossy().into_owned()))
                 }

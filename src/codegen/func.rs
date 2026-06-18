@@ -433,6 +433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ).map_err(|e| format!("load error: {}", e))?;
                         let data_pv = if let BasicValueEnum::PointerValue(pv) = data_ptr { pv } else { return Err("data must be pointer".into()); };
 
+                        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                         let elem_ptr = unsafe {
                             self.builder.build_gep(
                                 BasicTypeEnum::IntType(self.context.i64_type()),

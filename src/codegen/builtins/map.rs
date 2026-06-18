@@ -249,20 +249,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(body_bb);
                 let idx_2 = self.builder.build_int_add(idx, idx, "map_from_list_idx_2")
                     .map_err(|e| format!("add error: {}", e))?;
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let key_ptr_elem = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let key_handle = self.builder.build_load(i64_ty, key_ptr_elem, "map_from_list_key_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let key_dest = unsafe { self.builder.build_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(key_dest, key_handle)
                     .map_err(|e| format!("store error: {}", e))?;
                 let idx_2_plus_1 = self.builder.build_int_add(idx_2, i64_ty.const_int(1, false), "map_from_list_idx_2_plus_1")
                     .map_err(|e| format!("add error: {}", e))?;
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let val_ptr_elem = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx_2_plus_1], "map_from_list_val_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let val_handle = self.builder.build_load(i64_ty, val_ptr_elem, "map_from_list_val_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let val_dest = unsafe { self.builder.build_gep(i64_ty, values_ptr, &[idx], "map_from_list_val_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(val_dest, val_handle)

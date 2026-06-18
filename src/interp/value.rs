@@ -142,6 +142,7 @@ unsafe impl Sync for CBufferInner {}
 impl Drop for CBufferInner {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.size > 0 {
+            // Safety: ptr is a valid non-null pointer previously allocated by libc::malloc/calloc; size > 0 ensures we only free valid allocations.
             unsafe {
                 libc::free(self.ptr as *mut libc::c_void);
             }

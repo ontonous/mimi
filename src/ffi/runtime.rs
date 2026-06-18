@@ -299,6 +299,7 @@ pub extern "C" fn mimi_shared_get_ptr(handle: i64) -> *const Value {
 #[no_mangle]
 pub extern "C" fn mimi_value_free(ptr: *mut Value) {
     if !ptr.is_null() {
+        // Safety: ptr is a non-null pointer to a heap-allocated Value, previously obtained via Box::into_raw.
         unsafe { drop(Box::from_raw(ptr)); }
     }
 }
@@ -309,6 +310,7 @@ pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> boo
     if name.is_null() {
         return false;
     }
+    // Safety: name is a non-null pointer to a null-terminated C string (null-checked above).
     let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .unwrap_or("");
@@ -321,6 +323,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
     if name.is_null() {
         return false;
     }
+    // Safety: name is a non-null pointer to a null-terminated C string (null-checked above).
     let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .unwrap_or("");
@@ -331,6 +334,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
 #[no_mangle]
 pub extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {
     if !c_str.is_null() {
+        // Safety: c_str is a non-null pointer to a CString previously created via CString::into_raw (null-checked above).
         unsafe {
             drop(std::ffi::CString::from_raw(c_str));
         }
@@ -346,6 +350,7 @@ pub extern "C" fn mimi_string_as_c_str(mimi_string: *const Value) -> *const std:
     if mimi_string.is_null() {
         return std::ptr::null();
     }
+    // Safety: mimi_string is a non-null pointer to a valid heap-allocated Value (null-checked above).
     unsafe {
         match &*mimi_string {
             Value::String(s) => {
@@ -386,6 +391,7 @@ pub extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut std::ffi
     if mimi_string.is_null() {
         return std::ptr::null_mut();
     }
+    // Safety: mimi_string is a non-null pointer to a valid heap-allocated Value (null-checked above); the mutable dereference is safe because this function takes ownership from the caller.
     unsafe {
         match &mut *mimi_string {
             Value::String(s) => {
@@ -417,6 +423,7 @@ pub extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *mut Val
     if c_str.is_null() {
         return std::ptr::null_mut();
     }
+    // Safety: c_str is a non-null pointer to a CString previously created via CString::into_raw (null-checked above); Box::into_raw transfers ownership to the C caller.
     unsafe {
         let c_str = std::ffi::CString::from_raw(c_str);
         let s = c_str.to_string_lossy().into_owned();
@@ -501,6 +508,7 @@ impl MimiThreadPool {
         unsafe impl Send for ClosureData {}
 
         extern "C" fn closure_trampoline(data_ptr: *mut u8) {
+            // Safety: data_ptr was created by Box::into_raw and is guaranteed to be a valid heap-allocated Box<dyn FnOnce() + Send>.
             let data = unsafe { Box::from_raw(data_ptr as *mut Box<dyn FnOnce() + Send>) };
             (*data)();
         }
@@ -512,6 +520,7 @@ impl MimiThreadPool {
         });
         let data = Box::into_raw(data);
         extern "C" fn data_trampoline(data_ptr: *mut u8) -> *mut u8 {
+            // Safety: data_ptr was created by Box::into_raw and is guaranteed to be a valid heap-allocated ClosureData.
             let data = unsafe { Box::from_raw(data_ptr as *mut ClosureData) };
             (data.func)(data.arg);
             std::ptr::null_mut()

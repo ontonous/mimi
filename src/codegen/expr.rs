@@ -304,6 +304,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .map_err(|e| format!("ptrtoint error: {}", e))?,
                                             _ => return Err("[E0701] values: unsupported field type".into()),
                                         };
+                                        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                                         let elem_ptr = unsafe { self.builder.build_gep(i64_ty, values_data_i64, &[i64_ty.const_int(i as u64, false)], "values_elem") }
                                             .map_err(|e| format!("gep error: {}", e))?;
                                         self.builder.build_store(elem_ptr, val_i64)
@@ -418,6 +419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| format!("branch error: {}", e))?;
                         self.builder.position_at_end(body_bb);
                         // Load element
+                        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                         let elem_ptr = unsafe {
                             self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
                         }.map_err(|e| format!("gep error: {}", e))?;
@@ -432,6 +434,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("function returned void")?;
                         if is_map {
                             // For map: store result to output array
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let out_elem_ptr = unsafe {
                                 self.builder.build_gep(i64_ty, out_i64, &[idx], "out_elem")
                             }.map_err(|e| format!("gep error: {}", e))?;
@@ -452,6 +455,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder.position_at_end(store_bb);
                             let wi = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), write_idx, "wi")
                                 .map_err(|e| format!("load error: {}", e))?.into_int_value();
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let out_elem_ptr = unsafe {
                                 self.builder.build_gep(i64_ty, out_i64, &[wi], "out_elem")
                             }.map_err(|e| format!("gep error: {}", e))?;
@@ -546,6 +550,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.build_conditional_branch(loop_cmp, body_bb, done_bb)
                             .map_err(|e| format!("branch error: {}", e))?;
                         self.builder.position_at_end(body_bb);
+                        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                         let elem_ptr = unsafe {
                             self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
                         }.map_err(|e| format!("gep error: {}", e))?;
@@ -1004,6 +1009,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     for (j, inner_pat) in inner_pats.iter().enumerate() {
                         if let Pattern::Variable(name) = inner_pat {
                             let idx = i64_ty.const_int(j as u64, false);
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let elem_ptr = unsafe {
                                 self.builder.build_gep(i64_ty, data_ptr, &[idx], &format!("arr_{}", j))
                             }.map_err(|e| format!("gep error: {}", e))?;
@@ -1040,6 +1046,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     for (j, inner_pat) in inner_pats.iter().enumerate() {
                         if let Pattern::Variable(name) = inner_pat {
                             let idx = i64_ty.const_int(j as u64, false);
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let elem_ptr = unsafe {
                                 self.builder.build_gep(i64_ty, data_ptr, &[idx], &format!("slc_{}", j))
                             }.map_err(|e| format!("gep error: {}", e))?;
@@ -1221,6 +1228,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => return Err("list elements must be scalar types (int, float, pointer) for now".into()),
             };
             let idx = self.context.i64_type().const_int(i as u64, false);
+            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
             let elem_ptr = unsafe {
                 self.builder.build_gep(self.context.i64_type(), data_ptr_i64, &[idx], "elem")
             }.map_err(|e| format!("gep error: {}", e))?;
@@ -1283,6 +1291,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "data_i64")
                         .map_err(|e| format!("bitcast error: {}", e))?
                         .into_pointer_value();
+                    // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                     let elem_ptr = unsafe {
                         self.builder.build_gep(self.context.i64_type(), data_ptr_i64, &[idx_iv], "elem")
                     }.map_err(|e| format!("gep error: {}", e))?;
@@ -1290,6 +1299,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| format!("load error: {}", e));
                 }
                 // Fallback: treat as raw pointer to i64 array
+                // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                 let elem_ptr = unsafe {
                     self.builder.build_gep(self.context.i64_type(), pv, &[idx_iv], "elem")
                 }.map_err(|e| format!("gep error: {}", e))?;
@@ -1802,6 +1812,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
         let data_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr, "data_as_i8")
             .map_err(|e| format!("bitcast error: {}", e))?;
+        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
         let new_data_i8 = unsafe {
             self.builder.build_gep(self.context.i8_type(), data_i8, &[byte_offset], "new_data")
         }.map_err(|e| format!("gep error: {}", e))?;
@@ -1996,6 +2007,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("branch error: {}", e))?;
         self.builder.position_at_end(body_bb);
         // Load element
+        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
         let elem_ptr = unsafe {
             self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
         }.map_err(|e| format!("gep error: {}", e))?;
@@ -2030,6 +2042,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = self.compile_expr(expr, &comp_vars)?;
         let wi = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), wi_alloca, "wi")
             .map_err(|e| format!("load error: {}", e))?.into_int_value();
+        // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
         let out_elem_ptr = unsafe {
             self.builder.build_gep(i64_ty, out_i64, &[wi], "out_elem")
         }.map_err(|e| format!("gep error: {}", e))?;
@@ -2329,6 +2342,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let pos = unsafe { self.builder.build_gep(i8_type, buf, &[len], "fstr_pos") }
                                 .map_err(|e| format!("gep error: {}", e))?;
                             let fmt = self.builder.build_global_string_ptr("%ld", &format!("fstr_fmt_{}", i))
@@ -2349,6 +2363,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
+                            // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let pos = unsafe { self.builder.build_gep(i8_type, buf, &[len], "fstr_pos") }
                                 .map_err(|e| format!("gep error: {}", e))?;
                             let fmt = self.builder.build_global_string_ptr("%f", &format!("fstr_fmt_{}", i))

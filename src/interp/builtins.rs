@@ -1141,6 +1141,7 @@ impl<'a> Interpreter<'a> {
                 if *ptr == 0 {
                     return Ok(Value::String(String::new()));
                 }
+                // Safety: ptr is a valid non-null pointer from a C malloc/calloc allocation (already null-checked on previous line).
                 let c_str = unsafe { std::ffi::CStr::from_ptr(*ptr as *const i8) };
                 Ok(Value::String(c_str.to_string_lossy().into_owned()))
             }
