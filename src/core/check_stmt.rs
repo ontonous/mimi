@@ -194,7 +194,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0207,
                             format!("return type mismatch: expected {}, found {}", fmt_type(ret), fmt_type(&t)),
-                            Span::single(0, 0),
+                            Span::single(self.current_line, self.current_col),
                         ).with_help("check the function's declared return type and the type of the returned expression")
                     );
                 }

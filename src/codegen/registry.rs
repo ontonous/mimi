@@ -6,11 +6,13 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
+use crate::error::{CompileError, MimiResult};
+
 use super::CodeGenerator;
 use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
-    pub(super) fn compile_impl_methods(&mut self) -> Result<(), String> {
+    pub(super) fn compile_impl_methods(&mut self) -> MimiResult<()> {
         for (type_name, trait_impls) in self.type_impls.clone() {
             for (trait_name, methods) in &trait_impls {
                 for method in methods {
@@ -40,7 +42,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Build vtable struct types and global vtable instances for all trait impls.
     /// Called after compile_impl_methods so mangled functions exist.
-    pub(super) fn compile_vtables(&mut self) -> Result<(), String> {
+    pub(super) fn compile_vtables(&mut self) -> MimiResult<()> {
         let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
         // Phase 1: define vtable struct type per trait
         let mut trait_method_list: HashMap<String, Vec<String>> = HashMap::new();
@@ -75,7 +77,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 f.as_global_value().as_pointer_value(),
                                 i8_ptr,
                                 &format!("{}_{}_cast", trait_name, method_name),
-                            ).map_err(|e| format!("bitcast error: {}", e))?;
+                            ).map_err(|e| CompileError::Generic(format!("bitcast error: {}", e)))?;
                             fn_ptrs.push(ptr.into());
                             continue;
                         }
@@ -96,7 +98,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub(super) fn register_extern_block(&mut self, block: &crate::ast::ExternBlock) -> Result<(), String> {
+    pub(super) fn register_extern_block(&mut self, block: &crate::ast::ExternBlock) -> MimiResult<()> {
         for ef in &block.funcs {
             let mut param_tys = Vec::new();
             for p in &ef.params {
@@ -133,22 +135,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             for (i, p) in ef.params.iter().enumerate() {
                 if matches!(p.ty, crate::ast::Type::CShared(_)) {
                     let param = wrapper_fn.get_nth_param(i as u32)
-                        .ok_or(format!("missing param {}", i))?;
+                        .ok_or_else(|| CompileError::Generic(format!("missing param {}", i)))?;
                     if let Some(retain_fn) = self.module.get_function("mimi_shared_retain") {
                         // c_shared is compiled as i8*, need to bitcast to i64 for the runtime call
                         let param_i64 = match param {
                             BasicValueEnum::IntValue(iv) => iv,
                             BasicValueEnum::PointerValue(pv) => {
                                 self.builder.build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_{}", i))
-                                    .map_err(|e| format!("bitcast error: {}", e))?
+                                    .map_err(|e| CompileError::Generic(format!("bitcast error: {}", e)))?
                                     .into_int_value()
                             }
-                            _ => return Err(format!("[E0712] c_shared param {} must be pointer or int", i)),
+                            _ => return Err(CompileError::TypeMismatch(format!("c_shared param {} must be pointer or int", i))),
                         };
                         self.builder.build_call(retain_fn, &[
                             BasicMetadataValueEnum::IntValue(param_i64),
                         ], &format!("retain_{}", i))
-                            .map_err(|e| format!("retain error: {}", e))?;
+                            .map_err(|e| CompileError::Generic(format!("retain error: {}", e)))?;
                     }
                     shared_params.push((i, param));
                 }
@@ -158,41 +160,41 @@ impl<'ctx> CodeGenerator<'ctx> {
             for (i, p) in ef.params.iter().enumerate() {
                 if let crate::ast::Type::Cap(cap_name) = &p.ty {
                     let param = wrapper_fn.get_nth_param(i as u32)
-                        .ok_or(format!("missing param {}", i))?;
+                        .ok_or_else(|| CompileError::Generic(format!("missing param {}", i)))?;
                     if let Some(check_fn) = self.module.get_function("mimi_cap_check") {
                         let cap_name_global = self.builder.build_global_string_ptr(
                             &format!("{}\0", cap_name), &format!("cap_name_{}", i))
-                            .map_err(|e| format!("string global error: {}", e))?;
+                            .map_err(|e| CompileError::Generic(format!("string global error: {}", e)))?;
                         let cap_name_ptr = cap_name_global.as_pointer_value();
                         let check_result = self.builder.build_call(check_fn, &[
                             BasicMetadataValueEnum::IntValue(param.into_int_value()),
                             BasicMetadataValueEnum::PointerValue(cap_name_ptr),
                         ], &format!("cap_check_{}", i))
-                            .map_err(|e| format!("cap_check error: {}", e))?
+                            .map_err(|e| CompileError::Generic(format!("cap_check error: {}", e)))?
                             .try_as_basic_value().left()
-                            .ok_or("cap_check returned void")?
+                            .ok_or_else(|| CompileError::Generic("cap_check returned void".to_string()))?
                             .into_int_value();
                         // If cap_check returns false (0), abort
                         let is_valid = self.builder.build_int_compare(
                             inkwell::IntPredicate::NE, check_result,
                             self.context.bool_type().const_int(0, false),
                             "cap_valid")
-                            .map_err(|e| format!("compare error: {}", e))?;
+                            .map_err(|e| CompileError::Generic(format!("compare error: {}", e)))?;
                         let function = self.current_function()
-                            .ok_or_else(|| "codegen: no current function for cap check in extern block".to_string())?;
+                            .ok_or_else(|| CompileError::Generic("codegen: no current function for cap check in extern block".to_string()))?;
                         let ok_bb = self.context.append_basic_block(function, &format!("cap_ok_{}", i));
                         let fail_bb = self.context.append_basic_block(function, &format!("cap_fail_{}", i));
                         self.builder.build_conditional_branch(is_valid, ok_bb, fail_bb)
-                            .map_err(|e| format!("branch error: {}", e))?;
+                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
                         self.builder.position_at_end(fail_bb);
                         if let Some(exit_fn) = self.module.get_function("exit") {
                             self.builder.build_call(exit_fn, &[
                                 BasicMetadataValueEnum::IntValue(self.context.i32_type().const_int(1, false)),
                             ], "cap_fail_exit")
-                                .map_err(|e| format!("exit error: {}", e))?;
+                                .map_err(|e| CompileError::Generic(format!("exit error: {}", e)))?;
                         }
                         self.builder.build_unconditional_branch(ok_bb)
-                            .map_err(|e| format!("branch error: {}", e))?;
+                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
                         self.builder.position_at_end(ok_bb);
                     }
                 }
@@ -213,13 +215,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             let call = self.builder
                 .build_call(extern_fn, &wrapper_args, "extern_call")
-                .map_err(|e| format!("failed to build extern wrapper call: {}", e))?;
+                .map_err(|e| CompileError::Generic(format!("failed to build extern wrapper call: {}", e)))?;
 
             // Phase 4: Release c_shared params after C call
             for (i, _param) in &shared_params {
                 if let Some(release_fn) = self.module.get_function("mimi_shared_release") {
                     let orig_param = wrapper_fn.get_nth_param(*i as u32)
-                        .ok_or(format!("missing param {}", i))?;
+                        .ok_or_else(|| CompileError::Generic(format!("missing param {}", i)))?;
                     let param_i64 = match orig_param {
                         BasicValueEnum::IntValue(iv) => iv,
                         BasicValueEnum::PointerValue(pv) => {
@@ -227,25 +229,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| format!("bitcast error: {}", e))?
                                 .into_int_value()
                         }
-                        _ => return Err(format!("[E0712] c_shared param {} must be pointer or int", i)),
+                        _ => return Err(CompileError::TypeMismatch(format!("c_shared param {} must be pointer or int", i))),
                     };
                     self.builder.build_call(release_fn, &[
                         BasicMetadataValueEnum::IntValue(param_i64),
                     ], &format!("release_{}", i))
-                        .map_err(|e| format!("release error: {}", e))?;
+                        .map_err(|e| CompileError::Generic(format!("release error: {}", e)))?;
                 }
             }
 
             // Phase 5: Return
             if fn_type.get_return_type().is_some() {
-                let ret = call.try_as_basic_value().left().ok_or_else(|| {
-                    "extern wrapper call did not return a value".to_string()
-                })?;
+                let ret = call.try_as_basic_value().left().ok_or_else(|| CompileError::Generic("extern wrapper call did not return a value".to_string()))?;
                 self.builder.build_return(Some(&ret))
-                    .map_err(|e| format!("failed to build extern wrapper return: {}", e))?;
+                    .map_err(|e| CompileError::Generic(format!("failed to build extern wrapper return: {}", e)))?;
             } else {
                 self.builder.build_return(None)
-                    .map_err(|e| format!("failed to build extern wrapper return: {}", e))?;
+                    .map_err(|e| CompileError::Generic(format!("failed to build extern wrapper return: {}", e)))?;
             }
 
             if let Some(block) = previous_block {
@@ -255,7 +255,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub(super) fn register_type_def(&mut self, t: &crate::ast::TypeDef) -> Result<(), String> {
+    pub(super) fn register_type_def(&mut self, t: &crate::ast::TypeDef) -> MimiResult<()> {
         let llvm_ty = match &t.kind {
             crate::ast::TypeDefKind::Record(fields) => {
                 let mut field_tys = Vec::new();
@@ -283,7 +283,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub(super) fn register_actor_def(&mut self, actor: &crate::ast::ActorDef) -> Result<(), String> {
+    pub(super) fn register_actor_def(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
         // Represent actor as a struct with fields
         let mut field_tys = Vec::new();
         for f in &actor.fields {

@@ -1,4 +1,5 @@
 use super::CodeGenerator;
+use crate::error::MimiResult;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -7,7 +8,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_exit(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 {
                     return Err("exit expects 1 argument".into());
                 }
@@ -28,7 +29,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_now(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if !args.is_empty() { return Err("now/timestamp expects 0 arguments".into()); }
                 let fn_val = self.module.get_function("mimi_now")
                     .ok_or_else(|| "codegen: mimi_now not declared".to_string())?;
@@ -41,7 +42,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_now_ms(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if !args.is_empty() { return Err("now_ms/timestamp_ms expects 0 arguments".into()); }
                 let fn_val = self.module.get_function("mimi_now_ms")
                     .ok_or_else(|| "codegen: mimi_now_ms not declared".to_string())?;
@@ -54,7 +55,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_sleep(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("sleep expects 1 argument (milliseconds)".into()); }
                 let fn_val = self.module.get_function("mimi_sleep")
                     .ok_or_else(|| "codegen: mimi_sleep not declared".to_string())?;
@@ -67,7 +68,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_getenv(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("getenv expects 1 argument (name)".into()); }
                 let getenv_fn = self.module.get_function("mimi_getenv")
                     .ok_or_else(|| "codegen: mimi_getenv not declared".to_string())?;
@@ -94,7 +95,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_args(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if !args.is_empty() { return Err("args expects 0 arguments".into()); }
                 // Return the args count (simplified: return as i64 for now)
                 let count_fn = self.module.get_function("mimi_args_count")

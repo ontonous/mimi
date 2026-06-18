@@ -395,6 +395,7 @@ pub fn is_builtin(name: &str) -> bool {
 
 
 use super::CodeGenerator;
+use crate::error::{CompileError, MimiResult};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 
@@ -403,7 +404,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         name: &str,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         let libc_builtins: &[&str] = &[
             "println", "print", "eprintln",
             "assert", "assert_eq", "assert_ne", "assert_approx_eq",
@@ -493,9 +494,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "http_get" => self.compile_http_get(args),
             "http_post" => self.compile_http_post(args),
             "lexer" | "parse" => {
-                Err(format!("'{}' is a runtime-only function, not available in codegen", name))
+                Err(CompileError::Generic(format!("'{}' is a runtime-only function, not available in codegen", name)))
             }
-            _ => Err(format!("builtin '{}' not yet implemented in codegen", name)),
+            _ => Err(CompileError::Generic(format!("builtin '{}' not yet implemented in codegen", name))),
         }
     }
 }

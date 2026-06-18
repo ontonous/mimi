@@ -152,6 +152,8 @@ pub struct FuncDef {
     pub effects: Vec<String>,
     pub is_comptime: bool,
     pub is_async: bool,
+    /// Source position (line, col) from the `func` keyword
+    pub pos: (usize, usize),
 }
 
 #[derive(Debug, Clone)]

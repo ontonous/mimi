@@ -1,4 +1,5 @@
 use super::CodeGenerator;
+use crate::error::MimiResult;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -7,7 +8,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_to_json(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("[E0711] to_json expects 1 argument".into()); }
                 let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
@@ -142,7 +143,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_from_json(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("[E0711] from_json expects 1 argument".into()); }
                 let raw_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let from_json_fn = self.module.get_function("mimi_from_json")
@@ -162,7 +163,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_json_get_string(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("[E0711] json_get_string expects 2 arguments".into()); }
                 let json_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let key_ptr = self.extract_raw_str_ptr(&args[1])?;
@@ -183,7 +184,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_json_get_int(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("[E0711] json_get_int expects 2 arguments".into()); }
                 let json_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let key_ptr = self.extract_raw_str_ptr(&args[1])?;
@@ -201,7 +202,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_json_get_element(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("[E0711] json_get_element expects 2 arguments".into()); }
                 let json_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let index = match args[1] {

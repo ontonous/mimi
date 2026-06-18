@@ -1,4 +1,5 @@
 use super::CodeGenerator;
+use crate::error::MimiResult;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -7,7 +8,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_abs(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 {
                     return Err("abs expects 1 argument".into());
                 }
@@ -43,7 +44,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_sqrt(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 {
                     return Err("sqrt expects 1 argument".into());
                 }
@@ -63,7 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
         name: &str,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 {
                     return Err("min/max expects 2 arguments".into());
                 }
@@ -92,7 +93,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
         name: &str,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 {
                     return Err("floor/ceil/round expects 1 argument".into());
                 }
@@ -116,7 +117,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_pow(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("pow expects 2 arguments".into()); }
                 let f64_ty = self.context.f64_type();
                 let a = match args[0] {
@@ -155,7 +156,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_random(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 // Call libc random() and normalize to f64 in [0, 1)
                 let f64_ty = self.context.f64_type();
                 let i64_ty = self.context.i64_type();
@@ -180,7 +181,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_pi(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 // Return constant pi as f64
                 Ok(self.context.f64_type().const_float(std::f64::consts::PI).into())
 

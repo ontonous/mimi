@@ -6,6 +6,8 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
+use crate::error::{CompileError, MimiResult};
+
 use super::CodeGenerator;
 use super::VarEntry;
 
@@ -57,7 +59,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    pub fn compile_file(&mut self, file: &File) -> Result<(), String> {
+    pub fn compile_file(&mut self, file: &File) -> MimiResult<()> {
         // First pass: collect type definitions, function definitions, and cap definitions
         for item in &file.items {
             match item {

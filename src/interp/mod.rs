@@ -305,6 +305,7 @@ impl<'a> Interpreter<'a> {
                             effects: vec![],
                             is_comptime: false,
                             is_async: false,
+                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -327,6 +328,7 @@ impl<'a> Interpreter<'a> {
                             effects: vec![],
                             is_comptime: false,
                             is_async: false,
+                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -353,6 +355,7 @@ impl<'a> Interpreter<'a> {
                             effects: vec![],
                             is_comptime: false,
                             is_async: false,
+                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())

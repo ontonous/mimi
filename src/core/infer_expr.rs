@@ -40,11 +40,11 @@ impl<'a> Checker<'a> {
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0302,
                                         format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name),
-                                        Span::single(0, 0),
+                                        Span::single(self.current_line, self.current_col),
                                     ).with_note("mutable borrow occurs here", borrow_span)
                                 );
                             }
-                            self.set_borrow(name, BorrowState::BorrowedImm { span: Span::single(0, 0) });
+                            self.set_borrow(name, BorrowState::BorrowedImm { span: Span::single(self.current_line, self.current_col) });
                         }
                         Type::Ref(None, Box::new(t))
                     }
@@ -60,7 +60,7 @@ impl<'a> Checker<'a> {
                                             Diagnostic::error_code(
                                                 crate::diagnostic::codes::E0300,
                                                 format!("cannot borrow '{}' as mutable because it is already immutably borrowed", name),
-                                                Span::single(0, 0),
+                                                Span::single(self.current_line, self.current_col),
                                             ).with_note("immutable borrow occurs here", borrow_span)
                                         );
                                     }
@@ -70,13 +70,13 @@ impl<'a> Checker<'a> {
                                             Diagnostic::error_code(
                                                 crate::diagnostic::codes::E0301,
                                                 format!("cannot borrow '{}' as mutable because it is already mutably borrowed", name),
-                                                Span::single(0, 0),
+                                                Span::single(self.current_line, self.current_col),
                                             ).with_note("mutable borrow occurs here", borrow_span)
                                         );
                                     }
                                 }
                             }
-                            self.set_borrow(name, BorrowState::BorrowedMut { span: Span::single(0, 0) });
+                            self.set_borrow(name, BorrowState::BorrowedMut { span: Span::single(self.current_line, self.current_col) });
                         }
                         Type::RefMut(None, Box::new(t))
                     }
@@ -386,7 +386,7 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0215,
                                     format!("match expression is not exhaustive: missing variant '{}' of '{}'", variant, fmt_type(&subject_ty)),
-                                    Span::single(0, 0),
+                                    Span::single(self.current_line, self.current_col),
                                 ).with_help(format!("add an arm for '{}' or a wildcard '_ => ...' arm", variant))
                             );
                         }
@@ -1435,7 +1435,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0401,
                             format!("undefined function '{}'", name),
-                            Span::single(0, 0),
+                            Span::single(self.current_line, self.current_col),
                         ).with_help(format!("did you mean '{}'?", suggested))
                     );
                 } else {

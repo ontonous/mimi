@@ -814,7 +814,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mangled = Self::mangle_name(name, &merged_map);
         // Compile the specialized version if not yet compiled
         if self.module.get_function(&mangled).is_none() {
-            self.compile_generic_func(&func, &merged_map)?;
+            self.compile_generic_func(&func, &merged_map).map_err(|e| e.to_string())?;
         }
         // Call the mangled function
         self.compile_call_mangled(&mangled, args, vars)
@@ -1554,7 +1554,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Err path: run compensations, print error message, exit(1)
                 self.builder.position_at_end(err_bb);
                 let mut comp_vars = vars.clone();
-                self.compile_compensations(&mut comp_vars)?;
+                self.compile_compensations(&mut comp_vars).map_err(|e| e.to_string())?;
                 let try_exit_fn = self.module.get_function("mimi_try_exit")
                     .ok_or("mimi_try_exit not declared")?;
                 self.builder.build_call(try_exit_fn, &[
@@ -1580,7 +1580,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 self.builder.position_at_end(err_bb);
                 let mut comp_vars = vars.clone();
-                self.compile_compensations(&mut comp_vars)?;
+                self.compile_compensations(&mut comp_vars).map_err(|e| e.to_string())?;
                 let try_exit_fn = self.module.get_function("mimi_try_exit")
                     .ok_or("mimi_try_exit not declared")?;
                 self.builder.build_call(try_exit_fn, &[
@@ -1694,7 +1694,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Then branch
         self.builder.position_at_end(then_bb);
         let mut then_vars = vars.clone();
-        let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+        let then_val = self.compile_block_last_val(then_, &mut then_vars).map_err(|e| e.to_string())?;
         if !self.block_has_terminator() {
             self.builder.build_unconditional_branch(merge_bb)
                 .map_err(|e| format!("branch error: {}", e))?;
@@ -1704,7 +1704,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(else_bb);
         let else_val = if let Some(eb) = else_ {
             let mut else_vars = vars.clone();
-            let v = self.compile_block_last_val(eb, &mut else_vars)?;
+            let v = self.compile_block_last_val(eb, &mut else_vars).map_err(|e| e.to_string())?;
             if !self.block_has_terminator() {
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| format!("branch error: {}", e))?;
@@ -2548,7 +2548,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Dispatch builtins
         if super::builtins::is_builtin(name) {
-            return self.compile_builtin_call(name, &metadata_args);
+            return self.compile_builtin_call(name, &metadata_args).map_err(|e| e.to_string());
         }
 
         // Handle built-in Option/Result constructors

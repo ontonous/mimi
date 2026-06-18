@@ -11,6 +11,7 @@ mod block;
 mod expr;
 
 use crate::ast::*;
+use crate::error::CompileError;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
@@ -66,23 +67,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.get_insert_block().and_then(|b| b.get_terminator()).is_some()
     }
 
-    fn expect_basic_value(&self, call: &inkwell::values::CallSiteValue<'ctx>, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
-        call.try_as_basic_value().left().ok_or_else(|| format!("codegen: expected basic value from {}", name))
+    fn expect_basic_value(&self, call: &inkwell::values::CallSiteValue<'ctx>, name: &str) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        call.try_as_basic_value().left().ok_or_else(|| CompileError::Generic(format!("codegen: expected basic value from {}", name)))
     }
 
-    fn codegen_err(&self, code: &str, msg: String) -> String {
-        format!("[{}] {}", code, msg)
-    }
-
-    fn cg_err<T>(&self, code: &str, msg: impl Into<String>) -> Result<T, String> {
-        Err(self.codegen_err(code, msg.into()))
+    fn cg_err<T>(&self, code: &str, msg: impl Into<String>) -> Result<T, CompileError> {
+        Err(CompileError::Generic(format!("[{}] {}", code, msg.into())))
     }
 
     pub fn emit_ir(&self) -> String {
         self.module.print_to_string().to_string()
     }
 
-    pub fn compile_to_object(&self, output_path: &Path) -> Result<(), String> {
+    pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
         Target::initialize_native(&InitializationConfig::default())
             .map_err(|e| format!("failed to initialize target: {}", e))?;
         let triple = TargetMachine::get_default_triple();
@@ -111,6 +108,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).ok_or_else(|| format!("failed to create target machine for triple '{}'", triple_ref))?;
 
         tm.write_to_file(&self.module, inkwell::targets::FileType::Object, output_path)
-            .map_err(|e| format!("failed to write object file: {}", e))
+            .map_err(|e| CompileError::Generic(format!("failed to write object file: {}", e)))
     }
 }

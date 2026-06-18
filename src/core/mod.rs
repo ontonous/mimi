@@ -167,6 +167,9 @@ struct Checker<'a> {
     loop_depth: usize,
     /// Track generic parameters in scope while checking signatures
     generic_scope: Vec<String>,
+    /// Current item/function line-col for fallback error positioning
+    current_line: usize,
+    current_col: usize,
 }
 
 mod check_stmt;
@@ -200,7 +203,15 @@ impl<'a> Checker<'a> {
             module_path: Vec::new(),
             loop_depth: 0,
             generic_scope: Vec::new(),
+            current_line: 0,
+            current_col: 0,
         }
+    }
+
+    /// Set the current position for fallback error spans.
+    pub(crate) fn set_pos(&mut self, line: usize, col: usize) {
+        self.current_line = line;
+        self.current_col = col;
     }
 
     fn check(&mut self) -> Result<(), Vec<Diagnostic>> {
@@ -216,21 +227,20 @@ impl<'a> Checker<'a> {
     }
 
     fn emit(&mut self, msg: impl Into<String>) {
-        self.errors.push(Diagnostic::error(msg, Span::single(0, 0)));
+        let span = Span::single(self.current_line, self.current_col);
+        self.errors.push(Diagnostic::error(msg, span));
     }
 
-    #[allow(dead_code)]
-    fn emit_at(&mut self, msg: impl Into<String>, line: usize, col: usize) {
+    pub(crate) fn emit_at(&mut self, msg: impl Into<String>, line: usize, col: usize) {
         self.errors.push(Diagnostic::error(msg, Span::single(line, col)));
     }
 
-    #[allow(dead_code)]
     fn emit_code(&mut self, code: &str, msg: impl Into<String>) {
-        self.errors.push(Diagnostic::error_code(code, msg, Span::single(0, 0)));
+        let span = Span::single(self.current_line, self.current_col);
+        self.errors.push(Diagnostic::error_code(code, msg, span));
     }
 
-    #[allow(dead_code)]
-    fn emit_with_code(&mut self, code: &str, msg: impl Into<String>, span: Span) {
+    pub(crate) fn emit_with_code(&mut self, code: &str, msg: impl Into<String>, span: Span) {
         self.errors.push(Diagnostic::error_code(code, msg, span));
     }
 
@@ -467,6 +477,7 @@ impl<'a> Checker<'a> {
     fn collect_item_decls(&mut self, item: &Item) {
         match item {
             Item::Func(f) => {
+                self.set_pos(f.pos.0, f.pos.1);
                 let qualified_name = if self.module_path.is_empty() {
                     f.name.clone()
                 } else {
@@ -767,6 +778,7 @@ impl<'a> Checker<'a> {
     fn check_item(&mut self, item: &Item) {
         match item {
             Item::Func(f) => {
+                self.set_pos(f.pos.0, f.pos.1);
                 // Strict mode: check commitment locks
                 if self.strict {
                     self.check_commitment_locks(f.name.as_str(), f.commitment, &f.body);
@@ -799,6 +811,7 @@ impl<'a> Checker<'a> {
                 }
                 // Check actor methods
                 for method in &actor.methods {
+                    self.set_pos(method.pos.0, method.pos.1);
                     // Add implicit self parameter to scope for actor methods
                     let self_ty = Type::Name(actor.name.clone(), vec![]);
                     let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
@@ -851,7 +864,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0407,
                             format!("undefined type '{}'", impl_def.type_name),
-                            Span::single(0, 0),
+                            Span::single(self.current_line, self.current_col),
                         ).with_help("types must be defined before use — check the type name spelling or add a 'type' declaration")
                     );
                 }
@@ -869,6 +882,7 @@ impl<'a> Checker<'a> {
                 }
                 // Check impl method bodies
                 for method in &impl_def.methods {
+                    self.set_pos(method.pos.0, method.pos.1);
                     self.check_func(method);
                 }
             }
@@ -1147,7 +1161,7 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0501,
                                     format!("strict mode: function '{}' is $$ locked - contract modifications not allowed", name),
-                                    Span::single(0, 0),
+                                    Span::single(self.current_line, self.current_col),
                                 ).with_help("remove $$ suffix to allow modification, or use $$? for AI-reviewable lock")
                             );
                         }
@@ -1163,7 +1177,7 @@ impl<'a> Checker<'a> {
                                 Diagnostic::warning_code(
                                     crate::diagnostic::codes::E0600,
                                     format!("strict mode: function '{}' is $ locked - contract modifications discouraged", name),
-                                    Span::single(0, 0),
+                                    Span::single(self.current_line, self.current_col),
                                 ).with_help("remove $ suffix to allow modification")
                             );
                         }
@@ -1508,7 +1522,7 @@ impl<'a> Checker<'a> {
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0400,
                     format!("undefined variable '{}'", name),
-                    Span::single(0, 0),
+                    Span::single(self.current_line, self.current_col),
                 ).with_help(format!("did you mean '{}'?", suggested))
             );
         } else {

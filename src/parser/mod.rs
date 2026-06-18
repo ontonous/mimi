@@ -665,6 +665,7 @@ impl Parser {
     }
 
     fn parse_func(&mut self) -> Result<FuncDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         let commitment = self.expect_keyword(TokenKind::Func)?;
         let name = self.expect_ident()?;
         // Parse optional generic parameters: <T> or <T: Trait>
@@ -730,6 +731,7 @@ impl Parser {
             effects,
             is_comptime: false,
             is_async: false,
+            pos,
         })
     }
 

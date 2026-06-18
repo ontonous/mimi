@@ -1,4 +1,5 @@
 use super::CodeGenerator;
+use crate::error::MimiResult;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -7,20 +8,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_map_new(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 let func = self.module.get_function("mimi_map_new")
                     .ok_or("mimi_map_new not declared")?;
                 let result = self.builder.build_call(func, &[], "map_new_call")
                     .map_err(|e| format!("map_new error: {}", e))?;
-                result.try_as_basic_value().left()
-                    .ok_or("mimi_map_new returned void".to_string())
+                Ok(result.try_as_basic_value().left()
+                    .ok_or("mimi_map_new returned void")?)
 
     }
 
     pub(super) fn compile_map_size(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("map_size expects 1 argument".into()); }
                 let map_handle = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
@@ -32,15 +33,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(map_handle),
                 ], "map_size_call")
                     .map_err(|e| format!("map_size error: {}", e))?;
-                result.try_as_basic_value().left()
-                    .ok_or("mimi_map_size returned void".to_string())
+                Ok(result.try_as_basic_value().left()
+                    .ok_or("mimi_map_size returned void")?)
 
     }
 
     pub(super) fn compile_has_key(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("has_key expects 2 arguments (map, key)".into()); }
                 let map_handle = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
@@ -68,7 +69,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_map_get(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("map_get expects 2 arguments (map, key)".into()); }
                 let map_handle = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
@@ -123,7 +124,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_map_set(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 3 { return Err("map_set expects 3 arguments (map, key, value)".into()); }
                 let map_handle = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
@@ -153,7 +154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_map_remove(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err("map_remove expects 2 arguments (map, key)".into()); }
                 let map_handle = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
@@ -178,7 +179,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_map_from_list(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err("map_from_list expects 1 argument".into()); }
                 let list_ptr = match args[0] {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
@@ -286,8 +287,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(list_len),
                 ], "map_from_list_call")
                     .map_err(|e| format!("map_from_list error: {}", e))?;
-                result.try_as_basic_value().left()
-                    .ok_or("mimi_map_from_list returned void".to_string())
+                Ok(result.try_as_basic_value().left()
+                    .ok_or("mimi_map_from_list returned void")?)
 
     }
 
