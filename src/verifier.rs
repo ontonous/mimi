@@ -37,9 +37,10 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn new() -> Self {
-        let solver = Solver::new();
-        Self { solver }
+    pub fn new() -> Result<Self, String> {
+        let solver = std::panic::catch_unwind(|| Solver::new())
+            .map_err(|_| "failed to initialize Z3 solver (is libz3 installed?)".to_string())?;
+        Ok(Self { solver })
     }
 
     pub fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
@@ -121,24 +122,29 @@ impl Verifier {
         let z3_result = Z3Int::new_const("result");
         let mut z3_vars: Vec<(&str, Z3Int)> = Vec::new();
         let mut z3_real_vars: Vec<(&str, Z3Real)> = Vec::new();
+        let mut old_name_strings: Vec<String> = Vec::new();
         
         for p in &func.params {
             let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            let _is_bool = matches!(&p.ty, Type::Name(n, _) if n == "bool");
             
             if is_float {
                 z3_real_vars.push((p.name.as_str(), Z3Real::new_const(p.name.as_str())));
             } else {
-                // int, bool (as 0/1), and unknown types → Int
                 z3_vars.push((p.name.as_str(), Z3Int::new_const(p.name.as_str())));
             }
             
-            // Create old() snapshot variables
             let old_name = format!("old_{}", p.name);
+            old_name_strings.push(old_name);
+        }
+        
+        for p in &func.params {
+            let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
+            let old_name = format!("old_{}", p.name);
+            let name_ref = old_name_strings.iter().find(|s| s.as_str() == old_name).unwrap().as_str();
             if is_float {
-                z3_real_vars.push((Box::leak(old_name.clone().into_boxed_str()), Z3Real::new_const(old_name.as_str())));
+                z3_real_vars.push((name_ref, Z3Real::new_const(name_ref)));
             } else {
-                z3_vars.push((Box::leak(old_name.clone().into_boxed_str()), Z3Int::new_const(old_name.as_str())));
+                z3_vars.push((name_ref, Z3Int::new_const(name_ref)));
             }
         }
         z3_vars.push(("result", z3_result.clone()));
@@ -182,8 +188,8 @@ impl Verifier {
         let constraint_count = requires_exprs.len() + math_exprs.len() + func.params.len()
             + if body_return.is_some() { 1 } else { 0 };
 
-        match self.solver.check() {
-            SatResult::Sat => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())) {
+            Ok(SatResult::Sat) => {
                 if !ensures_exprs.is_empty() {
                     self.solver.push();
                     for ens in &ensures_exprs {
@@ -245,7 +251,7 @@ impl Verifier {
                     }
                 }
             }
-            SatResult::Unsat => {
+            Ok(SatResult::Unsat) => {
                 let req_span = requires_spans.first().copied()
                     .unwrap_or_else(|| Span::single(0, 0));
                 let diagnostic = Diagnostic::error(
@@ -261,10 +267,18 @@ impl Verifier {
                     constraint_count,
                 }
             }
-            SatResult::Unknown => VerificationResult {
+            Ok(SatResult::Unknown) => VerificationResult {
                 func_name: func.name.clone(),
                 status: VerifStatus::Unknown,
                 message: "precondition satisfiability unknown".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+            },
+            Err(_) => VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::Unknown,
+                message: "verification timed out or crashed".into(),
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
@@ -745,7 +759,7 @@ fn format_expr(expr: &Expr) -> String {
 pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let tokens = crate::lexer::Lexer::new(source).tokenize()?;
     let file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
-    let mut verifier = Verifier::new();
+    let mut verifier = Verifier::new()?;
     Ok(verifier.verify_file(&file))
 }
 

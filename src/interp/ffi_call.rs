@@ -85,8 +85,13 @@ impl<'a> Interpreter<'a> {
 
         let func_name = extern_func.name.clone();
 
-        // Call the function via libloading
-        // Safety: The symbol is resolved from a loaded library and transmuted to the expected function signature; arguments are converted from Mimi values to C-compatible i64 values, and errno is cleared before the call.
+        // SAFETY: All C function calls use a uniform `fn(i64 x 8) -> i64` signature.
+        // This is correct on x86_64 SysV ABI where:
+        //   - integers/pointers pass in 6-bit GP registers (rdi, rsi, ...)
+        //   - floats pass in XMM registers but are bit-cast to i64 for the Rust side
+        //   - strings pass as pointer (i64 via `CString::as_ptr() as i64`)
+        // The FfiContract type system (FfiArgContract/FfiRetContract) ensures correct
+        // encoding/decoding at the Rust boundary. C functions must match this convention.
         let result = unsafe {
             // Clear errno before call to avoid stale errno
             if contract.check_errno {

@@ -134,6 +134,14 @@ impl ModuleLoader {
 
     /// Resolve a use path to a file path
     fn resolve_import(&self, from: &Path, path: &[String]) -> Result<PathBuf, String> {
+        for segment in path {
+            if segment == ".." || segment.contains('/') || segment.contains('\\') {
+                return Err(format!(
+                    "import path '{}' contains invalid segment '{}'",
+                    path.join("::"), segment
+                ));
+            }
+        }
         let base = from.parent().unwrap_or(&self.base_dir);
 
         // Simple resolution: join the path segments and add .mimi extension

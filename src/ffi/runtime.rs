@@ -48,7 +48,7 @@ impl CapTable {
     /// Register a new capability and return its unique ID.
     pub fn register(&self, name: &str) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.insert(id, CapEntry {
             name: name.to_string(),
             consumed: false,
@@ -59,7 +59,7 @@ impl CapTable {
     /// Check whether the cap with the given ID exists, matches the name, and
     /// has not been consumed.  Does NOT consume the cap.
     pub fn check(&self, id: i64, name: &str) -> bool {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get(&id) {
             Some(entry) => !entry.consumed && entry.name == name,
             None => false,
@@ -70,7 +70,7 @@ impl CapTable {
     /// the name, and was not already consumed.  After this call the cap is
     /// marked as consumed and cannot be used again.
     pub fn consume(&self, id: i64, name: &str) -> bool {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get_mut(&id) {
             Some(entry) if !entry.consumed && entry.name == name => {
                 entry.consumed = true;
@@ -82,7 +82,7 @@ impl CapTable {
 
     /// Remove a consumed cap from the table (cleanup).
     pub fn remove(&self, id: i64) -> bool {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.remove(&id).is_some()
     }
 }
@@ -200,14 +200,14 @@ impl SharedHandleTable {
     pub fn create(&self, inner: Arc<RwLock<Value>>) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(SharedHandle::new(inner));
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.insert(id, handle);
         id
     }
 
     /// Get a reference to the handle by ID.
     pub fn get(&self, id: i64) -> Option<Arc<SharedHandle>> {
-        let handles = self.handles.lock().unwrap();
+        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.get(&id).cloned()
     }
 
@@ -225,12 +225,12 @@ impl SharedHandleTable {
     /// removes the handle from the table and returns `true`.
     pub fn release(&self, id: i64) -> bool {
         let handle = {
-            let handles = self.handles.lock().unwrap();
+            let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             handles.get(&id).cloned()
         };
         if let Some(handle) = handle {
             if handle.release() {
-                let mut handles = self.handles.lock().unwrap();
+                let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
                 handles.remove(&id);
                 return true;
             }
@@ -240,13 +240,13 @@ impl SharedHandleTable {
 
     /// Remove a handle from the table unconditionally (cleanup).
     pub fn remove(&self, id: i64) -> bool {
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.remove(&id).is_some()
     }
 
     /// Get the number of active handles (for diagnostics).
     pub fn len(&self) -> usize {
-        let handles = self.handles.lock().unwrap();
+        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.len()
     }
 }
@@ -357,7 +357,7 @@ pub extern "C" fn mimi_string_as_c_str(mimi_string: *const Value) -> *const std:
                 let c_str = std::ffi::CString::new(s.as_str()).unwrap_or_default();
                 let ptr = c_str.as_ptr();
                 // Register for cleanup — caller must call mimi_string_as_c_str_free
-                PENDING_C_STRINGS.lock().unwrap().push(c_str);
+                PENDING_C_STRINGS.lock().unwrap_or_else(|e| e.into_inner()).push(c_str);
                 ptr
             }
             _ => std::ptr::null(),
@@ -372,7 +372,7 @@ pub extern "C" fn mimi_string_as_c_str_free(c_str: *const std::ffi::c_char) {
     if c_str.is_null() {
         return;
     }
-    let mut pending = PENDING_C_STRINGS.lock().unwrap();
+    let mut pending = PENDING_C_STRINGS.lock().unwrap_or_else(|e| e.into_inner());
     pending.retain(|cs| cs.as_ptr() != c_str);
 }
 
@@ -469,12 +469,12 @@ impl MimiThreadPool {
         for _ in 0..size {
             let receiver = std::sync::Arc::clone(&receiver);
             let worker = thread::spawn(move || loop {
-                let task = receiver.lock().unwrap().recv();
+                let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
                 match task {
                     Ok(task) => {
                         let _ = (task.func)(task.arg);
                         // Decrement pending count and notify waiters
-                        let mut count = task.pending.lock().unwrap();
+                        let mut count = task.pending.lock().unwrap_or_else(|e| e.into_inner());
                         *count -= 1;
                         if *count == 0 {
                             task.completion.notify_all();
@@ -490,7 +490,7 @@ impl MimiThreadPool {
     }
 
     pub fn submit_raw(&self, func: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
-        let mut count = self.pending.lock().unwrap();
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         let _ = self.sender.send(RawTask {
             func,
@@ -525,7 +525,7 @@ impl MimiThreadPool {
             (data.func)(data.arg);
             std::ptr::null_mut()
         }
-        let mut count = self.pending.lock().unwrap();
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         let _ = self.sender.send(RawTask {
             func: data_trampoline,
@@ -537,7 +537,7 @@ impl MimiThreadPool {
 
     /// Wait until all submitted tasks have completed.
     pub fn join_all(&self) {
-        let mut count = self.pending.lock().unwrap();
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         while *count > 0 {
             count = self.completion.wait(count).unwrap();
         }
@@ -565,9 +565,13 @@ pub unsafe extern "C" fn mimi_pool_submit(fn_ptr: *const u8, arg: *mut u8) {
     if fn_ptr.is_null() {
         return;
     }
+    // Reject misaligned pointers - function pointers should be at least word-aligned
+    if fn_ptr as usize % std::mem::align_of::<usize>() != 0 {
+        return;
+    }
     if let Some(pool) = MIMI_POOL.as_ref() {
-        // SAFETY: The caller guarantees fn_ptr is a valid function pointer
-        // and arg is valid for the duration of the task.
+        // SAFETY: The caller guarantees fn_ptr is a valid function pointer,
+        // arg is valid for the duration of the task, and alignment is verified above.
         let func: extern "C" fn(*mut u8) -> *mut u8 = std::mem::transmute(fn_ptr);
         pool.submit_raw(func, arg);
     }

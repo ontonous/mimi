@@ -3,6 +3,8 @@ use crate::ast::Item;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 
+const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
+
 /// LSP server for Mimi language
 pub struct LspServer {
     documents: HashMap<String, String>,
@@ -40,7 +42,7 @@ impl LspServer {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
-            if len == 0 {
+            if len == 0 || len > MAX_CONTENT_LENGTH {
                 continue;
             }
 
@@ -114,6 +116,11 @@ impl LspServer {
                     .get("text")?
                     .as_str()?;
                 self.documents.insert(uri.to_string(), text.to_string());
+                if self.documents.len() > 256 {
+                    if let Some(oldest_key) = self.documents.keys().next().cloned() {
+                        self.documents.remove(&oldest_key);
+                    }
+                }
                 // Publish diagnostics
                 let diagnostics = self.compute_diagnostics(text);
                 Some(serde_json::json!({
@@ -137,6 +144,11 @@ impl LspServer {
                     .get("text")?
                     .as_str()?;
                 self.documents.insert(uri.to_string(), text.to_string());
+                if self.documents.len() > 256 {
+                    if let Some(oldest_key) = self.documents.keys().next().cloned() {
+                        self.documents.remove(&oldest_key);
+                    }
+                }
                 let diagnostics = self.compute_diagnostics(text);
                 Some(serde_json::json!({
                     "jsonrpc": "2.0",
@@ -146,6 +158,14 @@ impl LspServer {
                         "diagnostics": diagnostics
                     }
                 }))
+            }
+            "textDocument/didClose" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                self.documents.remove(uri);
+                None
             }
             "textDocument/completion" => {
                 let uri = msg.get("params")?
