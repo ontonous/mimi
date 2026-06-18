@@ -885,7 +885,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::SharedLet { init, .. } => {
                     self.compile_expr(init, &vars)?;
                 }
-                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {}
+                Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
                 _ => {}
             }
         }
@@ -1400,7 +1400,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
                     self.compile_block(body, &mut vars)?;
                 }
-                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {
+                Stmt::Desc(_) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Math(_) => {
                     // Skip contract-related statements in codegen
                 }
                 _ => {}
@@ -1614,7 +1614,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified)
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Desc(_) | Stmt::Requires(_) | Stmt::Ensures(_) | Stmt::Math(_) => {
+                Stmt::Desc(_) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Math(_) => {
                     // Skip contract-related statements in codegen
                 }
                 _ => {}
