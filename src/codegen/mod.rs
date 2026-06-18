@@ -993,8 +993,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
                     self.compile_block(block, &mut vars)?;
                 }
-                Stmt::SharedLet { init, .. } => {
-                    self.compile_expr(init, &vars)?;
+                Stmt::SharedLet { name, init, .. } => {
+                    let val = self.compile_expr(init, &vars)?;
+                    let llvm_ty = val.get_type();
+                    let alloca = self.builder.build_alloca(llvm_ty, name)
+                        .map_err(|e| format!("shared alloca error: {}", e))?;
+                    self.builder.build_store(alloca, val)
+                        .map_err(|e| format!("shared store error: {}", e))?;
+                    vars.insert(name.clone(), (alloca, llvm_ty));
                 }
                 Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
                 _ => {}
@@ -1528,9 +1534,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
-                Stmt::SharedLet { init, .. } => {
-                    // SharedLet: evaluate init expression (simplified - no actual shared ownership in codegen)
-                    self.compile_expr(init, &vars)?;
+                Stmt::SharedLet { name, init, .. } => {
+                    let val = self.compile_expr(init, &vars)?;
+                    let llvm_ty = val.get_type();
+                    let alloca = self.builder.build_alloca(llvm_ty, name)
+                        .map_err(|e| format!("shared alloca error: {}", e))?;
+                    self.builder.build_store(alloca, val)
+                        .map_err(|e| format!("shared store error: {}", e))?;
+                    vars.insert(name.clone(), (alloca, llvm_ty));
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit
@@ -1786,9 +1797,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Drop: evaluate expression and discard result (for linear capabilities)
                     self.compile_expr(expr, vars)?;
                 }
-                Stmt::SharedLet { init, .. } => {
-                    // SharedLet: evaluate init expression (simplified)
-                    self.compile_expr(init, vars)?;
+                Stmt::SharedLet { name, init, .. } => {
+                    let val = self.compile_expr(init, vars)?;
+                    let llvm_ty = val.get_type();
+                    let alloca = self.builder.build_alloca(llvm_ty, name)
+                        .map_err(|e| format!("shared alloca error: {}", e))?;
+                    self.builder.build_store(alloca, val)
+                        .map_err(|e| format!("shared store error: {}", e))?;
+                    vars.insert(name.clone(), (alloca, llvm_ty));
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit
