@@ -4,6 +4,8 @@ mod value;
 mod closure_utils;
 mod eval;
 mod call;
+mod builtins;
+mod ffi_call;
 mod pattern;
 mod quote;
 mod actor;
