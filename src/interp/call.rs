@@ -830,11 +830,57 @@ impl<'a> Interpreter<'a> {
                 if args.len() != 1 { return Err("from_json expects 1 argument (json string)".into()); }
                 match &args[0] {
                     Value::String(s) => {
-                        let json_val: serde_json::Value = serde_json::from_str(s)
+                        // Validate JSON and return the string as-is (matches codegen behavior)
+                        let _: serde_json::Value = serde_json::from_str(s)
                             .map_err(|e| format!("from_json parse error: {}", e))?;
-                        Ok(self.json_to_value(&json_val))
+                        Ok(Value::String(s.clone()))
                     }
                     _ => Err("from_json expects a string".into()),
+                }
+            }
+            "json_get_string" => {
+                if args.len() != 2 { return Err("json_get_string expects 2 arguments".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::String(json), Value::String(key)) => {
+                        let jv: serde_json::Value = serde_json::from_str(json)
+                            .map_err(|e| format!("json_get_string parse error: {}", e))?;
+                        match jv.get(key) {
+                            Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
+                            _ => Ok(Value::String("".into())),
+                        }
+                    }
+                    _ => Err("json_get_string expects (string, string)".into()),
+                }
+            }
+            "json_get_int" => {
+                if args.len() != 2 { return Err("json_get_int expects 2 arguments".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::String(json), Value::String(key)) => {
+                        let jv: serde_json::Value = serde_json::from_str(json)
+                            .map_err(|e| format!("json_get_int parse error: {}", e))?;
+                        match jv.get(key) {
+                            Some(serde_json::Value::Number(n)) => {
+                                if let Some(i) = n.as_i64() { Ok(Value::Int(i)) }
+                                else { Ok(Value::Int(0)) }
+                            }
+                            _ => Ok(Value::Int(0)),
+                        }
+                    }
+                    _ => Err("json_get_int expects (string, string)".into()),
+                }
+            }
+            "json_get_element" => {
+                if args.len() != 2 { return Err("json_get_element expects 2 arguments".into()); }
+                match (&args[0], &args[1]) {
+                    (Value::String(json), Value::Int(idx)) => {
+                        let jv: serde_json::Value = serde_json::from_str(json)
+                            .map_err(|e| format!("json_get_element parse error: {}", e))?;
+                        match jv.get(*idx as usize) {
+                            Some(val) => Ok(Value::String(val.to_string())),
+                            None => Ok(Value::String("".into())),
+                        }
+                    }
+                    _ => Err("json_get_element expects (string, int)".into()),
                 }
             }
             "str_char_at" => {

@@ -1300,6 +1300,41 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            "from_json" => {
+                if args.len() != 1 {
+                    self.emit("from_json expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "json_get_string" => {
+                if args.len() != 2 {
+                    self.emit("json_get_string expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "json_get_int" => {
+                if args.len() != 2 {
+                    self.emit("json_get_int expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
+            "json_get_element" => {
+                if args.len() != 2 {
+                    self.emit("json_get_element expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             _ => {}
         }
 

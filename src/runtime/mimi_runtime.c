@@ -162,7 +162,7 @@ int64_t mimi_close(int64_t fd) { (void)fd; return -1; }
 char* mimi_http_get(const char* u) { (void)u; return (char*)0; }
 char* mimi_http_post(const char* u, const char* b) { (void)u; (void)b; return (char*)0; }
 const char* json_get_string(const char* j, const char* k) { (void)j; (void)k; return (const char*)0; }
-int json_get_int(const char* j, const char* k, int64_t* o) { (void)j; (void)k; (void)o; return 0; }
+int64_t json_get_int(const char* j, const char* k) { (void)j; (void)k; return 0; }
 const char* json_get_element(const char* j, int64_t i) { (void)j; (void)i; return (const char*)0; }
 
 /* Stubs for pthread (parasteps won't work in freestanding) */
@@ -776,7 +776,7 @@ static int json_parse_string(JsonParser* jp, char** out, size_t* out_len) {
     while (*jp->p) {
         if (esc) { esc = 0; len++; jp->p++; continue; }
         if (*jp->p == '\\') { esc = 1; len++; jp->p++; continue; }
-        if (*jp->p == '"') { len++; jp->p++; break; }
+        if (*jp->p == '"') { jp->p++; break; }
         len++; jp->p++;
     }
     if (*(jp->p - 1) != '"') { jp->err_pos = start; return 0; }
@@ -785,7 +785,7 @@ static int json_parse_string(JsonParser* jp, char** out, size_t* out_len) {
         if (*out) {
             memcpy(*out, start, len);
             (*out)[len] = '\0';
-            /* Unescape JSON escapes (simplified) */
+            /* Unescape JSON escapes */
             char* w = *out;
             for (char* r = *out; *r; r++) {
                 if (*r == '\\') {
@@ -799,7 +799,7 @@ static int json_parse_string(JsonParser* jp, char** out, size_t* out_len) {
                         case 'n': *w++ = '\n'; break;
                         case 'r': *w++ = '\r'; break;
                         case 't': *w++ = '\t'; break;
-                        case 'u': { /* Simple: skip unicode escapes */ r += 4; *w++ = '?'; break; }
+                        case 'u': { r += 4; *w++ = '?'; break; }
                         default: *w++ = *r; break;
                     }
                 } else {
@@ -960,16 +960,15 @@ const char* json_get_string(const char* json_str, const char* key) {
 }
 
 /* json_get_int: extract an integer field from a JSON object.
- * Returns 1 on success, 0 on failure. */
-int json_get_int(const char* json_str, const char* key, int64_t* out) {
+ * Returns the value, or 0 if not found/error. */
+int64_t json_get_int(const char* json_str, const char* key) {
     char* val = (char*)json_get_string(json_str, key);
     if (!val) return 0;
     char* end = NULL;
     int64_t result = strtoll(val, &end, 10);
     int ok = (end && *end == '\0');
     free(val);
-    if (ok) *out = result;
-    return ok;
+    return ok ? result : 0;
 }
 
 /* json_get_element: extract an element from a JSON array by index.

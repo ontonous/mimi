@@ -144,10 +144,14 @@ impl Parser {
             TokenKind::Int(s) => {
                 let (line, col) = (self.peek().line, self.peek().col);
                 self.advance();
-                let v = s
-                    .replace('_', "")
-                    .parse::<i64>()
-                    .map_err(|_| ParseError::new("invalid integer", line, col))?;
+                let cleaned = s.replace('_', "");
+                let v = if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                    i64::from_str_radix(&cleaned[2..], 16)
+                        .map_err(|_| ParseError::new("invalid hex integer", line, col))?
+                } else {
+                    cleaned.parse::<i64>()
+                        .map_err(|_| ParseError::new("invalid integer", line, col))?
+                };
                 return self.parse_postfix(Expr::Literal(Lit::Int(v)));
             }
             TokenKind::Float(s) => {

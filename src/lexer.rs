@@ -605,10 +605,30 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_number(&mut self) -> TokenKind {
-        let start_line = self.line;
-        let start_col = self.col;
+        let _start_line = self.line;
+        let _start_col = self.col;
         let mut s = String::new();
         let mut is_float = false;
+        // Check for 0x or 0X prefix (hex literal)
+        if let Some('0') = self.peek() {
+            let mut tmp = self.chars.clone();
+            let next = tmp.next();
+            if matches!(next, Some('x') | Some('X')) {
+                s.push('0');
+                self.advance();
+                s.push('x');
+                self.advance();
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_hexdigit() || c == '_' {
+                        s.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                return TokenKind::Int(s);
+            }
+        }
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
                 s.push(c);
@@ -633,7 +653,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        let _ = (start_line, start_col);
+        let _ = (_start_line, _start_col);
         if is_float {
             TokenKind::Float(s)
         } else {

@@ -5,7 +5,7 @@ use inkwell::AddressSpace;
 
 pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
     match ty {
-        Type::Name(name, _) => match name.as_str() {
+        Type::Name(name, args) => match name.as_str() {
             "i32" | "i64" => Some(BasicTypeEnum::IntType(ctx.i64_type())),
             "f64" => Some(BasicTypeEnum::FloatType(ctx.f64_type())),
             "bool" => Some(BasicTypeEnum::IntType(ctx.bool_type())),
@@ -14,6 +14,16 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
                 let i64 = ctx.i64_type();
                 let fields = [BasicTypeEnum::PointerType(i8_ptr), BasicTypeEnum::IntType(i64)];
                 Some(BasicTypeEnum::StructType(ctx.struct_type(&fields, false)))
+            }
+            "Result" if args.len() == 2 => {
+                let ok = mimi_type_to_llvm(ctx, &args[0])?;
+                let disc = BasicTypeEnum::IntType(ctx.bool_type());
+                Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok], false)))
+            }
+            "Option" if args.len() == 1 => {
+                let inner = mimi_type_to_llvm(ctx, &args[0])?;
+                let disc = BasicTypeEnum::IntType(ctx.bool_type());
+                Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner], false)))
             }
             "unit" | "nothing" => None,
             _ => Some(BasicTypeEnum::IntType(ctx.i64_type())),

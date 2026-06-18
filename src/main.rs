@@ -997,24 +997,42 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
 
     codegen.compile_to_object(&output_path.with_extension("o"))?;
 
-    // Link with cc to create executable
+    // Compile and link C runtime
     let obj_path = output_path.with_extension("o");
+    // Compile the C runtime to a temp object
+    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
+    let runtime_o = output_path.parent().unwrap_or(std::path::Path::new(".")).join("mimi_runtime.o");
+    let mut rt_cmd = std::process::Command::new("cc");
+    if no_std {
+        rt_cmd.arg("-DMIMI_NO_STD");
+    }
+    let rt_status = rt_cmd
+        .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
+        .status()
+        .map_err(|e| format!("runtime compile: {}", e))?;
+    if !rt_status.success() {
+        let _ = std::fs::remove_file(&obj_path);
+        return Err("C runtime compilation failed".into());
+    }
+
+    // Link with cc to create executable
     let mut cmd = std::process::Command::new("cc");
     if no_std {
-        // Freestanding: no libc, no-pie, minimal startup
         cmd.arg("-nostdlib").arg("-static");
     } else {
         cmd.arg("-no-pie");
     }
     let status = cmd
         .arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
+        .arg(runtime_o.to_str().ok_or("runtime object path is not valid UTF-8")?)
         .arg("-o")
         .arg(output_path.to_str().ok_or("output path is not valid UTF-8")?)
         .status()
         .map_err(|e| format!("failed to run linker: {}", e))?;
 
-    // Cleanup object file
+    // Cleanup object files
     let _ = std::fs::remove_file(&obj_path);
+    let _ = std::fs::remove_file(&runtime_o);
 
     if status.success() {
         println!("✓ Compiled {} → {}", path.display(), output_path.display());
