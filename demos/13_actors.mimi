@@ -1,0 +1,73 @@
+actor Counter {
+    mut count: i32 = 0
+
+    func increment() { self.count = self.count + 1 }
+    func decrement() { self.count = self.count - 1 }
+    func get_count() -> i32 { self.count }
+    func reset() { self.count = 0 }
+}
+
+actor BankAccount {
+    mut balance: i32 = 0
+    mut owner: string = ""
+
+    func init(name: string, initial: i32) {
+        self.owner = name
+        self.balance = initial
+    }
+
+    func deposit(amount: i32) {
+        requires: amount > 0
+        self.balance = self.balance + amount
+    }
+
+    func withdraw(amount: i32) -> bool {
+        requires: amount > 0
+        if self.balance >= amount {
+            self.balance = self.balance - amount
+            true
+        } else { false }
+    }
+
+    func get_balance() -> i32 { self.balance }
+    func get_owner() -> string { self.owner }
+}
+
+func demo_counter() {
+    println("1. Counter Actor:")
+    let c = Counter.spawn()
+    println("  initial count:", c.get_count())
+    c.increment(); c.increment(); c.increment()
+    println("  after 3 increments:", c.get_count())
+    c.decrement()
+    println("  after 1 decrement:", c.get_count())
+    c.reset()
+    println("  after reset:", c.get_count())
+}
+
+func demo_bank() {
+    println("\n2. BankAccount Actor:")
+    let acc = BankAccount.spawn()
+    acc.init("Alice", 1000)
+    println("  owner:", acc.get_owner())
+    println("  initial balance:", acc.get_balance())
+
+    acc.deposit(500)
+    println("  after +500:", acc.get_balance())
+
+    let ok = acc.withdraw(200)
+    println("  withdraw 200:", if ok { "OK" } else { "FAIL" })
+    println("  balance:", acc.get_balance())
+
+    let fail = acc.withdraw(2000)
+    println("  withdraw 2000:", if fail { "OK" } else { "FAIL (insufficient)" })
+    println("  final balance:", acc.get_balance())
+}
+
+func main() -> i32 {
+    println("=== 13: Actor 并发模型 ===")
+    demo_counter()
+    demo_bank()
+    println("\n=== Actor 测试通过 ===")
+    0
+}

@@ -1,0 +1,102 @@
+type Shape {
+    Circle(f64)
+    Rectangle(f64, f64)
+}
+
+type Color {
+    Red
+    Green
+    Blue
+    Custom(i32, i32, i32)
+}
+
+type Point {
+    x: f64,
+    y: f64,
+}
+
+type MaybeInt {
+    SomeInt(i32)
+    NoInt
+}
+
+func area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.14159 * r * r,
+        Rectangle(w, h) => w * h,
+    }
+}
+
+func color_name(c: Color) -> string {
+    match c {
+        Custom(r, g, b) => "rgb(" + to_string(r) + "," + to_string(g) + "," + to_string(b) + ")",
+        Red => "red",
+        _ => "other color",
+    }
+}
+
+func describe_option(m: MaybeInt) -> string {
+    match m {
+        SomeInt(_) => "has value",
+        NoInt => "empty",
+    }
+}
+
+func classify_number(x: i32) -> string {
+    match x {
+        n if n > 0 => "positive",
+        n if n < 0 => "negative",
+        _ => "zero",
+    }
+}
+
+func describe_point(p: Point) -> string {
+    let is_origin = p.x == 0.0 && p.y == 0.0
+    if is_origin { "origin" }
+    else if p.y == 0.0 { "on x-axis at " + to_string(p.x) }
+    else if p.x == 0.0 { "on y-axis at " + to_string(p.y) }
+    else { "point (" + to_string(p.x) + ", " + to_string(p.y) + ")" }
+}
+
+func match_tuple(pair: (i32, string)) {
+    match pair {
+        (n, s) => println("  n=", n, " s=", s),
+    }
+}
+
+func triangle_area(a: f64, b: f64, c: f64) -> f64 {
+    let p = (a + b + c) / 2.0
+    sqrt(p * (p - a) * (p - b) * (p - c))
+}
+
+func main() -> i32 {
+    println("=== 04: ADT 与模式匹配 ===")
+
+    println("1. 形状面积:")
+    println("  Circle(5) =", area(Circle(5.0)))
+    println("  Rectangle(3,4) =", area(Rectangle(3.0, 4.0)))
+    println("  Triangle(3,4,5) area =", triangle_area(3.0, 4.0, 5.0))
+
+    println("\n2. 颜色枚举:")
+    println("  Red =", color_name(Red))
+    println("  Custom(255,0,0) =", color_name(Custom(255, 0, 0)))
+
+    println("\n3. 自定义 Option:")
+    println("  SomeInt(42):", describe_option(SomeInt(42)))
+    println("  NoInt:", describe_option(NoInt))
+
+    println("\n4. match 守卫:")
+    println("  classify(5) =", classify_number(5))
+    println("  classify(-3) =", classify_number(-3))
+    println("  classify(0) =", classify_number(0))
+
+    println("\n5. 记录类型:")
+    println("  Point(0,0):", describe_point(Point { x: 0.0, y: 0.0 }))
+    println("  Point(3,4):", describe_point(Point { x: 3.0, y: 4.0 }))
+
+    println("\n6. 元组解构:")
+    match_tuple((42, "hello"))
+
+    println("\n=== ADT 与模式匹配测试通过 ===")
+    0
+}

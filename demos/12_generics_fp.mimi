@@ -1,0 +1,43 @@
+func demo_hof() {
+    println("1. 高阶列表操作:")
+    let n1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    let evens = filter(n1, fn(v: i32) -> bool { v % 2 == 0 })
+    println("  evens:", evens)
+
+    let odds = filter(n1, fn(v: i32) -> bool { v % 2 != 0 })
+    println("  odds:", odds)
+
+    let squared = map(n1, fn(v: i32) -> i32 { v * v })
+    println("  squared:", squared)
+
+    let sum_evens = reduce(evens, fn(a: i32, v: i32) -> i32 { a + v }, 0)
+    println("  sum of evens:", sum_evens)
+}
+
+func demo_predicates() {
+    let n2 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    println("\n2. 谓词函数:")
+    println("  filter(>5) =", filter(n2, fn(v: i32) -> bool { v > 5 }))
+    println("  filter(<=3) =", filter(n2, fn(v: i32) -> bool { v <= 3 }))
+}
+
+func demo_chain() {
+    let n3 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    println("\n3. 链式组合:")
+    let squares = map(n3, fn(v: i32) -> i32 { v * v })
+    let big_squares = filter(squares, fn(v: i32) -> bool { v > 25 })
+    println("  squares > 25:", big_squares)
+    let sum_big = reduce(big_squares, fn(a: i32, v: i32) -> i32 { a + v }, 0)
+    println("  sum:", sum_big)
+}
+
+func main() -> i32 {
+    println("=== 12: 泛型与函数式编程 ===")
+    demo_hof()
+    demo_predicates()
+    demo_chain()
+    println("\n=== 泛型与函数式编程测试通过 ===")
+    0
+}

@@ -1,0 +1,114 @@
+func binary_search(xs: List<i32>, target: i32) -> (bool, i32) {
+    let mut lo = 0
+    let mut hi = len(xs) - 1
+    while lo <= hi {
+        let mid_val = lo + (hi - lo) / 2
+        if xs[mid_val] == target { return (true, mid_val) }
+        else if xs[mid_val] < target { lo = mid_val + 1 }
+        else { hi = mid_val - 1 }
+    }
+    (false, -1)
+}
+
+func gcd(a: i32, b: i32) -> i32 {
+    let mut xx = a
+    let mut yy = b
+    while yy != 0 {
+        let tmp = yy
+        yy = xx % yy
+        xx = tmp
+    }
+    xx
+}
+
+func lcm_val(a: i32, b: i32) -> i32 {
+    a * b / gcd(a, b)
+}
+
+func is_palindrome_number(n: i32) -> bool {
+    if n < 0 { return false }
+    let mut rev = 0
+    let mut val_p = n
+    while val_p > 0 {
+        rev = rev * 10 + val_p % 10
+        val_p = val_p / 10
+    }
+    n == rev
+}
+
+func max_subarray_sum(arr: List<i32>) -> i32 {
+    let mut max_ending = arr[0]
+    let mut max_sofar = arr[0]
+    let mut kk = 1
+    while kk < len(arr) {
+        let xk = arr[kk]
+        if max_ending + xk > xk { max_ending = max_ending + xk }
+        else { max_ending = xk }
+        if max_ending > max_sofar { max_sofar = max_ending }
+        kk += 1
+    }
+    max_sofar
+}
+
+func collatz_steps(n: i32) -> i32 {
+    let mut cnt_c = 0
+    let mut val_c = n
+    while val_c != 1 {
+        if val_c % 2 == 0 { val_c = val_c / 2 }
+        else { val_c = 3 * val_c + 1 }
+        cnt_c += 1
+    }
+    cnt_c
+}
+
+func count_digits(n: i32) -> i32 {
+    if n == 0 { return 1 }
+    let mut cnt_d = 0
+    let mut val_d = if n < 0 { -n } else { n }
+    while val_d > 0 {
+        cnt_d += 1
+        val_d = val_d / 10
+    }
+    cnt_d
+}
+
+func demo_search() {
+    println("1. 二分查找:")
+    let sorted: List<i32> = [1, 3, 5, 7, 9, 11, 13, 15]
+    println("  数组:", sorted)
+    let (f1, i1) = binary_search(sorted, 7)
+    println("  找 7:", if f1 { "at " + to_string(i1) } else { "no" })
+    let (f2, i2) = binary_search(sorted, 8)
+    println("  找 8:", if f2 { "at " + to_string(i2) } else { "no" })
+}
+
+func demo_math() {
+    println("2. gcd(48,18) =", gcd(48, 18))
+    println("   lcm(12,18) =", lcm_val(12, 18))
+
+    println("3. 回文: 121:", is_palindrome_number(121))
+    println("   -121:", is_palindrome_number(-121))
+    println("   123:", is_palindrome_number(123))
+
+    println("4. Collatz(6) =", collatz_steps(6))
+    println("   Collatz(27) =", collatz_steps(27))
+
+    let arr = [-2, 1, -3, 4, -1, 2, 1, -5, 4]
+    println("5. Kadane:", max_subarray_sum(arr))
+
+    println("6. count_digits(12345) =", count_digits(12345))
+}
+
+func demo_builtins() {
+    println("7. sort([9,3,7,1]) =", sort([9, 3, 7, 1]))
+    println("   reverse([1,2,3]) =", reverse([1, 2, 3]))
+}
+
+func main() -> i32 {
+    println("=== 08: 算法 ===")
+    demo_search()
+    demo_math()
+    demo_builtins()
+    println("\n=== 算法测试通过 ===")
+    0
+}

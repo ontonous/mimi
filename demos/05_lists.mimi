@@ -1,0 +1,51 @@
+func demo_list_basics() {
+    println("1. 列表创建和基本操作:")
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+    println("  xs =", xs)
+    println("  len(xs) =", len(xs))
+    println("  xs[0] =", xs[0])
+
+    println("\n2. contains:")
+    println("  contains(xs, 5) =", contains(xs, 5))
+    println("  contains(xs, 99) =", contains(xs, 99))
+
+    println("\n3. push / pop:")
+    let mut ys = [1, 2, 3]
+    push(ys, 4)
+    println("  after push 4: len =", len(ys))
+    let popped = pop(ys)
+    println("  popped:", popped)
+
+    println("\n4. range:")
+    println("  range(0, 10) =", range(0, 10))
+}
+
+func demo_list_transform() {
+    let data = [3, 1, 4, 1, 5, 9, 2, 6]
+    println("5. reverse:", reverse([1, 2, 3, 4, 5]))
+    println("6. sort:", sort(data))
+
+    println("7. map:")
+    println("  map(*2) =", map(data, fn(v: i32) -> i32 { v * 2 }))
+    println("  map(^2) =", map(data, fn(v: i32) -> i32 { v * v }))
+
+    println("8. filter:")
+    println("  filter(even) =", filter(data, fn(v: i32) -> bool { v % 2 == 0 }))
+    println("  filter(>3) =", filter(data, fn(v: i32) -> bool { v > 3 }))
+
+    println("9. reduce:")
+    println("  sum =", reduce(data, fn(a: i32, v: i32) -> i32 { a + v }, 0))
+    println("  product 1..5 =", reduce(range(1, 6), fn(a: i32, v: i32) -> i32 { a * v }, 1))
+
+    println("10. zip:", zip(["a", "b", "c"], [1, 2, 3]))
+    println("11. sum:", sum(data))
+    println("12. slice [1..5]:", data[1..5])
+}
+
+func main() -> i32 {
+    println("=== 05: 列表与内置函数 ===")
+    demo_list_basics()
+    demo_list_transform()
+    println("\n=== 列表操作测试通过 ===")
+    0
+}

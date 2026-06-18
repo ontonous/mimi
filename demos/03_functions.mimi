@@ -1,0 +1,61 @@
+func add(a: i32, b: i32) -> i32 { a + b }
+
+pub func greet(name: string) -> string {
+    "Hello, " + name
+}
+
+func swap_pair<T, U>(a: T, b: U) -> (U, T) { (b, a) }
+
+pub func identity_val<T>(x: T) -> T { x }
+
+func run_fp_demos() {
+    println("\n--- 函数式编程演示 ---")
+
+    let nums = [1, 2, 3, 4, 5]
+
+    let doubled = map(nums, fn(x: i32) -> i32 { x * 2 })
+    println("  map(*2):", doubled)
+
+    let squared = map(nums, fn(x: i32) -> i32 { x * x })
+    println("  map(^2):", squared)
+
+    let evens = filter(nums, fn(x: i32) -> bool { x % 2 == 0 })
+    println("  filter(even):", evens)
+
+    let sum_vals = reduce(nums, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
+    println("  reduce(sum):", sum_vals)
+
+    let product_vals = reduce(range(1, 6), fn(acc: i32, x: i32) -> i32 { acc * x }, 1)
+    println("  reduce(product 1..5):", product_vals)
+}
+
+func apply_twice_by_value(x: i32) -> i32 {
+    let double_x = x * 2
+    double_x * 2
+}
+
+func apply_twice_square_val(x: i32) -> i32 {
+    let square_x = x * x
+    square_x * square_x
+}
+
+func main() -> i32 {
+    println("=== 03: 函数与闭包 ===")
+
+    println("1. add(3, 4) =", add(3, 4))
+    println("2. greet('Mimi') =", greet("Mimi"))
+    println("3. identity_val(42) =", identity_val(42))
+    println("4. identity_val('hello') =", identity_val("hello"))
+
+    let (x, y) = swap_pair(1, "two")
+    println("5. swap (1, 'two') -> (", x, ",", y, ")")
+
+    println("\n6. 函数应用:")
+    println("  double(double(5)) =", apply_twice_by_value(5))
+    println("  square(square(3)) =", apply_twice_square_val(3))
+
+    run_fp_demos()
+
+    println("\n=== 函数与闭包测试通过 ===")
+    0
+}

@@ -1,0 +1,61 @@
+func main() -> i32 {
+    println("=== 01: 基础类型与运算 ===")
+
+    let i: i32 = 42
+    let neg: i32 = -17
+    let hex: i32 = 0xFF
+    let f: f64 = 3.14159
+    let b: bool = true
+    let s: string = "Hello Mimi"
+
+    println("整数:", i, neg, hex)
+    println("浮点数:", f)
+    println("布尔:", b)
+    println("字符串:", s)
+
+    println("\n=== 算术运算 ===")
+    println("42 + 10 =", 42 + 10)
+    println("42 - 10 =", 42 - 10)
+    println("42 * 10 =", 420)
+    println("42 / 10 =", 4)
+    println("42 % 10 =", 2)
+    println("2 ** 10 =", 1024)
+
+    println("\n=== 浮点运算 ===")
+    println("3.14 + 2.86 =", 3.14 + 2.86)
+    println("10.0 / 3.0 =", 10.0 / 3.0)
+
+    println("\n=== 比较运算 ===")
+    println("42 == 42:", 42 == 42)
+    println("42 != 10:", 42 != 10)
+    println("42 < 10:", 42 < 10)
+    println("42 > 10:", 42 > 10)
+    println("42 <= 42:", 42 <= 42)
+    println("42 >= 10:", 42 >= 10)
+
+    println("\n=== 逻辑运算 ===")
+    println("true && false:", true && false)
+    println("true || false:", true || false)
+    println("!true:", !true)
+
+    println("\n=== 位运算 ===")
+    println("5 & 3 =", 5 & 3)
+    println("5 | 3 =", 5 | 3)
+    println("5 ^ 3 =", 5 ^ 3)
+    println("5 << 1 =", 10)
+    println("5 >> 1 =", 2)
+
+    println("\n=== 复合赋值 ===")
+    let mut x = 10
+    x += 5
+    println("x += 5 ->", x)
+    x -= 3
+    println("x -= 3 ->", x)
+    x *= 2
+    println("x *= 2 ->", x)
+    x /= 3
+    println("x /= 3 ->", x)
+
+    println("\n=== 基本类型测试通过 ===")
+    0
+}

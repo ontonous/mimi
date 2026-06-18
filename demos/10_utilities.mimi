@@ -1,0 +1,64 @@
+type Point {
+    x: f64,
+    y: f64,
+}
+
+type Person {
+    name: string,
+    age: i32,
+}
+
+func distance(a: Point, b: Point) -> f64 {
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+    sqrt(dx * dx + dy * dy)
+}
+
+func greet_person(p: Person) -> string {
+    "Hello, " + p.name + "! Age: " + to_string(p.age)
+}
+
+func demo_geometry() {
+    println("1. 几何计算:")
+    let p1 = Point { x: 0.0, y: 0.0 }
+    let p2 = Point { x: 3.0, y: 4.0 }
+    println("  distance:", distance(p1, p2))
+}
+
+func demo_records() {
+    println("\n2. 记录类型:")
+    println("  ", greet_person(Person { name: "Alice", age: 30 }))
+    println("  ", greet_person(Person { name: "Bob", age: 25 }))
+}
+
+func demo_math() {
+    println("\n3. 数学函数:")
+    println("  abs(-42) =", abs(-42))
+    println("  min(10, 20) =", min(10, 20))
+    println("  max(10, 20) =", max(10, 20))
+    println("  sqrt(144.0) =", sqrt(144.0))
+    println("  pow(2.0, 10.0) =", pow(2.0, 10.0))
+}
+
+func demo_convert() {
+    println("\n4. 类型转换:")
+    println("  to_string(42) =", to_string(42))
+    println("  to_int(3.14) =", to_int(3.14))
+    println("  to_float(42) =", to_float(42))
+}
+
+func demo_time() {
+    println("\n5. math constants:")
+    println("  pi() =", pi())
+}
+
+func main() -> i32 {
+    println("=== 10: 实用程序 ===")
+    demo_geometry()
+    demo_records()
+    demo_math()
+    demo_convert()
+    demo_time()
+    println("\n=== 实用程序测试通过 ===")
+    0
+}

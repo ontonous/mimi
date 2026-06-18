@@ -1,0 +1,87 @@
+newtype UserId = i32
+
+type User {
+    id: UserId,
+    name: string,
+}
+
+func create_user(id: i32, name: string) -> User {
+    User { id: UserId(id), name: name }
+}
+
+func get_user_id(u: User) -> i32 {
+    let UserId(v) = u.id
+    v
+}
+
+func fibonacci(n: i32) -> i32 {
+    requires: n >= 0
+    ensures: result >= 0
+    if n <= 1 { n }
+    else { fibonacci(n - 1) + fibonacci(n - 2) }
+}
+
+func factorial(n: i32) -> i32 {
+    requires: n >= 0
+    ensures: result > 0
+    if n <= 1 { 1 }
+    else { n * factorial(n - 1) }
+}
+
+func divide_safe(a: i32, b: i32) -> i32 {
+    requires: b != 0
+    ensures: result * b == a
+    a / b
+}
+
+func withdraw(balance: i32, amount: i32) -> i32 {
+    requires: amount > 0
+    requires: balance >= amount
+    ensures: result == balance - amount
+    balance - amount
+}
+
+func demo_newtype() {
+    println("1. newtype:")
+    println("  user id:", get_user_id(create_user(1, "Alice")))
+}
+
+func demo_contract() {
+    println("\n2. 契约 (requires/ensures):")
+    println("  fibonacci(10) =", fibonacci(10))
+    println("  factorial(5) =", factorial(5))
+    println("  divide_safe(10, 3) =", divide_safe(10, 3))
+    println("  withdraw(100, 30) =", withdraw(100, 30))
+}
+
+func demo_arena() {
+    println("\n3. arena:")
+    arena {
+        let x = 10
+        let y = 20
+        println("  result:", x + y)
+    }
+}
+
+func demo_fstring() {
+    println("\n4. f-string:")
+    println(f"  val = {42}, pi = {3.14159}")
+}
+
+func main() -> i32 {
+    println("=== 11: 高级特性 ===")
+    demo_newtype()
+    demo_contract()
+    demo_arena()
+    demo_fstring()
+
+    println("\n5. 复合赋值:")
+    let mut val = 10
+    val += 5; println("  += 5:", val)
+    val -= 3; println("  -= 3:", val)
+    val *= 2; println("  *= 2:", val)
+    val /= 4; println("  /= 4:", val)
+
+    println("\n=== 高级特性测试通过 ===")
+    0
+}

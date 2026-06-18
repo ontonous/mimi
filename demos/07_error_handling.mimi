@@ -1,0 +1,79 @@
+type Res {
+    Ok(i32)
+    Err(string)
+}
+
+func divide(a: i32, b: i32) -> Res {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+
+func process(pa: i32, pb: i32) -> Res {
+    let x = divide(pa, pb)?
+    let y = divide(x, 2)?
+    Ok(y + 10)
+}
+
+func multi_step() -> Res {
+    on failure { println("  cleanup: global") }
+    println("  step1: divide(10, 2)")
+    let a1 = divide(10, 2)?
+    on failure { println("  cleanup: after step1") }
+    println("  step2: divide(20, 4)")
+    let b1 = divide(20, 4)?
+    println("  step3:", a1 + b1)
+    Ok(a1 + b1)
+}
+
+func multi_step_fail() -> Res {
+    on failure { println("  cleanup: rollback") }
+    println("  step1: divide(10, 2)")
+    let a2 = divide(10, 2)?
+    on failure { println("  cleanup: after step1") }
+    println("  step2: divide(5, 0) -> FAIL")
+    let b2 = divide(5, 0)?
+    println("  step3: never")
+    Ok(a2 + b2)
+}
+
+func demo_results() {
+    println("1. divide(10, 3):")
+    match divide(10, 3) {
+        Ok(v) => println("  =", v),
+        Err(e) => println("  error:", e),
+    }
+
+    println("  divide(10, 0):")
+    match divide(10, 0) {
+        Ok(v) => println("  =", v),
+        Err(e) => println("  error:", e),
+    }
+
+    println("\n2. ? propagate:")
+    match process(20, 3) {
+        Ok(v) => println("  process(20,3) =", v),
+        Err(e) => println("  error:", e),
+    }
+}
+
+func demo_comp() {
+    println("\n3. on failure (success):")
+    match multi_step() {
+        Ok(v) => println("  result =", v),
+        Err(e) => println("  error:", e),
+    }
+
+    println("\n4. on failure (fail + LIFO cleanup):")
+    match multi_step_fail() {
+        Ok(v) => println("  result =", v),
+        Err(e) => println("  error:", e),
+    }
+}
+
+func main() -> i32 {
+    println("=== 07: 错误处理 ===")
+    demo_results()
+    demo_comp()
+    println("\n=== 错误处理测试通过 ===")
+    0
+}

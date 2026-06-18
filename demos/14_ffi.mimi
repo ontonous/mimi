@@ -1,0 +1,23 @@
+extern "C" {
+    func strlen(s: string) -> i64
+    func puts(s: string) -> i32
+    func abs(x: i32) -> i32
+}
+
+func main() -> i32 {
+    println("=== 14: FFI 外部函数调用 ===")
+
+    println("1. C strlen:")
+    let len = strlen("Hello from Mimi FFI!")
+    println("  strlen('Hello from Mimi FFI!') =", len)
+
+    println("2. C puts:")
+    puts("  Hello from C's puts() function!")
+
+    println("3. C abs:")
+    println("  abs(-42) =", abs(-42))
+    println("  abs(42) =", abs(42))
+
+    println("\n=== FFI 测试通过 ===")
+    0
+}

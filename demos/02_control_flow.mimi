@@ -1,0 +1,93 @@
+func factorial(n: i32) -> i32 {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+func fibonacci(n: i32) -> i32 {
+    if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) }
+}
+
+func is_prime(n: i32) -> bool {
+    if n < 2 { return false }
+    let mut d = 2
+    while d * d <= n {
+        if n % d == 0 { return false }
+        d += 1
+    }
+    true
+}
+
+func sum_to(n: i32) -> i32 {
+    let mut sum = 0
+    let mut idx = 1
+    while idx <= n {
+        sum += idx
+        idx += 1
+    }
+    sum
+}
+
+func sum_items(items: List<i32>) -> i32 {
+    let mut acc = 0
+    for x in items { acc += x }
+    acc
+}
+
+func classify(x: i32) -> string {
+    if x > 0 { "positive" }
+    else if x < 0 { "negative" }
+    else { "zero" }
+}
+
+func find_in_list(xs: List<i32>, target: i32) -> (bool, i32) {
+    for idx in range(0, len(xs)) {
+        if xs[idx] == target { return (true, idx) }
+    }
+    (false, -1)
+}
+
+func print_names(names: List<string>) {
+    for name in names { println("  Hello,", name) }
+}
+
+func print_range(start: i32, end: i32) {
+    for idx in range(start, end) { println("  count:", idx) }
+}
+
+func count_with_break() {
+    let mut val = 0
+    while val < 10 {
+        val += 1
+        if val == 3 { continue }
+        if val == 8 { break }
+        println("  val =", val)
+    }
+}
+
+func main() -> i32 {
+    println("=== 02: 控制流 ===")
+    println("1. 递归: factorial(10) =", factorial(10))
+    println("2. 递归: fibonacci(10) =", fibonacci(10))
+    println("3. 素数: is_prime(17) =", is_prime(17))
+    println("4. 素数: is_prime(25) =", is_prime(25))
+    println("5. 循环求和: sum_to(100) =", sum_to(100))
+    println("6. 列表求和:", sum_items([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+    println("7. 分类: classify(5) =", classify(5))
+    println("8. 分类: classify(-3) =", classify(-3))
+    println("9. 分类: classify(0) =", classify(0))
+
+    println("\n10. for 循环遍历列表:")
+    print_names(["Alice", "Bob", "Charlie"])
+
+    println("\n11. for 循环范围:")
+    print_range(1, 6)
+
+    println("\n12. while + break/continue:")
+    count_with_break()
+
+    println("\n13. return 提前返回:")
+    let (found, idx) = find_in_list([10, 20, 30, 40, 50], 30)
+    println("  found at index:", idx)
+
+    println("\n=== 控制流测试通过 ===")
+    0
+}

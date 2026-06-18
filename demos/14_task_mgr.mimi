@@ -1,0 +1,84 @@
+type TaskStatus {
+    Pending
+    InProgress
+    Completed
+    Failed(string)
+}
+
+type Task {
+    id: i32,
+    title: string,
+    status: TaskStatus,
+}
+
+func create_task(id: i32, title: string) -> Task {
+    Task { id: id, title: title, status: Pending }
+}
+
+func task_summary(task: Task) -> string {
+    let status_str = match task.status {
+        Pending => "pending",
+        InProgress => "in progress",
+        Completed => "completed",
+        Failed(reason) => "failed: " + reason,
+    }
+    "Task #" + to_string(task.id) + ": " + task.title + " [" + status_str + "]"
+}
+
+func is_failed(task: Task) -> bool {
+    match task.status {
+        Failed(_) => true,
+        _ => false,
+    }
+}
+
+func sum_values(xs: List<i32>) -> i32 {
+    let mut total = 0
+    for x in xs {
+        total = total + x
+    }
+    total
+}
+
+func describe_via_match(s: TaskStatus) -> string {
+    match s {
+        Failed(reason) => "失败: " + reason,
+        _ => "other status",
+    }
+}
+
+func demo_tasks() {
+    let t1 = create_task(1, "学习 Mimi")
+    let t2 = create_task(2, "写 Demo")
+    let t3 = create_task(3, "运行测试")
+
+    println("1. 任务摘要:")
+    println("  ", task_summary(t1))
+    println("  ", task_summary(t2))
+    println("  ", task_summary(t3))
+
+    let faulty = Task { id: 4, title: "出错的任务", status: Failed("内存不足") }
+    println("  ", task_summary(faulty))
+
+    println("\n2. 列表求和:")
+    println("  sum =", sum_values([1, 2, 3, 4, 5]))
+
+    println("\n3. is_failed 检测:")
+    println("  t1 failed:", is_failed(t1))
+    println("  faulty failed:", is_failed(faulty))
+
+    println("\n4. match 带数据变体 (only Failed works):")
+    println("  describe faulty:", describe_via_match(faulty.status))
+    println("  describe t1:", describe_via_match(t1.status))
+
+    println("\n5. 记录字段访问:")
+    println("  task id:", t1.id)
+    println("  task title:", t1.title)
+}
+
+func main() -> i32 {
+    println("=== 14: 综合 - 任务管理系统 ===")
+    demo_tasks()
+    println("\n=== 任务管理系统测试通过 ===")
+    0
+}

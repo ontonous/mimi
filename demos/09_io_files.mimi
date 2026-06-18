@@ -1,0 +1,30 @@
+func demo_file_ops() {
+    println("1. file_exists:")
+    println("  /etc/hostname:", file_exists("/etc/hostname"))
+    println("  /nonexistent:", file_exists("/nonexistent"))
+
+    println("\n2. read_file (返回 Result 类型):")
+    let r1 = read_file("/etc/hostname")
+    println("  /etc/hostname result:", r1)
+
+    println("\n3. write_file:")
+    let w1 = write_file("/tmp/mimi_demo_write.txt", "Hello Mimi!\n")
+    println("  write result:", w1)
+    let r2 = read_file("/tmp/mimi_demo_write.txt")
+    println("  read back:", r2)
+}
+
+func demo_wc() {
+    println("\n4. 简易 wc:")
+    let r3 = read_file("/etc/hostname")
+    println("  raw result:", r3)
+    println("  (Result 类型可直接打印, 模式匹配不可用)")
+}
+
+func main() -> i32 {
+    println("=== 09: I/O 与文件处理 ===")
+    demo_file_ops()
+    demo_wc()
+    println("\n=== I/O 与文件处理测试通过 ===")
+    0
+}

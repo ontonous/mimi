@@ -1,0 +1,121 @@
+type TaskStatus {
+    Pending
+    InProgress
+    Completed
+    Failed(string)
+}
+
+type Task {
+    id: i32,
+    title: string,
+    status: TaskStatus,
+}
+
+func create_task(id: i32, title: string) -> Task {
+    Task { id: id, title: title, status: Pending }
+}
+
+func update_status(task: Task, new_status: TaskStatus) -> Task {
+    Task { id: task.id, title: task.title, status: new_status }
+}
+
+func task_summary(task: Task) -> string {
+    let status_str = match task.status {
+        Pending => "pending",
+        InProgress => "in progress",
+        Completed => "completed",
+        Failed(reason) => "failed: " + reason,
+    }
+    "Task #" + to_string(task.id) + ": " + task.title + " [" + status_str + "]"
+}
+
+func filter_by_status(tasks: List<Task>, status: TaskStatus) -> List<Task> {
+    filter(tasks, fn(t: Task) -> bool {
+        match t.status {
+            Pending => match status { Pending => true, _ => false },
+            InProgress => match status { InProgress => true, _ => false },
+            Completed => match status { Completed => true, _ => false },
+            Failed(_) => match status { Failed(_) => true, _ => false },
+        }
+    })
+}
+
+func count_by_status(tasks: List<Task>) -> (i32, i32, i32, i32) {
+    let mut p = 0
+    let mut ip = 0
+    let mut c = 0
+    let mut f = 0
+    for t in tasks {
+        match t.status {
+            Pending => p += 1,
+            InProgress => ip += 1,
+            Completed => c += 1,
+            Failed(_) => f += 1,
+        }
+    }
+    (p, ip, c, f)
+}
+
+func is_all_completed(tasks: List<Task>) -> bool {
+    all(tasks, fn(t: Task) -> bool {
+        match t.status {
+            Completed => true,
+            _ => false,
+        }
+    })
+}
+
+func main() -> i32 {
+    println("=== 15: 综合应用 - 任务管理系统 ===")
+
+    println("1. 创建任务:")
+    let mut tasks: List<Task> = []
+    push(tasks, create_task(1, "学习 Mimi 语言"))
+    push(tasks, create_task(2, "编写 Demo 程序"))
+    push(tasks, create_task(3, "运行测试"))
+    push(tasks, create_task(4, "撰写文档"))
+
+    for t in tasks {
+        println("  ", task_summary(t))
+    }
+
+    println("\n2. 更新任务状态:")
+    tasks = update_status(tasks[0], InProgress)
+    tasks = update_status(tasks[1], Completed)
+    tasks = update_status(tasks[2], Failed("语法错误"))
+
+    for t in tasks {
+        println("  ", task_summary(t))
+    }
+
+    println("\n3. 按状态统计:")
+    let (p, ip, c, f) = count_by_status(tasks)
+    println("  Pending:", p)
+    println("  In Progress:", ip)
+    println("  Completed:", c)
+    println("  Failed:", f)
+
+    println("\n4. 过滤已完成任务:")
+    let completed = filter_by_status(tasks, Completed)
+    for t in completed {
+        println("  *", task_summary(t))
+    }
+
+    println("\n5. 检查是否全部完成:")
+    println("  all completed:", is_all_completed(tasks))
+
+    println("\n6. 使用 TaskStatus 模式匹配:")
+    let statuses = [Pending, InProgress, Completed, Failed("timeout")]
+    for s in statuses {
+        let desc = match s {
+            Pending => "等待处理",
+            InProgress => "正在处理",
+            Completed => "处理完成",
+            Failed(reason) => "处理失败: " + reason,
+        }
+        println("  ", desc)
+    }
+
+    println("\n=== 任务管理系统测试通过 ===")
+    0
+}
