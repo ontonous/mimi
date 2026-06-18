@@ -296,7 +296,7 @@ impl<'a> Checker<'a> {
                 // Skip if: no enum variants, has catchall, or any arm has a guard (undecidable)
                 if !all_variants.is_empty() && !has_catchall && !has_guard {
                     for variant in &all_variants {
-                        if !covered_variants.contains(variant) {
+                            if !covered_variants.contains(variant) {
                             self.emit_code(crate::diagnostic::codes::E0215, format!(
                                 "match expression is not exhaustive: missing variant '{}' of '{}'",
                                 variant,
@@ -1042,20 +1042,6 @@ impl<'a> Checker<'a> {
                     self.emit("Err expects 1 argument");
                 } else {
                     self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "Some" => {
-                if args.len() != 1 {
-                    self.emit("Some expects 1 argument");
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "None" => {
-                if !args.is_empty() {
-                    self.emit("None expects 0 arguments");
                 }
                 return Type::Name("unknown".into(), vec![]);
             }

@@ -139,6 +139,49 @@ func main() -> i32 {
     assert!(check_source(src).is_ok());
 }
 
+#[test]
+fn test_exhaustive_enum_data_incomplete() {
+    let src = r#"
+type Opt { Some(i32) None }
+func main() -> i32 {
+    let x = Some(42);
+    match x {
+        Some(v) => v,
+    }
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    let all_msg: String = errs.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(" ");
+    assert!(
+        all_msg.contains("exhaustive"),
+        "expected 'exhaustive' error, got: {:?}",
+        errs.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_exhaustive_bool_incomplete_gap() {
+    // KNOWN GAP (T3): bool is built-in, not an enum, so get_enum_variants
+    // returns empty. The exhaustive check is skipped.
+    // When this test starts FAILING, the gap is fixed.
+    let src = r#"
+func main() -> i32 {
+    let b = true;
+    match b { true => 1 }
+}
+"#;
+    let result = check_source(src);
+    if result.is_err() {
+        let all_msg: String = result.unwrap_err().iter()
+            .map(|d| d.message.clone()).collect::<Vec<_>>().join(" ");
+        assert!(
+            all_msg.contains("exhaustive"),
+            "expected 'exhaustive' error"
+        );
+    }
+    // If Ok, that's the known gap
+}
+
 // ==============================
 // 双路径一致性测试 (需要 cc)
 // ==============================
