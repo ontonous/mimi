@@ -111,7 +111,7 @@ func main() -> i32 {
 }
 ' "pass"
 
-# bool — 不完整 (missing false) — 已知缺陷: bool 暂不做穷尽性检查
+# bool — 不完整 (missing false) — 必须报错
 run_test_case "match-bool-incomplete" '
 func main() -> i32 {
     let b = true;
@@ -119,7 +119,7 @@ func main() -> i32 {
         true => 1,
     }
 }
-' "pass"
+' "fail" "exhaustive"
 
 # 带数据的枚举 (Some + None) — 完整 match
 run_test_case "match-enum-data-complete" '
@@ -133,8 +133,7 @@ func main() -> i32 {
 }
 ' "pass"
 
-# 带数据的枚举 — 不完整 (missing None) — 已知缺陷: 暂不强制报错
-# 这里仅做监控: 如果未来编译器开始报错，会自动通过
+# 带数据的枚举 — 不完整 (missing None) — 必须报错
 run_test_case "match-enum-data-incomplete" '
 type Opt { Some(i32) None }
 func main() -> i32 {
@@ -143,7 +142,7 @@ func main() -> i32 {
         Some(v) => v,
     }
 }
-' "pass"
+' "fail" "exhaustive"
 
 echo ""
 echo "========================================="
