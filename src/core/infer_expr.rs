@@ -1085,6 +1085,20 @@ impl<'a> Checker<'a> {
             "pi" => {
                 return Type::Name("f64".into(), vec![]);
             }
+            "now" | "timestamp" | "now_ms" | "timestamp_ms" => {
+                return Type::Name("i64".into(), vec![]);
+            }
+            "sleep" => {
+                if args.len() != 1 {
+                    self.emit("sleep expects 1 argument (milliseconds)");
+                } else {
+                    let t = self.infer_expr(&args[0], scopes);
+                    if !is_int(&t) {
+                        self.emit("sleep expects an integer argument");
+                    }
+                }
+                return Type::Name("unit".into(), vec![]);
+            }
             "type_name" | "type_fields" | "type_variants" => {
                 if args.len() != 1 {
                     self.emit(format!("{} expects 1 argument", name));
@@ -1341,6 +1355,27 @@ impl<'a> Checker<'a> {
         let (params, mut ret) = match self.funcs.get(name) {
             Some(sig) => sig.clone(),
             None => {
+                // Try closure/lambda variable lookup: check if the name is a local
+                // variable with a function type (let f = fn(x) { ... }; f(42))
+                let closure_sig: Option<(Vec<Type>, Type)> = scopes.iter().rev()
+                    .find_map(|scope| scope.get(name).cloned())
+                    .and_then(|ty| match ty {
+                        Type::Func(params, ret) => Some((params, *ret)),
+                        _ => None,
+                    });
+                if let Some((param_types, ret_ty)) = closure_sig {
+                    if args.len() != param_types.len() {
+                        self.emit(format!("closure '{}' expects {} arguments, got {}", name, param_types.len(), args.len()));
+                    } else {
+                        for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate() {
+                            let arg_ty = self.infer_expr(arg, scopes);
+                            if !same_type(&arg_ty, param_ty) {
+                                self.emit(format!("argument {} of closure '{}' expected {}, found {}", i + 1, name, fmt_type(param_ty), fmt_type(&arg_ty)));
+                            }
+                        }
+                    }
+                    return ret_ty;
+                }
                 // Try built-in Option/Result constructors as fallback
                 match name {
                     "Some" => {

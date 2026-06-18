@@ -404,6 +404,29 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    Expr::Index(obj, idx) => {
+                        // xs[i] = val: check that xs is a mutable list and val matches element type
+                        let obj_ty = self.infer_expr(obj, scopes);
+                        self.infer_expr(idx, scopes);
+                        match &obj_ty {
+                            Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                                let elem_ty = &args[0];
+                                if !same_type(&value_ty, elem_ty) {
+                                    self.emit(format!(
+                                        "cannot assign {} to list element of type {}",
+                                        fmt_type(&value_ty),
+                                        fmt_type(elem_ty)
+                                    ));
+                                }
+                            }
+                            _ => {
+                                self.emit(format!(
+                                    "cannot index-assign to {}",
+                                    fmt_type(&obj_ty)
+                                ));
+                            }
+                        }
+                    }
                     _ => self.emit_code(crate::diagnostic::codes::E0219, "assignment target must be a variable"),
                 }
             }

@@ -197,9 +197,7 @@ impl<'a> Interpreter<'a> {
                 };
                 for item in list {
                     self.bind(var, item);
-                    if let Some(v) = self.eval_block(body)? {
-                        return Ok(Some(v));
-                    }
+                    self.eval_block(body)?;
                     match self.loop_action.take() {
                         Some(LoopAction::Break(val)) => {
                             if let Some(v) = val {
@@ -403,6 +401,38 @@ impl<'a> Interpreter<'a> {
                                 handle.inner.write().map_err(|e| format!("actor lock failed: {}", e))?.fields.insert(field.clone(), v);
                             }
                             _ => return Err("cannot assign to non-record/non-actor value".into()),
+                        }
+                    }
+                    Expr::Index(obj, idx) => {
+                        // list[i] = val: evaluate list, index, and set element
+                        let list_val = self.eval_expr(obj)?;
+                        let idx_val = self.eval_expr(idx)?;
+                        let index = match idx_val {
+                            Value::Int(i) => i as usize,
+                            _ => return Err("list index must be an integer".into()),
+                        };
+                        match list_val {
+                            Value::List(mut items) => {
+                                if index >= items.len() {
+                                    return Err(format!("list index {} out of bounds (len {})", index, items.len()));
+                                }
+                                items[index] = v;
+                                // Update the binding
+                                if let Expr::Ident(name) = obj.as_ref() {
+                                    let mut found = false;
+                                    for scope in self.env.iter_mut().rev() {
+                                        if scope.contains_key(name) {
+                                            scope.insert(name.clone(), Value::List(items));
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if !found {
+                                        return Err(format!("variable '{}' not found", name));
+                                    }
+                                }
+                            }
+                            _ => return Err("cannot index-assign to non-list value".into()),
                         }
                     }
                     _ => return Err("assignment target must be a variable".into()),

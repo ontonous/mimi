@@ -1186,6 +1186,8 @@ impl<'a> Checker<'a> {
                 // If the name matches an enum variant of the subject type,
                 // treat it as a constructor match (no variable binding).
                 let is_constructor = match subject {
+                    Type::Result(_, _) => name == "Ok" || name == "Err",
+                    Type::Option(_) => name == "Some" || name == "None",
                     Type::Name(tn, _) => self.types.get(tn)
                         .and_then(|t| match &t.kind { TypeDefKind::Enum(vs) => Some(vs), _ => None })
                         .map(|vs| vs.iter().any(|v| v.name == *name))
@@ -1214,6 +1216,35 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Constructor(name, pats) => {
+                // Handle built-in Result<T,E> constructors Ok/Err (only for Type::Result subjects)
+                if (name == "Ok" || name == "Err") && matches!(subject, Type::Result(_, _)) {
+                    if let Type::Result(ok_ty, err_ty) = subject {
+                        let expected_ty = if name == "Ok" { ok_ty } else { err_ty };
+                        if pats.len() != 1 {
+                            self.emit(format!("'{}' expects 1 argument, got {}", name, pats.len()));
+                        } else {
+                            self.check_pattern(&pats[0], expected_ty, scopes);
+                        }
+                    }
+                    return;
+                }
+                // Handle built-in Option<T> constructors (only for Type::Option subjects)
+                if name == "Some" && matches!(subject, Type::Option(_)) {
+                    if let Type::Option(inner) = subject {
+                        if pats.len() != 1 {
+                            self.emit(format!("'Some' expects 1 argument, got {}", pats.len()));
+                        } else {
+                            self.check_pattern(&pats[0], inner, scopes);
+                        }
+                    }
+                    return;
+                }
+                if name == "None" && matches!(subject, Type::Option(_)) {
+                    if !pats.is_empty() {
+                        self.emit("'None' expects no arguments".to_string());
+                    }
+                    return;
+                }
                 let def = self.types.values().find(|t| {
                     match &t.kind {
                         TypeDefKind::Enum(variants) => variants.iter().any(|v| v.name == *name),
@@ -1489,6 +1520,12 @@ impl<'a> Checker<'a> {
     /// Get all variant names for an enum type
     fn get_enum_variants(&self, ty: &Type) -> Vec<String> {
         match ty {
+            Type::Result(_, _) => {
+                vec!["Ok".into(), "Err".into()]
+            }
+            Type::Option(_) => {
+                vec!["Some".into(), "None".into()]
+            }
             Type::Name(name, _) => {
                 if name == "bool" {
                     // Built-in bool: pretend it has true/false variants
