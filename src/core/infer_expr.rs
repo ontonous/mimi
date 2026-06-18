@@ -221,6 +221,10 @@ impl<'a> Checker<'a> {
                             self.emit_code(crate::diagnostic::codes::E0221,
                                 format!("impl Trait does not have method '{}'", method_name));
                             Type::Name("unknown".into(), vec![])
+                        } else if let Type::Option(inner) = &obj_ty {
+                            self.check_option_method(method_name, inner, args, scopes)
+                        } else if let Type::Result(ok_ty, err_ty) = &obj_ty {
+                            self.check_result_method(method_name, ok_ty, err_ty, args, scopes)
                         } else {
                             self.emit_code(crate::diagnostic::codes::E0222, format!("method call requires a named type, found {}", fmt_type(&obj_ty)));
                             Type::Name("unknown".into(), vec![])
@@ -1087,22 +1091,6 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unit".into(), vec![]);
             }
-            "Ok" => {
-                if args.len() != 1 {
-                    self.emit("Ok expects 1 argument");
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
-            "Err" => {
-                if args.len() != 1 {
-                    self.emit("Err expects 1 argument");
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                }
-                return Type::Name("unknown".into(), vec![]);
-            }
             "ast_dump" | "ast_eval" => {
                 for a in args {
                     self.infer_expr(a, scopes);
@@ -1293,6 +1281,49 @@ impl<'a> Checker<'a> {
         let (params, mut ret) = match self.funcs.get(name) {
             Some(sig) => sig.clone(),
             None => {
+                // Try built-in Option/Result constructors as fallback
+                match name {
+                    "Some" => {
+                        if args.len() != 1 {
+                            self.emit("Some expects 1 argument");
+                        } else {
+                            let inner = self.infer_expr(&args[0], scopes);
+                            return Type::Option(Box::new(inner));
+                        }
+                        return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                    }
+                    "None" => {
+                        if args.len() != 0 {
+                            self.emit("None expects 0 arguments");
+                        }
+                        return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                    }
+                    "Ok" => {
+                        if args.len() != 1 {
+                            self.emit("Ok expects 1 argument");
+                        } else {
+                            let inner = self.infer_expr(&args[0], scopes);
+                            return Type::Result(Box::new(inner), Box::new(Type::Name("unknown".into(), vec![])));
+                        }
+                        return Type::Result(
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                        );
+                    }
+                    "Err" => {
+                        if args.len() != 1 {
+                            self.emit("Err expects 1 argument");
+                        } else {
+                            let inner = self.infer_expr(&args[0], scopes);
+                            return Type::Result(Box::new(Type::Name("unknown".into(), vec![])), Box::new(inner));
+                        }
+                        return Type::Result(
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                        );
+                    }
+                    _ => {}
+                }
                 // Try module-qualified lookup via use imports
                 for module in self.use_imports.clone() {
                     let qualified = format!("{}::{}", module, name);
@@ -1494,5 +1525,68 @@ impl<'a> Checker<'a> {
         }
         scopes.pop();
         result_type
+    }
+
+    /// Type-check a method call on Option<T>
+    fn check_option_method(&mut self, method: &str, inner: &Type, args: &[Expr], scopes: &mut Vec<HashMap<String, Type>>) -> Type {
+        match method {
+            "unwrap" | "expect" => {
+                if method == "expect" && !args.is_empty() {
+                    self.infer_expr(&args[0], scopes);
+                }
+                (*inner).clone()
+            }
+            "unwrap_or" => {
+                if args.len() != 1 {
+                    self.emit("unwrap_or expects 1 argument");
+                } else {
+                    let default = self.infer_expr(&args[0], scopes);
+                    if !same_type(&default, inner) {
+                        self.emit(format!("unwrap_or expected {}, found {}", fmt_type(inner), fmt_type(&default)));
+                    }
+                }
+                (*inner).clone()
+            }
+            "is_some" | "is_none" => Type::Name("bool".into(), vec![]),
+            "ok_or" => Type::Result(Box::new((*inner).clone()), Box::new(Type::Name("unknown".into(), vec![]))),
+            "map" => Type::Option(Box::new(Type::Name("unknown".into(), vec![]))),
+            "and_then" => Type::Name("unknown".into(), vec![]),
+            "map_err" => Type::Option(Box::new((*inner).clone())),
+            _ => {
+                self.emit(format!("Option<{}> has no method '{}'", fmt_type(inner), method));
+                Type::Name("unknown".into(), vec![])
+            }
+        }
+    }
+
+    /// Type-check a method call on Result<T, E>
+    fn check_result_method(&mut self, method: &str, ok_ty: &Type, err_ty: &Type, args: &[Expr], scopes: &mut Vec<HashMap<String, Type>>) -> Type {
+        match method {
+            "unwrap" | "expect" => {
+                if method == "expect" && !args.is_empty() {
+                    self.infer_expr(&args[0], scopes);
+                }
+                (*ok_ty).clone()
+            }
+            "unwrap_or" => {
+                if args.len() != 1 {
+                    self.emit("unwrap_or expects 1 argument");
+                } else {
+                    let default = self.infer_expr(&args[0], scopes);
+                    if !same_type(&default, ok_ty) {
+                        self.emit(format!("unwrap_or expected {}, found {}", fmt_type(ok_ty), fmt_type(&default)));
+                    }
+                }
+                (*ok_ty).clone()
+            }
+            "is_ok" | "is_err" => Type::Name("bool".into(), vec![]),
+            "map" => Type::Result(Box::new(Type::Name("unknown".into(), vec![])), Box::new((*err_ty).clone())),
+            "and_then" => Type::Name("unknown".into(), vec![]),
+            "map_err" => Type::Result(Box::new((*ok_ty).clone()), Box::new(Type::Name("unknown".into(), vec![]))),
+            _ => {
+                self.emit(format!("Result<{}, {}> has no method '{}'", fmt_type(ok_ty), fmt_type(err_ty), method));
+                Type::Name("unknown".into(), vec![])
+            }
+        }
     }
 }

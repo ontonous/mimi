@@ -632,7 +632,7 @@ func main() -> bool {
 fn interp_option_is_none() {
     let src = r#"
 func main() -> bool {
-    let x: i32 = None;
+    let x = None();
     x.is_none()
 }
 "#;
@@ -702,6 +702,26 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn typecheck_option_constructors() {
+    let src = r#"
+func main() -> i32 {
+    Some(42).unwrap()
+}
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
+fn typecheck_result_constructors() {
+    let src = r#"
+func main() -> bool {
+    Ok(42).is_ok()
+}
+"#;
+    assert!(check_source(src).is_ok());
 }
 
 #[test]
