@@ -1212,6 +1212,69 @@ func main() -> i32 {
         "expected HTTP request failed, got: {}", stdout.trim());
 }
 
+// ===================== UBSan Tests =====================
+
+fn can_ubsan() -> bool {
+    std::process::Command::new("cc")
+        .args(["-fsanitize=undefined", "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
+        .output().is_ok()
+}
+
+#[test]
+#[ignore]
+fn e2e_ubsan_arithmetic() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    if !can_ubsan() { eprintln!("SKIP: UBSAN not supported by compiler"); return; }
+    let stdout = compile_and_run_ubsan(r#"
+        func main() -> i32 {
+            let x: i32 = 42
+            let y: i32 = 8
+            println(x / y)
+            println(x - y)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "5\n34");
+}
+
+#[test]
+#[ignore]
+fn e2e_ubsan_string_ops() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    if !can_ubsan() { eprintln!("SKIP: UBSAN not supported by compiler"); return; }
+    let stdout = compile_and_run_ubsan(r#"
+        func main() -> i32 {
+            let s = "hello, world!"
+            println(s)
+            let t = s + " ubsan"
+            println(t)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "hello, world!\nhello, world! ubsan");
+}
+
+#[test]
+#[ignore]
+fn e2e_ubsan_list_ops() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    if !can_ubsan() { eprintln!("SKIP: UBSAN not supported by compiler"); return; }
+    let stdout = compile_and_run_ubsan(r#"
+        func main() -> i32 {
+            let xs: List<i32> = [1, 2, 3, 4, 5]
+            let mut sum = 0
+            for x in xs {
+                sum = sum + x
+            }
+            println(sum)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "15");
+}
+
+// ===================== ASan Tests =====================
+
 #[test]
 #[ignore]
 fn e2e_asan_string_ops() {

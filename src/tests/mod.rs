@@ -147,6 +147,7 @@ pub(crate) struct E2EConfig {
     pub verify_contracts: bool,
     pub use_valgrind: bool,
     pub use_asan: bool,
+    pub use_ubsan: bool,
     pub valgrind_args: Vec<String>,
 }
 
@@ -156,6 +157,7 @@ impl Default for E2EConfig {
             verify_contracts: false,
             use_valgrind: false,
             use_asan: false,
+            use_ubsan: false,
             valgrind_args: vec!["--tool=memcheck".into(), "--error-exitcode=1".into(), "--leak-check=full".into()],
         }
     }
@@ -194,6 +196,9 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     if config.use_asan {
         cc_compile.arg("-fsanitize=address");
     }
+    if config.use_ubsan {
+        cc_compile.arg("-fsanitize=undefined").arg("-fno-sanitize-recover=all");
+    }
     let rt_status = cc_compile.status()
         .map_err(|e| format!("runtime compile: {}", e))?;
     if !rt_status.success() {
@@ -205,6 +210,9 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     cc_link.arg("-no-pie").arg(&obj_path).arg(&runtime_o).arg("-o").arg(&bin_path);
     if config.use_asan {
         cc_link.arg("-fsanitize=address");
+    }
+    if config.use_ubsan {
+        cc_link.arg("-fsanitize=undefined");
     }
     let status = cc_link.status()
         .map_err(|e| format!("linker: {}", e))?;
@@ -253,5 +261,10 @@ pub(crate) fn compile_and_run_valgrind(src: &str) -> Result<String, String> {
 /// E2E test compiled with AddressSanitizer and run directly.
 pub(crate) fn compile_and_run_asan(src: &str) -> Result<String, String> {
     compile_and_run_with_config(src, &E2EConfig { use_asan: true, ..Default::default() })
+}
+
+/// E2E test compiled with UndefinedBehaviorSanitizer and run directly.
+pub(crate) fn compile_and_run_ubsan(src: &str) -> Result<String, String> {
+    compile_and_run_with_config(src, &E2EConfig { use_ubsan: true, ..Default::default() })
 }
 

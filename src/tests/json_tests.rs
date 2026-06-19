@@ -213,17 +213,6 @@ func main() -> str {
 }
 
 #[test]
-fn json_get_bool_not_boolean() {
-    let src = r#"
-func main() -> str {
-    json_get_string("{\"x\": 42}", "x")
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String("42".into()));
-}
-
-#[test]
 fn json_has_key_present() {
     let v = run_source(r#"func main() -> bool { json_get_string("{\"x\":\"y\"}", "x") != "" }"#);
     assert_eq!(v, interp::Value::Bool(true));

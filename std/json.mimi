@@ -26,9 +26,18 @@ pub func get_element(json: string, index: i32) -> string {
 }
 
 // get_bool: Gets a boolean field from a JSON object by key.
-pub func get_bool(json: string, key: string) -> bool {
+// Returns Result::Ok(true/false) if key exists, Result::Err if key missing or not boolean.
+pub func get_bool(json: string, key: string) -> Result<bool, string> {
     let v = json_get_string(json, key)
-    v == "true"
+    if v == "" {
+        Result::Err("key not found")
+    } else if v == "true" {
+        Result::Ok(true)
+    } else if v == "false" {
+        Result::Ok(false)
+    } else {
+        Result::Err("not a boolean")
+    }
 }
 
 // get_float: Gets a float field from a JSON object by key.
