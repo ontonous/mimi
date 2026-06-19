@@ -1174,6 +1174,32 @@ func main() -> i32 {
     assert_eq!(stdout.trim(), "99");
 }
 
+// ===================== ImplTrait Return (codegen E2E) =====================
+
+#[test]
+#[ignore = "type checker doesn't resolve methods on impl Trait return types"]
+fn e2e_impl_trait_return() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+trait Drawable {
+    func draw() -> i32;
+}
+type Circle { radius: i32 }
+impl Drawable for Circle {
+    func draw() -> i32 { 42 }
+}
+func make_drawable() -> impl Drawable {
+    Circle { radius: 10 }
+}
+func main() -> i32 {
+    let d = make_drawable()
+    println(d.draw())
+    0
+}
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
 // ===================== Sanitizer Tests =====================
 // These tests run the compiled binary under valgrind (memcheck) or with
 // AddressSanitizer. They are #[ignore] by default — run with:
