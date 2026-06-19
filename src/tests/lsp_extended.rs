@@ -376,3 +376,108 @@ fn debug_references() {
     assert!(!word.is_empty(), "should extract word 'add'");
     assert!(!refs.is_empty(), "should find references to 'add'");
 }
+
+#[test]
+fn hover_variable() {
+    let server = LspServer::new();
+    let text = "func main() {\n    let x = 42;\n    println(x);\n}";
+    let result = server.compute_hover(text, 1, 10);
+    let _ = result;
+}
+
+#[test]
+fn definition_variable() {
+    let server = LspServer::new();
+    let text = "func main() -> i32 {\n    let x = 42;\n    x\n}";
+    let result = server.compute_definition(text, 2, 4, "file:///test.mimi");
+    let _ = result;
+}
+
+#[test]
+fn document_symbols_with_modules() {
+    let server = LspServer::new();
+    let text = "module Math {\n    func add(a: i32, b: i32) -> i32 { a + b }\n}\nfunc main() { }";
+    let symbols = server.compute_document_symbols(text);
+    let names: Vec<&str> = symbols.iter()
+        .map(|s| s.get("name").unwrap().as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Math") || names.contains(&"main"), "should contain at least one symbol");
+}
+
+#[test]
+fn semantic_tokens_with_if() {
+    let server = LspServer::new();
+    let text = "func main() {\n    if true {\n        1\n    }\n}";
+    let tokens = server.compute_semantic_tokens(text);
+    assert!(!tokens.is_empty(), "should produce semantic tokens");
+}
+
+#[test]
+fn semantic_tokens_with_operators() {
+    let server = LspServer::new();
+    let text = "func main() -> i32 {\n    let x = 1 + 2 * 3;\n    x\n}";
+    let tokens = server.compute_semantic_tokens(text);
+    assert!(!tokens.is_empty(), "should produce semantic tokens");
+}
+
+#[test]
+fn diagnostic_type_mismatch_in_let() {
+    let result = check_source(r#"
+        func main() -> i32 {
+            let x: i32 = "hello";
+            0
+        }
+    "#);
+    assert!(result.is_err(), "should reject string to i32 assignment");
+    if let Err(errors) = &result {
+        assert!(!errors.is_empty(), "should have at least one error");
+    }
+}
+
+#[test]
+fn diagnostic_double_error() {
+    let result = check_source(r#"
+        func main() {
+            let x = undefined1;
+            let y = undefined2;
+        }
+    "#);
+    if let Err(errors) = result {
+        assert!(errors.len() >= 2, "should have at least two errors");
+    }
+}
+
+#[test]
+fn diagnostic_undefined_variable_in_expression() {
+    let result = check_source(r#"
+        func main() -> i32 {
+            let x = y + 1;
+            0
+        }
+    "#);
+    assert!(result.is_err(), "should reject undefined variable y");
+}
+
+#[test]
+fn signature_help_multiple_overloads() {
+    let server = LspServer::new();
+    let text = "func foo(a: i32) -> i32 { a }\nfunc foo(a: i32, b: i32) -> i32 { a + b }\nfunc main() { foo(1, 2) }";
+    let result = server.compute_signature_help(text, 2, 12);
+    let _ = result;
+}
+
+#[test]
+fn folding_range_complex_nesting() {
+    let server = LspServer::new();
+    let text = "func f() {\n    if true {\n        if false {\n            1\n        }\n    }\n}";
+    let ranges = server.compute_folding_ranges(text);
+    assert!(ranges.len() >= 3, "should have folding ranges for nested braces");
+}
+
+#[test]
+fn folding_range_multiple_functions() {
+    let server = LspServer::new();
+    let text = "func a() {\n    1\n}\nfunc b() {\n    2\n}";
+    let ranges = server.compute_folding_ranges(text);
+    assert!(ranges.len() >= 2, "should have folding ranges for 2 functions");
+}

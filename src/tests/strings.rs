@@ -86,3 +86,84 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(v, interp::Value::String("Hi, Alice!".to_string()));
 }
+
+#[test]
+fn string_compare_equal() {
+    let src = r#"
+func main() -> bool {
+    "hello" == "hello"
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn string_compare_not_equal() {
+    let src = r#"
+func main() -> bool {
+    "hello" != "world"
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn string_concat_long_chain() {
+    let src = r#"
+func main() -> string {
+    let s = "a" + "b" + "c" + "d" + "e";
+    s
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("abcde".to_string()));
+}
+
+#[test]
+fn fstring_integer_expression() {
+    let src = r#"
+func main() -> string {
+    let a = 10;
+    let b = 20;
+    f"sum = {a + b}"
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("sum = 30".to_string()));
+}
+
+#[test]
+fn fstring_boolean_interpolation() {
+    let src = r#"
+func main() -> string {
+    let flag = true;
+    f"flag is {flag}"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("flag is true".to_string()));
+}
+
+#[test]
+fn string_from_function_return() {
+    let src = r#"
+func greet() -> string {
+    "hello world"
+}
+
+func main() -> string {
+    greet()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("hello world".to_string()));
+}
+
+#[test]
+fn string_concat_with_variable() {
+    let src = r#"
+func main() -> string {
+    let prefix = "pre";
+    let suffix = "fix";
+    prefix + suffix
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("prefix".to_string()));
+}

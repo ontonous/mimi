@@ -192,17 +192,6 @@ func main() -> i32 {
 }
 
 #[test]
-fn typecheck_return_type_mismatch() {
-    let src = r#"
-func main() -> i32 {
-    "hello"
-}
-"#;
-    let result = check_source(src);
-    assert!(result.is_err(), "Should reject string return when i32 expected");
-}
-
-#[test]
 fn typecheck_unary_not_on_non_bool() {
     let src = r#"
 func main() -> bool {

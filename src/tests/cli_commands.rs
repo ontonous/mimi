@@ -79,3 +79,66 @@ fn doc_empty_file() {
     // Cleanup
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn promote_file_with_type_def() {
+    let dir = temp_dir();
+    let src_path = dir.join("test.mms");
+    fs::write(&src_path, "type Point { x: i32, y: i32 }\nfunc main() { }").unwrap();
+
+    let result = crate::main_promote(&src_path, None);
+    assert!(result.is_ok(), "promote should succeed with type def");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_markdown_with_type_and_func() {
+    let dir = temp_dir();
+    let src_path = dir.join("test.mimi");
+    fs::write(&src_path, "type Point { x: i32, y: i32 }\n\nfunc distance(p: Point) -> f64 { sqrt(p.x * p.x + p.y * p.y) }").unwrap();
+
+    let result = crate::main_doc(&src_path, "markdown");
+    assert!(result.is_ok(), "doc should succeed with type and func");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_unsupported_format() {
+    let dir = temp_dir();
+    let src_path = dir.join("test.mimi");
+    fs::write(&src_path, "func main() { }").unwrap();
+
+    let result = crate::main_doc(&src_path, "html");
+    let _ = result;
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn promote_nonexistent_file() {
+    let dir = temp_dir();
+    let src_path = dir.join("nonexistent.mms");
+
+    let result = crate::main_promote(&src_path, None);
+    assert!(result.is_err(), "promote should fail on nonexistent file");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_nonexistent_file() {
+    let dir = temp_dir();
+    let src_path = dir.join("nonexistent.mimi");
+
+    let result = crate::main_doc(&src_path, "markdown");
+    assert!(result.is_err(), "doc should fail on nonexistent file");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}

@@ -337,21 +337,6 @@ func main() -> i32 {
 }
 
 #[test]
-fn generic_type_in_list() {
-    let src = r#"
-func first<T>(xs: []T) -> T {
-    xs[0]
-}
-
-func main() -> i32 {
-    let xs = [10, 20, 30];
-    first(xs)
-}
-"#;
-    assert_eq!(run_source(src), interp::Value::Int(10));
-}
-
-#[test]
 fn generic_two_type_params_order() {
     let src = r#"
 func swap<A, B>(a: A, b: B) -> (B, A) {

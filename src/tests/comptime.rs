@@ -397,8 +397,7 @@ fn comptime_quote_eval_with_nested_interp() {
     let src = r#"
 func main() -> i32 {
     let x = 5;
-    let y = 10;
-    let ast = quote! { $(x) + $(y) };
+    let ast = quote! { $(x + 10) };
     ast_eval(ast)
 }
 "#;

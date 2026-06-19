@@ -93,3 +93,101 @@ func main() {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
+
+#[test]
+fn actor_method_with_param() {
+    let src = r#"
+actor Accumulator {
+    mut total: i32 = 0;
+
+    func add(n: i32) {
+        self.total = self.total + n;
+    }
+
+    func get() -> i32 {
+        return self.total;
+    }
+}
+
+func main() -> i32 {
+    let a = Accumulator.spawn();
+    a.add(5);
+    a.add(10);
+    await a.get()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(15));
+}
+
+#[test]
+fn actor_return_bool() {
+    let src = r#"
+actor Checker {
+    val: bool = true;
+
+    func check() -> bool {
+        return self.val;
+    }
+}
+
+func main() -> bool {
+    let c = Checker.spawn();
+    c.check()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn actor_return_string() {
+    let src = r#"
+actor Messenger {
+    msg: string = "hello";
+
+    func get_msg() -> string {
+        return self.msg;
+    }
+}
+
+func main() -> string {
+    let m = Messenger.spawn();
+    m.get_msg()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("hello".to_string()));
+}
+
+#[test]
+fn actor_multiple_fields() {
+    let src = r#"
+actor Point {
+    x: i32 = 3;
+    y: i32 = 4;
+}
+
+func main() -> i32 {
+    let p = Point.spawn();
+    p.x + p.y
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(7));
+}
+
+#[test]
+fn actor_nested_in_function_multiple_calls() {
+    let src = r#"
+actor Holder {
+    val: i32 = 99;
+}
+
+func use_actor() -> i32 {
+    let h = Holder.spawn();
+    h.val
+}
+
+func main() -> i32 {
+    use_actor() + use_actor()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(198));
+}
