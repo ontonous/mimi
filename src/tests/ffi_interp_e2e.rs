@@ -101,10 +101,25 @@ fn interp_ffi_json_sum_list() {
     assert_eq!(result.unwrap(), interp::Value::Int(60));
 }
 
-// Interpreter callback test is skipped: the libffi callback trampoline
-// has a pre-existing issue (SIGSEGV in trampoline dispatch) that also
-// exists in the codegen E2E path. The codegen `e2e_closure_extern_callback`
-// uses a different mechanism (LLVM thunks) and works correctly.
+#[test]
+fn interp_ffi_callback() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().unwrap();
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        extern "C" {
+            func test_callback(x: i32, cb: func(i32) -> i32) -> i32
+        }
+        func main() -> i32 {
+            let factor = 2
+            let cb = fn(n: i32) -> i32 { n * factor }
+            test_callback(5, cb)
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(result.unwrap(), interp::Value::Int(10));
+}
 
 #[test]
 fn interp_ffi_parse_int_raw_string() {

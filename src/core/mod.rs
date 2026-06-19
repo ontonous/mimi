@@ -759,11 +759,12 @@ impl<'a> Checker<'a> {
     /// extern function signature.
     fn is_valid_extern_type(&self, ty: &Type, _in_pointer: bool) -> bool {
         match ty {
-            // Scalars and #[repr(C)] user types
+            // Scalars and #[repr(C)] user types (Enum, Record, Union)
             Type::Name(name, _) => {
                 matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit")
                 || (self.types.get(name).map(|t| t.attributes.contains(&TypeAttribute::ReprC)).unwrap_or(false)
-                    && matches!(self.types.get(name).map(|t| &t.kind), Some(TypeDefKind::Enum(_))))
+                    && matches!(self.types.get(name).map(|t| &t.kind),
+                        Some(TypeDefKind::Enum(_)) | Some(TypeDefKind::Record(_)) | Some(TypeDefKind::Union(_))))
             }
             // Capabilities
             Type::Cap(_) => true,

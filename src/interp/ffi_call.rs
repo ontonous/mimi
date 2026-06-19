@@ -822,17 +822,7 @@ impl<'a> Interpreter<'a> {
                 // code_ptr_ref is &unsafe extern "C" fn() — a reference to the generated
                 // trampoline function pointer. We convert it to a raw i64 address.
                 let fn_ptr_val: unsafe extern "C" fn() = *code_ptr_ref;
-                let fn_ptr_addr = fn_ptr_val as usize;
-                // Best-effort: mark the closure's code page executable.
-                // libffi should already do this, but some hardened kernels may need help.
-                let page_size = 4096usize;
-                let page_start = fn_ptr_addr & !(page_size - 1);
-                let _ = unsafe { libc::mprotect(
-                    page_start as *mut libc::c_void,
-                    page_size as libc::size_t,
-                    libc::PROT_READ | libc::PROT_EXEC,
-                ) };
-                let fn_ptr = fn_ptr_addr as i64;
+                let fn_ptr = fn_ptr_val as i64;
 
                 // Keep the closure and its userdata alive for the duration of the C call
                 ffi_guards.push(FfiGuard::CallbackClosure {

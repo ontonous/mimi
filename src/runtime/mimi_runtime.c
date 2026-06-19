@@ -1440,15 +1440,16 @@ int __mimi_extern_test_json_sum(const char* json) {
 
 // Codegen JSON FFI: serialize Mimi list {i64 len, i8* data} to JSON string
 // data points to i64 array (Mimi's universal element representation).
+// elem_type: 0=int, 1=float (bitcast f64 bits), 2=string (i8* ptr).
 // Returns malloc'd char* (caller must free).
-char* mimi_list_serialize(void* data, int64_t len) {
+char* mimi_json_serialize(void* data, int64_t len, int64_t elem_type) {
     if (!data || len <= 0) {
         char* empty = (char*)malloc(3);
         if (!empty) return NULL;
         empty[0] = '['; empty[1] = ']'; empty[2] = '\0';
         return empty;
     }
-    size_t buf_size = (size_t)len * 24 + 16;
+    size_t buf_size = (size_t)len * 64 + 16;
     char* buf = (char*)malloc(buf_size);
     if (!buf) return NULL;
     char* p = buf;
@@ -1456,29 +1457,51 @@ char* mimi_list_serialize(void* data, int64_t len) {
     for (int64_t i = 0; i < len; i++) {
         if (i > 0) *p++ = ',';
         int64_t raw = ((int64_t*)data)[i];
-        char tmp[24];
-        int nd = 0;
-        int64_t val = raw;
-        if (val < 0) { tmp[nd++] = '-'; val = -val; }
-        if (val == 0) {
-            tmp[nd++] = '0';
+        if (elem_type == 1) {
+            double val;
+            memcpy(&val, &raw, sizeof(val));
+            int nd = sprintf(p, "%g", val);
+            p += nd;
+        } else if (elem_type == 2) {
+            char* s = (char*)raw;
+            *p++ = '"';
+            if (s) {
+                while (*s) {
+                    if (*s == '"' || *s == '\\') *p++ = '\\';
+                    *p++ = *s++;
+                }
+            }
+            *p++ = '"';
         } else {
-            char rev[24];
-            int nr = 0;
-            while (val > 0) { rev[nr++] = (char)('0' + (val % 10)); val /= 10; }
-            for (int j = nr - 1; j >= 0; j--) tmp[nd++] = rev[j];
+            char tmp[24];
+            int nd = 0;
+            int64_t val = raw;
+            if (val < 0) { tmp[nd++] = '-'; val = -val; }
+            if (val == 0) {
+                tmp[nd++] = '0';
+            } else {
+                char rev[24];
+                int nr = 0;
+                while (val > 0) { rev[nr++] = (char)('0' + (val % 10)); val /= 10; }
+                for (int j = nr - 1; j >= 0; j--) tmp[nd++] = rev[j];
+            }
+            for (int j = 0; j < nd; j++) *p++ = tmp[j];
         }
-        for (int j = 0; j < nd; j++) *p++ = tmp[j];
     }
     *p++ = ']';
     *p = '\0';
     return buf;
 }
 
+// Backward-compatible wrapper for existing codegen i64-only callers
+char* mimi_list_serialize(void* data, int64_t len) {
+    return mimi_json_serialize(data, len, 0);
+}
+
 // Codegen JSON FFI: deserialize JSON string "[e1,e2,...]" to Mimi list data.
-// Returns malloc'd i64 array (Mimi's universal element representation).
-// Sets *out_len to element count. Caller must free the returned pointer.
-void* mimi_list_deserialize(const char* json, int64_t* out_len) {
+// elem_type: 0=int, 1=float, 2=string.
+// Returns malloc'd i64 array. Sets *out_len. Caller must free the result.
+void* mimi_json_deserialize(const char* json, int64_t* out_len, int64_t elem_type) {
     if (!json) { *out_len = 0; return NULL; }
     const char* p = json;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
@@ -1488,8 +1511,13 @@ void* mimi_list_deserialize(const char* json, int64_t* out_len) {
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') { p++; if (*p == '\0') break; }
         if (*p == ']') break;
-        if (*p >= '0' && *p <= '9') { count++; while (*p >= '0' && *p <= '9') p++; }
-        else if (*p == '-') { count++; p++; while (*p >= '0' && *p <= '9') p++; }
+        if (elem_type == 2 && *p == '"') {
+            count++;
+            p++;
+            while (*p && *p != '"') { if (*p == '\\') p++; p++; }
+            if (*p == '"') p++;
+        } else if (*p >= '0' && *p <= '9') { count++; while (*p >= '0' && *p <= '9') p++; if (*p == '.') { p++; while (*p >= '0' && *p <= '9') p++; } }
+        else if (*p == '-') { count++; p++; while (*p >= '0' && *p <= '9') p++; if (*p == '.') { p++; while (*p >= '0' && *p <= '9') p++; } }
         else p++;
     }
     int64_t* data = (int64_t*)malloc((count + 1) * sizeof(int64_t));
@@ -1501,14 +1529,48 @@ void* mimi_list_deserialize(const char* json, int64_t* out_len) {
     while (*p && idx < count) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') { p++; if (*p == '\0') break; }
         if (*p == ']') break;
-        int neg = 0;
-        if (*p == '-') { neg = 1; p++; }
-        int64_t val = 0;
-        while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
-        data[idx++] = neg ? -val : val;
+        if (elem_type == 1) {
+            // Float: parse as double, store bits as i64
+            char* end = NULL;
+            double fval = strtod(p, &end);
+            if (end != p) {
+                int64_t bits;
+                memcpy(&bits, &fval, sizeof(bits));
+                data[idx++] = bits;
+                p = end;
+            } else {
+                data[idx++] = 0; p++;
+            }
+        } else if (elem_type == 2) {
+            // String: parse quoted string, store pointer to malloc'd copy
+            if (*p == '"') p++;
+            const char* start = p;
+            while (*p && *p != '"') { if (*p == '\\') p++; p++; }
+            int64_t slen = p - start;
+            char* s = (char*)malloc(slen + 1);
+            if (s) {
+                strncpy(s, start, slen);
+                s[slen] = '\0';
+                data[idx++] = (int64_t)(intptr_t)s;
+            } else {
+                data[idx++] = 0;
+            }
+            if (*p == '"') p++;
+        } else {
+            int neg = 0;
+            if (*p == '-') { neg = 1; p++; }
+            int64_t val = 0;
+            while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+            data[idx++] = neg ? -val : val;
+        }
     }
     *out_len = count;
     return (void*)data;
+}
+
+// Backward-compatible wrapper for existing codegen i64-only callers
+void* mimi_list_deserialize(const char* json, int64_t* out_len) {
+    return mimi_json_deserialize(json, out_len, 0);
 }
 
 // G8: Segmentation fault — for fork isolation testing

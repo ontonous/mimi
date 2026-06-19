@@ -11,6 +11,17 @@ use crate::error::{CompileError, MimiResult};
 use super::{CallbackThunkEntry, CodeGenerator};
 use super::VarEntry;
 
+/// Map a Mimi Type to JSON serialization element type tag:
+/// 0 = i64/i32 (integer), 1 = f64 (float), 2 = string
+fn elem_type_tag(ty: &Type) -> u32 {
+    match ty {
+        Type::Name(n, _) if n == "f64" => 1,
+        Type::Name(n, _) if n == "string" => 2,
+        Type::Name(_, params) if !params.is_empty() => elem_type_tag(&params[0]),
+        _ => 0,
+    }
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_impl_methods(&mut self) -> MimiResult<()> {
         for (type_name, trait_impls) in self.type_impls.clone() {
@@ -494,18 +505,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             _ => return Err(CompileError::TypeMismatch(
                                 format!("list len {}: expected int", i))),
                         };
-                        let serialize_fn = if let Some(f) = self.module.get_function("mimi_list_serialize") {
+                        let elem_tag = elem_type_tag(&p.ty);
+                        let elem_tag_iv = self.context.i64_type().const_int(elem_tag as u64, false);
+                        let serialize_fn = if let Some(f) = self.module.get_function("mimi_json_serialize") {
                             f
                         } else {
                             let fn_ty = i8_ptr_ty.fn_type(&[
                                 BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
                                 BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
                             ], false);
-                            self.module.add_function("mimi_list_serialize", fn_ty, Some(inkwell::module::Linkage::External))
+                            self.module.add_function("mimi_json_serialize", fn_ty, Some(inkwell::module::Linkage::External))
                         };
                         let json_val = self.builder.build_call(serialize_fn, &[
                             BasicMetadataValueEnum::PointerValue(data_pv),
                             BasicMetadataValueEnum::IntValue(len_iv),
+                            BasicMetadataValueEnum::IntValue(elem_tag_iv),
                         ], &format!("json_ser_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("json serialize error: {}", e)))?
                             .try_as_basic_value().left()
@@ -600,18 +615,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let out_len_alloca = self.builder.build_alloca(self.context.i64_type(), "out_len")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let deserialize_fn = if let Some(f) = self.module.get_function("mimi_list_deserialize") {
+                let ret_tag = ef.ret.as_ref().map(|ret_ty| elem_type_tag(ret_ty)).unwrap_or(0);
+                let ret_tag_iv = self.context.i64_type().const_int(ret_tag as u64, false);
+                let deserialize_fn = if let Some(f) = self.module.get_function("mimi_json_deserialize") {
                     f
                 } else {
                     let fn_ty = i8_ptr_ty.fn_type(&[
                         BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
                         BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
                     ], false);
-                    self.module.add_function("mimi_list_deserialize", fn_ty, Some(inkwell::module::Linkage::External))
+                    self.module.add_function("mimi_json_deserialize", fn_ty, Some(inkwell::module::Linkage::External))
                 };
                 let data_ptr_val = self.builder.build_call(deserialize_fn, &[
                     BasicMetadataValueEnum::PointerValue(json_pv),
                     BasicMetadataValueEnum::PointerValue(out_len_alloca),
+                    BasicMetadataValueEnum::IntValue(ret_tag_iv),
                 ], "json_deser")
                     .map_err(|e| CompileError::LlvmError(format!("json deserialize error: {}", e)))?
                     .try_as_basic_value().left()
