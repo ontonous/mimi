@@ -569,6 +569,44 @@ impl<'a> Lexer<'a> {
                         Some('"') => { s.push_str("\\\""); self.advance(); }
                         Some('{') => { s.push_str("\\{"); self.advance(); }
                         Some('}') => { s.push_str("\\}"); self.advance(); }
+                        Some('0') => { s.push_str("\\0"); self.advance(); }
+                        Some('x') => {
+                            s.push_str("\\x");
+                            self.advance();
+                            for _ in 0..2 {
+                                match self.peek() {
+                                    Some(c) if c.is_ascii_hexdigit() => { s.push(c); self.advance(); }
+                                    _ => break,
+                                }
+                            }
+                        }
+                        Some('u') => {
+                            s.push_str("\\u");
+                            self.advance();
+                            if self.peek() == Some('{') {
+                                s.push('{');
+                                self.advance();
+                                while let Some(c) = self.peek() {
+                                    if c.is_ascii_hexdigit() || c == '_' {
+                                        s.push(c);
+                                        self.advance();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if self.peek() == Some('}') {
+                                    s.push('}');
+                                    self.advance();
+                                }
+                            } else {
+                                for _ in 0..4 {
+                                    match self.peek() {
+                                        Some(c) if c.is_ascii_hexdigit() => { s.push(c); self.advance(); }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                        }
                         Some(c) => { s.push(c); self.advance(); }
                         None => return Err("unterminated escape in f-string".into()),
                     }
