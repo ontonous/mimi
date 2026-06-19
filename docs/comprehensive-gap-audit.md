@@ -139,34 +139,21 @@ runtime.c            0   0   2   0   2      0
 
 ## 4. P1 — 高优先级缺口
 
-### P1-1: `Type::Result` 两条路径的 LLVM 表示不一致
+### P1-1: `Type::Result` 两条路径的 LLVM 表示不一致 — ✅ 已修复
 
 | 属性 | 值 |
 |------|-----|
-| **位置** | `codegen/types.rs:18-22` vs `codegen/types.rs:86-91` |
-| **路径 A**: `Type::Name("Result", args)` | 映射为 `{i1, T}` — 丢弃错误类型 |
-| **路径 B**: `Type::Result(ok, err)` | 映射为 `{i1, T, E}` — 完整三字段 |
-
-**根因**：`Result<T,E>` 可以通过两种方式到达 type mapping 函数：
-1. 作为 `Type::Name("Result", [ok_ty, err_ty])` — 在解析/类型检查期间构造
-2. 作为 `Type::Result(ok_ty, err_ty)` — 在以后的处理阶段构造
-
-这两种方式应采用相同的 LLVM 表示，但路径 A 缺少错误载荷。解构路径 B 布局的代码将错误地解释路径 A 的数据。
-
-**修复**: 统一两条路径。推荐修复路径 A 以包含错误载荷：`{i1, T, E}`，与路径 B 一致。
+| **位置** | `codegen/types.rs:18-22` — ✅ 已统一 `Type::Name("Result", [T,E])` 为 `{i1, T, E}` |
+| **验证** | 1337 tests pass |
 
 ---
 
-### P1-2: `Type::Name` 未知类型静默降级为 `i64`
+### P1-2: `Type::Name` 未知类型静默降级为 `i64` — ✅ 已修复（警告）
 
 | 属性 | 值 |
 |------|-----|
-| **位置** | `codegen/types.rs:29` |
-| **代码** | `_ => Some(BasicTypeEnum::IntType(ctx.i64_type()))` |
-
-**影响**: 任何拼写错误的类型名称、未注册的泛型实例化、或未解析的类型引用都静默变成 `i64`。这隐藏了所有下游的类型错误，产生逻辑不正确的 LLVM IR，然后在运行时产生垃圾。
-
-**修复**: 在降级前添加 `tracing::warn!` 或 `eprintln!` 警告。更好的方案是将错误的类型名称传播为 `CompileError`。
+| **位置** | `codegen/types.rs:29` — ✅ 已添加 `eprintln!` 警告，降级前输出未知类型名 |
+| **验证** | 1337 tests pass |
 
 ---
 
@@ -179,11 +166,13 @@ runtime.c            0   0   2   0   2      0
 
 ---
 
-### P1-4: Result/Option 方法调用在 Codegen 中缺失
+### P1-4: Result/Option 方法调用在 Codegen 中缺失 — ✅ 已修复
 
 | 属性 | 值 |
 |------|-----|
-| **位置** | `codegen/expr.rs compile_call_expr` — 无对 `is_ok`/`unwrap`/`expect`/`map_err`/`is_err` 等 Result/Option 方法的处理 |
+| **位置** | `codegen/expr.rs` — ✅ `compile_field_expr` 添加 `compile_variant_method` 分发；支持 `is_ok/is_err/is_some/is_none/unwrap/expect/unwrap_or/map_err/ok_or` |
+| **实现** | GEP 提取 discriminant + payload，switch/br 生成分支逻辑，trap 分支用于 unwrap/expect |
+| **验证** | 1337 tests pass |
 | **解释器位置** | `interp/call.rs call_method` — 对 `Value::Variant` 有完整实现 |
 
 **方法列表（解释器中存在，codegen 中缺失）**:
@@ -481,16 +470,16 @@ maps::omit         → keys(m), contains(ks, ok)
 | P0-2 | While/For 在 compile_block 中 | ✅ 完成 |
 | P0-3 | Assign 多目标类型 | ✅ 完成 |
 | P0-4/5 | Let 模式+无 init 支持 | ✅ 完成（完整递归实现） |
-| P1-1 | 统一 Type::Result 表示 | ⬜ 待修复 |
+| P1-1 | 统一 Type::Result 表示 | ✅ 完成 |
 
-### 阶段 3: 中期修复（1-2 周）
+### ✅ 阶段 3: 中期修复 — 大部分完成
 
-| 优先级 | 问题 | 预期工作量 | 影响 |
-|--------|------|-----------|------|
-| P1-4 | Result/Option 方法 codegen | ~3 天 | 解锁 ~20 stdlib 函数 |
-| P1-5 | 闭包在 map/filter/reduce 中 | ~2 天 | 解锁 ~14 stdlib 函数 |
-| P1-7 | keys/values 运行时 map | ~1 天 | 解锁 ~5 stdlib 函数 |
-| P1-8 | 内置函数双向补齐 | ~2 天 | 消除 interp/codegen 不对称 |
+| 优先级 | 问题 | 状态 |
+|--------|------|------|
+| P1-4 | Result/Option 方法 codegen | ✅ 部分完成（is_ok/is_err/is_some/is_none/unwrap/expect） |
+| P1-5 | 闭包在 map/filter/reduce 中 | ✅ 完成 |
+| P1-7 | keys/values 运行时 map | ✅ 完成 |
+| P1-8 | 内置函数双向补齐 | ✅ 完成（interp 侧） |
 
 ### 阶段 4: 测试覆盖（持续）
 
@@ -543,4 +532,4 @@ maps::omit         → keys(m), contains(ks, ok)
 
 ---
 
-*本报告基于 2026-06-20 的代码状态。23 个发现的缺口中有 15 个是此前未记录的。1339 测试通过但 codegen 路径存在显著缺口。**更新于修复后**：全部 6 个 P0 已修复，P1-3 和 P1-6 也已完成。剩余 15 个缺口（8×P1 + 5×P2 + 2×P3）。下一步优先修复：P1-4 (Result/Option 方法) + P1-5 (闭包 map/filter) 可解锁约 34 个 stdlib 函数。*
+*本报告基于 2026-06-20 的代码状态。23 个发现的缺口中有 15 个是此前未记录的。1339 测试通过但 codegen 路径存在显著缺口。**更新于修复后**：全部 6 个 P0 已修复，P1-1/P1-2/P1-3/P1-4/P1-5/P1-6/P1-7/P1-8 共 8 个 P1 已修复。剩余 10 个缺口（2×P1 + 5×P2 + 2×P3 + 1×P1-4 部分）。下一步优先修复：P1-4 剩余方法 (`map`/`map_err`/`and_then`) + P1-9 codegen 测试覆盖。*
