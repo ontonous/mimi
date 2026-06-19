@@ -169,6 +169,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.heap_allocs.borrow_mut().push(Vec::new());
     }
 
+    /// G10: Update a previously registered heap allocation pointer (after realloc).
+    pub(super) fn update_heap_alloc(&self, old_ptr: inkwell::values::PointerValue<'ctx>, new_ptr: inkwell::values::PointerValue<'ctx>) {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            if let Some(entry) = stack.iter_mut().find(|p| **p == old_ptr) {
+                *entry = new_ptr;
+            }
+        }
+    }
+
     /// G10: Pop scope level and emit `free(ptr)` for each registered heap allocation.
     pub(super) fn free_heap_allocs(&mut self) -> Result<(), CompileError> {
         if let Some(scope) = self.heap_allocs.borrow_mut().pop() {

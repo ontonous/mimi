@@ -182,6 +182,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Store new data pointer
                 self.builder.build_store(data_gep, realloc_result)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.update_heap_alloc(old_data, realloc_result);
 
                 // Store new element at data[old_len]: *(new_data + old_len*8) = elem
                 // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
@@ -310,6 +311,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 self.builder.build_store(data_gep, realloc_result)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.update_heap_alloc(old_data, realloc_result);
 
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;

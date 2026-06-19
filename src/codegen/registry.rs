@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::codegen::types;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
@@ -252,18 +252,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             let param_types: Vec<crate::ast::Type> = ef.params.iter().map(|p| p.ty.clone()).collect();
             self.extern_param_types.insert(ef.name.clone(), param_types);
 
-            // Check for types requiring JSON serialization (not yet supported in codegen)
+            // Only Tuple requires interpreter; List and Record now use JSON serialization
             for p in &ef.params {
-                if let crate::ast::Type::Name(name, _) = &p.ty {
-                    if name == "List" || name == "Tuple" || self.record_type_names.contains(name.as_str()) {
-                        return Err(CompileError::LlvmError(format!(
-                            "codegen does not yet support complex type '{}' in extern parameter '{}'. \
-                             Use `mimi run` (interpreter) for JSON-serialized FFI, or convert to a \
-                             passport type (c_shared, c_borrow, *T) for native codegen FFI.",
-                            name, p.name
-                        )));
-                    }
-                }
                 if let crate::ast::Type::Tuple(_) = &p.ty {
                     return Err(CompileError::LlvmError(format!(
                         "codegen does not yet support Tuple type in extern parameter '{}'. \
@@ -272,17 +262,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )));
                 }
             }
-            // Same check for return type
             if let Some(ret_ty) = &ef.ret {
-                if let crate::ast::Type::Name(name, _) = ret_ty {
-                    if name == "List" || name == "Tuple" || self.record_type_names.contains(name.as_str()) {
-                        return Err(CompileError::LlvmError(format!(
-                            "codegen does not yet support complex type '{}' as extern return type for '{}'. \
-                             Use `mimi run` (interpreter) for JSON-serialized FFI, or use a scalar/pointer return type.",
-                            name, ef.name
-                        )));
-                    }
-                }
                 if let crate::ast::Type::Tuple(_) = ret_ty {
                     return Err(CompileError::LlvmError(format!(
                         "codegen does not yet support Tuple as extern return type for '{}'. \
@@ -292,33 +272,90 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
 
+            let list_struct_sty = self.context.struct_type(&[
+                BasicTypeEnum::IntType(self.context.i64_type()),
+                BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
+            ], false);
+            let list_struct_ty = BasicTypeEnum::StructType(list_struct_sty);
+            let list_ptr_ty = BasicTypeEnum::PointerType(list_struct_sty.ptr_type(inkwell::AddressSpace::default()));
             let mut param_tys = Vec::new();
             for p in &ef.params {
-                let ty = self.type_to_llvm_for_extern(&p.ty);
+                let ty = match &p.ty {
+                    crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()) => {
+                        list_ptr_ty
+                    }
+                    _ => self.type_to_llvm_for_extern(&p.ty),
+                };
                 param_tys.push(types::basic_to_metadata(self.context, ty));
             }
-            let ret_ty = match &ef.ret {
-                Some(ty) => self.type_to_llvm_for_extern(ty),
+            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let mut extern_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+            for p in &ef.params {
+                let llvm_ty = match &p.ty {
+                    crate::ast::Type::Name(n, _) if n == "string" || n == "List" || self.record_type_names.contains(n.as_str()) => {
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty)
+                    }
+                    _ => {
+                        let ty = self.type_to_llvm_for_extern(&p.ty);
+                        types::basic_to_metadata(self.context, ty)
+                    }
+                };
+                extern_param_tys.push(llvm_ty);
+            }
+            let wrapper_ret_ty = match &ef.ret {
+                Some(ty) => {
+                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str())) {
+                        list_struct_ty
+                    } else {
+                        self.type_to_llvm_for_extern(ty)
+                    }
+                }
                 None => BasicTypeEnum::IntType(self.context.i64_type()),
             };
-            let fn_type = match ret_ty {
-                BasicTypeEnum::IntType(t) => t.fn_type(&param_tys, false),
-                BasicTypeEnum::FloatType(t) => t.fn_type(&param_tys, false),
-                BasicTypeEnum::PointerType(t) => t.fn_type(&param_tys, false),
-                BasicTypeEnum::StructType(t) => t.fn_type(&param_tys, false),
-                BasicTypeEnum::ArrayType(t) => t.fn_type(&param_tys, false),
-                _ => self.context.i64_type().fn_type(&param_tys, false),
+            let extern_ret_ty = match &ef.ret {
+                Some(ty) => {
+                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str())) {
+                        BasicTypeEnum::PointerType(i8_ptr_ty)
+                    } else {
+                        self.type_to_llvm_for_extern(ty)
+                    }
+                }
+                None => BasicTypeEnum::IntType(self.context.i64_type()),
+            };
+            let is_void_return = ef.ret.is_none();
+            let wrapper_fn_type = if is_void_return {
+                self.context.void_type().fn_type(&param_tys, false)
+            } else {
+                match wrapper_ret_ty {
+                    BasicTypeEnum::IntType(t) => t.fn_type(&param_tys, false),
+                    BasicTypeEnum::FloatType(t) => t.fn_type(&param_tys, false),
+                    BasicTypeEnum::PointerType(t) => t.fn_type(&param_tys, false),
+                    BasicTypeEnum::StructType(t) => t.fn_type(&param_tys, false),
+                    BasicTypeEnum::ArrayType(t) => t.fn_type(&param_tys, false),
+                    _ => self.context.i64_type().fn_type(&param_tys, false),
+                }
+            };
+            let extern_fn_type = if is_void_return {
+                self.context.void_type().fn_type(&extern_param_tys, false)
+            } else {
+                match extern_ret_ty {
+                    BasicTypeEnum::IntType(t) => t.fn_type(&extern_param_tys, false),
+                    BasicTypeEnum::FloatType(t) => t.fn_type(&extern_param_tys, false),
+                    BasicTypeEnum::PointerType(t) => t.fn_type(&extern_param_tys, false),
+                    BasicTypeEnum::StructType(t) => t.fn_type(&extern_param_tys, false),
+                    BasicTypeEnum::ArrayType(t) => t.fn_type(&extern_param_tys, false),
+                    _ => self.context.i64_type().fn_type(&extern_param_tys, false),
+                }
             };
             let extern_name = format!("__mimi_extern_{}", ef.name);
-            let extern_fn = self.module.add_function(&extern_name, fn_type, Some(inkwell::module::Linkage::External));
-            let wrapper_fn = self.module.add_function(&ef.name, fn_type, Some(inkwell::module::Linkage::Internal));
+            let extern_fn = self.module.add_function(&extern_name, extern_fn_type, Some(inkwell::module::Linkage::External));
+            let wrapper_fn = self.module.add_function(&ef.name, wrapper_fn_type, Some(inkwell::module::Linkage::Internal));
 
             let entry = self.context.append_basic_block(wrapper_fn, "entry");
             let previous_block = self.builder.get_insert_block();
             self.builder.position_at_end(entry);
 
             let i64_ty = self.context.i64_type();
-            let _i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
 
             // Phase 1: Retain c_shared params before C call
             let mut shared_params: Vec<(usize, BasicValueEnum<'ctx>)> = Vec::new();
@@ -408,22 +445,94 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
 
-            // Phase 4: Build wrapper args and call extern function
-            let wrapper_args: Vec<BasicMetadataValueEnum<'ctx>> = wrapper_fn
-                .get_param_iter()
-                .map(|p| match p {
-                    BasicValueEnum::IntValue(v) => BasicMetadataValueEnum::IntValue(v),
-                    BasicValueEnum::FloatValue(v) => BasicMetadataValueEnum::FloatValue(v),
-                    BasicValueEnum::PointerValue(v) => BasicMetadataValueEnum::PointerValue(v),
-                    BasicValueEnum::StructValue(v) => BasicMetadataValueEnum::StructValue(v),
-                    BasicValueEnum::ArrayValue(v) => BasicMetadataValueEnum::ArrayValue(v),
-                    BasicValueEnum::VectorValue(v) => BasicMetadataValueEnum::VectorValue(v),
-                })
-                .collect();
+            // Phase 4: Build wrapper args, converting Mimi types to C ABI.
+            // string {i8*, i64} → i8*, List/Record {i64, i8*} → JSON char*
+            let mut wrapper_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+            let mut json_strings: Vec<PointerValue<'ctx>> = Vec::new();
+            for (i, p) in ef.params.iter().enumerate() {
+                let param = wrapper_fn.get_nth_param(i as u32)
+                    .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
+                match &p.ty {
+                    crate::ast::Type::Name(n, _) if n == "string" => {
+                        let struct_val = param.into_struct_value();
+                        let ptr = self.builder.build_extract_value(struct_val, 0, &format!("str_ptr_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("extract value error: {}", e)))?;
+                        wrapper_args.push(match ptr {
+                            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(pv),
+                            _ => return Err(CompileError::TypeMismatch(
+                                format!("string param {}: expected pointer from struct field 0", i))),
+                        });
+                    }
+                    crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()) => {
+                        let list_ptr = param.into_pointer_value();
+                        let len_gep = self.builder.build_struct_gep(
+                            list_struct_sty, list_ptr, 0, &format!("list_len_gep_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                        let data_gep = self.builder.build_struct_gep(
+                            list_struct_sty, list_ptr, 1, &format!("list_data_gep_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                        let len_val = self.builder.build_load(self.context.i64_type(), len_gep, &format!("list_len_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                        let data_ptr_val = self.builder.build_load(
+                            self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                            data_gep, &format!("list_data_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                        let data_pv = match data_ptr_val {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            _ => return Err(CompileError::TypeMismatch(
+                                format!("list data ptr {}: expected pointer", i))),
+                        };
+                        let len_iv = match len_val {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(CompileError::TypeMismatch(
+                                format!("list len {}: expected int", i))),
+                        };
+                        let serialize_fn = if let Some(f) = self.module.get_function("mimi_list_serialize") {
+                            f
+                        } else {
+                            let fn_ty = i8_ptr_ty.fn_type(&[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            ], false);
+                            self.module.add_function("mimi_list_serialize", fn_ty, Some(inkwell::module::Linkage::External))
+                        };
+                        let json_val = self.builder.build_call(serialize_fn, &[
+                            BasicMetadataValueEnum::PointerValue(data_pv),
+                            BasicMetadataValueEnum::IntValue(len_iv),
+                        ], &format!("json_ser_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("json serialize error: {}", e)))?
+                            .try_as_basic_value().left()
+                            .ok_or_else(|| CompileError::LlvmError("json serialize returned void".to_string()))?
+                            .into_pointer_value();
+                        json_strings.push(json_val);
+                        wrapper_args.push(BasicMetadataValueEnum::PointerValue(json_val));
+                    }
+                    _ => {
+                        wrapper_args.push(match param {
+                            BasicValueEnum::IntValue(v) => BasicMetadataValueEnum::IntValue(v),
+                            BasicValueEnum::FloatValue(v) => BasicMetadataValueEnum::FloatValue(v),
+                            BasicValueEnum::PointerValue(v) => BasicMetadataValueEnum::PointerValue(v),
+                            BasicValueEnum::StructValue(v) => BasicMetadataValueEnum::StructValue(v),
+                            BasicValueEnum::ArrayValue(v) => BasicMetadataValueEnum::ArrayValue(v),
+                            BasicValueEnum::VectorValue(v) => BasicMetadataValueEnum::VectorValue(v),
+                        });
+                    }
+                }
+            }
 
             let call = self.builder
                 .build_call(extern_fn, &wrapper_args, "extern_call")
                 .map_err(|e| CompileError::LlvmError(format!("failed to build extern wrapper call: {}", e)))?;
+
+            // Free JSON serialization strings after C call
+            for (j, json_pv) in json_strings.iter().enumerate() {
+                if let Some(free_fn) = self.module.get_function("free") {
+                    self.builder.build_call(free_fn, &[
+                        BasicMetadataValueEnum::PointerValue(*json_pv),
+                    ], &format!("free_json_{}", j))
+                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                }
+            }
 
             // Phase 4: Release c_shared params after C call
             for (i, _param) in &shared_params {
@@ -472,7 +581,56 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
 
             // Phase 6: Return
-            if fn_type.get_return_type().is_some() {
+            let needs_json_deserialize = ef.ret.as_ref().map_or(false, |ret_ty| {
+                matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()))
+            });
+            if needs_json_deserialize {
+                let ret = call.try_as_basic_value().left()
+                    .ok_or_else(|| CompileError::LlvmError("extern call returned void".to_string()))?;
+                let json_pv = match ret {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    _ => return Err(CompileError::LlvmError("Json return must be pointer".to_string())),
+                };
+                let out_len_alloca = self.builder.build_alloca(self.context.i64_type(), "out_len")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                let deserialize_fn = if let Some(f) = self.module.get_function("mimi_list_deserialize") {
+                    f
+                } else {
+                    let fn_ty = i8_ptr_ty.fn_type(&[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                    ], false);
+                    self.module.add_function("mimi_list_deserialize", fn_ty, Some(inkwell::module::Linkage::External))
+                };
+                let data_ptr_val = self.builder.build_call(deserialize_fn, &[
+                    BasicMetadataValueEnum::PointerValue(json_pv),
+                    BasicMetadataValueEnum::PointerValue(out_len_alloca),
+                ], "json_deser")
+                    .map_err(|e| CompileError::LlvmError(format!("json deserialize error: {}", e)))?
+                    .try_as_basic_value().left()
+                    .ok_or_else(|| CompileError::LlvmError("json deserialize returned void".to_string()))?
+                    .into_pointer_value();
+                let len_val = self.builder.build_load(self.context.i64_type(), out_len_alloca, "list_len")
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                if let Some(free_fn) = self.module.get_function("free") {
+                    self.builder.build_call(free_fn, &[BasicMetadataValueEnum::PointerValue(json_pv)], "free_json_ret")
+                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                }
+                let list_alloca = self.builder.build_alloca(list_struct_ty, "list_ret")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_alloca, 0, "list_len_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.builder.build_store(len_gep, len_val)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_alloca, 1, "list_data_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.builder.build_store(data_gep, data_ptr_val)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let ret_val = self.builder.build_load(list_struct_ty, list_alloca, "list_ret_val")
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                self.builder.build_return(Some(&ret_val))
+                    .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+            } else if wrapper_fn_type.get_return_type().is_some() {
                 let ret = call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
                 self.builder.build_return(Some(&ret))
                     .map_err(|e| CompileError::LlvmError(format!("failed to build extern wrapper return: {}", e)))?;

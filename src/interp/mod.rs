@@ -20,7 +20,7 @@ use crate::ffi::FfiContract;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use closure_utils::collect_free_vars;
 

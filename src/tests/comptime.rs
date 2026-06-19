@@ -349,3 +349,110 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
+
+#[test]
+fn comptime_requires_on_comptime_func() {
+    let src = r#"
+comptime func validate(n: i32) -> i32 {
+    requires: n > 0
+    n * 2
+}
+
+func main() -> i32 {
+    validate(5)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(10));
+}
+
+#[test]
+fn comptime_requires_fails_on_comptime_func() {
+    let src = r#"
+comptime func validate(n: i32) -> i32 {
+    requires: n > 0
+    n * 2
+}
+
+func main() -> i32 {
+    validate(-1)
+}
+"#;
+    let result = run_source_result(src);
+    assert!(result.is_err());
+}
+
+#[test]
+fn comptime_quote_with_contract_interaction() {
+    let src = r#"
+func main() -> i32 {
+    let ast = quote! { 42 };
+    ast_eval(ast)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn comptime_quote_eval_with_nested_interp() {
+    let src = r#"
+func main() -> i32 {
+    let x = 5;
+    let y = 10;
+    let ast = quote! { $(x) + $(y) };
+    ast_eval(ast)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(15));
+}
+
+#[test]
+fn comptime_quote_eval_block_with_contract() {
+    let src = r#"
+func compute(x: i32) -> i32 {
+    requires: x > 0
+    x * 2
+}
+
+func main() -> i32 {
+    let ast = quote! { compute(5) };
+    ast_eval(ast)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(10));
+}
+
+#[test]
+fn math_block_and_comptime_interaction() {
+    let src = r#"
+comptime func get_val() -> i32 {
+    50
+}
+
+func main() -> i32 {
+    math: {
+        get_val();
+    }
+    get_val() + 10
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(60));
+}
+
+#[test]
+fn math_block_contract_cross_check() {
+    let src = r#"
+func safe_div(a: i32, b: i32) -> i32 {
+    requires: b != 0
+    ensures: result == a / b
+    a / b
+}
+
+func main() -> i32 {
+    math: {
+        safe_div(10, 2);
+    }
+    42
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}

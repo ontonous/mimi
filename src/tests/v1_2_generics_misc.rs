@@ -320,6 +320,87 @@ func main() -> i32 {
     assert_eq!(run_source(src), interp::Value::Int(3));
 }
 
+#[test]
+fn generic_type_inference_mixed_calls() {
+    let src = r#"
+func id<T>(x: T) -> T {
+    x
+}
+
+func main() -> i32 {
+    let a = id(42);
+    let b = id("hello");
+    a
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn generic_type_in_list() {
+    let src = r#"
+func first<T>(xs: []T) -> T {
+    xs[0]
+}
+
+func main() -> i32 {
+    let xs = [10, 20, 30];
+    first(xs)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(10));
+}
+
+#[test]
+fn generic_two_type_params_order() {
+    let src = r#"
+func swap<A, B>(a: A, b: B) -> (B, A) {
+    (b, a)
+}
+
+func main() -> i32 {
+    let (x, y) = swap(1, 2);
+    x + y
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(3));
+}
+
+#[test]
+fn generic_concrete_type_def() {
+    let src = r#"
+type Box<T> {
+    value: T
+}
+
+func main() -> string {
+    let b = Box { value: "hello" };
+    b.value
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("hello".to_string()));
+}
+
+#[test]
+fn generic_struct_method_call() {
+    let src = r#"
+type Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+func make_pair<A, B>(a: A, b: B) -> Pair<A, B> {
+    Pair { first: a, second: b }
+}
+
+func main() -> i32 {
+    let p = make_pair(10, 20);
+    p.first + p.second
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(30));
+}
+
 // ===== T301: Trait 方法静态分派测试 =====
 
 

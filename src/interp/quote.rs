@@ -213,6 +213,13 @@ impl<'a> Interpreter<'a> {
             QuotedAst::Ident(name) => {
                 if let Some(v) = self.lookup(name) {
                     Ok(v)
+                } else if let Some(func) = self.find_function(name) {
+                    Ok(Value::Closure {
+                        params: func.params.clone(),
+                        ret: func.ret.clone(),
+                        body: func.body.clone(),
+                        captured: HashMap::new(),
+                    })
                 } else {
                     Err(format!("undefined variable '{}' in quoted AST", name))
                 }

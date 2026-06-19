@@ -325,6 +325,84 @@ fn e2e_extern_ensures_fail() {
     assert!(result.is_err(), "should fail on ensures violation for extern call");
 }
 
+// ===================== FFI Type Coverage E2E =====================
+
+#[test]
+fn e2e_extern_strlen() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_strlen(s: string) -> i32
+        }
+        func main() -> i32 {
+            println(test_strlen("hello world"))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "11");
+}
+
+#[test]
+fn e2e_extern_nop() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_nop()
+        }
+        func main() -> i32 {
+            test_nop()
+            println(42)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_extern_greet_raw() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_greet(x: i32) -> raw_string
+        }
+        func main() -> i32 {
+            println(test_greet(42))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "Hello 42");
+}
+
+#[test]
+fn e2e_extern_parse_int_raw_string() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_parse_int(s: raw_string) -> i32
+        }
+        func main() -> i32 {
+            println(test_parse_int("42"))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_extern_json_sum() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_json_sum(json: List<i32>) -> i32
+        }
+        func main() -> i32 {
+            println(test_json_sum([1, 2, 3, 4, 5]))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "15");
+}
+
 #[test]
 fn e2e_actor_spawn_and_method() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }

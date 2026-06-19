@@ -905,49 +905,6 @@ impl<'a> Checker<'a> {
         matches!(name, "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "List" | "Future" | "Result" | "Option")
     }
 
-    /// Check if a type is Copy (all fields are Copy for records, all variants Copy for enums).
-    #[allow(dead_code)]
-    fn is_copy_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Name(name, _) => {
-                // Built-in scalar types are Copy
-                if matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "unit") {
-                    return true;
-                }
-                // Check user-defined types
-                if let Some(type_def) = self.types.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Record(fields) => {
-                            fields.iter().all(|f| self.is_copy_type(&f.ty))
-                        }
-                        TypeDefKind::Enum(variants) => {
-                            variants.iter().all(|v| {
-                                match &v.payload {
-                                    None => true,
-                                    Some(VariantPayload::Tuple(types)) => {
-                                        types.iter().all(|t| self.is_copy_type(t))
-                                    }
-                                    Some(VariantPayload::Record(fields)) => {
-                                        fields.iter().all(|f| self.is_copy_type(&f.ty))
-                                    }
-                                }
-                            })
-                        }
-                        TypeDefKind::Alias(inner) => self.is_copy_type(inner),
-                        TypeDefKind::Newtype(inner) => self.is_copy_type(inner),
-                    }
-                } else {
-                    false
-                }
-            }
-            Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_type(e)),
-            Type::Shared(_) | Type::LocalShared(_) => true,
-            Type::Ref(_, _) | Type::RefMut(_, _) => true,
-            Type::Array(inner, _) => self.is_copy_type(inner),
-            _ => false,
-        }
-    }
-
     fn check_type_well_formed(&mut self, ty: &Type, context: &str) {
         self.check_type_well_formed_inner(ty, context, false);
     }
@@ -1136,6 +1093,12 @@ impl<'a> Checker<'a> {
                     if self.block_returns_on_all_paths(body) {
                         return true;
                     }
+                }
+                Stmt::Expr(Expr::Match(_, arms)) => {
+                    return arms.iter().all(|arm| {
+                        let block = vec![Stmt::Expr(arm.body.clone())];
+                        self.block_returns_on_all_paths(&block)
+                    });
                 }
                 _ => {}
             }
@@ -1465,9 +1428,15 @@ impl<'a> Checker<'a> {
                 type_map.entry(name.clone()).or_insert_with(|| actual.clone());
             }
             Type::Name(name, p_args) => {
-                if let Type::Name(_, a_args) = actual {
-                    if name == "List" && p_args.len() == 1 && a_args.len() == 1 {
-                        self.infer_type_params(&p_args[0], &a_args[0], generics, type_map);
+                if is_type_param(name, generics) {
+                    type_map.entry(name.clone()).or_insert_with(|| actual.clone());
+                } else if !p_args.is_empty() {
+                    if let Type::Name(_, a_args) = actual {
+                        if p_args.len() == a_args.len() {
+                            for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                                self.infer_type_params(pa, aa, generics, type_map);
+                            }
+                        }
                     }
                 }
             }

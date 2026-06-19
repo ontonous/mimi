@@ -1324,9 +1324,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value().left()
             .ok_or("malloc returned void")?
             .into_pointer_value();
-        // Note: not registered with heap_allocs because list data can be realloc'd
-        // by push/pop builtins, causing double-free. The initial allocation would still
-        // be in heap_allocs after realloc frees it.
+        self.register_heap_alloc(data_ptr);
         let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
             self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
             "data_ptr_i64")
@@ -2091,13 +2089,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             let env_field_types: Vec<BasicTypeEnum<'ctx>> =
                 free_vars.values().map(|&(_, ty)| ty).collect();
             let env_struct_type = self.context.struct_type(&env_field_types, false);
-            let env_alloca = self.builder.build_alloca(env_struct_type, "env")
-                .map_err(|e| format!("alloca error: {}", e))?;
+            let env_byte_size = env_struct_type.size_of().ok_or_else(|| "size_of error".to_string())?;
+            let malloc_fn = self.module.get_function("malloc")
+                .ok_or_else(|| "malloc not declared".to_string())?;
+            let env_heap_ptr = self.builder.build_call(malloc_fn, &[
+                BasicMetadataValueEnum::IntValue(env_byte_size),
+            ], "env_heap")
+                .map_err(|e| format!("malloc error: {}", e))?
+                .try_as_basic_value().left()
+                .ok_or("malloc returned void")?
+                .into_pointer_value();
+            self.register_heap_alloc(env_heap_ptr);
             for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
                 let val = self.builder.build_load(ty, var_alloca, &format!("cap_val_{}", name))
                     .map_err(|e| format!("load error: {}", e))?;
                 let field_gep = self.builder.build_struct_gep(
-                    env_struct_type, env_alloca, i as u32, &format!("env_{}_gep", name),
+                    env_struct_type, env_heap_ptr, i as u32, &format!("env_{}_gep", name),
                 ).map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(field_gep, val)
                     .map_err(|e| format!("store error: {}", e))?;
@@ -2106,7 +2113,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 closure_struct_type, closure_alloca, 1, "env_gep",
             ).map_err(|e| format!("gep error: {}", e))?;
             let env_ptr_i8 = self.builder.build_pointer_cast(
-                env_alloca,
+                env_heap_ptr,
                 i8_ptr,
                 "env_ptr_i8",
             ).map_err(|e| format!("pointer cast error: {}", e))?;
@@ -2499,6 +2506,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value().left()
             .ok_or("malloc returned void")?
             .into_pointer_value();
+        self.register_heap_alloc(buf);
 
         // Initialize buffer with empty string
         let empty = self.builder.build_global_string_ptr("", "fstr_empty_init")
@@ -2762,6 +2770,63 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| format!("store error: {}", e))?;
                 Ok(alloca.into())
             }
+            BinOp::Pow => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(base), BasicValueEnum::IntValue(exp)) => {
+                    let pow_fn_name = "__mimi_pow_i64";
+                    let i64_ty = self.context.i64_type();
+                    let fn_ty = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
+                    let pow_fn = self.module.get_function(pow_fn_name)
+                        .unwrap_or_else(|| {
+                            self.module.add_function(pow_fn_name, fn_ty, Some(inkwell::module::Linkage::External))
+                        });
+                    Ok(self.builder.build_call(pow_fn, &[
+                        BasicMetadataValueEnum::IntValue(base),
+                        BasicMetadataValueEnum::IntValue(exp),
+                    ], "pow_i64_call")
+                        .map_err(|e| format!("pow error: {}", e))?
+                        .try_as_basic_value().left()
+                        .ok_or("pow returned void")?
+                        .into())
+                }
+                (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
+                    let pow_fn = self.module.get_function("llvm.pow.f64")
+                        .ok_or_else(|| "llvm.pow.f64 not declared".to_string())?;
+                    Ok(self.builder.build_call(pow_fn, &[
+                        BasicMetadataValueEnum::FloatValue(l),
+                        BasicMetadataValueEnum::FloatValue(r),
+                    ], "pow_f64")
+                        .map_err(|e| format!("pow error: {}", e))?
+                        .try_as_basic_value().left()
+                        .ok_or("pow returned void")?
+                        .into())
+                }
+                _ => Err("pow requires matching numeric types".into()),
+            },
+            BinOp::BitAnd => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
+                    Ok(self.builder.build_and(l, r, "bitand").map_err(|e| format!("and error: {}", e))?.into()),
+                _ => Err("bitand requires integer types".into()),
+            },
+            BinOp::BitOr => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
+                    Ok(self.builder.build_or(l, r, "bitor").map_err(|e| format!("or error: {}", e))?.into()),
+                _ => Err("bitor requires integer types".into()),
+            },
+            BinOp::BitXor => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
+                    Ok(self.builder.build_xor(l, r, "bitxor").map_err(|e| format!("xor error: {}", e))?.into()),
+                _ => Err("bitxor requires integer types".into()),
+            },
+            BinOp::Shl => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
+                    Ok(self.builder.build_left_shift(l, r, "shl").map_err(|e| format!("shl error: {}", e))?.into()),
+                _ => Err("shl requires integer types".into()),
+            },
+            BinOp::Shr => match (lhs, rhs) {
+                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
+                    Ok(self.builder.build_right_shift(l, r, false, "shr").map_err(|e| format!("shr error: {}", e))?.into()),
+                _ => Err("shr requires integer types".into()),
+            },
             _ => Err(format!("unsupported binary operator {:?}", op)),
         }
     }

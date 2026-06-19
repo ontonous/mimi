@@ -2,6 +2,28 @@
 #include <stddef.h>
 #include "mimi_runtime.h"
 
+/* Integer power: base^exp with overflow detection.
+   Returns 0 on overflow (matching safe_arith::checked_pow semantics). */
+int64_t __mimi_pow_i64(int64_t base, int64_t exp) {
+    if (exp < 0) return 0;
+    if (exp == 0) return 1;
+    int64_t result = 1;
+    int64_t b = base;
+    int64_t e = exp;
+    while (e > 0) {
+        if (e & 1) {
+            if (b != 0 && result > (INT64_MAX / b)) return 0;
+            result *= b;
+        }
+        e >>= 1;
+        if (e > 0) {
+            if (b != 0 && b > (INT64_MAX / b)) return 0;
+            b *= b;
+        }
+    }
+    return result;
+}
+
 /* ====================================================================
  * MIMI_NO_STD (freestanding) support
  *
@@ -1414,6 +1436,79 @@ int __mimi_extern_test_json_sum(const char* json) {
         sum += neg ? -val : val;
     }
     return sum;
+}
+
+// Codegen JSON FFI: serialize Mimi list {i64 len, i8* data} to JSON string
+// data points to i64 array (Mimi's universal element representation).
+// Returns malloc'd char* (caller must free).
+char* mimi_list_serialize(void* data, int64_t len) {
+    if (!data || len <= 0) {
+        char* empty = (char*)malloc(3);
+        if (!empty) return NULL;
+        empty[0] = '['; empty[1] = ']'; empty[2] = '\0';
+        return empty;
+    }
+    size_t buf_size = (size_t)len * 24 + 16;
+    char* buf = (char*)malloc(buf_size);
+    if (!buf) return NULL;
+    char* p = buf;
+    *p++ = '[';
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) *p++ = ',';
+        int64_t raw = ((int64_t*)data)[i];
+        char tmp[24];
+        int nd = 0;
+        int64_t val = raw;
+        if (val < 0) { tmp[nd++] = '-'; val = -val; }
+        if (val == 0) {
+            tmp[nd++] = '0';
+        } else {
+            char rev[24];
+            int nr = 0;
+            while (val > 0) { rev[nr++] = (char)('0' + (val % 10)); val /= 10; }
+            for (int j = nr - 1; j >= 0; j--) tmp[nd++] = rev[j];
+        }
+        for (int j = 0; j < nd; j++) *p++ = tmp[j];
+    }
+    *p++ = ']';
+    *p = '\0';
+    return buf;
+}
+
+// Codegen JSON FFI: deserialize JSON string "[e1,e2,...]" to Mimi list data.
+// Returns malloc'd i64 array (Mimi's universal element representation).
+// Sets *out_len to element count. Caller must free the returned pointer.
+void* mimi_list_deserialize(const char* json, int64_t* out_len) {
+    if (!json) { *out_len = 0; return NULL; }
+    const char* p = json;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '[') { *out_len = 0; return NULL; }
+    p++;
+    int64_t count = 0;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') { p++; if (*p == '\0') break; }
+        if (*p == ']') break;
+        if (*p >= '0' && *p <= '9') { count++; while (*p >= '0' && *p <= '9') p++; }
+        else if (*p == '-') { count++; p++; while (*p >= '0' && *p <= '9') p++; }
+        else p++;
+    }
+    int64_t* data = (int64_t*)malloc((count + 1) * sizeof(int64_t));
+    if (!data) { *out_len = 0; return NULL; }
+    p = json;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == '[') p++;
+    int64_t idx = 0;
+    while (*p && idx < count) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') { p++; if (*p == '\0') break; }
+        if (*p == ']') break;
+        int neg = 0;
+        if (*p == '-') { neg = 1; p++; }
+        int64_t val = 0;
+        while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+        data[idx++] = neg ? -val : val;
+    }
+    *out_len = count;
+    return (void*)data;
 }
 
 // G8: Segmentation fault — for fork isolation testing

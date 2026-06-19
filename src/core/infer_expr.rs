@@ -1033,17 +1033,35 @@ impl<'a> Checker<'a> {
                     Box::new(Type::Name("string".into(), vec![])),
                 );
             }
-            "map" | "filter" => {
+            "map" => {
                 if args.len() != 2 {
-                    self.emit(format!("{} expects 2 arguments", name));
+                    self.emit("map expects 2 arguments (list, closure)");
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
+                    let elem_ty = match &list_ty {
+                        Type::Name(_, args) if args.len() == 1 => args[0].clone(),
+                        _ => Type::Name("unknown".into(), vec![]),
+                    };
+                    let closure_ty = self.infer_expr(&args[1], scopes);
+                    let ret_ty = match &closure_ty {
+                        Type::Func(_, ret) => ret.as_ref().clone(),
+                        _ => elem_ty.clone(),
+                    };
+                    return Type::Name("List".into(), vec![ret_ty]);
+                }
+                return Type::Name("unknown".into(), vec![]);
+            }
+            "filter" => {
+                if args.len() != 2 {
+                    self.emit("filter expects 2 arguments (list, closure)");
+                } else {
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let elem_ty = match &list_ty {
+                        Type::Name(_, args) if args.len() == 1 => args[0].clone(),
+                        _ => Type::Name("unknown".into(), vec![]),
+                    };
                     self.infer_expr(&args[1], scopes);
-                    if name == "map" {
-                        return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
-                    } else {
-                        return list_ty;
-                    }
+                    return Type::Name("List".into(), vec![elem_ty]);
                 }
                 return Type::Name("unknown".into(), vec![]);
             }

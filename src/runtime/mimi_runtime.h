@@ -129,4 +129,8 @@ void* mimi_rc_alloc(int64_t size);
 void mimi_rc_retain(void* ptr);
 void mimi_rc_release(void* ptr);
 
+/* Integer power: __mimi_pow_i64(base, exp) -> base^exp (i64).
+   Returns 0 on overflow (use safe_arith::checked_pow semantics). */
+int64_t __mimi_pow_i64(int64_t base, int64_t exp);
+
 #endif

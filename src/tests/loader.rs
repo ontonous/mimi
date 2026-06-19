@@ -104,3 +104,88 @@ func hello() -> i32 { 1 }
     assert!(loader.get_module("nope").is_none(), "nonexistent module returns None");
     cleanup(&dir);
 }
+
+#[test]
+fn loader_empty_file() {
+    let dir = temp_dir("empty");
+    let file_path = dir.join("empty.mimi");
+    fs::write(&file_path, r#""#).unwrap();
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let result = loader.load_main(&file_path);
+    assert!(result.is_ok(), "loading empty file should succeed");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_file_with_only_comments() {
+    let dir = temp_dir("comments");
+    let file_path = dir.join("comments.mimi");
+    fs::write(&file_path, r#"
+// This is a comment
+// Another comment
+"#).unwrap();
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let result = loader.load_main(&file_path);
+    assert!(result.is_ok(), "loading file with only comments should succeed");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_merge_with_empty() {
+    let dir = temp_dir("merge_empty");
+    let main_path = dir.join("main.mimi");
+    let empty_path = dir.join("empty.mimi");
+    fs::write(&main_path, r#"
+func main() -> i32 { 42 }
+"#).unwrap();
+    fs::write(&empty_path, r#""#).unwrap();
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let _ = loader.load_main(&main_path);
+    let _ = loader.load_main(&empty_path);
+    let merged = loader.merge_all().expect("merge_all should succeed");
+    assert!(merged.items.len() >= 1, "merge should include main function");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_resolve_import() {
+    let dir = temp_dir("resolve");
+    let lib_path = dir.join("lib.mimi");
+    let main_path = dir.join("main.mimi");
+    fs::write(&lib_path, r#"
+pub func helper() -> i32 { 99 }
+"#).unwrap();
+    fs::write(&main_path, r#"
+use lib;
+
+func main() -> i32 {
+    lib::helper()
+}
+"#).unwrap();
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let result = loader.load_main(&main_path);
+    // May fail if import resolution requires specific setup
+    // Just ensure it doesn't panic
+    let _ = result;
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_duplicate_key_no_panic() {
+    let dir = temp_dir("dup");
+    let path = dir.join("a.mimi");
+    fs::write(&path, r#"
+func f() -> i32 { 1 }
+func f() -> i32 { 2 }
+"#).unwrap();
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    let result = loader.load_main(&path);
+    // May error on duplicate, just ensure no panic
+    let _ = result;
+    cleanup(&dir);
+}

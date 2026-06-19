@@ -175,3 +175,88 @@ func main() -> i32 {
     let result = core::check(&file);
     assert!(result.is_ok(), "Borrow used in last statement should be allowed: {:?}", result.err());
 }
+
+#[test]
+fn typecheck_arg_type_mismatch() {
+    let src = r#"
+func add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+func main() -> i32 {
+    add(1, "hello")
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject string arg for i32 param");
+}
+
+#[test]
+fn typecheck_return_type_mismatch() {
+    let src = r#"
+func main() -> i32 {
+    "hello"
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject string return when i32 expected");
+}
+
+#[test]
+fn typecheck_unary_not_on_non_bool() {
+    let src = r#"
+func main() -> bool {
+    !42
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject ! on non-bool");
+}
+
+#[test]
+fn typecheck_binary_op_type_mismatch() {
+    let src = r#"
+func main() -> i32 {
+    1 + "hello"
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject i32 + string");
+}
+
+#[test]
+fn typecheck_if_condition_non_bool() {
+    let src = r#"
+func main() -> i32 {
+    if 42 {
+        1
+    } else {
+        0
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject non-bool if condition");
+}
+
+#[test]
+fn typecheck_assignment_type_mismatch() {
+    let src = r#"
+func main() {
+    let x: string = 42;
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject int assigned to string var");
+}
+
+#[test]
+fn typecheck_missing_return() {
+    let src = r#"
+func main() -> i32 {
+    let x = 1;
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "Should reject function missing return");
+}
