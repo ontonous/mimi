@@ -2006,3 +2006,82 @@ fn e2e_text_indent() {
     "#);
     assert_eq!(val, interp::Value::String("  a\n  b".to_string()));
 }
+
+// ===================== Stdlib: result (interpreter) =====================
+
+#[test]
+fn e2e_result_is_ok_result() {
+    let val = run_source(r#"
+        func is_ok_result(r: Result<i32, string>) -> bool { r.is_ok() }
+        func main() -> i32 {
+            let r = Ok(42)
+            if is_ok_result(r) { 1 } else { 0 }
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(1));
+}
+
+#[test]
+fn e2e_result_is_err_result() {
+    let val = run_source(r#"
+        func is_err_result(r: Result<i32, string>) -> bool { r.is_err() }
+        func main() -> i32 {
+            let r = Err("fail")
+            if is_err_result(r) { 1 } else { 0 }
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(1));
+}
+
+#[test]
+fn e2e_result_unwrap_or_function() {
+    let val = run_source(r#"
+        func unwrap_or_val(r: Result<i32, string>, default: i32) -> i32 {
+            if r.is_ok() { r.unwrap() } else { default }
+        }
+        func main() -> i64 {
+            let ok = Ok(42)
+            let err = Err("fail")
+            unwrap_or_val(ok, 0) + unwrap_or_val(err, 99)
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(141));
+}
+
+// ===================== Stdlib: datetime constants (interpreter) =====================
+
+#[test]
+fn e2e_datetime_format_duration_ms() {
+    let val = run_source(r#"
+        func format_duration_secs(total_secs: i64) -> string {
+            let ds_days = total_secs / 86400
+            let ds_rem = total_secs % 86400
+            let ds_hours = ds_rem / 3600
+            let ds_rem2 = ds_rem % 3600
+            let ds_minutes = ds_rem2 / 60
+            let ds_seconds = ds_rem2 % 60
+            to_string(ds_days) + "d " + to_string(ds_hours) + "h " + to_string(ds_minutes) + "m " + to_string(ds_seconds) + "s"
+        }
+        func format_duration_ms(ms: i64) -> string {
+            let total_secs = ms / 1000
+            let rem_ms = ms % 1000
+            format_duration_secs(total_secs) + "." + to_string(rem_ms) + "ms"
+        }
+        func main() -> string { format_duration_ms(90061123) }
+    "#);
+    assert_eq!(val, interp::Value::String("1d 1h 1m 1s.123ms".to_string()));
+}
+
+#[test]
+fn e2e_datetime_time_constants() {
+    let val = run_source(r#"
+        func main() -> i64 {
+            let spm = 60
+            let sph = 3600
+            let spd = 86400
+            let mps = 1000
+            spd + sph + spm + mps
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(91060));
+}
