@@ -12,16 +12,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 /// A registered callback with its C-compatible invoker.
 pub struct CallbackHandle {
-    /// Optional userdata pointer (passed as void* to C)
-    pub userdata: Option<*mut std::ffi::c_void>,
     /// Reference count for lifecycle management
     pub ref_count: Arc<AtomicI64>,
     /// C-compatible invoker function.
     /// Signature: fn(callback_id: i64, args: &[i64]) -> i64
     pub invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
-    /// Optional free function for C-allocated memory (e.g., strings passed to callbacks).
-    /// Signature: fn(*mut c_void)
-    pub free_callback: Option<fn(*mut std::ffi::c_void)>,
 }
 
 // Safety: userdata is only accessed from C code that respects the protocol.
@@ -45,20 +40,14 @@ impl CallbackTable {
 
     /// Register a callback and return its ID.
     /// The `invoker` is a closure that knows how to call the Mimi closure.
-    /// `free_callback` is an optional C function to free C-allocated memory
-    /// (e.g., strings) passed as callback arguments after the callback returns.
     pub fn register(
         &self,
-        userdata: Option<*mut std::ffi::c_void>,
         invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
-        free_callback: Option<fn(*mut std::ffi::c_void)>,
     ) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(CallbackHandle {
-            userdata,
             ref_count: Arc::new(AtomicI64::new(1)),
             invoker,
-            free_callback,
         });
         let mut handles = self.handles.lock().unwrap();
         handles.insert(id, handle);
@@ -134,9 +123,7 @@ mod tests {
     #[test]
     fn test_callback_registration() {
         let id = CALLBACK_TABLE.register(
-            None,
             Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args.iter().sum() })),
-            None,
         );
         assert!(id > 0);
         assert!(CALLBACK_TABLE.get(id).is_some());
@@ -147,9 +134,7 @@ mod tests {
     #[test]
     fn test_callback_invocation() {
         let id = CALLBACK_TABLE.register(
-            None,
             Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args[0] + args[1] })),
-            None,
         );
         // Safety: callback_trampoline is a safe-to-call extern "C" function; id is a valid registered callback ID and args are simple integers.
         let result = unsafe { callback_trampoline(id, 3, 4, std::ptr::null_mut()) };

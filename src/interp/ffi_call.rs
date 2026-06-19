@@ -784,9 +784,7 @@ impl<'a> Interpreter<'a> {
                 // Register with CALLBACK_TABLE so the trampoline can find it
                 // Use a dummy invoker (the real invocation is via thread-local ctx)
                 let cb_id = CALLBACK_TABLE.register(
-                    None,
                     Some(Box::new(|_id: i64, _args: &[i64]| -> i64 { 0 })),
-                    None, // arg freeing is handled by arg_free_mask in the trampoline
                 );
                 callback_ids.push(cb_id);
 
