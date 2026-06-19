@@ -57,7 +57,7 @@ pub struct CodeGenerator<'ctx> {
     shared_var_names: std::collections::HashSet<String>,
     /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
     /// Uses RefCell for interior mutability since builtins take &self.
-    heap_allocs: std::cell::RefCell<Vec<Vec<inkwell::values::PointerValue<'ctx>>>>,
+    heap_allocs: std::cell::RefCell<Vec<Vec<HeapEntry<'ctx>>>>,
     ensures_stmts: Vec<Box<Expr>>,
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
@@ -76,6 +76,14 @@ pub struct CodeGenerator<'ctx> {
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
+
+/// Entries tracked for scope-exit heap cleanup.
+/// `Ptr` = raw pointer to free directly.
+/// `Slot` = address of an alloca/GEP holding the pointer; load it, then free the loaded value.
+enum HeapEntry<'ctx> {
+    Ptr(inkwell::values::PointerValue<'ctx>),
+    Slot(inkwell::values::PointerValue<'ctx>),
+}
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
@@ -159,7 +167,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Takes &self (not &mut self) because builtins use &self.
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            stack.push(ptr);
+            stack.push(HeapEntry::Ptr(ptr));
+        }
+    }
+
+    /// Register a GEP/slot whose loaded value should be freed at scope exit.
+    /// At free time, the pointer is loaded from the slot, getting the latest
+    /// value after any reallocs.
+    pub(super) fn register_heap_gep(&self, gep: inkwell::values::PointerValue<'ctx>) {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            stack.push(HeapEntry::Slot(gep));
         }
     }
 
@@ -174,9 +191,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// correctly updates pointers registered in outer scopes.
     pub(super) fn update_heap_alloc(&self, old_ptr: inkwell::values::PointerValue<'ctx>, new_ptr: inkwell::values::PointerValue<'ctx>) {
         for stack in self.heap_allocs.borrow_mut().iter_mut().rev() {
-            if let Some(entry) = stack.iter_mut().find(|p| **p == old_ptr) {
-                *entry = new_ptr;
-                return;
+            for entry in stack.iter_mut() {
+                if let HeapEntry::Ptr(p) = entry {
+                    if *p == old_ptr {
+                        *entry = HeapEntry::Ptr(new_ptr);
+                        return;
+                    }
+                }
             }
         }
     }
@@ -186,7 +207,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(scope) = self.heap_allocs.borrow_mut().pop() {
             let free_fn = self.module.get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
-            for ptr in scope {
+            for entry in scope {
+                let ptr = match entry {
+                    HeapEntry::Ptr(p) => p,
+                    HeapEntry::Slot(gep) => {
+                        let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let loaded = self.builder.build_load(ptr_ty, gep, "heap_slot")
+                            .map_err(|e| CompileError::LlvmError(format!("heap slot load error: {}", e)))?;
+                        loaded.into_pointer_value()
+                    }
+                };
                 self.builder.build_call(free_fn, &[
                     BasicMetadataValueEnum::PointerValue(ptr),
                 ], "free_heap")

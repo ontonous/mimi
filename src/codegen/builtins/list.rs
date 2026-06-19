@@ -12,14 +12,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 2 {
                     return Err(CompileError::WrongArgCount("range expects 2 arguments".to_string()));
                 }
-                let start = match args[0] {
+                let start_raw = match args[0] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
                     _ => return Err(CompileError::TypeMismatch("range start must be i64".to_string())),
                 };
-                let end = match args[1] {
+                let end_raw = match args[1] {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
                     _ => return Err(CompileError::TypeMismatch("range end must be i64".to_string())),
                 };
+                // Extend i32 arguments to i64 (Mimi defaults to i32 for small integer literals)
+                let i64_ty = self.context.i64_type();
+                let start = if start_raw.get_type() == self.context.i32_type() {
+                    self.builder.build_int_z_extend(start_raw, i64_ty, "start_ext")
+                        .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                } else { start_raw };
+                let end = if end_raw.get_type() == self.context.i32_type() {
+                    self.builder.build_int_z_extend(end_raw, i64_ty, "end_ext")
+                        .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                } else { end_raw };
                 // Create a list struct: { i64 len, i64* data }
                 // For simplicity in codegen, we use a runtime-allocated array
                 let len_val = self.builder.build_int_sub(end, start, "range_len")
@@ -43,7 +53,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // Fill the array: for i in 0..len: data[i] = start + i
-                let i64_ty = self.context.i64_type();
                 let idx_alloca = self.builder.build_alloca(i64_ty, "idx")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                 self.builder.build_store(idx_alloca, i64_ty.const_int(0, false))
@@ -182,7 +191,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Store new data pointer
                 self.builder.build_store(data_gep, realloc_result)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.update_heap_alloc(old_data, realloc_result);
 
                 // Store new element at data[old_len]: *(new_data + old_len*8) = elem
                 // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
@@ -311,7 +319,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 self.builder.build_store(data_gep, realloc_result)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.update_heap_alloc(old_data, realloc_result);
 
                 self.builder.build_unconditional_branch(merge_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;

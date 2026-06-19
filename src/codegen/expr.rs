@@ -1324,7 +1324,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value().left()
             .ok_or("malloc returned void")?
             .into_pointer_value();
-        self.register_heap_alloc(data_ptr);
         let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
             self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
             "data_ptr_i64")
@@ -1372,6 +1371,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("bitcast error: {}", e))?;
         self.builder.build_store(data_gep, data_void_ptr)
             .map_err(|e| format!("store error: {}", e))?;
+        self.register_heap_gep(data_gep);
         Ok(list_alloca.into())
     }
 
@@ -2548,12 +2548,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                             let pos = unsafe { self.builder.build_gep(i8_type, buf, &[len], "fstr_pos") }
                                 .map_err(|e| format!("gep error: {}", e))?;
+                            let ext_iv = if iv.get_type().get_bit_width() < 64 {
+                                self.builder.build_int_z_extend(iv, self.context.i64_type(), &format!("fstr_ext_{}", i))
+                                    .map_err(|e| format!("zext error: {}", e))?
+                            } else { iv };
                             let fmt = self.builder.build_global_string_ptr("%ld", &format!("fstr_fmt_{}", i))
                                 .map_err(|e| format!("string error: {}", e))?;
                             self.builder.build_call(sprintf_fn, &[
                                 BasicMetadataValueEnum::PointerValue(pos),
                                 BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(iv),
+                                BasicMetadataValueEnum::IntValue(ext_iv),
                             ], &format!("fstr_sprintf_{}", i))
                                 .map_err(|e| format!("sprintf error: {}", e))?;
                         }
