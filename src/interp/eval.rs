@@ -382,7 +382,7 @@ impl<'a> Interpreter<'a> {
                         let ref_val = self.eval_expr(inner)?;
                         match ref_val {
                             Value::RefMut(rc) => {
-                                *rc.0.borrow_mut() = v;
+                                *rc.write().map_err(|e| format!("write lock failed: {}", e))? = v;
                             }
                             _ => return Err(format!("cannot assign through non-mutable reference (type: {})", Self::type_name(&ref_val))),
                         }
@@ -470,18 +470,18 @@ impl<'a> Interpreter<'a> {
                 let v = self.eval_expr(init)?;
                 let shared_val = match kind {
                     SharedKind::Shared => Value::Shared(Arc::new(RwLock::new(v))),
-                    SharedKind::LocalShared => Value::LocalShared(SendRc(Rc::new(RefCell::new(v)))),
+                    SharedKind::LocalShared => Value::LocalShared(Arc::new(RwLock::new(v))),
                     SharedKind::Weak => {
                         // Auto-detect: if init is Shared → WeakShared, if LocalShared → WeakLocal
                         match v {
                             Value::Shared(arc) => Value::WeakShared(Arc::downgrade(&arc)),
-                            Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                            Value::LocalShared(rc) => Value::WeakLocal(Arc::downgrade(&rc)),
                             _ => return Err(format!("weak requires a shared or local_shared value, got {}", v)),
                         }
                     }
                     SharedKind::WeakLocal => {
                         match v {
-                            Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                            Value::LocalShared(rc) => Value::WeakLocal(Arc::downgrade(&rc)),
                             _ => return Err(format!("weak_local requires a local_shared value, got {}", v)),
                         }
                     }
@@ -884,7 +884,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     Value::LocalShared(rc) => {
-                        let inner = rc.0.borrow();
+                        let inner = rc.read().map_err(|e| format!("read lock failed: {}", e))?;
                         match &*inner {
                             Value::Record(_, fields) => fields.get(field.as_str()).cloned()
                                 .ok_or_else(|| format!("field '{}' not found in local_shared record", field)),
@@ -1206,10 +1206,10 @@ impl<'a> Interpreter<'a> {
                 _ => Err(format!("cannot negate {}", Self::type_name(&v))),
             },
             UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
-            UnOp::Ref => Ok(Value::Ref(SendRc(Rc::new(RefCell::new(v))))),
-            UnOp::RefMut => Ok(Value::RefMut(SendRc(Rc::new(RefCell::new(v))))),
+            UnOp::Ref => Ok(Value::Ref(Arc::new(RwLock::new(v)))),
+            UnOp::RefMut => Ok(Value::RefMut(Arc::new(RwLock::new(v)))),
             UnOp::Deref => match v {
-                Value::Ref(rc) | Value::RefMut(rc) => Ok(rc.0.borrow().clone()),
+                Value::Ref(rc) | Value::RefMut(rc) => Ok(rc.read().map_err(|e| format!("read lock failed: {}", e))?.clone()),
                 _ => Err(format!("cannot dereference {}", Self::type_name(&v))),
             },
         }

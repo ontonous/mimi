@@ -170,10 +170,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// G10: Update a previously registered heap allocation pointer (after realloc).
+    /// Searches all scope levels (innermost first) so that realloc in nested blocks
+    /// correctly updates pointers registered in outer scopes.
     pub(super) fn update_heap_alloc(&self, old_ptr: inkwell::values::PointerValue<'ctx>, new_ptr: inkwell::values::PointerValue<'ctx>) {
-        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+        for stack in self.heap_allocs.borrow_mut().iter_mut().rev() {
             if let Some(entry) = stack.iter_mut().find(|p| **p == old_ptr) {
                 *entry = new_ptr;
+                return;
             }
         }
     }

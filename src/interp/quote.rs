@@ -461,14 +461,14 @@ impl<'a> Interpreter<'a> {
                 let v = self.eval_quoted_ast(init)?;
                 let shared_val = match kind {
                     SharedKind::Shared => Value::Shared(Arc::new(RwLock::new(v))),
-                    SharedKind::LocalShared => Value::LocalShared(SendRc(Rc::new(RefCell::new(v)))),
+                    SharedKind::LocalShared => Value::LocalShared(Arc::new(RwLock::new(v))),
                     SharedKind::Weak => match v {
                         Value::Shared(arc) => Value::WeakShared(Arc::downgrade(&arc)),
-                        Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                        Value::LocalShared(rc) => Value::WeakLocal(Arc::downgrade(&rc)),
                         _ => return Err(format!("weak requires a shared or local_shared value, got {}", v)),
                     },
                     SharedKind::WeakLocal => match v {
-                        Value::LocalShared(rc) => Value::WeakLocal(SendWeak(Rc::downgrade(&rc.0))),
+                        Value::LocalShared(rc) => Value::WeakLocal(Arc::downgrade(&rc)),
                         _ => return Err(format!("weak_local requires a local_shared value, got {}", v)),
                     },
                 };

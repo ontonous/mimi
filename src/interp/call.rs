@@ -269,9 +269,9 @@ impl<'a> Interpreter<'a> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Spawn a new thread to execute the async function body directly
+        let file_clone = self.file.clone();
         super::pool::get_pool().execute(move || {
-            let empty_file = crate::ast::File { imports: vec![], items: vec![] };
-            let mut interp = Interpreter::new(&empty_file);
+            let mut interp = Interpreter::new(&file_clone);
             interp.push_scope();
             for (p, a) in func_clone.params.iter().zip(args_clone) {
                 interp.bind(&p.name, a);
@@ -301,9 +301,9 @@ impl<'a> Interpreter<'a> {
             }
             Value::LocalShared(rc) => {
                 match method {
-                    "clone" => Ok(Value::LocalShared(SendRc(Rc::clone(&rc.0)))),
+                    "clone" => Ok(Value::LocalShared(Arc::clone(&rc))),
                     "deref" | "inner" => {
-                        let inner = rc.0.borrow();
+                        let inner = rc.read().map_err(|e| format!("read lock failed: {}", e))?;
                         Ok(inner.clone())
                     }
                     _ => Err(format!("local_shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj))),

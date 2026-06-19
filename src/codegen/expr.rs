@@ -2099,7 +2099,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .try_as_basic_value().left()
                 .ok_or("malloc returned void")?
                 .into_pointer_value();
-            self.register_heap_alloc(env_heap_ptr);
+            // NOTE: not registered in heap_allocs — closure env must outlive
+            // the creating scope if the closure escapes (returned or stored
+            // to a shared variable), so we cannot auto-free it on scope exit.
             for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
                 let val = self.builder.build_load(ty, var_alloca, &format!("cap_val_{}", name))
                     .map_err(|e| format!("load error: {}", e))?;

@@ -31,8 +31,8 @@ struct FfiCallbackCtx {
 enum FfiGuard {
     Read(std::sync::RwLockReadGuard<'static, Value>),
     Write(std::sync::RwLockWriteGuard<'static, Value>),
-    RefRead(std::cell::Ref<'static, Value>),
-    RefWrite(std::cell::RefMut<'static, Value>),
+    RefRead(std::sync::RwLockReadGuard<'static, Value>),
+    RefWrite(std::sync::RwLockWriteGuard<'static, Value>),
     /// A libffi closure (dynamic C-compatible function pointer) that must
     /// remain alive for the duration of the C call, plus its boxed userdata.
     CallbackClosure {
@@ -169,17 +169,7 @@ unsafe fn extend_guard_write<'a>(g: std::sync::RwLockWriteGuard<'a, Value>) -> s
     std::mem::transmute(g)
 }
 
-/// Extend a Ref's lifetime to 'static.
-/// SAFETY: Caller must ensure the underlying RefCell outlives this guard.
-unsafe fn extend_ref<'a>(g: std::cell::Ref<'a, Value>) -> std::cell::Ref<'static, Value> {
-    std::mem::transmute(g)
-}
 
-/// Extend a RefMut's lifetime to 'static.
-/// SAFETY: Caller must ensure the underlying RefCell outlives this guard.
-unsafe fn extend_ref_mut<'a>(g: std::cell::RefMut<'a, Value>) -> std::cell::RefMut<'static, Value> {
-    std::mem::transmute(g)
-}
 
 impl<'a> Interpreter<'a> {
     pub(crate) fn call_extern(
@@ -554,9 +544,9 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Value::Ref(rc) => {
-                    let borrow = rc.borrow();
-                    let ptr = &*borrow as *const Value as *const () as i64;
-                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_ref(borrow) }));
+                    let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
+                    let ptr = &*guard as *const Value as *const () as i64;
+                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_guard_read(guard) }));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -595,9 +585,9 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Value::RefMut(rc) => {
-                    let mut borrow = rc.borrow_mut();
-                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_ref_mut(borrow) }));
+                    let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
+                    let ptr = &mut *guard as *mut Value as *mut () as i64;
+                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_guard_write(guard) }));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -664,9 +654,9 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Value::Ref(rc) => {
-                    let borrow = rc.borrow();
-                    let ptr = &*borrow as *const Value as *const () as i64;
-                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_ref(borrow) }));
+                    let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
+                    let ptr = &*guard as *const Value as *const () as i64;
+                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_guard_read(guard) }));
                     Ok(ptr)
                 }
                 Value::Int(n) => {
@@ -707,9 +697,9 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Value::RefMut(rc) => {
-                    let mut borrow = rc.borrow_mut();
-                    let ptr = &mut *borrow as *mut Value as *mut () as i64;
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_ref_mut(borrow) }));
+                    let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
+                    let ptr = &mut *guard as *mut Value as *mut () as i64;
+                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_guard_write(guard) }));
                     Ok(ptr)
                 }
                 Value::Int(n) => {

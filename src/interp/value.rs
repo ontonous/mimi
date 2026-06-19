@@ -1,29 +1,8 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::{Rc, Weak as RcWeak};
 use std::sync::{Arc, RwLock, Weak as ArcWeak};
-
-#[derive(Debug, Clone)]
-pub(crate) struct SendRc<T>(pub(crate) Rc<T>);
-unsafe impl<T: Clone> Send for SendRc<T> {}
-unsafe impl<T: Clone> Sync for SendRc<T> {}
-impl<T> std::ops::Deref for SendRc<T> {
-    type Target = Rc<T>;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SendWeak<T>(pub(crate) RcWeak<T>);
-unsafe impl<T: Clone> Send for SendWeak<T> {}
-unsafe impl<T: Clone> Sync for SendWeak<T> {}
-impl<T> SendWeak<T> {
-    pub(crate) fn upgrade(&self) -> Option<SendRc<T>> {
-        self.0.upgrade().map(SendRc)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum QuotedAst {
@@ -112,14 +91,14 @@ pub enum Value {
         captured: HashMap<String, Value>,
     },
     Shared(Arc<RwLock<Value>>),
-    LocalShared(SendRc<RefCell<Value>>),
+    LocalShared(Arc<RwLock<Value>>),
     WeakShared(ArcWeak<RwLock<Value>>),
-    WeakLocal(SendWeak<RefCell<Value>>),
+    WeakLocal(ArcWeak<RwLock<Value>>),
     Cap(Vec<String>),
     /// Immutable reference: &T
-    Ref(SendRc<RefCell<Value>>),
+    Ref(Arc<RwLock<Value>>),
     /// Mutable reference: &mut T
-    RefMut(SendRc<RefCell<Value>>),
+    RefMut(Arc<RwLock<Value>>),
     /// Type descriptor for comptime reflection
     Type(String),
     /// Allocator type value
@@ -277,7 +256,7 @@ impl std::fmt::Display for Value {
                 write!(f, "shared({})", v)
             }
             Value::LocalShared(rc) => {
-                let v = rc.0.borrow();
+                let v = rc.read().map_err(|_| std::fmt::Error)?;
                 write!(f, "local_shared({})", v)
             }
             Value::WeakShared(w) => match w.upgrade() {
@@ -289,18 +268,18 @@ impl std::fmt::Display for Value {
             },
             Value::WeakLocal(w) => match w.upgrade() {
                 Some(rc) => {
-                    let v = rc.0.borrow();
+                    let v = rc.read().map_err(|_| std::fmt::Error)?;
                     write!(f, "weak_local({})", v)
                 }
                 None => write!(f, "weak_local(None)"),
             },
             Value::Cap(names) => write!(f, "cap({})", names.join(" + ")),
             Value::Ref(rc) => {
-                let v = rc.0.borrow();
+                let v = rc.read().map_err(|_| std::fmt::Error)?;
                 write!(f, "&{}", v)
             }
             Value::RefMut(rc) => {
-                let v = rc.0.borrow();
+                let v = rc.read().map_err(|_| std::fmt::Error)?;
                 write!(f, "&mut {}", v)
             }
             Value::Type(name) => write!(f, "{}", name),
@@ -340,8 +319,11 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
         Value::Newtype(inner) => contains_arena_ref(inner, arena_id),
         Value::DynTrait { data, .. } => contains_arena_ref(data, arena_id),
         Value::Ref(rc) | Value::RefMut(rc) => {
-            let v = rc.0.borrow();
-            contains_arena_ref(&v, arena_id)
+            if let Ok(v) = rc.read() {
+                contains_arena_ref(&v, arena_id)
+            } else {
+                false
+            }
         }
         Value::Type(_) => false,
         _ => false,
@@ -397,17 +379,25 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         }
         (Value::Newtype(a), Value::Newtype(b)) => values_equal(a, b),
         (Value::Ref(a), Value::Ref(b)) | (Value::RefMut(a), Value::RefMut(b)) => {
-            let va = a.0.borrow();
-            let vb = b.0.borrow();
-            values_equal(&va, &vb)
+            if let (Ok(va), Ok(vb)) = (a.read(), b.read()) {
+                values_equal(&va, &vb)
+            } else {
+                false
+            }
         }
         (Value::Ref(a), _) => {
-            let va = a.0.borrow();
-            values_equal(&va, b)
+            if let Ok(va) = a.read() {
+                values_equal(&va, b)
+            } else {
+                false
+            }
         }
         (_, Value::Ref(b)) => {
-            let vb = b.0.borrow();
-            values_equal(a, &vb)
+            if let Ok(vb) = b.read() {
+                values_equal(a, &vb)
+            } else {
+                false
+            }
         }
         (Value::Type(a), Value::Type(b)) => a == b,
         _ => false,
