@@ -86,10 +86,10 @@ Source (.mimi)
 | 等级 | 数量 | 条目 |
 |------|------|------|
 | **P0 — Critical** | 0 | 全部已修复 |
-| **P1 — High** | 9 | F5, F6, F9, G1b, G9, N2, N6 部分 |
+| **P1 — High** | 5 | F5(部分→设计如此), F6(剩余回调泄漏), G9, F9, N2 |
 | **P2 — Medium** | 7 | G3-G4, G6, G8, N1, F10/F11 |
-| **P3 — Low** | 5 | G7, N3-N5, B15-B17 |
-| **已修复** | 24 | F1-F4, F7, F8, G1a, G2, G5, G10, B1-B14, E0750 |
+| **P3 — Low** | 3 | G7, N3-N5, B15-B16 |
+| **已修复** | 30+ | F1-F4, F7-F8, G1a/G1b/G2/G5/G10, B1-B14, E0750 + 本轮 RC/FFI |
 
 ### 4.2 修复总览
 
@@ -101,10 +101,26 @@ Source (.mimi)
 | 本轮 | **G5: Shared RC** — mimi_rc_alloc/retain/release, compile_shared_let_stmt | `codegen/{mod,block,func,actors,scope,expr}.rs`, `runtime.c` |
 | 本轮 | **G10: 内存泄漏修复** — builtin 分配 scope 跟踪 + sort/map_from_list 修复 | `codegen/builtins/{list,map,string,json,io}.rs`, `mod.rs` |
 | 本轮 | **F4: guard 泄漏** — 移除已废弃的 as_ptr/ass_mut_ptr | `ffi/runtime.rs` |
+| 本轮 | **RC: Shared RC 作用域清理** — func/actors return 路径补 pop_shared_scope + release_all_shared | `codegen/{func,actors}.rs` |
+| 本轮 | **RC: SharedHandle Drop + FFI 去重** — SharedHandle::drop 清理 SHARED_TABLE；interp FFI 参数去重 | `ffi/runtime.rs`, `interp/ffi_call.rs` |
+| 本轮 | **F10: errno 完整 POSIX 映射** — 扩展至 1-133 + libc::strerror fallback | `interp/ffi_call.rs:390-444` |
+| 本轮 | **F11: StringTransfer NUL 处理** — strip NUL 字节防止 CString::new 失败 | `interp/ffi_call.rs:491-504` |
 | 前轮 | **F1: 浮点 ABI** — libffi CIF f64 类型 | `interp/ffi_call.rs` |
 | 前轮 | **F2: C 崩溃恢复** — fork() 隔离 | `interp/ffi_call.rs` |
 | 前轮 | **F3: ensures result 绑定** — scope 注入 | `interp/ffi_call.rs` |
 | 前轮 | **B1-B5** — 深度审计补充修复 | 多个文件 |
+
+### 4.3 本轮修复详情（2026-06-19 第七轮）
+
+| 修复项 | 等级 | 文件 | 说明 |
+|--------|------|------|------|
+| RC-1: func.rs return 路径 `pop_shared_scope` | P1 | `codegen/func.rs:166-186` | early-return 补发 `mimi_rc_release` |
+| RC-2: func.rs 正常退出 `release_all_shared` | P1 | `codegen/func.rs:730-736` | 正常路径 safety net |
+| RC-3: actors.rs shared scope 清理 | P1 | `codegen/actors.rs:219-237,457-459` | return + 正常退出 |
+| RC-4: interp FFI 句柄去重 | P1 | `interp/ffi_call.rs:561-622` | 同一 Arc 复用 handle ID |
+| RC-5: SharedHandle Drop + id 字段 | P1 | `ffi/runtime.rs:105-238` | 自动清理 SHARED_TABLE |
+| E2: errno POSIX 全量映射 | P2 | `interp/ffi_call.rs:390-444` | 1-133 + `libc::strerror` fallback |
+| E3: StringTransfer NUL 处理 | P2 | `interp/ffi_call.rs:491-504` | strip NUL 防止 `CString::new` 失败 |
 
 ---
 
@@ -148,9 +164,9 @@ Source (.mimi)
 
 ### F5: FFI 类型映射不完整 — 胶水层半残
 
-**严重度**: P0 → ⚠️ **部分确认**（核心映射已修复，复合类型仍缺失）
+**严重度**: P0 → ℹ️ **无需修复（设计如此）**
 
-**现状**: F5-F8 核心场景（浮点、回调、合约验证）已修复，但 List/Tuple/Record/Closure/Actor 的 FFI 映射仍不支持。
+**现状**: 探索核实后修正审计结论。List/Tuple 已通过 `Json` 契约支持（`contract.rs:175,204,222,237` → `Json` → C 侧 `const char*`）。仅 Record 用户定义类型和 Closure **类型级** 仍为 `Unsupported`，但已在类型检查层正确拦截（`core/mod.rs:740-743` emit E0231），不会产生未定义行为。
 
 | 类型 | FFI 支持 | 说明 |
 |------|---------|------|
@@ -159,28 +175,32 @@ Source (.mimi)
 | string (borrow/transfer) | ✅ | CString 借用/转移 |
 | raw pointer | ✅ | `*T`, `*mut T` |
 | cap / c_shared / c_borrow | ✅ | 能力/共享/借用句柄 |
-| **List** | ❌ | `Unsupported` |
-| **Tuple** | ❌ | `Unsupported` |
-| **Record** | ❌ | `Unsupported` |
-| **Closure** | ❌ | 仅函数指针，无 env |
-| **Actor** | ❌ | `Unsupported` |
+| **List** | ✅ | `Json` 契约 → `const char*` |
+| **Tuple** | ✅ | `Json` 契约 → `const char*` |
+| **Record** | ❌ | `Unsupported`（类型检查层拦截 E0231） |
+| **Closure** | ⚠️ | 类型级 `Unsupported`；值级可通过 `Callback` 契约传函数指针 |
+| **Actor** | ❌ | `Type` 枚举无 Actor 变体，类型层不可表达 |
 
 ---
 
 ### F6: FFI 内存契约不完整 — C 返回值泄漏
 
-**严重度**: P0 → ⚠️ **部分确认**（StringOwned 已修复，回调场景仍有泄漏）
+**严重度**: P0 → ⚠️ **部分修复**（StringOwned 已修复，回调场景 C→Mimi 字符串泄漏仍存在）
 
-**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景的 C→Mimi 字符串传递仍有泄漏。
+**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景的 C→Mimi 字符串传递仍有泄漏（C 侧 `malloc` 经 `CStr::from_ptr` 转为 Rust `String` 后未释放）。
 
 ---
 
 ### G5: Shared 引用计数缺失 — 语义分裂
 
-**严重度**: P0 → ✅ **已修复**
-**修复位置**: `codegen/{mod,block,func,actors,scope,expr}.rs`, `runtime.c`, `runtime.h`
+**严重度**: P0 → ✅ **已修复**（含本轮 scope 清理 + handle 去重）
 
-**现状**: codegen 生成 `mimi_rc_alloc` 堆分配 + `mimi_rc_release` 作用域退出释放。
+**修复位置**: `codegen/{mod,block,func,actors,scope,expr}.rs`, `runtime.c`, `runtime.h`, `interp/ffi_call.rs`
+
+**本轮补充修复**:
+- `func.rs`/`actors.rs`: 所有 return 路径补发 `pop_shared_scope()`；正常退出补发 `release_all_shared()`
+- `SharedHandle`: 新增 `id` 字段 + `Drop` impl → 最后一个 `Arc` drop 时自动 `SHARED_TABLE.remove(id)`
+- `interp/ffi_call.rs`: 新增 `FfiSharedGuard` RAII + `shared_dedup` 缓存，CShared/CBorrow/CBorrowMut/RawPtr/RawPtrMut 同一 Arc 复用 handle ID
 
 | 层 | Shared 实现 | clone | drop |
 |---|------------|-------|------|
@@ -199,7 +219,7 @@ Source (.mimi)
 | spawn 结果 | `expr.rs:1524` | ✅ 配对 |
 | string/map/io 内置 | `heap_allocs` 作用域跟踪 | ✅ 配对 |
 | compile_sort 死 malloc | 已移除 | ✅ 修复 |
-| list 构造 `{i64*, i8*}` | 无 | ⚠️ 列表堆指针未跟踪 |
+| list 构造 `{i64*, i8*}` | 无 | ⚠️ 列表字面量 malloc 未被 heap_allocs 跟踪（设计如此，避免与 push/pop 的 realloc 冲突）|
 
 **新增设施**:
 - `heap_allocs: RefCell<Vec<Vec<PointerValue>>>` + `register_heap_alloc`/`free_heap_allocs`/`push_heap_scope`
@@ -303,7 +323,7 @@ Phase 3: 工程化 + 绑定
 └── B6-B14: 深度审计 P1-P2 补充修复 ✅ 全部完成
 ```
 
-**当前状态**: Phase 1 全部完成，G1+G2 已修复，Phase 2 剩余 Shared cleanup，Phase 3 剩余 G9/F9/N6。
+**当前状态**: Phase 1 全部完成，G1+G2 已修复，**Shared RC 作用域清理本轮完成**，Phase 3 剩余 G9/F9。F5 列表/元组已通过 Json 支持；F6 StringOwned 已修复，回调字符串泄漏待处理。ASan list_ops 测试因列表字面量 malloc 未跟踪而保持 `#[ignore]`。
 
 ---
 
@@ -326,8 +346,8 @@ Phase 3: 工程化 + 绑定
 
 ### N6: ASan/UBSan 测试全部禁用
 
-**位置**: `tests/codegen_e2e.rs:1012-1308` — 9 个内存安全测试全部 `#[ignore]`。
-**状态**: ⏸️ 依赖 G10 完成（已部分修复）。部分 ASan 测试可启用。
+**位置**: `tests/codegen_e2e.rs:1012-1308`
+**状态**: ⏸️ **部分完成** — UBSan + ASan string 已启用；ASan list_ops (`e2e_asan_list_ops`) 保持 `#[ignore]`，因列表字面量 `malloc` 未被 `heap_allocs` 跟踪，需架构变更（统一分配器）才能修复。
 
 ### F9: 多语言绑定生成不存在
 
@@ -352,7 +372,7 @@ Phase 3: 工程化 + 绑定
 | G6: Arena 降级 | `codegen/block.rs:217-239` | stacksave/stackrestore，功能等价 |
 | G8: async pthreads | `codegen/func.rs:15-61` | 脱糖为 spawn+pthread，IR 测试通过 |
 | N1: ring-buffer 溢出 | `runtime.c:701` | `pool_task_tail++` 无上限检查 |
-| F10/F11: errno/UTF-8 | `ffi_call.rs:175-218,463` | ~35 errno 值，lossy 转换 |
+| F10/F11: errno/UTF-8 | `ffi_call.rs:175-218,463` | ✅ errno 扩展至 POSIX 1-133 + libc::strerror fallback；F11 StringTransfer strip NUL 字节 |
 
 ---
 
@@ -502,12 +522,14 @@ string (borrow)   → const char* 临时借用     ✅ 可用
 string (transfer) → char* 所有权转移         ✅ 可用
 *T, *mut T        → T* 原始指针             ✅ 可用
 cap               → i64 能力句柄             ✅ 可用
-c_shared T        → i64 共享句柄             ✅ 可用
+c_shared T        → i64 共享句柄             ✅ 可用（本轮去重+自动清理）
 c_borrow T        → T* 借用指针             ✅ 可用（with_value 安全路径）
 Callback          → libffi Closure fn ptr   ✅ 可用（F8 新加）
-List/Tuple/Record → Unsupported             ❌ 不可用
-Closure           → 函数指针 (无 env)       ⚠️ 部分可用
-Actor             → Unsupported             ❌ 不可用
+List              → const char* (JSON)      ✅ 可用
+Tuple             → const char* (JSON)      ✅ 可用
+Record            → void* (类型检查拦截)    ❌ 设计如此
+Closure           → 函数指针 (类型级 Unsupported) | 值级 Callback ✅
+Actor             → Type 枚举无 Actor 变体   ❌ 设计如此
 ```
 
 ### 12.2 内存所有权模型
@@ -558,8 +580,8 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | F2 (C 崩溃) | 无信号处理 | ✅ fork() 隔离 |
 | F3 (ensures) | eval 不支持 scope 注入 | ✅ push/pop scope |
 | F4 (guard 泄漏) | `mem::forget` 避免借用冲突 | ✅ 移除废弃 API |
-| F5 (类型映射) | 合约系统仅支持标量和指针 | ⚠️ 回调已加，复合类型待完善 |
-| F6 (内存契约) | C→Mimi 返回值无自动释放 | ✅ StringOwned 已修复 |
+| F5 (类型映射) | 合约系统仅支持标量和指针 | ℹ️ List/Tuple 已通过 Json 支持；Record/Closure 类型级在类型检查层拦截 |
+| F6 (内存契约) | C→Mimi 返回值无自动释放 | ⚠️ StringOwned 已修复；回调 C→Mimi 字符串泄漏仍存在 |
 
 ---
 
@@ -572,26 +594,22 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | **Phase 0.5** — 诊断与运行时基础修复 | ✅ 全部完成（B1-B5） |
 | **Phase 1** — FFI 可信基础 | ✅ 全部完成（F1-F8, G5, G10） |
 | **G2** — 枚举 match tag | ✅ 已完成 |
+| **Phase 2** — Shared RC 作用域清理 | ✅ 已完成（RC-1~5） |
+| **F10/F11** — errno/UTF-8 补充 | ✅ 已完成（errno POSIX 全量 + NUL 处理） |
 
-### Phase 2 — 语言特性 FFI 就绪（P1）
-
-| 目标 | 状态 | 工期 | 依赖 |
-|------|------|------|------|
-| G1a: 闭包 env struct `{fn_ptr, env_ptr}` + 栈分配 | ✅ 已完成 | 1 周 | 依赖 G5 |
-| G1b: FFI trampoline（LLVM thunk + 全局变量） | ✅ 已完成 | 1 周 | 依赖 G1a |
-| Shared: handle 去重 + cleanup | ⏸️ 待开始 | 1-2 周 | 依赖 F4 |
-
-### Phase 3 — 工程化 + 补充修复
+### 进行中 / 待开始
 
 | 目标 | 状态 | 工期 | 依赖 |
 |------|------|------|------|
-| B6: F-string 转义序列补全 | ✅ 已完成 | — | 无 |
-| B7: Contract span 行号传递 | ✅ 已完成 | — | 无 |
-| B8-B14: 安全/诊断/模块修复 | ✅ 全部完成 | — | 无 |
-| G9: 跨文件模块 E2E | ⏸️ 待开始 | 1 天 | 无 |
+| G9: 跨文件模块 E2E | ⏸️ 待开始 | 1-2 天 | 无 |
 | F9: Python binding generator | ⏸️ 待开始 | 1-2 天 | 无 |
-| F10: errno 完整映射 | ⏸️ 待开始 | 0.5 天 | 无 |
-| N6: 启用 ASan 测试 | 🔶 部分完成（UBSan + ASan string 已启用，ASan list 仍忽略） | 0.5 天 | 依赖 G10 |
+| N6: ASan list_ops 启用 | ⏸️ 延期 | — | 需列表统一分配器架构变更 |
+| N2: async await i64 截断 | ⏸️ 待开始 | 1 天 | 无 |
+| N1: ring-buffer 溢出 | ⏸️ 待开始 | 0.5 天 | 无 |
+| G3/G4: break/continue + ? E2E | ⏸️ 待开始 | 0.5 天 | 无 |
+| G6/G8: Arena + async pthreads | ⏸️ 待开始 | 1 天 | 无 |
+| B15/B16: Span/Manifest | ⏸️ 待开始 | 0.5 天 | 无 |
+| F6 剩余: 回调 C→Mimi 字符串泄漏 | ⏸️ 待开始 | 1 天 | 无 |
 
 ### Phase 4 — 语言完善
 
@@ -618,6 +636,49 @@ G3/G4 (测试覆盖)、N1 (ring-buffer)、G6/G8 (arena/async)、comptime (C head
 | FFI + shared + enum | C 函数接收/返回 shared 枚举值 | 0 |
 | 闭包 + shared | 闭包捕获 shared 变量 → env 中引用计数 | 0 |
 | shared + spawn | Actor 内部 shared 状态 + await 返回 | 0 |
+
+---
+
+## 待修复项汇总（2026-06-19 当前）
+
+### P1 — 高优先级
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| F6 剩余 | `interp/ffi_call.rs`（回调路径） | C callback 返回 `char*` 经 `CStr::from_ptr` 转 Rust String 后 C 侧 `malloc` 未释放 |
+| G9 | `loader.rs:207-221` | `merge_all()` 无重名检测；E2E 框架不支持 `use` |
+| F9 | 新建文件 | Python binding generator（pybind11 stubs） |
+| N2 | `codegen/expr.rs:1511-1522` | async await 结果硬编码 `build_load(i64)`，Tuple/Record 返回值截断 |
+
+### P2 — 中优先级
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| N1 | `runtime.c:701` | `pool_task_tail++` 无上限检查，ring-buffer 可能覆写未处理任务 |
+| G3 | `codegen/block.rs:190` | if 内 break/continue E2E 覆盖 |
+| G4 | `codegen/expr.rs:1535-1619` | `?` 运算符 E2E 覆盖 |
+| G6 | `codegen/block.rs:217-239` | Arena 降级（stacksave/stackrestore → heap bump） |
+| G8 | `codegen/func.rs:15-61` | async pthreads 统一为 parasteps pool |
+
+### P3 — 低优先级
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| B15 | `span.rs:59-65` | `Span::width()` 多行返回 0 |
+| B16 | `manifest.rs:52-53` | root 路径 `parent()` 循环权限错误传播 |
+| B17 | `interp/quote.rs:290` | RC 性能优化（双克隆） |
+| N3 | `codegen/expr.rs:1349-1463` | 无结构化并发（设计如此） |
+| N4 | `tests/mod.rs:1093-1095` | E2E 框架不支持 `use`（与 G9 相关） |
+| N5 | `lsp.rs:146,152` | LSP 全量重解析（非 bug，影响 UX） |
+
+### 延期 / 设计如此
+
+| 项 | 原因 |
+|----|------|
+| E4: ASan list_ops | 列表字面量 `malloc` 未被 `heap_allocs` 跟踪，需架构变更（统一分配器） |
+| F5: List/Tuple FFI | 已通过 Json 契约支持，无需额外修复 |
+| RC-6: SHARED_TABLE leak detection | `SharedHandle::Drop` 已提供自动清理 |
+| G7: 借用检查不在 codegen | 设计如此 — core/ 已检查 |
 
 ---
 
