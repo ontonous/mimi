@@ -51,6 +51,7 @@ pub(crate) mod extern_calls;
 pub(crate) mod ffi_safety;
 pub(crate) mod ffi_passport_types;
 pub(crate) mod ffi_verification;
+pub(crate) mod ffi_interp_e2e;
 pub(crate) mod type_system_verification;
 pub(crate) mod actor_concurrent;
 pub(crate) mod derive_methods;
@@ -109,6 +110,29 @@ impl Drop for FfiEnvLock {
     }
 }
 
+/// Compile `mimi_runtime.c` into a shared library for interpreter FFI tests.
+/// Returns the path to the compiled `.so`.
+/// The caller MUST hold `FfiEnvLock` before calling this and setting `MIMI_FFI_LIB`.
+pub(crate) fn build_interp_ffi_so() -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
+    let tmp_dir = std::env::temp_dir().join(format!("mimi_ffi_so_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
+    let so_path = tmp_dir.join("mimi_runtime_test.so");
+    let status = Command::new("cc")
+        .arg("-shared")
+        .arg("-fPIC")
+        .arg("-o")
+        .arg(&so_path)
+        .arg(&runtime_c)
+        .status()
+        .map_err(|e| format!("cc not found: {}", e))?;
+    if !status.success() {
+        return Err(format!("failed to compile test .so, exit code: {:?}", status.code()));
+    }
+    Ok(so_path)
+}
+
 pub(crate) fn parse(src: &str) -> crate::ast::File {
     let tokens = lexer::Lexer::new(src).tokenize().unwrap();
     parser::Parser::new(tokens).parse_file().unwrap()
@@ -124,6 +148,19 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
     let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
     let mut interp = interp::Interpreter::new(&file);
+    interp.verify_contracts = true;
+    interp.run().map_err(|e| e.message)
+}
+
+/// Like `run_source_result` but with fork isolation disabled.
+/// Needed for FFI tests that return pointers (raw_string, string, Json)
+/// or use callbacks, which are incompatible with fork isolation
+/// (child-process heap is not accessible from the parent).
+pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
+    let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
+    let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    let mut interp = interp::Interpreter::new(&file);
+    interp.verify_ffi = false;
     interp.verify_contracts = true;
     interp.run().map_err(|e| e.message)
 }

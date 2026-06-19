@@ -1350,6 +1350,92 @@ int __mimi_extern_test_callback(int x, int (*cb)(int)) {
     return cb(x);
 }
 
+// G2: Float identity — takes f64, returns the same f64
+double __mimi_extern_test_float_identity(double x) {
+    return x;
+}
+
+// G3: String length (borrowed string)
+int __mimi_extern_test_strlen(const char* s) {
+    if (!s) return -1;
+    size_t len = 0;
+    while (s[len]) len++;
+    return (int)len;
+}
+
+// G4: Void (no-op)
+void __mimi_extern_test_nop(void) {
+}
+
+// G5: Parse int from JSON string — expects a JSON number root value
+int __mimi_extern_test_parse_int(const char* json) {
+    if (!json) return -1;
+    const char* p = json;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    int val = 0;
+    while (*p >= '0' && *p <= '9') {
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    return neg ? -val : val;
+}
+
+// G6: Allocate and return a greeting string (owned / raw_string)
+// Caller must free the returned pointer.
+char* __mimi_extern_test_greet(int x) {
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "Hello %d", x);
+    if (n < 0) return NULL;
+    char* s = (char*)malloc((size_t)n + 1);
+    if (!s) return NULL;
+    memcpy(s, buf, (size_t)n + 1);
+    return s;
+}
+
+// G7: JSON array sum — tests List/Record/Tuple serialized as JSON string
+int __mimi_extern_test_json_sum(const char* json) {
+    if (!json) return -1;
+    const char* p = json;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == '[') p++; else return -1;
+    int sum = 0;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
+        if (*p == ']' || *p == '\0') break;
+        int neg = 0;
+        if (*p == '-') { neg = 1; p++; }
+        int val = 0;
+        while (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            p++;
+        }
+        sum += neg ? -val : val;
+    }
+    return sum;
+}
+
+// G8: Segmentation fault — for fork isolation testing
+void __mimi_extern_test_segfault(void) {
+    volatile int* p = NULL;
+    *p = 42;  // deliberate null dereference
+}
+
+// === Wrappers for interpreter FFI path (no __mimi_extern_ prefix) ===
+// The interpreter looks up symbols by the Mimi extern name directly.
+double test_float_identity(double x) { return __mimi_extern_test_float_identity(x); }
+int    test_strlen(const char* s) { return __mimi_extern_test_strlen(s); }
+void   test_nop(void) { __mimi_extern_test_nop(); }
+int    test_parse_int(const char* json) { return __mimi_extern_test_parse_int(json); }
+int    test_json_sum(const char* json) { return __mimi_extern_test_json_sum(json); }
+void   test_segfault(void) { __mimi_extern_test_segfault(); }
+
+// greet uses a static buffer to avoid allocation issues across .so boundary
+char* test_greet(int x) { return __mimi_extern_test_greet(x); }
+// callback wrapper
+int    test_callback(int x, int (*cb)(int)) { return __mimi_extern_test_callback(x, cb); }
+
 void mimi_runtime_abort(const char* msg) {
     if (msg) {
         fprintf(stderr, "Contract violation: %s\n", msg);

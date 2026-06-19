@@ -191,6 +191,24 @@ fn e2e_closure_extern_callback() {
     assert_eq!(stdout.trim(), "10");
 }
 
+#[test]
+fn e2e_extern_float_identity() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_float_identity(x: f64) -> f64
+        }
+        func main() -> i32 {
+            let x: f64 = 3.14
+            println(test_float_identity(x))
+            0
+        }
+    "#).unwrap();
+    let trimmed = stdout.trim().to_string();
+    // Accept any output starting with "3.14" (the exact formatting may vary)
+    assert!(trimmed.starts_with("3.14"), "expected '3.14...', got '{}'", trimmed);
+}
+
 // ===================== Error Handling =====================
 
 #[test]

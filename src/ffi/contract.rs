@@ -192,7 +192,7 @@ impl FfiArgContract {
             Type::CBorrow(inner) => FfiArgContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiArgContract::CBorrowMut(inner.clone()),
             Type::RawString => FfiArgContract::StringTransfer,
-            Type::ExternFunc(param_types, ret_type) => {
+            Type::ExternFunc(param_types, ret_type) | Type::Func(param_types, ret_type) => {
                 // Function pointer - register as callback with dynamic trampoline
                 FfiArgContract::Callback {
                     param_types: param_types.clone(),
