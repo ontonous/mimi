@@ -78,15 +78,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Some(BasicValueEnum::PointerValue(pv)) => pv,
                     _ => return Err("getenv should return a pointer".into()),
                 };
-                // Check if NULL (env var not set); return empty string instead of NULL pointer
+                // Check if NULL (env var not set); return {null, 0} instead of calling strlen(NULL)
                 let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let string_ty = self.context.struct_type(&[
+                    BasicTypeEnum::PointerType(i8_ptr),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let str_alloca = self.builder.build_alloca(string_ty, "getenv_str")
+                    .map_err(|e| format!("alloca error: {}", e))?;
+                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                    .map_err(|e| format!("gep error: {}", e))?;
+                // Initialize with {null, 0} as default (NULL env var case)
+                let zero_i64 = self.context.i64_type().const_int(0, false);
+                self.builder.build_store(ptr_gep, i8_ptr.const_null())
+                    .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_store(len_gep, zero_i64)
+                    .map_err(|e| format!("store error: {}", e))?;
                 let is_null = self.builder.build_int_compare(
                     inkwell::IntPredicate::EQ,
                     ptr,
                     i8_ptr.const_null(),
                     "env_is_null",
                 ).map_err(|e| format!("compare error: {}", e))?;
-                // Compute strlen for the non-null path
+                let function = self.current_function()
+                    .ok_or_else(|| "codegen: no current function for getenv".to_string())?;
+                let not_null_bb = self.context.append_basic_block(function, "getenv_not_null");
+                let merge_bb = self.context.append_basic_block(function, "getenv_merge");
+                self.builder.build_conditional_branch(is_null, merge_bb, not_null_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                // Non-null path: compute strlen and store actual values
+                self.builder.position_at_end(not_null_bb);
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;
                 let str_len = self.builder.build_call(strlen_fn, &[
@@ -96,30 +119,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .try_as_basic_value().left()
                     .ok_or("strlen returned void")?
                     .into_int_value();
-                let zero = self.context.i64_type().const_int(0, false);
-                let actual_ptr = self.builder.build_select(is_null,
-                    i8_ptr.const_null(),
-                    ptr,
-                    "env_ptr").map_err(|e| format!("select error: {}", e))?;
-                let actual_len = self.builder.build_select(is_null,
-                    zero,
-                    str_len,
-                    "env_len").map_err(|e| format!("select error: {}", e))?;
-                // Build Mimi string struct {i8*, i64}
-                let string_ty = self.context.struct_type(&[
-                    BasicTypeEnum::PointerType(i8_ptr),
-                    BasicTypeEnum::IntType(self.context.i64_type()),
-                ], false);
-                let str_alloca = self.builder.build_alloca(string_ty, "getenv_str")
-                    .map_err(|e| format!("alloca error: {}", e))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-                    .map_err(|e| format!("gep error: {}", e))?;
-                self.builder.build_store(ptr_gep, actual_ptr)
+                self.builder.build_store(ptr_gep, ptr)
                     .map_err(|e| format!("store error: {}", e))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
-                    .map_err(|e| format!("gep error: {}", e))?;
-                self.builder.build_store(len_gep, actual_len)
+                self.builder.build_store(len_gep, str_len)
                     .map_err(|e| format!("store error: {}", e))?;
+                self.builder.build_unconditional_branch(merge_bb)
+                    .map_err(|e| format!("branch error: {}", e))?;
+                self.builder.position_at_end(merge_bb);
                 Ok(str_alloca.into())
 
     }

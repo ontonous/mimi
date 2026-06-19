@@ -219,6 +219,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(Some(expr)) => {
                     self.pop_comp_scope();
                     self.pop_shared_scope()?;
+                    self.pop_cap_scope();
                     let mut val = self.compile_expr(expr, &vars)?;
                     val = self.adjust_int_val(val, self.current_fn_ret_type())?;
                     let ensures = self.ensures_stmts.clone();
@@ -231,6 +232,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(None) => {
                     self.pop_comp_scope();
                     self.pop_shared_scope()?;
+                    self.pop_cap_scope();
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
                         self.compile_contract_assert(ensures_expr, &vars, &format!("ensures violation"))?;

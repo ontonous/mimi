@@ -2,6 +2,7 @@
 
 pub mod contract;
 pub mod c_header;
+pub mod py_bind;
 pub mod runtime;
 pub mod callback;
 

@@ -514,14 +514,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // If fseek failed, clamp file_size to 0 to avoid negative malloc size
                 let zero = self.context.i64_type().const_int(0, false);
                 let neg_one = self.context.i64_type().const_int(
-                    (1u64 << 63) | 1u64, false); // i64::MIN as unsigned bit pattern for -1
+                    u64::MAX, false); // -1 in two's complement
                 let is_neg_one = self.builder.build_int_compare(
                     IntPredicate::EQ,
                     file_size,
                     neg_one,
                     "is_neg_one",
                 ).map_err(|e| CompileError::LlvmError(format!("neg_one compare error: {}", e)))?;
-                let clamp_cond = self.builder.build_or(fseek_ok, is_neg_one, "clamp_cond")
+                let fseek_failed = self.builder.build_xor(fseek_ok,
+                    self.context.bool_type().const_int(1, false), "fseek_failed")
+                    .map_err(|e| CompileError::LlvmError(format!("xor error: {}", e)))?;
+                let clamp_cond = self.builder.build_or(fseek_failed, is_neg_one, "clamp_cond")
                     .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
                 let file_size = self.builder.build_select(clamp_cond, zero, file_size, "file_size")
                     .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?

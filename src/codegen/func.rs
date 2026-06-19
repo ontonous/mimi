@@ -167,6 +167,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.pop_comp_scope();
                     self.free_heap_allocs()?;
                     self.pop_shared_scope()?;
+                    self.pop_cap_scope();
                     let val = self.compile_expr(expr, &vars)?;
                     let val = self.adjust_int_val(val, ret_type)?;
                     let ensures = self.ensures_stmts.clone();
@@ -180,6 +181,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.pop_comp_scope();
                     self.free_heap_allocs()?;
                     self.pop_shared_scope()?;
+                    self.pop_cap_scope();
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
                         self.compile_contract_assert(ensures_expr, &vars, &format!("ensures violation in '{}'", func.name))?;

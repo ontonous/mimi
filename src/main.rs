@@ -155,6 +155,13 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Generate Python pybind11 bindings from extern declarations
+    EmitPyBindings {
+        path: Option<PathBuf>,
+        /// Output path for the pybind11 C++ source file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
         path: PathBuf,
@@ -233,6 +240,7 @@ fn main() {
         Command::Verify { path } => verify(path.as_deref()),
         Command::Build { path, output, emit_ir, strict, no_std, verify_contracts } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts),
         Command::EmitCHeaders { path, output } => emit_c_headers(path.as_deref(), output.as_deref()),
+        Command::EmitPyBindings { path, output } => emit_py_bindings(path.as_deref(), output.as_deref()),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
@@ -1296,6 +1304,50 @@ fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), Stri
         }
         None => {
             println!("{}", header);
+        }
+    }
+    Ok(())
+}
+
+fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut extern_funcs = Vec::new();
+    let mut type_defs = std::collections::HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
+
+    let bindings = ffi::py_bind::PyBindGenerator::new(type_defs, &pkg_name)
+        .generate(&extern_funcs)
+        .map_err(|e| format!("failed to generate bindings: {}", e))?;
+
+    match output {
+        Some(out_path) => {
+            std::fs::write(out_path, &bindings)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("✓ Generated Python bindings: {}", out_path.display());
+            // Also emit a CMakeLists.txt next to the output
+            let cmake_out = out_path.with_extension("cmake");
+            let cmake = ffi::py_bind::generate_cmake_snippet(
+                &pkg_name,
+                "./",
+                "/usr/local/lib",
+            );
+            std::fs::write(&cmake_out, cmake)
+                .map_err(|e| format!("failed to write {}: {}", cmake_out.display(), e))?;
+            println!("✓ Generated CMakeLists.txt: {}", cmake_out.display());
+        }
+        None => {
+            println!("{}", bindings);
         }
     }
     Ok(())

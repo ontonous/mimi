@@ -485,7 +485,6 @@ impl<'a> Interpreter<'a> {
                     77 => "EDQUOT",
                     78 => "ENOMEDIUM",
                      79 => "EMEDIUMTYPE",
-                     80 => "ECANCELED",
                      81 => "ENOKEY",
                      82 => "EKEYEXPIRED",
                      83 => "EKEYREVOKED",
