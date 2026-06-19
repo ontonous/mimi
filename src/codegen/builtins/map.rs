@@ -287,6 +287,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(list_len),
                 ], "map_from_list_call")
                     .map_err(|e| format!("map_from_list error: {}", e))?;
+                // Free the temporary key/value arrays (mimi_map_from_list copies data internally)
+                let free_fn = self.module.get_function("free")
+                    .ok_or("free not declared")?;
+                self.builder.build_call(free_fn, &[
+                    BasicMetadataValueEnum::PointerValue(keys_data),
+                ], "free_keys")
+                    .map_err(|e| format!("free keys error: {}", e))?;
+                self.builder.build_call(free_fn, &[
+                    BasicMetadataValueEnum::PointerValue(values_data),
+                ], "free_values")
+                    .map_err(|e| format!("free values error: {}", e))?;
                 Ok(result.try_as_basic_value().left()
                     .ok_or("mimi_map_from_list returned void")?)
 

@@ -172,6 +172,54 @@ impl<'ctx> CodeGenerator<'ctx> {
         false
     }
 
+    /// Push a new shared variable scope
+    pub(super) fn push_shared_scope(&mut self) {
+        self.shared_release_vars.push(Vec::new());
+    }
+
+    /// Pop the current shared variable scope and emit release calls for all
+    /// shared variables declared in it.
+    pub(super) fn pop_shared_scope(&mut self) -> MimiResult<()> {
+        if let Some(scope) = self.shared_release_vars.pop() {
+            if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
+                for heap_ptr in &scope {
+                    self.builder.build_call(release_fn, &[
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(*heap_ptr),
+                    ], "shared_release")
+                        .map_err(|e| CompileError::LlvmError(format!("shared release error: {}", e)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Release all remaining shared variables at function exit
+    pub(super) fn release_all_shared(&mut self) -> MimiResult<()> {
+        let all_release: Vec<inkwell::values::PointerValue<'ctx>> = self.shared_release_vars
+            .iter()
+            .flat_map(|scope| scope.iter())
+            .copied()
+            .collect();
+        if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
+            for heap_ptr in all_release {
+                self.builder.build_call(release_fn, &[
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(heap_ptr),
+                ], "shared_release")
+                    .map_err(|e| CompileError::LlvmError(format!("shared release error: {}", e)))?;
+            }
+        }
+        self.shared_release_vars.clear();
+        self.shared_release_vars.push(Vec::new());
+        Ok(())
+    }
+
+    /// Register a shared variable's heap pointer for release on scope exit
+    pub(super) fn register_shared_var(&mut self, heap_ptr: inkwell::values::PointerValue<'ctx>) {
+        if let Some(scope) = self.shared_release_vars.last_mut() {
+            scope.push(heap_ptr);
+        }
+    }
+
     /// Check for unconsumed capabilities at scope exit
     pub(super) fn check_unconsumed_caps(&self) -> MimiResult<()> {
         if let Some(scope) = self.cap_vars.last() {

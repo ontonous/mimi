@@ -120,4 +120,13 @@ char* mimi_http_post(const char* url, const char* body);
 /* Contract violation: print message and abort */
 void mimi_runtime_abort(const char* msg);
 
+/* Refcounted heap allocation for shared values.
+   mimi_rc_alloc(size) allocates sizeof(MimiRcHeader) + size bytes,
+   initializes refcount to 1, and returns a pointer to the user data.
+   mimi_rc_retain(ptr) increments the refcount.
+   mimi_rc_release(ptr) decrements the refcount; frees when it reaches 0. */
+void* mimi_rc_alloc(int64_t size);
+void mimi_rc_retain(void* ptr);
+void mimi_rc_release(void* ptr);
+
 #endif

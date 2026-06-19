@@ -201,6 +201,26 @@ void mimi_try_exit(int64_t payload) {
     while (1) {}
 }
 
+/* MIMI_NO_STD stub: refcounted allocation uses bump allocator (no atomics) */
+void* mimi_rc_alloc(int64_t size) {
+    size_t total = sizeof(int64_t) + (size_t)size;
+    int64_t* hdr = (int64_t*)malloc(total);
+    if (!hdr) return (void*)0;
+    *hdr = 1;  /* refcount = 1 */
+    return (void*)(hdr + 1);
+}
+void mimi_rc_retain(void* ptr) {
+    if (!ptr) return;
+    int64_t* hdr = (int64_t*)ptr - 1;
+    (*hdr)++;
+}
+void mimi_rc_release(void* ptr) {
+    if (!ptr) return;
+    int64_t* hdr = (int64_t*)ptr - 1;
+    (*hdr)--;
+    if (*hdr <= 0) free(hdr);
+}
+
 #else /* !MIMI_NO_STD — normal libc build */
 
 #include <stdlib.h>
@@ -209,6 +229,33 @@ void mimi_try_exit(int64_t payload) {
 #include <unistd.h>
 #include <time.h>
 #include <pthread.h>
+#include <stdatomic.h>
+
+/* Reference-counted heap allocation.
+   Layout: [ int64_t refcount | user data ... ]
+   Returns pointer to user data (right after the refcount header). */
+void* mimi_rc_alloc(int64_t size) {
+    size_t total = sizeof(atomic_int_least64_t) + (size_t)size;
+    atomic_int_least64_t* hdr = (atomic_int_least64_t*)malloc(total);
+    if (!hdr) return (void*)0;
+    atomic_init(hdr, 1);
+    return (void*)(hdr + 1);
+}
+
+void mimi_rc_retain(void* ptr) {
+    if (!ptr) return;
+    atomic_int_least64_t* hdr = (atomic_int_least64_t*)ptr - 1;
+    atomic_fetch_add(hdr, 1);
+}
+
+void mimi_rc_release(void* ptr) {
+    if (!ptr) return;
+    atomic_int_least64_t* hdr = (atomic_int_least64_t*)ptr - 1;
+    int64_t prev = atomic_fetch_sub(hdr, 1);
+    if (prev <= 1) {
+        free(hdr);
+    }
+}
 
 #define INITIAL_CAPACITY 16
 #define LOAD_FACTOR 0.75

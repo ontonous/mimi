@@ -1064,7 +1064,6 @@ fn e2e_valgrind_recursion() {
 }
 
 #[test]
-#[ignore]
 fn e2e_valgrind_shared_weak_lifecycle() {
     // Placeholder: shared/weak valgrind test.
     // Codegen currently treats SharedLet as a plain `let` (no Arc/Rc),

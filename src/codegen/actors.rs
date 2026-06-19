@@ -271,9 +271,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, &vars)?;
-                    if let Some(&(alloca, _)) = vars.get(name) {
-                        self.builder.build_store(alloca, val)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    if let Some(&(alloca, ty)) = vars.get(name) {
+                        self.assign_to_var(name, val, alloca, ty)?;
                     }
                 }
                 Stmt::If { cond, then_, else_ } => {
@@ -448,13 +447,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_block(block, &mut vars)?;
                 }
                 Stmt::SharedLet { name, init, .. } => {
-                    let val = self.compile_expr(init, &vars)?;
-                    let llvm_ty = val.get_type();
-                    let alloca = self.builder.build_alloca(llvm_ty, name)
-                        .map_err(|e| CompileError::LlvmError(format!("shared alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
-                    vars.insert(name.clone(), (alloca, llvm_ty));
+                    self.compile_shared_let_stmt(name, init, &mut vars)?;
                 }
                 Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
                 _ => {}

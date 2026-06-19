@@ -196,6 +196,19 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     module.add_function("mimi_shared_release",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External));
+    // G5: Refcounted heap allocation for shared values (defined in mimi_runtime.c)
+    // mimi_rc_alloc(size: i64) -> i8*
+    module.add_function("mimi_rc_alloc",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_rc_retain(ptr: i8*)
+    module.add_function("mimi_rc_retain",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_rc_release(ptr: i8*)
+    module.add_function("mimi_rc_release",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
     // mimi_cap_check(cap, name) -> bool
     module.add_function("mimi_cap_check",
         i32.fn_type(&[

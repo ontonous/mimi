@@ -43,6 +43,13 @@ pub struct CodeGenerator<'ctx> {
     parasteps_thread_ids: Vec<inkwell::values::IntValue<'ctx>>,
     compensation_blocks: Vec<Vec<Stmt>>,
     comp_scope_stack: Vec<usize>,
+    /// Stack of shared variable heap pointers that need release on scope exit.
+    shared_release_vars: Vec<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// Names of variables declared with `shared let` (for special access handling).
+    shared_var_names: std::collections::HashSet<String>,
+    /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
+    /// Uses RefCell for interior mutability since builtins take &self.
+    heap_allocs: std::cell::RefCell<Vec<Vec<inkwell::values::PointerValue<'ctx>>>>,
     ensures_stmts: Vec<Box<Expr>>,
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
@@ -57,7 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new() }
     }
 
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
@@ -105,6 +112,110 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub fn emit_ir(&self) -> String {
         self.module.print_to_string().to_string()
+    }
+
+    /// G5: Assign a compiled value to a variable (handles shared var dereference).
+    pub(super) fn assign_to_var(
+        &mut self,
+        name: &str,
+        val: BasicValueEnum<'ctx>,
+        alloca: inkwell::values::PointerValue<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        if self.shared_var_names.contains(name) {
+            // Shared variable: load the heap pointer, store new value at that location
+            let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+            let heap_ptr = self.builder.build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))
+                .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load error: {}", e)))?
+                .into_pointer_value();
+            self.builder.build_store(heap_ptr, val)
+                .map_err(|e| CompileError::LlvmError(format!("shared assign store error: {}", e)))?;
+        } else {
+            self.builder.build_store(alloca, val)
+                .map_err(|e| CompileError::LlvmError(format!("assign store error: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// G10: Register a heap pointer (from builtins) for scope-exit free.
+    /// Takes &self (not &mut self) because builtins use &self.
+    pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            stack.push(ptr);
+        }
+    }
+
+    /// G10: Push a new scope level for heap allocations.
+    /// Takes &self (not &mut self) because builtins use &self.
+    pub(super) fn push_heap_scope(&self) {
+        self.heap_allocs.borrow_mut().push(Vec::new());
+    }
+
+    /// G10: Pop scope level and emit `free(ptr)` for each registered heap allocation.
+    pub(super) fn free_heap_allocs(&mut self) -> Result<(), CompileError> {
+        if let Some(scope) = self.heap_allocs.borrow_mut().pop() {
+            let free_fn = self.module.get_function("free")
+                .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+            for ptr in scope {
+                self.builder.build_call(free_fn, &[
+                    BasicMetadataValueEnum::PointerValue(ptr),
+                ], "free_heap")
+                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// G5: Compile a `shared let` statement with heap allocation and refcounting.
+    pub(super) fn compile_shared_let_stmt(
+        &mut self,
+        name: &String,
+        init: &Expr,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
+        let val = self.compile_expr(init, vars)?;
+        let llvm_ty = val.get_type();
+        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+
+        let ty_size_bytes = llvm_ty.size_of()
+            .and_then(|v: inkwell::values::IntValue<'ctx>| v.get_zero_extended_constant())
+            .unwrap_or(8);
+        let ty_size = self.context.i64_type().const_int(ty_size_bytes, false);
+        let alloc_fn = self.module.get_function("mimi_rc_alloc")
+            .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc not declared".to_string()))?;
+        let heap_raw = self.builder.build_call(alloc_fn, &[
+            inkwell::values::BasicMetadataValueEnum::IntValue(ty_size),
+        ], &format!("{}_rc_alloc", name))
+            .map_err(|e| CompileError::LlvmError(format!("rc_alloc error: {}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc returned void".to_string()))?;
+
+        let heap_raw_ptr = heap_raw.into_pointer_value();
+        let heap_ptr = self.builder.build_pointer_cast(
+            heap_raw_ptr,
+            llvm_ty.ptr_type(inkwell::AddressSpace::default()),
+            &format!("{}_heap", name))
+            .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
+
+        self.builder.build_store(heap_ptr, val)
+            .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
+
+        let alloca = self.builder.build_alloca(
+            llvm_ty.ptr_type(inkwell::AddressSpace::default()), name)
+            .map_err(|e| CompileError::LlvmError(format!("shared handle alloca error: {}", e)))?;
+        self.builder.build_store(alloca, heap_ptr)
+            .map_err(|e| CompileError::LlvmError(format!("shared handle store error: {}", e)))?;
+
+        vars.insert(name.clone(), (alloca, llvm_ty));
+        self.shared_var_names.insert(name.clone());
+
+        let heap_i8 = self.builder.build_pointer_cast(
+            heap_ptr, i8_ptr, &format!("{}_i8", name))
+            .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
+        self.register_shared_var(heap_i8);
+
+        Ok(())
     }
 
     pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {

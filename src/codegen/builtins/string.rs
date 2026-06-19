@@ -34,7 +34,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(iv),
                         ], "sprintf_call")
                             .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
-                        // Return raw C string pointer (matches string literal representation)
+                        // Register for scope-exit free
+                        self.register_heap_alloc(buf);
                         Ok(buf.into())
                     }
                     BasicMetadataValueEnum::FloatValue(fv) => {
@@ -58,6 +59,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::FloatValue(fv),
                         ], "sprintf_call")
                             .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                        self.register_heap_alloc(buf);
                         Ok(buf.into())
                     }
                     _ => Err(CompileError::TypeMismatch("to_string: unsupported type".to_string())),

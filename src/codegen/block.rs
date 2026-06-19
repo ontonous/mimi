@@ -18,6 +18,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         self.push_comp_scope();
+        self.push_shared_scope();
+        self.push_heap_scope();
         for stmt in block {
             // Run compensations before exit()
             if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
@@ -147,9 +149,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, vars)?;
-                    if let Some(&(alloca, _)) = vars.get(name) {
-                        self.builder.build_store(alloca, val)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    if let Some(&(alloca, ty)) = vars.get(name) {
+                        self.assign_to_var(name, val, alloca, ty)?;
                     }
                 }
                 Stmt::If { cond, then_, else_ } => {
@@ -202,13 +203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_expr(expr, vars)?;
                 }
                 Stmt::SharedLet { name, init, .. } => {
-                    let val = self.compile_expr(init, vars)?;
-                    let llvm_ty = val.get_type();
-                    let alloca = self.builder.build_alloca(llvm_ty, name)
-                        .map_err(|e| CompileError::LlvmError(format!("shared alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
-                    vars.insert(name.clone(), (alloca, llvm_ty));
+                    self.compile_shared_let_stmt(name, init, vars)?;
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit
@@ -276,6 +271,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {}
             }
         }
+        self.pop_shared_scope()?;
+        self.free_heap_allocs()?;
         self.pop_comp_scope();
         Ok(())
     }
@@ -350,9 +347,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, vars)?;
-                    if let Some(&(alloca, _)) = vars.get(name) {
-                        self.builder.build_store(alloca, val)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    if let Some(&(alloca, ty)) = vars.get(name) {
+                        self.assign_to_var(name, val, alloca, ty)?;
                         last_val = val;
                     }
                 }

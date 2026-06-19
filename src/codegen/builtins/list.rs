@@ -826,22 +826,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     i64_ty.ptr_type(inkwell::AddressSpace::default()), "sort_data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
-                let sizeof_i64 = i64_ty.const_int(8, false);
-                let alloc_size = self.builder.build_int_mul(list_len, sizeof_i64, "sort_alloc_size")
-                    .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-                let malloc_fn = self.module.get_function("malloc")
-                    .ok_or_else(|| "malloc not declared".to_string())?;
-                let new_data = self.builder.build_call(malloc_fn, &[
-                    BasicMetadataValueEnum::IntValue(alloc_size),
-                ], "sort_malloc")
-                    .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
-                    .ok_or("malloc returned void")?
-                    .into_pointer_value();
-                let _new_data_i64 = self.builder.build_bit_cast(new_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "sort_new_data_i64")
-                    .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                    .into_pointer_value();
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for sort loop".to_string())?;
                 let outer_loop_bb = self.context.append_basic_block(function, "sort_outer_loop");
                 let outer_body_bb = self.context.append_basic_block(function, "sort_outer_body");

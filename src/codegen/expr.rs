@@ -73,8 +73,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if let Some(&(alloca, ty)) = vars.get(name) {
-            self.builder.build_load(ty, alloca, name)
-                .map_err(|e| format!("load error: {}", e))
+            if self.shared_var_names.contains(name.as_str()) {
+                // Shared variable: the alloca stores a T* pointer to heap memory.
+                // First load the pointer, then load the value from the heap.
+                let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                let heap_ptr = self.builder.build_load(ptr_ty, alloca, name)
+                    .map_err(|e| format!("shared heap ptr load error: {}", e))?;
+                let heap_pointer = heap_ptr.into_pointer_value();
+                self.builder.build_load(ty, heap_pointer, name)
+                    .map_err(|e| format!("shared value load error: {}", e))
+            } else {
+                self.builder.build_load(ty, alloca, name)
+                    .map_err(|e| format!("load error: {}", e))
+            }
         } else if self.cap_type_names.contains(name.as_str()) {
             // Cap literal: call mimi_cap_register(name) to get handle
             if let Some(register_fn) = self.module.get_function("mimi_cap_register") {
