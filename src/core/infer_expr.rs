@@ -1322,6 +1322,14 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            "json_is_valid" => {
+                if args.len() != 1 {
+                    self.emit("json_is_valid expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
             "json_get_string" => {
                 if args.len() != 2 {
                     self.emit("json_get_string expects 2 arguments");

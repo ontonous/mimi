@@ -65,6 +65,65 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.compile_actor_method(actor, method)?;
         }
         
+        // Generate spawn wrapper function
+        self.compile_actor_spawn(actor)?;
+        
+        Ok(())
+    }
+    
+    fn compile_actor_spawn(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
+        // Generate {Name}_spawn() -> Actor struct
+        // This mirrors the constructor but evaluates field init expressions instead of taking params
+        let actor_ty = *self.type_llvm.get(&actor.name)
+            .ok_or_else(|| CompileError::TypeNotFound(format!("actor type '{}' not found", actor.name)))?;
+        
+        let spawn_fn_type = match actor_ty {
+            BasicTypeEnum::StructType(sty) => sty.fn_type(&[], false),
+            _ => return Err(CompileError::ActorNotStruct(actor.name.to_string())),
+        };
+        
+        let spawn_name = format!("{}_spawn", actor.name);
+        let function = self.module.add_function(&spawn_name, spawn_fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        
+        // Allocate actor struct
+        let alloca = match actor_ty {
+            BasicTypeEnum::StructType(sty) => self.builder.build_alloca(sty, &actor.name)
+                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?,
+            _ => return Err(CompileError::LlvmError("actor type error".to_string())),
+        };
+        
+        // Store field values from init expressions (or default)
+        let empty_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
+        if let BasicTypeEnum::StructType(sty) = actor_ty {
+            for (i, field) in actor.fields.iter().enumerate() {
+                let gep = self.builder.build_struct_gep(sty, alloca, i as u32, &field.name)
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let val = if let Some(init) = &field.init {
+                    self.compile_expr(init, &empty_vars)?
+                } else {
+                    // Default value by type
+                    let ty = types::mimi_type_to_llvm(self.context, &field.ty)
+                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                    match ty {
+                        BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
+                        BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+                        BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                        _ => self.context.i64_type().const_int(0, false).into(),
+                    }
+                };
+                self.builder.build_store(gep, val)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            }
+        }
+        
+        // Return the actor struct
+        let ret_val = self.builder.build_load(actor_ty, alloca, &actor.name)
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        
         Ok(())
     }
     
@@ -121,6 +180,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("codegen: missing self param in actor method".to_string()))?)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         vars.insert("self".to_string(), (self_alloca, actor_ptr_ty));
+        self.var_type_names.insert("self".to_string(), actor.name.clone());
         
         // Bind method params
         let param_offset = 1; // param 0 is self
@@ -194,9 +254,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                     self.builder.build_store(alloca, val)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    // Track type name from record expressions
+                    // Track type name from record expressions or spawn calls
                     if let Expr::Record { ty: Some(tn), .. } = init {
                         self.var_type_names.insert(name.clone(), tn.clone());
+                    } else if let Expr::Call(callee, _) = init {
+                        if let Expr::Field(obj, method_name) = callee.as_ref() {
+                            if method_name == "spawn" {
+                                let obj_type = self.infer_object_type(obj, &vars);
+                                if !obj_type.is_empty() {
+                                    self.var_type_names.insert(name.clone(), obj_type);
+                                }
+                            }
+                        }
                     }
                     vars.insert(name, (alloca, llvm_ty));
                 }

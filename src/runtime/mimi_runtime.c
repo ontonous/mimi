@@ -940,6 +940,23 @@ void* mimi_from_json(const char* json_str) {
     return result;
 }
 
+/* mimi_is_valid_json: returns 1 if json_str is valid JSON, 0 otherwise.
+ * Avoids allocation — purely checks syntax. */
+int64_t mimi_is_valid_json(const char* json_str) {
+    if (!json_str) return 0;
+    JsonParser jp;
+    jp.p = json_str;
+    jp.start = json_str;
+    jp.err_pos = NULL;
+    char* result = NULL;
+    size_t result_len = 0;
+    if (!json_parse_value(&jp, &result, &result_len)) return 0;
+    json_skip_ws(&jp);
+    int valid = (*jp.p == 0) ? 1 : 0;
+    if (result) free(result);
+    return valid;
+}
+
 /* json_get_string: extract a string field from a JSON object.
  * Returns heap-allocated string or NULL if not found/error.
  * json_str is the raw JSON text (object or value). */
@@ -1240,6 +1257,10 @@ char* mimi_http_post(const char* url, const char* body) {
         path, host, body_len, body);
     if (n < 0 || (size_t)n >= sizeof(request)) return NULL;
     return http_request(host, port, request, NULL);
+}
+
+int __mimi_extern_test_positive(int x) {
+    return x;
 }
 
 void mimi_runtime_abort(const char* msg) {

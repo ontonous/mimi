@@ -896,6 +896,17 @@ impl<'a> Interpreter<'a> {
         Ok(Value::String(json_str))
     }
 
+    pub(crate) fn builtin_json_is_valid(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 1 { return Err("json_is_valid expects 1 argument (json string)".into()); }
+        match &args[0] {
+            Value::String(s) => {
+                let valid = serde_json::from_str::<serde_json::Value>(s).is_ok();
+                Ok(Value::Bool(valid))
+            }
+            _ => Err("json_is_valid expects a string".into()),
+        }
+    }
+
     pub(crate) fn builtin_from_json(&self, args: Vec<Value>) -> Result<Value, String> {
         if args.len() != 1 { return Err("from_json expects 1 argument (json string)".into()); }
         match &args[0] {

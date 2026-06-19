@@ -272,6 +272,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.var_type_names.insert(name.clone(), tn.clone());
                     } else if let Expr::Record { ty: Some(tn), .. } = init {
                         self.var_type_names.insert(name.clone(), tn.clone());
+                    } else if let Expr::Call(callee, _) = init {
+                        if let Expr::Field(obj, method_name) = callee.as_ref() {
+                            if method_name == "spawn" {
+                                let obj_type = self.infer_object_type(obj, &vars);
+                                if !obj_type.is_empty() {
+                                    self.var_type_names.insert(name.clone(), obj_type);
+                                }
+                            }
+                        }
                     }
                     vars.insert(name.clone(), (alloca, llvm_ty));
 

@@ -230,6 +230,56 @@ fn e2e_contract_requires_fail() {
 }
 
 #[test]
+fn e2e_extern_ensures_pass() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_verify_contracts(r#"
+        extern "C" {
+            func test_positive(x: i32) -> i32
+                ensures: result > 0;
+        }
+        func main() -> i32 {
+            println(test_positive(5))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn e2e_extern_ensures_fail() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let result = compile_and_verify_contracts(r#"
+        extern "C" {
+            func test_positive(x: i32) -> i32
+                ensures: result > 0;
+        }
+        func main() -> i32 {
+            println(test_positive(0))
+            0
+        }
+    "#);
+    assert!(result.is_err(), "should fail on ensures violation for extern call");
+}
+
+#[test]
+fn e2e_actor_spawn_and_method() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        actor Counter {
+            count: i32 = 42;
+            func get() -> i32 { return self.count; }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn();
+            let val = c.get();
+            println(val);
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
 fn e2e_float_sub() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"

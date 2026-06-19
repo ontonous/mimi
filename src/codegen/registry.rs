@@ -210,7 +210,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
 
-            // Phase 3: Build wrapper args and call extern function
+            // Phase 3: Check requires contract before C call
+            if self.verify_contracts {
+                if let Some(req_expr) = &ef.requires {
+                    let mut contract_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
+                    for (i, p) in ef.params.iter().enumerate() {
+                        let param = wrapper_fn.get_nth_param(i as u32)
+                            .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
+                        let llvm_ty = param.get_type();
+                        let alloca = self.builder.build_alloca(llvm_ty, &p.name)
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        self.builder.build_store(alloca, param)
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                        contract_vars.insert(p.name.clone(), (alloca, llvm_ty));
+                    }
+                    self.compile_contract_assert(req_expr, &contract_vars, &format!("requires violation in extern '{}'", ef.name))?;
+                }
+            }
+
+            // Phase 4: Build wrapper args and call extern function
             let wrapper_args: Vec<BasicMetadataValueEnum<'ctx>> = wrapper_fn
                 .get_param_iter()
                 .map(|p| match p {
@@ -248,7 +266,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
 
-            // Phase 5: Return
+            // Phase 5: Check ensures contract after C call
+            if self.verify_contracts {
+                if let Some(ens_expr) = &ef.ensures {
+                    let ret_val = call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
+                    let mut contract_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
+                    for (i, p) in ef.params.iter().enumerate() {
+                        let param = wrapper_fn.get_nth_param(i as u32)
+                            .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
+                        let llvm_ty = param.get_type();
+                        let alloca = self.builder.build_alloca(llvm_ty, &p.name)
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        self.builder.build_store(alloca, param)
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                        contract_vars.insert(p.name.clone(), (alloca, llvm_ty));
+                    }
+                    let result_ty = ret_val.get_type();
+                    let result_alloca = self.builder.build_alloca(result_ty, "result")
+                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                    self.builder.build_store(result_alloca, ret_val)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    contract_vars.insert("result".to_string(), (result_alloca, result_ty));
+                    self.compile_contract_assert(ens_expr, &contract_vars, &format!("ensures violation in extern '{}'", ef.name))?;
+                }
+            }
+
+            // Phase 6: Return
             if fn_type.get_return_type().is_some() {
                 let ret = call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
                 self.builder.build_return(Some(&ret))

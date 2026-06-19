@@ -590,7 +590,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 
                 // 1. Try actor method dispatch
                 if let Some(function) = self.module.get_function(&actor_method) {
-                    let obj_val = self.compile_expr(obj, vars)?;
+                    let mut obj_val = self.compile_expr(obj, vars)?;
+                    // Actor methods take self as pointer; convert struct value to pointer if needed
+                    if let BasicValueEnum::StructValue(sv) = obj_val {
+                        let struct_ty = sv.get_type();
+                        let alloca = self.builder.build_alloca(struct_ty, "self_tmp")
+                            .map_err(|e| format!("alloca error: {}", e))?;
+                        self.builder.build_store(alloca, obj_val)
+                            .map_err(|e| format!("store error: {}", e))?;
+                        obj_val = alloca.into();
+                    }
                     let mut compiled_args = Vec::new();
                     compiled_args.push(obj_val);
                     for arg in args {
@@ -610,7 +619,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.context.i64_type().const_int(0, false).into()
                     ));
                 }
-                
+
+                // 1.5. Special case: Type.spawn() constructor call for actors
+                if method_name == "spawn" {
+                    let spawn_name = format!("{}_spawn", obj_type);
+                    if let Some(spawn_fn) = self.module.get_function(&spawn_name) {
+                        let call = self.builder.build_call(spawn_fn, &[], "actor_spawn")
+                            .map_err(|e| format!("spawn call error: {}", e))?;
+                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                            self.context.i64_type().const_int(0, false).into()
+                        ));
+                    }
+                }
+
                 // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
                 if let Some(trait_impls) = self.type_impls.get(&obj_type) {
                     for (trait_name, methods) in trait_impls {
@@ -2230,7 +2251,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn infer_object_type(&self, expr: &Expr, vars: &HashMap<String, VarEntry<'ctx>>) -> String {
+    pub(super) fn infer_object_type(&self, expr: &Expr, vars: &HashMap<String, VarEntry<'ctx>>) -> String {
         match expr {
             Expr::Ident(name) => {
                 // Look up variable's type name from our tracking map

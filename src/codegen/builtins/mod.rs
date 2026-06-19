@@ -270,6 +270,10 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     module.add_function("mimi_to_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External));
+    // mimi_is_valid_json(json_str: i8*) -> i32 (1 if valid, 0 if not)
+    module.add_function("mimi_is_valid_json",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External));
     // mimi_from_json(json_str: i8*) -> i8* (heap-allocated validated JSON string, or NULL)
     module.add_function("mimi_from_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
@@ -462,6 +466,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "exit" => self.compile_exit(args),
             "to_json" => self.compile_to_json(args),
             "from_json" => self.compile_from_json(args),
+            "json_is_valid" => self.compile_is_valid_json(args),
             "json_get_string" => self.compile_json_get_string(args),
             "json_get_int" => self.compile_json_get_int(args),
             "json_get_element" => self.compile_json_get_element(args),

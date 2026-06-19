@@ -45,8 +45,7 @@ pub func has_key(json: string, key: string) -> bool {
 
 // is_valid_json: Returns true if s is syntactically valid JSON.
 pub func is_valid_json(s: string) -> bool {
-    let result = from_json(s)
-    result != ""
+    json_is_valid(s)
 }
 
 // to_string_pretty: Pretty-prints a JSON string with indentation.

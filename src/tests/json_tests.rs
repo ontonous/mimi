@@ -199,3 +199,66 @@ fn json_has_key_missing() {
     let v = run_source(r#"func main() -> bool { json_get_string("{\"x\":\"y\"}", "z") != "" }"#);
     assert_eq!(v, interp::Value::Bool(false));
 }
+
+// ===== is_valid_json =====
+
+#[test]
+fn json_is_valid_object() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("{\"a\":1}") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_array() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("[1,2,3]") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_string() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("\"hello\"") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_number() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("42") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_bool() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("true") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_empty_string_json() {
+    // Regression: '""' is valid JSON but was incorrectly detected as invalid
+    let v = run_source(r#"func main() -> bool { json_is_valid("\"\"") }"#);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn json_is_valid_empty_input() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("") }"#);
+    assert_eq!(v, interp::Value::Bool(false));
+}
+
+#[test]
+fn json_is_valid_invalid_trash() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("{invalid}") }"#);
+    assert_eq!(v, interp::Value::Bool(false));
+}
+
+#[test]
+fn json_is_valid_invalid_unclosed() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("{\"a\":1") }"#);
+    assert_eq!(v, interp::Value::Bool(false));
+}
+
+#[test]
+fn json_is_valid_trailing_garbage() {
+    let v = run_source(r#"func main() -> bool { json_is_valid("42abc") }"#);
+    assert_eq!(v, interp::Value::Bool(false));
+}

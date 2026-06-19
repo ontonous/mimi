@@ -201,6 +201,7 @@ impl<'a> Interpreter<'a> {
             "args" => self.builtin_args(args),
             "to_json" => self.builtin_to_json(args),
             "from_json" => self.builtin_from_json(args),
+            "json_is_valid" => self.builtin_json_is_valid(args),
             "json_get_string" => self.builtin_json_get_string(args),
             "json_get_int" => self.builtin_json_get_int(args),
             "json_get_element" => self.builtin_json_get_element(args),

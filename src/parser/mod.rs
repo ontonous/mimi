@@ -560,14 +560,17 @@ impl Parser {
                 None
             };
             // Parse optional requires/ensures contracts
+            self.skip_newlines();
             let mut requires = None;
             let mut ensures = None;
             loop {
                 if self.at(&TokenKind::Requires) {
                     self.advance();
+                    self.expect(TokenKind::Colon, "`:` after requires")?;
                     requires = Some(self.parse_expr(0)?);
                 } else if self.at(&TokenKind::Ensures) {
                     self.advance();
+                    self.expect(TokenKind::Colon, "`:` after ensures")?;
                     ensures = Some(self.parse_expr(0)?);
                 } else {
                     break;

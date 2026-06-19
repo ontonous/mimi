@@ -78,6 +78,7 @@ void* mimi_from_json(const char* json_str);
 const char* json_get_string(const char* json_str, const char* key);
 int64_t json_get_int(const char* json_str, const char* key);
 const char* json_get_element(const char* json_str, int64_t index);
+int64_t mimi_is_valid_json(const char* json_str);
 
 /* ========== Network / Socket functions ========== */
 
