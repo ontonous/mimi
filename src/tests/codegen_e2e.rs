@@ -1115,11 +1115,23 @@ func main() -> i32 {
 fn e2e_net_connect_failure() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
-func tcp_connect(host: string, port: i32) -> Result<i32, string> {
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
+func tcp_connect(host: string, port: i32) -> Result<i32, NetError> {
     let fd = socket(2, 1, 0)
-    if fd < 0 { return Result::Err("failed to create socket") }
+    if fd < 0 { return Result::Err(SocketCreate) }
     let ret = connect(fd, host, port)
-    if ret < 0 { close_fd(fd); return Result::Err("connection failed") }
+    if ret < 0 { close_fd(fd); return Result::Err(ConnectFailed) }
     Result::Ok(fd)
 }
 
@@ -1127,7 +1139,13 @@ func main() -> i32 {
     let result = tcp_connect("127.0.0.1", 1)
     match result {
         Ok(fd) => { close_fd(fd); println("connected") }
-        Err(msg) => { println(msg) }
+        Err(e) => {
+            match e {
+                ConnectFailed => { println("connection failed") }
+                SocketCreate => { println("socket failed") }
+                _ => { println("unknown error") }
+            }
+        }
     }
     0
 }
@@ -1142,13 +1160,25 @@ func main() -> i32 {
 fn e2e_net_listen_bind() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
-func tcp_listen(port: i32, backlog: i32) -> Result<i32, string> {
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
+func tcp_listen(port: i32, backlog: i32) -> Result<i32, NetError> {
     let fd = socket(2, 1, 0)
-    if fd < 0 { return Result::Err("failed to create socket") }
+    if fd < 0 { return Result::Err(SocketCreate) }
     let ret = bind(fd, port)
-    if ret < 0 { close_fd(fd); return Result::Err("bind failed") }
+    if ret < 0 { close_fd(fd); return Result::Err(BindFailed) }
     let ret2 = listen(fd, backlog)
-    if ret2 < 0 { close_fd(fd); return Result::Err("listen failed") }
+    if ret2 < 0 { close_fd(fd); return Result::Err(ListenFailed) }
     Result::Ok(fd)
 }
 
@@ -1156,7 +1186,13 @@ func main() -> i32 {
     let result = tcp_listen(19876, 1)
     match result {
         Ok(fd) => { println("listening"); close_fd(fd) }
-        Err(msg) => { println(msg) }
+        Err(e) => {
+            match e {
+                BindFailed => { println("bind failed") }
+                SocketCreate => { println("socket failed") }
+                _ => { println("unknown error") }
+            }
+        }
     }
     0
 }
@@ -1169,9 +1205,21 @@ func main() -> i32 {
 fn e2e_net_fetch_failure() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
-func fetch(url: string) -> Result<string, string> {
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
+func fetch(url: string) -> Result<string, NetError> {
     let body = http_get(url)
-    if body == "" { Result::Err("HTTP request failed") }
+    if body == "" { Result::Err(HttpGetFailed) }
     else { Result::Ok(body) }
 }
 
@@ -1179,7 +1227,12 @@ func main() -> i32 {
     let result = fetch("http://127.0.0.1:1/nonexistent")
     match result {
         Ok(body) => { println(body) }
-        Err(msg) => { println(msg) }
+        Err(e) => {
+            match e {
+                HttpGetFailed => { println("HTTP request failed") }
+                _ => { println("unknown error") }
+            }
+        }
     }
     0
 }
@@ -1193,9 +1246,21 @@ func main() -> i32 {
 fn e2e_net_fetch_post_failure() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
-func fetch_post(url: string, body: string) -> Result<string, string> {
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
+func fetch_post(url: string, body: string) -> Result<string, NetError> {
     let resp = http_post(url, body)
-    if resp == "" { Result::Err("HTTP request failed") }
+    if resp == "" { Result::Err(HttpPostFailed) }
     else { Result::Ok(resp) }
 }
 
@@ -1203,7 +1268,12 @@ func main() -> i32 {
     let result = fetch_post("http://127.0.0.1:1/post", "data")
     match result {
         Ok(body) => { println(body) }
-        Err(msg) => { println(msg) }
+        Err(e) => {
+            match e {
+                HttpPostFailed => { println("HTTP request failed") }
+                _ => { println("unknown error") }
+            }
+        }
     }
     0
 }

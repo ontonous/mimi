@@ -1,78 +1,91 @@
 // Networking utilities — wraps socket builtins
 
+// Structured network error type
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
 // tcp_socket: Creates a TCP socket. Returns fd or negative on error.
 pub func tcp_socket() -> i32 {
     socket(AF_INET, SOCK_STREAM, 0)
 }
 
 // tcp_connect: Connects to host:port over TCP. Returns fd on success.
-pub func tcp_connect(host: string, port: i32) -> Result<i32, string> {
+pub func tcp_connect(host: string, port: i32) -> Result<i32, NetError> {
     let fd = tcp_socket()
     if fd < 0 {
-        return Result::Err("failed to create socket")
+        return Result::Err(SocketCreate)
     }
     let ret = connect(fd, host, port)
     if ret < 0 {
         close_fd(fd)
-        return Result::Err("connection failed")
+        return Result::Err(ConnectFailed)
     }
     Result::Ok(fd)
 }
 
 // tcp_listen: Listens on port with backlog. Returns fd on success.
-pub func tcp_listen(port: i32, backlog: i32) -> Result<i32, string> {
+pub func tcp_listen(port: i32, backlog: i32) -> Result<i32, NetError> {
     let fd = tcp_socket()
     if fd < 0 {
-        return Result::Err("failed to create socket")
+        return Result::Err(SocketCreate)
     }
     let ret = bind(fd, port)
     if ret < 0 {
         close_fd(fd)
-        return Result::Err("bind failed")
+        return Result::Err(BindFailed)
     }
     let ret2 = listen(fd, backlog)
     if ret2 < 0 {
         close_fd(fd)
-        return Result::Err("listen failed")
+        return Result::Err(ListenFailed)
     }
     Result::Ok(fd)
 }
 
 // tcp_send: Sends data over socket fd. Returns bytes sent on success.
-pub func tcp_send(fd: i32, data: string) -> Result<i32, string> {
+pub func tcp_send(fd: i32, data: string) -> Result<i32, NetError> {
     let n = send(fd, data)
     if n < 0 {
-        Result::Err("send failed")
+        Result::Err(SendFailed)
     } else {
         Result::Ok(n)
     }
 }
 
 // tcp_recv: Receives up to buf_size bytes from socket fd.
-pub func tcp_recv(fd: i32, buf_size: i32) -> Result<string, string> {
+pub func tcp_recv(fd: i32, buf_size: i32) -> Result<string, NetError> {
     let data = recv(fd, buf_size)
     if data == "" {
-        Result::Err("recv failed or connection closed")
+        Result::Err(RecvFailed)
     } else {
         Result::Ok(data)
     }
 }
 
 // fetch: Performs HTTP GET, returns body string on success.
-pub func fetch(url: string) -> Result<string, string> {
+pub func fetch(url: string) -> Result<string, NetError> {
     let body = http_get(url)
     if body == "" {
-        Result::Err("HTTP request failed")
+        Result::Err(HttpGetFailed)
     } else {
         Result::Ok(body)
     }
 }
 
 // fetch_post: Performs HTTP POST with body, returns response on success.
-pub func fetch_post(url: string, body: string) -> Result<string, string> {
+pub func fetch_post(url: string, body: string) -> Result<string, NetError> {
     let resp = http_post(url, body)
     if resp == "" {
-        Result::Err("HTTP request failed")
+        Result::Err(HttpPostFailed)
     } else {
         Result::Ok(resp)
     }

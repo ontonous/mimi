@@ -761,7 +761,7 @@ MyModule::helper()
 | `std::text` | 文本处理：`is_blank`, `is_numeric`, `count_lines`, `slugify`, `indent_text`, `wrap_text`, `camel_to_snake` |
 | `std::result` | Result 组合子：`is_ok_result`, `is_err_result`, `result_unwrap`, `unwrap_or`, `expect_result`, `map_result`, `map_err_result` |
 | `std::mymath` | 数学函数：`square`, `cube`, `abs`, `abs_float`, `factorial`, `fibonacci`, `is_prime`, `gcd`, `lcm`, `hypot`, `power`, `sqrt_val`, `floor_val`, `ceil_val`, `round_val`, `clamp_int`, `collatz_steps`, `mod_pow`, `deg_to_rad`, `rad_to_deg`, `random_int`, `is_power_of_two`, `next_power_of_two` |
-| `std::net` | 网络操作：`tcp_socket`, `tcp_connect`, `tcp_listen`, `tcp_send`, `tcp_recv`, `fetch`, `fetch_post` |
+| `std::net` | 网络操作（返回 `Result<T, NetError>`）：`tcp_socket`, `tcp_connect`, `tcp_listen`, `tcp_send`, `tcp_recv`, `fetch`, `fetch_post`；错误类型：`NetError { SocketCreate, ConnectFailed, BindFailed, ListenFailed, AcceptFailed, SendFailed, RecvFailed, HttpGetFailed, HttpPostFailed }` |
 | `std::maps` | Map 操作：`new`, `get`, `set`, `has_key`, `remove`, `size`, `is_empty`, `get_or_default`, `merge`, `to_list`, `filter_keys`, `map_values`, `update`, `pick`, `omit` |
 | `std::json` | JSON 操作：`to_json`, `from_json`, `get_string`, `get_int`, `get_element`, `get_bool`, `get_float`, `is_valid_json`, `array_length` |
 | `std::time` | 时间操作：`timestamp`, `timestamp_ms`, `sleep_ms`, `elapsed`, `seconds_since`, `millis_since`, `duration` |
