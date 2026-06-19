@@ -2,11 +2,11 @@ use crate::ast::*;
 use crate::contracts;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
+use std::collections::HashMap;
 use std::time::Instant;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::{SatResult, Solver};
 
-/// Default Z3 solver timeout in milliseconds (5 seconds)
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 #[derive(Debug, Clone)]
@@ -26,13 +26,46 @@ pub enum VerifStatus {
     Unknown,
 }
 
-/// A counterexample: variable assignments that violate the postcondition.
 #[derive(Debug, Clone)]
 pub struct Counterexample {
     pub assignments: Vec<(String, i64)>,
+    pub real_assignments: Vec<(String, f64)>,
     pub violated_ensures: Vec<String>,
-    /// Which specific ensures expressions are actually violated
     pub violated_indices: Vec<usize>,
+}
+
+struct Z3VarMap {
+    int_vars: HashMap<String, Z3Int>,
+    real_vars: HashMap<String, Z3Real>,
+}
+
+impl Z3VarMap {
+    fn new() -> Self {
+        Self { int_vars: HashMap::new(), real_vars: HashMap::new() }
+    }
+
+    fn insert_int(&mut self, name: impl Into<String>, var: Z3Int) {
+        self.int_vars.insert(name.into(), var);
+    }
+
+    fn insert_real(&mut self, name: impl Into<String>, var: Z3Real) {
+        self.real_vars.insert(name.into(), var);
+    }
+
+    #[inline]
+    fn get_int(&self, name: &str) -> Option<&Z3Int> {
+        self.int_vars.get(name)
+    }
+
+    #[inline]
+    fn get_real(&self, name: &str) -> Option<&Z3Real> {
+        self.real_vars.get(name)
+    }
+
+    #[inline]
+    fn is_real(&self, name: &str) -> bool {
+        self.real_vars.contains_key(name)
+    }
 }
 
 pub struct Verifier {
@@ -43,8 +76,6 @@ impl Verifier {
     pub fn new() -> Result<Self, String> {
         let solver = std::panic::catch_unwind(|| Solver::new())
             .map_err(|_| "failed to initialize Z3 solver (is libz3 installed?)".to_string())?;
-        // Set solver timeout to prevent infinite blocking on complex constraints.
-        // When timeout expires, solver.check() returns Unknown (already handled gracefully).
         let mut params = z3::Params::new();
         params.set_u32("timeout", DEFAULT_TIMEOUT_MS as u32);
         solver.set_params(&params);
@@ -85,31 +116,26 @@ impl Verifier {
         let requires_expr = func.requires.as_ref();
         let ensures_expr = func.ensures.as_ref();
 
-        // Create Z3 variables for parameters + result
+        let mut vars = Z3VarMap::new();
         let z3_result = Z3Int::new_const("result");
-        let mut z3_vars: Vec<(&str, Z3Int)> = Vec::new();
-        let mut z3_real_vars: Vec<(&str, Z3Real)> = Vec::new();
 
         for p in &func.params {
-            let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            if is_float {
-                z3_real_vars.push((p.name.as_str(), Z3Real::new_const(p.name.as_str())));
+            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else {
-                z3_vars.push((p.name.as_str(), Z3Int::new_const(p.name.as_str())));
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
         }
-        z3_vars.push(("result", z3_result.clone()));
+        vars.insert_int("result", z3_result.clone());
 
         let constraint_count = (requires_expr.is_some() as usize) + (ensures_expr.is_some() as usize);
 
-        // Assert requires as preconditions
         if let Some(req) = requires_expr {
-            if let Some(z3_bool) = self.expr_to_z3_bool(req, &z3_vars, &z3_real_vars) {
+            if let Some(z3_bool) = self.expr_to_z3_bool(req, &vars) {
                 self.solver.assert(&z3_bool);
             }
         }
 
-        // Check requires satisfiability
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())) {
             Ok(SatResult::Unsat) => VerificationResult {
                 func_name: format!("extern {}", func.name),
@@ -134,15 +160,12 @@ impl Verifier {
                 constraint_count,
             },
             Ok(SatResult::Sat) => {
-                // Requires is satisfiable — check ensures feasibility
                 if let Some(ens) = ensures_expr {
                     self.solver.push();
-                    // Assert NOT(ensures) to check if ensures can be violated given requires
-                    if let Some(z3_not_ens) = self.expr_to_z3_bool(ens, &z3_vars, &z3_real_vars).map(|b| b.not()) {
+                    if let Some(z3_not_ens) = self.expr_to_z3_bool(ens, &vars).map(|b| b.not()) {
                         self.solver.assert(&z3_not_ens);
                         match self.solver.check() {
                             SatResult::Unsat => {
-                                // requires → ensures is a tautology
                                 self.solver.pop(1);
                                 VerificationResult {
                                     func_name: format!("extern {}", func.name),
@@ -154,9 +177,6 @@ impl Verifier {
                                 }
                             }
                             SatResult::Sat | SatResult::Unknown => {
-                                // There exists a counterexample where requires holds but ensures doesn't.
-                                // For extern (opaque body), this is expected — runtime --verify-ffi
-                                // will catch actual violations.
                                 self.solver.pop(1);
                                 VerificationResult {
                                     func_name: format!("extern {}", func.name),
@@ -255,74 +275,62 @@ impl Verifier {
             };
         }
 
-        // Create Z3 variables for function parameters + old() snapshots + result
-        // Detect parameter types and create appropriately typed Z3 variables
-        let z3_result = Z3Int::new_const("result");
-        let mut z3_vars: Vec<(&str, Z3Int)> = Vec::new();
-        let mut z3_real_vars: Vec<(&str, Z3Real)> = Vec::new();
-        let mut old_name_strings: Vec<String> = Vec::new();
-        
-        for p in &func.params {
-            let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            
-            if is_float {
-                z3_real_vars.push((p.name.as_str(), Z3Real::new_const(p.name.as_str())));
-            } else {
-                z3_vars.push((p.name.as_str(), Z3Int::new_const(p.name.as_str())));
-            }
-            
-            let old_name = format!("old_{}", p.name);
-            old_name_strings.push(old_name);
-        }
-        
-        for (i, p) in func.params.iter().enumerate() {
-            let is_float = matches!(&p.ty, Type::Name(n, _) if n == "f64");
-            let name_ref: &str = &old_name_strings[i];
-            if is_float {
-                z3_real_vars.push((name_ref, Z3Real::new_const(name_ref)));
-            } else {
-                z3_vars.push((name_ref, Z3Int::new_const(name_ref)));
-            }
-        }
-        z3_vars.push(("result", z3_result.clone()));
+        let mut vars = Z3VarMap::new();
+        let mut old_names: Vec<String> = Vec::with_capacity(func.params.len());
 
-        // Extract the return value expression from the function body
+        for p in &func.params {
+            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
+            } else {
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+            }
+            old_names.push(format!("old_{}", p.name));
+        }
+
+        let z3_result = Z3Int::new_const("result");
+        vars.insert_int("result", z3_result);
+
+        for (i, p) in func.params.iter().enumerate() {
+            let old_name = old_names[i].as_str();
+            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                vars.insert_real(old_name, Z3Real::new_const(old_name));
+            } else {
+                vars.insert_int(old_name, Z3Int::new_const(old_name));
+            }
+        }
+
         let body_return = extract_body_return(&func.body);
 
-        // Assert preconditions
         for req in &requires_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(req, &z3_vars, &z3_real_vars) {
+            if let Some(z3_bool) = self.expr_to_z3_bool(req, &vars) {
                 self.solver.assert(&z3_bool);
             }
         }
 
-        // Assert math constraints
         for math in &math_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(math, &z3_vars, &z3_real_vars) {
+            if let Some(z3_bool) = self.expr_to_z3_bool(math, &vars) {
                 self.solver.assert(&z3_bool);
             }
         }
 
-        // Encode old() snapshots: old_x == x for each parameter (snapshot at function entry)
-        for p in &func.params {
-            if let Some(param_z3) = z3_vars.iter().find(|(n, _)| *n == p.name).map(|(_, v)| v.clone()) {
-                let old_name = format!("old_{}", p.name);
-                if let Some(old_z3) = z3_vars.iter().find(|(n, _)| *n == old_name.as_str()).map(|(_, v)| v.clone()) {
-                    self.solver.assert(old_z3.eq(&param_z3));
-                }
+        for (i, p) in func.params.iter().enumerate() {
+            let old_name = old_names[i].as_str();
+            let param_z3 = vars.get_int(p.name.as_str()).cloned();
+            let old_z3 = vars.get_int(old_name).cloned();
+            if let (Some(pv), Some(ov)) = (param_z3, old_z3) {
+                self.solver.assert(&ov.eq(&pv));
             }
         }
 
-        // Encode function body: bind result == body(args)
-        // This is the critical link between the implementation and the contract.
         if let Some(ref return_expr) = body_return {
-            if let Some(body_z3) = self.expr_to_z3_int(return_expr, &z3_vars) {
-                self.solver.assert(z3_result.eq(&body_z3));
+            if let Some(body_z3) = self.expr_to_z3_int(return_expr, &vars) {
+                self.solver.assert(&z3_result.eq(&body_z3));
             }
         }
 
-        // Count total constraints: requires + math + old_snapshots + body
-        let constraint_count = requires_exprs.len() + math_exprs.len() + func.params.len()
+        let constraint_count = requires_exprs.len()
+            + math_exprs.len()
+            + func.params.len()
             + if body_return.is_some() { 1 } else { 0 };
 
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())) {
@@ -330,8 +338,8 @@ impl Verifier {
                 if !ensures_exprs.is_empty() {
                     self.solver.push();
                     for ens in &ensures_exprs {
-                        if let Some(z3_bool) = self.expr_to_z3_bool(ens, &z3_vars, &z3_real_vars) {
-                            self.solver.assert(z3_bool.not());
+                        if let Some(z3_bool) = self.expr_to_z3_bool(ens, &vars) {
+                            self.solver.assert(&z3_bool.not());
                         }
                     }
                     match self.solver.check() {
@@ -348,9 +356,7 @@ impl Verifier {
                         }
                         SatResult::Sat => {
                             let model = self.solver.get_model();
-                            let counterexample = self.extract_counterexample(
-                                &model, &z3_vars, &ensures_exprs,
-                            );
+                            let counterexample = self.extract_counterexample(&model, &vars, &ensures_exprs);
                             self.solver.pop(1);
                             let diagnostic = self.build_failure_narrative(
                                 func, &counterexample, &requires_exprs, &ensures_exprs,
@@ -389,8 +395,7 @@ impl Verifier {
                 }
             }
             Ok(SatResult::Unsat) => {
-                let req_span = requires_spans.first().copied()
-                    .unwrap_or_else(|| Span::single(0, 0));
+                let req_span = requires_spans.first().copied().unwrap_or_else(|| Span::single(0, 0));
                 let diagnostic = Diagnostic::error(
                     format!("preconditions are unsatisfiable for '{}'", func.name),
                     req_span,
@@ -423,37 +428,46 @@ impl Verifier {
         }
     }
 
-    /// Extract counterexample variable assignments from the Z3 model.
     fn extract_counterexample(
         &self,
         model: &Option<z3::Model>,
-        z3_vars: &[(&str, Z3Int)],
+        vars: &Z3VarMap,
         ensures_exprs: &[Expr],
     ) -> Counterexample {
         let mut assignments = Vec::new();
+        let mut real_assignments = Vec::new();
 
         if let Some(model) = model {
-            for (name, z3_var) in z3_vars {
+            for (name, z3_var) in &vars.int_vars {
+                if name == "result" { continue; }
                 if let Some(val) = model.eval(z3_var, true) {
                     if let Some(i) = val.as_i64() {
-                        assignments.push((name.to_string(), i));
+                        assignments.push((name.clone(), i));
+                    }
+                }
+            }
+            if let Some(z3_var) = vars.int_vars.get("result") {
+                if let Some(val) = model.eval(z3_var, true) {
+                    if let Some(i) = val.as_i64() {
+                        assignments.push(("result".to_string(), i));
+                    }
+                }
+            }
+            for (name, z3_var) in &vars.real_vars {
+                if let Some(val) = model.eval(z3_var, true) {
+                    if let Some((num, den)) = val.as_real() {
+                        let f = (*num as f64) / (*den as f64);
+                        real_assignments.push((name.clone(), f));
                     }
                 }
             }
         }
 
-        // Identify which ensures were violated by testing each one individually
         let mut violated_indices = Vec::new();
         if let Some(ref m) = model {
             for (idx, ens) in ensures_exprs.iter().enumerate() {
-                if let Some(z3_bool) = self.expr_to_z3_bool(ens, z3_vars, &[]) {
-                    if let Some(val) = m.eval(&z3_bool, true) {
-                        if let Some(b) = val.as_bool() {
-                            if !b {
-                                violated_indices.push(idx);
-                            }
-                        }
-                    }
+                if !Self::eval_expr_on_model(ens, m, vars) {
+                    violated_indices.push(idx);
                 }
             }
         }
@@ -467,12 +481,70 @@ impl Verifier {
 
         Counterexample {
             assignments,
+            real_assignments,
             violated_ensures: violated,
             violated_indices,
         }
     }
 
-    /// Build a human-readable narrative from a counterexample.
+    fn eval_expr_on_model(expr: &Expr, model: &z3::Model, vars: &Z3VarMap) -> bool {
+        match expr {
+            Expr::Literal(Lit::Bool(b)) => *b,
+            Expr::Ident(name) => {
+                if let Some(z3_var) = vars.get_int(name) {
+                    match model.eval(z3_var, true) {
+                        Some(val) => val.as_i64().map(|i| i != 0).unwrap_or(false),
+                        None => false,
+                    }
+                } else if let Some(z3_var) = vars.get_real(name) {
+                    model.eval(z3_var, true)
+                        .and_then(|v| v.as_real())
+                        .map(|(num, _den)| *num != 0)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    if let Some(z3_var) = vars.get_int(&old_name) {
+                        match model.eval(z3_var, true) {
+                            Some(val) => val.as_i64().map(|i| i != 0).unwrap_or(false),
+                            None => false,
+                        }
+                    } else if let Some(z3_var) = vars.get_real(&old_name) {
+                        model.eval(z3_var, true)
+                            .and_then(|v| v.as_real())
+                            .map(|(num, _den)| *num != 0)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Expr::Binary(op, lhs, rhs) => {
+                let l = Self::eval_expr_on_model(lhs, model, vars);
+                let r = Self::eval_expr_on_model(rhs, model, vars);
+                match op {
+                    BinOp::And => l && r,
+                    BinOp::Or => l || r,
+                    BinOp::EqCmp => l == r,
+                    BinOp::NeCmp => l != r,
+                    BinOp::Lt => l < r,
+                    BinOp::Gt => l > r,
+                    BinOp::Le => l <= r,
+                    BinOp::Ge => l >= r,
+                    _ => false,
+                }
+            }
+            Expr::Unary(UnOp::Not, inner) => !Self::eval_expr_on_model(inner, model, vars),
+            _ => false,
+        }
+    }
+
     fn build_failure_narrative(
         &self,
         func: &FuncDef,
@@ -484,8 +556,6 @@ impl Verifier {
     ) -> Diagnostic {
         let func_name = &func.name;
 
-        // Separate input params from result
-        let _param_names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
         let input_assignments: Vec<&(String, i64)> = counterexample.assignments.iter()
             .filter(|(name, _)| name != "result")
             .collect();
@@ -493,66 +563,51 @@ impl Verifier {
             .find(|(name, _)| name == "result")
             .map(|(_, val)| *val);
 
-        // Build the main error message with causal chain
         let mut message = format!(
             "verification failed for '{}': postcondition violation",
             func_name
         );
 
-        // Show input values
         if !input_assignments.is_empty() {
-            let inputs_str: Vec<String> = input_assignments.iter()
+            let mut parts: Vec<String> = input_assignments.iter()
                 .map(|(name, val)| format!("{} = {}", name, val))
                 .collect();
-            message.push_str(&format!(
-                "\n  with inputs: {}",
-                inputs_str.join(", ")
-            ));
+            for (name, val) in &counterexample.real_assignments {
+                parts.push(format!("{} = {:.6}", name, val));
+            }
+            message.push_str(&format!("\n  with inputs: {}", parts.join(", ")));
         }
 
-        // Show what the body computes
         if let Some(result) = result_val {
-            message.push_str(&format!(
-                "\n  body returns: result = {}",
-                result
-            ));
+            message.push_str(&format!("\n  body returns: result = {}", result));
         }
-
-        // Show which postconditions were violated
-        if !counterexample.violated_ensures.is_empty() {
-            for &idx in counterexample.violated_indices.iter() {
-                if let Some(ens) = ensures_exprs.get(idx) {
-                    message.push_str(&format!(
-                        "\n  but ensures {} = false",
-                        format_expr(ens)
-                    ));
-                }
+        if !counterexample.real_assignments.is_empty() {
+            for (name, val) in &counterexample.real_assignments {
+                message.push_str(&format!("\n  body returns: {} = {:.6}", name, val));
             }
         }
 
-        // Build the diagnostic with proper source location
-        // Use the first violated ensures span as the primary location
-        let primary_span = ensures_spans.first().copied()
-            .unwrap_or_else(|| Span::single(0, 0));
-        let mut diag = Diagnostic::error(message, primary_span)
-            .with_code("E0500");
+        for &idx in counterexample.violated_indices.iter() {
+            if let Some(ens) = ensures_exprs.get(idx) {
+                message.push_str(&format!("\n  but ensures {} = false", format_expr(ens)));
+            }
+        }
 
-        // Add precondition context with source locations
+        let primary_span = ensures_spans.first().copied().unwrap_or_else(|| Span::single(0, 0));
+        let mut diag = Diagnostic::error(message, primary_span).with_code("E0500");
+
         if !requires_exprs.is_empty() {
             let req_strs: Vec<String> = requires_exprs.iter().map(format_expr).collect();
-            let req_span = requires_spans.first().copied()
-                .unwrap_or_else(|| Span::single(0, 0));
+            let req_span = requires_spans.first().copied().unwrap_or_else(|| Span::single(0, 0));
             diag = diag.with_note(
                 format!("preconditions satisfied: {}", req_strs.join(", ")),
                 req_span,
             );
         }
 
-        // Add per-ensures violation notes with source locations
         for &idx in counterexample.violated_indices.iter() {
             if let Some(ens) = ensures_exprs.get(idx) {
-                let ens_span = ensures_spans.get(idx).copied()
-                    .unwrap_or_else(|| Span::single(0, 0));
+                let ens_span = ensures_spans.get(idx).copied().unwrap_or_else(|| Span::single(0, 0));
                 diag = diag.with_note(
                     format!("postcondition '{}' is false", format_expr(ens)),
                     ens_span,
@@ -560,7 +615,6 @@ impl Verifier {
             }
         }
 
-        // Generate fix suggestion
         if let Some(hint) = self.generate_fix_hint(func, counterexample) {
             diag = diag.with_help(hint);
         }
@@ -568,14 +622,12 @@ impl Verifier {
         diag
     }
 
-    /// Generate a fix suggestion based on the counterexample and function structure.
     fn generate_fix_hint(&self, func: &FuncDef, counterexample: &Counterexample) -> Option<String> {
         let param_names: Vec<String> = func.params.iter().map(|p| p.name.clone()).collect();
         let result_val = counterexample.assignments.iter()
             .find(|(name, _)| name == "result")
             .map(|(_, val)| *val);
 
-        // Pattern 1: body returns wrong constant
         if let Some(result) = result_val {
             let body_is_trivial = func.body.iter().all(|s| {
                 matches!(s, Stmt::Expr(Expr::Literal(..)) | Stmt::Return(Some(Expr::Literal(..))))
@@ -589,8 +641,7 @@ impl Verifier {
             }
         }
 
-        // Pattern 2: body doesn't use all parameters
-        let body_text: String = func.body.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>().join(" ");
+        let body_text: String = func.body.iter().map(|s| format_stmt(s)).collect::<Vec<_>>().join(" ");
         let unused_params: Vec<&str> = param_names.iter()
             .filter(|p| !body_text.contains(p.as_str()))
             .map(|s| s.as_str())
@@ -603,7 +654,6 @@ impl Verifier {
             ));
         }
 
-        // Pattern 3: body is too simple (just arithmetic) without edge-case handling
         let body_is_simple = func.body.iter().all(|s| {
             matches!(s, Stmt::Expr(Expr::Binary(..)) | Stmt::Return(Some(Expr::Binary(..))))
         });
@@ -619,16 +669,14 @@ impl Verifier {
         None
     }
 
-    fn expr_to_z3_int(&self, expr: &Expr, vars: &[(&str, Z3Int)]) -> Option<Z3Int> {
+    fn expr_to_z3_int(&self, expr: &Expr, vars: &Z3VarMap) -> Option<Z3Int> {
         match expr {
             Expr::Literal(Lit::Int(n)) => Some(Z3Int::from_i64(*n)),
-            Expr::Ident(name) => {
-                vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone())
-            }
+            Expr::Ident(name) => vars.get_int(name).cloned(),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);
-                    return vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone());
+                    return vars.get_int(&old_name).cloned();
                 }
                 None
             }
@@ -652,8 +700,7 @@ impl Verifier {
         }
     }
 
-    /// Try to encode an expression as a Z3 Real (for f64 parameters).
-    fn expr_to_z3_real(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> Option<Z3Real> {
+    fn expr_to_z3_real(&self, expr: &Expr, vars: &Z3VarMap) -> Option<Z3Real> {
         match expr {
             Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
             Expr::Literal(Lit::Float(f)) => {
@@ -662,35 +709,33 @@ impl Verifier {
                 } else if f.is_infinite() || f.is_nan() {
                     None
                 } else {
-                    // Use the float's decimal string representation
-                    let _s = format!("{}", f);
-                    // Z3Real::from_real_str needs context; approximate with integer conversion
-                    // For practical verification, convert to scaled integer
-                    let scaled = (*f * 1000000.0) as i64;
-                    Some(Z3Real::from_int(&Z3Int::from_i64(scaled)) / Z3Real::from_int(&Z3Int::from_i64(1000000)))
+                    let scaled = (*f * 1000000.0).round() as i64;
+                    Some(
+                        Z3Real::from_int(&Z3Int::from_i64(scaled))
+                            / Z3Real::from_int(&Z3Int::from_i64(1000000)),
+                    )
                 }
             }
             Expr::Ident(name) => {
-                // Check real vars first, then int vars (promote to real)
-                if let Some(v) = real_vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()) {
-                    Some(v)
-                } else { vars.iter().find(|(vn, _)| *vn == name).map(|(_, v)| v.clone()).map(|v| Z3Real::from_int(&v)) }
+                if let Some(v) = vars.get_real(name) {
+                    Some(v.clone())
+                } else {
+                    vars.get_int(name).map(|v| Z3Real::from_int(v))
+                }
             }
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);
-                    if let Some(v) = real_vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
-                        return Some(v);
+                    if let Some(v) = vars.get_real(&old_name) {
+                        return Some(v.clone());
                     }
-                    if let Some(v) = vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
-                        return Some(Z3Real::from_int(&v));
-                    }
+                    return vars.get_int(&old_name).map(|v| Z3Real::from_int(v));
                 }
                 None
             }
             Expr::Binary(op, lhs, rhs) => {
-                let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                let l = self.expr_to_z3_real(lhs, vars)?;
+                let r = self.expr_to_z3_real(rhs, vars)?;
                 match op {
                     BinOp::Add => Some(l + r),
                     BinOp::Sub => Some(l - r),
@@ -700,69 +745,60 @@ impl Verifier {
                 }
             }
             Expr::Unary(UnOp::Neg, inner) => {
-                let v = self.expr_to_z3_real(inner, vars, real_vars)?;
+                let v = self.expr_to_z3_real(inner, vars)?;
                 Some(-v)
             }
             _ => None,
         }
     }
 
-    fn expr_to_z3_bool(&self, expr: &Expr, vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> Option<Z3Bool> {
+    fn expr_to_z3_bool(&self, expr: &Expr, vars: &Z3VarMap) -> Option<Z3Bool> {
         match expr {
-            Expr::Literal(Lit::Bool(b)) => {
-                Some(Z3Bool::from_bool(*b))
-            }
+            Expr::Literal(Lit::Bool(b)) => Some(Z3Bool::from_bool(*b)),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);
-                    // Check if there's a real var for old_x
-                    if real_vars.iter().any(|(n, _)| *n == old_name.as_str()) {
-                        return None; // Can't convert Real to Bool directly
+                    if vars.is_real(&old_name) {
+                        return None;
                     }
-                    // Check int vars
-                    if let Some(v) = vars.iter().find(|(vn, _)| *vn == old_name.as_str()).map(|(_, v)| v.clone()) {
-                        // Treat non-zero as true
-                        return Some(v.eq(Z3Int::from_i64(0)).not());
+                    if let Some(v) = vars.get_int(&old_name) {
+                        return Some(v.eq(&Z3Int::from_i64(0)).not());
                     }
-                    return None;
                 }
                 None
             }
             Expr::Binary(op, lhs, rhs) => {
-                // Detect if operands are float expressions
-                let lhs_is_real = self.is_real_expr(lhs, vars, real_vars);
-                let rhs_is_real = self.is_real_expr(rhs, vars, real_vars);
-                let use_real = lhs_is_real || rhs_is_real;
-                
+                let use_real = self.is_real_expr(lhs, vars) || self.is_real_expr(rhs, vars);
+
                 match op {
                     BinOp::EqCmp if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.eq(&r))
                     }
                     BinOp::NeCmp if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.eq(&r).not())
                     }
                     BinOp::Lt if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.lt(&r))
                     }
                     BinOp::Gt if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.gt(&r))
                     }
                     BinOp::Le if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.le(&r))
                     }
                     BinOp::Ge if use_real => {
-                        let l = self.expr_to_z3_real(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_real(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_real(lhs, vars)?;
+                        let r = self.expr_to_z3_real(rhs, vars)?;
                         Some(l.ge(&r))
                     }
                     BinOp::EqCmp => {
@@ -796,35 +832,34 @@ impl Verifier {
                         Some(l.ge(&r))
                     }
                     BinOp::And => {
-                        let l = self.expr_to_z3_bool(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_bool(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_bool(lhs, vars)?;
+                        let r = self.expr_to_z3_bool(rhs, vars)?;
                         Some(Z3Bool::and(&[&l, &r]))
                     }
                     BinOp::Or => {
-                        let l = self.expr_to_z3_bool(lhs, vars, real_vars)?;
-                        let r = self.expr_to_z3_bool(rhs, vars, real_vars)?;
+                        let l = self.expr_to_z3_bool(lhs, vars)?;
+                        let r = self.expr_to_z3_bool(rhs, vars)?;
                         Some(Z3Bool::or(&[&l, &r]))
                     }
                     _ => None,
                 }
             }
             Expr::Unary(UnOp::Not, inner) => {
-                let v = self.expr_to_z3_bool(inner, vars, real_vars)?;
+                let v = self.expr_to_z3_bool(inner, vars)?;
                 Some(v.not())
             }
             _ => None,
         }
     }
-    
-    /// Check if an expression involves real (f64) variables.
-    fn is_real_expr(&self, expr: &Expr, _vars: &[(&str, Z3Int)], real_vars: &[(&str, Z3Real)]) -> bool {
+
+    fn is_real_expr(&self, expr: &Expr, vars: &Z3VarMap) -> bool {
         match expr {
-            Expr::Ident(name) => real_vars.iter().any(|(n, _)| *n == name.as_str()),
+            Expr::Ident(name) => vars.is_real(name),
             Expr::Literal(Lit::Float(_)) => true,
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);
-                    real_vars.iter().any(|(n, _)| *n == old_name.as_str())
+                    vars.is_real(&old_name)
                 } else {
                     false
                 }
@@ -834,14 +869,7 @@ impl Verifier {
     }
 }
 
-/// Extract the return value expression from a function body.
-/// Handles patterns:
-///   - `return expr;`
-///   - last expression in body (implicit return)
-///
-/// Skips Requires/Ensures/Math/Desc/MmsBlock statements.
 fn extract_body_return(block: &Block) -> Option<Expr> {
-    // First try explicit `return` statements
     for stmt in block.iter().rev() {
         match stmt {
             Stmt::Return(Some(expr)) => return Some(expr.clone()),
@@ -849,7 +877,6 @@ fn extract_body_return(block: &Block) -> Option<Expr> {
             _ => {}
         }
     }
-    // Fall back to last expression statement
     for stmt in block.iter().rev() {
         match stmt {
             Stmt::Expr(expr) => return Some(expr.clone()),
@@ -861,7 +888,6 @@ fn extract_body_return(block: &Block) -> Option<Expr> {
     None
 }
 
-/// Format an expression as a human-readable string.
 fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(Lit::Int(n)) => format!("{}", n),
@@ -890,6 +916,20 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Unary(UnOp::Neg, inner) => format!("-{}", format_expr(inner)),
         Expr::Unary(UnOp::Not, inner) => format!("!{}", format_expr(inner)),
         _ => "<expr>".to_string(),
+    }
+}
+
+fn format_stmt(stmt: &Stmt) -> String {
+    match stmt {
+        Stmt::Let { name, .. } => format!("let {}", name),
+        Stmt::Expr(expr) => format_expr(expr),
+        Stmt::Return(Some(expr)) => format!("return {}", format_expr(expr)),
+        Stmt::Return(None) => "return".to_string(),
+        Stmt::If { cond, .. } => format!("if {}", format_expr(cond)),
+        Stmt::While { cond, .. } => format!("while {}", format_expr(cond)),
+        Stmt::Requires(e, _) => format!("requires {}", format_expr(e)),
+        Stmt::Ensures(e, _) => format!("ensures {}", format_expr(e)),
+        _ => "<stmt>".to_string(),
     }
 }
 
@@ -926,7 +966,6 @@ func identity(x: i32) -> i32 {
 
     #[test]
     fn verify_body_satisfies_ensures() {
-        // T1 core test: body return expression is encoded as result == body(args)
         let src = r#"
 func double(x: i32) -> i32 {
     requires: x >= 0
@@ -942,7 +981,6 @@ func double(x: i32) -> i32 {
 
     #[test]
     fn verify_body_violates_ensures() {
-        // T1 core test: body return doesn't satisfy ensures
         let src = r#"
 func wrong(x: i32) -> i32 {
     requires: x >= 0
@@ -959,7 +997,6 @@ func wrong(x: i32) -> i32 {
 
     #[test]
     fn verify_result_binding_in_counterexample() {
-        // T1: counterexample should include result variable
         let src = r#"
 func add_one(x: i32) -> i32 {
     requires: x > 0
@@ -970,7 +1007,6 @@ func add_one(x: i32) -> i32 {
         let results = verify_source(src).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
-        // The counterexample should show that body returns x, not x+1
         let diag = results[0].diagnostic.as_ref().unwrap();
         assert!(diag.message.contains("result ="), "should show result value in narrative");
     }
@@ -1025,7 +1061,6 @@ func impossible(x: i32) -> i32 {
 
     #[test]
     fn verify_old_snapshot() {
-        // T2: old(x) should capture pre-state value
         let src = r#"
 func noop(x: i32) -> i32 {
     requires: x > 0
@@ -1041,7 +1076,6 @@ func noop(x: i32) -> i32 {
 
     #[test]
     fn verify_old_snapshot_fails() {
-        // T2: old(x) should detect mutation
         let src = r#"
 func mutate(x: i32) -> i32 {
     requires: x > 0
@@ -1069,8 +1103,6 @@ func mutate(x: i32) -> i32 {
         );
     }
 
-    // --- Extern block Z3 verification tests ---
-
     #[test]
     fn verify_extern_ensures_consistent() {
         let src = r#"
@@ -1082,7 +1114,6 @@ extern "C" {
 func main() -> i64 { 0 }
 "#;
         let results = verify_source(src).unwrap();
-        // Extern func with ensures should be verified as consistent
         let ext: Vec<_> = results.iter().filter(|r| r.func_name.contains("extern")).collect();
         assert_eq!(ext.len(), 1, "extern func should be verified");
         assert_eq!(ext[0].status, VerifStatus::Verified,
@@ -1141,7 +1172,6 @@ func main() -> i64 { 0 }
 
     #[test]
     fn verify_extern_with_main_only() {
-        // Extern with contracts should appear alongside main func results
         let src = r#"
 extern "C" {
     func identity(x: i64) -> i64
