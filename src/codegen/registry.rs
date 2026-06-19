@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
 
-use super::CodeGenerator;
+use super::{CallbackThunkEntry, CodeGenerator};
 use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -106,12 +106,151 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return registered;
             }
         }
+        // G1b: Closure types (Type::Func) cross FFI as raw function pointers (i8*),
+        // not as {fn_ptr, env_ptr} structs. The conversion is done at the call site
+        // via get_or_create_callback_thunk + TLS globals.
+        if matches!(ty, crate::ast::Type::Func(_, _)) {
+            let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            return BasicTypeEnum::PointerType(i8_ptr);
+        }
         types::mimi_type_to_llvm(self.context, ty)
             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
     }
 
+    /// G1b: Get or create a callback thunk for a given callback signature.
+    /// The thunk is a small LLVM function that:
+    /// 1. Reads fn_ptr and env_ptr from module-level globals
+    /// 2. Calls fn_ptr(env_ptr, args...) with the correct C calling convention
+    /// Returns the thunk function value and its two global slots.
+    pub(super) fn get_or_create_callback_thunk(
+        &mut self,
+        cb_params: &[crate::ast::Type],
+        cb_ret: &crate::ast::Type,
+    ) -> MimiResult<CallbackThunkEntry<'ctx>> {
+        // Build fingerprint from signature
+        let ret_str = format!("{:?}", cb_ret);
+        let params_str: Vec<String> = cb_params.iter().map(|t| format!("{:?}", t)).collect();
+        let fingerprint = format!("{}_{}", ret_str, params_str.join("_"));
+
+        // Check cache
+        if let Some(entry) = self.callback_thunks.get(&fingerprint) {
+            return Ok(CallbackThunkEntry {
+                thunk_fn: entry.thunk_fn,
+                fn_ptr_global: entry.fn_ptr_global,
+                env_ptr_global: entry.env_ptr_global,
+            });
+        }
+
+        let i8_type = self.context.i8_type();
+        let i8_ptr = i8_type.ptr_type(inkwell::AddressSpace::default());
+        let id = self.callback_thunk_counter;
+        self.callback_thunk_counter += 1;
+
+        // Create global slots for fn_ptr and env_ptr
+        let fn_ptr_global = self.module.add_global(i8_ptr, None, &format!("__mimi_cb_fnptr_{}", id));
+        fn_ptr_global.set_initializer(&i8_ptr.const_null());
+        let env_ptr_global = self.module.add_global(i8_ptr, None, &format!("__mimi_cb_envptr_{}", id));
+        env_ptr_global.set_initializer(&i8_ptr.const_null());
+
+        // Build thunk function type matching callback signature
+        let mut thunk_param_tys = Vec::new();
+        for pt in cb_params {
+            let llvm_ty = types::mimi_type_to_llvm(self.context, pt)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            thunk_param_tys.push(types::basic_to_metadata(self.context, llvm_ty));
+        }
+        let thunk_ret_llvm = types::mimi_type_to_llvm(self.context, cb_ret)
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+
+        let thunk_fn_type = match thunk_ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&thunk_param_tys, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&thunk_param_tys, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&thunk_param_tys, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&thunk_param_tys, false),
+            BasicTypeEnum::ArrayType(t) => t.fn_type(&thunk_param_tys, false),
+            _ => self.context.i64_type().fn_type(&thunk_param_tys, false),
+        };
+
+        let thunk_name = format!("__mimi_thunk_{}", id);
+        let thunk_fn = self.module.add_function(&thunk_name, thunk_fn_type, Some(inkwell::module::Linkage::Internal));
+
+        let saved_block = self.builder.get_insert_block();
+        let entry_bb = self.context.append_basic_block(thunk_fn, "entry");
+        self.builder.position_at_end(entry_bb);
+
+        // Load fn_ptr and env_ptr from global slots
+        let fn_ptr_val = self.builder.build_load(i8_ptr, fn_ptr_global.as_pointer_value(), "tls_fn_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("load fn_ptr: {}", e)))?;
+        let env_ptr_val = self.builder.build_load(i8_ptr, env_ptr_global.as_pointer_value(), "tls_env_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("load env_ptr: {}", e)))?;
+        let fn_ptr_pv = fn_ptr_val.into_pointer_value();
+        let env_ptr_pv = env_ptr_val.into_pointer_value();
+
+        // Build the Mimi closure function signature: fn(env_ptr: i8*, params...) -> ret
+        let mut mimi_param_meta = vec![BasicMetadataTypeEnum::PointerType(i8_ptr)];
+        mimi_param_meta.extend(thunk_param_tys.iter().cloned());
+
+        let mimi_fn_ty = match thunk_ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&mimi_param_meta, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&mimi_param_meta, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&mimi_param_meta, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&mimi_param_meta, false),
+            BasicTypeEnum::ArrayType(t) => t.fn_type(&mimi_param_meta, false),
+            _ => self.context.i64_type().fn_type(&mimi_param_meta, false),
+        };
+
+        // Cast fn_ptr to the correct type: fn(env_ptr, params...) -> ret
+        let fn_ptr_typed = self.builder.build_pointer_cast(
+            fn_ptr_pv,
+            mimi_fn_ty.ptr_type(inkwell::AddressSpace::default()),
+            "fn_typed",
+        ).map_err(|e| CompileError::LlvmError(format!("pointer cast: {}", e)))?;
+
+        // Build call args: env_ptr + thunk params
+        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = vec![
+            BasicMetadataValueEnum::PointerValue(env_ptr_pv),
+        ];
+        for i in 0..thunk_param_tys.len() {
+            let param = thunk_fn.get_nth_param(i as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("thunk param {} not found", i)))?;
+            call_args.push(match param {
+                BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(iv),
+                BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(fv),
+                BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(pv),
+                BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(sv),
+                BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(av),
+                _ => return Err(CompileError::LlvmError(format!("unsupported thunk param type at {}", i))),
+            });
+        }
+
+        let cb_call = self.builder.build_indirect_call(
+            mimi_fn_ty, fn_ptr_typed, &call_args, "cb_call",
+        ).map_err(|e| CompileError::LlvmError(format!("thunk callback call: {}", e)))?;
+        if thunk_fn_type.get_return_type().is_some() {
+            let ret_val = cb_call.try_as_basic_value().left()
+                .ok_or_else(|| CompileError::LlvmError("thunk call returned void but expected value".to_string()))?;
+            self.builder.build_return(Some(&ret_val))
+                .map_err(|e| CompileError::LlvmError(format!("thunk return: {}", e)))?;
+        } else {
+            self.builder.build_return(None)
+                .map_err(|e| CompileError::LlvmError(format!("thunk void return: {}", e)))?;
+        }
+
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        let entry = CallbackThunkEntry { thunk_fn, fn_ptr_global, env_ptr_global };
+        self.callback_thunks.insert(fingerprint, entry);
+
+        Ok(CallbackThunkEntry { thunk_fn, fn_ptr_global, env_ptr_global })
+    }
+
     pub(super) fn register_extern_block(&mut self, block: &crate::ast::ExternBlock) -> MimiResult<()> {
         for ef in &block.funcs {
+            // Store param types for later closure→thunk conversion in compile_call
+            let param_types: Vec<crate::ast::Type> = ef.params.iter().map(|p| p.ty.clone()).collect();
+            self.extern_param_types.insert(ef.name.clone(), param_types);
             let mut param_tys = Vec::new();
             for p in &ef.params {
                 let ty = self.type_to_llvm_for_extern(&p.ty);

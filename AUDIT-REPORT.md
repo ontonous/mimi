@@ -86,10 +86,10 @@ Source (.mimi)
 | 等级 | 数量 | 条目 |
 |------|------|------|
 | **P0 — Critical** | 0 | 全部已修复 |
-| **P1 — High** | 11 | F5, F6, F9, G1, G9, N2, N6, B6, B7, B8-B14 部分 |
-| **P2 — Medium** | 8 | G3-G4, G6, G8, N1, F10/F11, B9-B14 部分 |
+| **P1 — High** | 9 | F5, F6, F9, G1b, G9, N2, N6 部分 |
+| **P2 — Medium** | 7 | G3-G4, G6, G8, N1, F10/F11 |
 | **P3 — Low** | 5 | G7, N3-N5, B15-B17 |
-| **已修复** | 18 | F1-F4, F7, F8, G2, G5, G10, B1-B5, E0750 |
+| **已修复** | 24 | F1-F4, F7, F8, G1a, G2, G5, G10, B1-B14, E0750 |
 
 ### 4.2 修复总览
 
@@ -233,21 +233,24 @@ Source (.mimi)
 
 ---
 
-### G1: 闭包 — P1
+### G1: 闭包 — P1 ✅ 全部完成
 
 **FFI 角色**: C callback → closure → Actor message
 
-**代码核实**: **部分确认** — 基础设施存在，桥接缺失
+**代码核实**: **全部完成**
 
 | 组件 | 状态 | 位置 |
 |------|------|------|
 | `CallbackTable` 运行时 | ✅ 已实现 | `callback.rs:16-101` |
-| F8: `callback_trampoline` + libffi Closure | ✅ 已实现 | `interp/ffi_call.rs:55-105` |
+| F8: `callback_trampoline` + libffi Closure（解释器） | ✅ 已实现 | `interp/ffi_call.rs:55-105` |
 | Mimi closure → C fn ptr 转换（解释器） | ✅ 已实现 | `interp/ffi_call.rs:424-426` |
-| codegen 闭包 struct `{fn_ptr, env}` | ❌ TODO | `expr.rs:1955-1957` |
+| **G1a**: codegen 闭包 struct `{fn_ptr, env_ptr}` + env 打包 | ✅ 已实现 | `codegen/expr.rs:1956-2128`, `types.rs:135-143` |
+| **G1b**: codegen closure → extern trampoline | ✅ 已实现 | `codegen/registry.rs:113-239`, `expr.rs:2779-2814` |
 | FFI 合约对 closure 参数的支持 | ✅ 映射为 `Callback` 合约 | `contract.rs:167-170` |
 
-**修复**: (1) codegen 闭包 struct + env 打包（依赖 G5）；(2) trampoline 生成；(3) CallbackTable 集成。工期 2-4 周。
+**实现方案（G1a）**：闭包表示为 `{fn_ptr: i8*, env_ptr: i8*}` 2 字段结构体。`compile_lambda_expr` 在栈上分配 env struct，lambda 函数签名 `fn(env_ptr: i8*, params...) -> ret`。`compile_call_expr` 识别闭包变量通过 2 字段 struct 类型，提取 fn_ptr/env_ptr 做间接调用。
+
+**实现方案（G1b）**：传递闭包给 `extern` 函数时，`compile_call` 检测闭包参数，提取 fn_ptr/env_ptr 存入 per-signature thunk 的全局变量，将 thunk 函数地址（cast 到 `i8*`）传给 C。Thunk 函数（LLVM IR 生成）从全局变量读取 fn_ptr/env_ptr，调用 `fn_ptr(env_ptr, args...)`。Thunk 按签名指纹（参数类型+返回类型）缓存。
 
 ---
 
@@ -286,8 +289,9 @@ Phase 1: FFI 可信基础 (前置条件) ✅ 全部完成
                 │
                 ▼
 Phase 2: 语言特性 FFI 就绪
-├── G2: 枚举 match (P0) ── ✅ hash→ordinal + from_int ✅
-├── G1: 闭包 (P1) ──────── 需闭包 struct (依赖 G5)
+├── G2: 枚举 match (P0) ── ✅ hash→ordinal + from_int
+├── G1a: 闭包 struct + env (P1) ── ✅ {fn_ptr, env_ptr} 栈分配
+├── G1b: FFI trampoline (P1) ── ✅ LLVM thunk + 全局变量
 ├── G5: Shared cleanup ──── handle 去重 + cleanup
 └── comptime (P2) ──────── 独立路径
                 │
@@ -295,11 +299,11 @@ Phase 2: 语言特性 FFI 就绪
 Phase 3: 工程化 + 绑定
 ├── G9: 跨文件模块
 ├── F9: Python binding
-├── N6: ASan 启用
-└── B6-B14: 深度审计 P1-P2 补充修复
+├── N6: ASan 启用 (部分: UBSan + ASan string 已启用)
+└── B6-B14: 深度审计 P1-P2 补充修复 ✅ 全部完成
 ```
 
-**当前状态**: Phase 1 全部完成，G2 已修复，Phase 2 剩余 G1 + Shared cleanup。
+**当前状态**: Phase 1 全部完成，G1+G2 已修复，Phase 2 剩余 Shared cleanup，Phase 3 剩余 G9/F9/N6。
 
 ---
 
@@ -395,15 +399,15 @@ Phase 3: 工程化 + 绑定
 **位置**: `lint.rs:28-52`
 **修复**: 新增 `is_followed_by_impl` 检查，desc/rule 后有 func/type 时不报警。
 
-#### B6: F-string lexer 转义序列处理不完整 → ⏸️ 待修复
+#### B6: F-string lexer 转义序列处理不完整 → ✅ 已修复
 
 **位置**: `lexer.rs:562-575`
-**现状**: `\u{...}`、`\xNN` 等 Unicode/hex 转义未被识别。
+**修复**: 新增 `\u{...}`、`\uNNNN`、`\xNN`、`\0` 转义序列识别。
 
-#### B7: Contract 语句全部报 `Span(0:0)` → ⏸️ 待修复
+#### B7: Contract 语句全部报 `Span(0:0)` → ✅ 已修复
 
-**位置**: `contracts.rs:45, 50`
-**现状**: 合约内类型错误永远指向文件顶部。
+**位置**: `contracts.rs:45, 50`, `ast.rs`, `parse_stmt.rs`, `main.rs`
+**修复**: 合约内类型错误现在指向正确的 mms 关键字位置（parser 捕获 mms 行号，Contract struct 带 span，bind_item_contracts 使用 contract.span）。
 
 ### P2 — 新增 Medium（7 个）
 
@@ -434,7 +438,16 @@ Phase 3: 工程化 + 绑定
 | B3 (CompileError::code 映射) | ✅ 已修复 | `error.rs:108-148` 改用 codes 常量 |
 | B4 (formatter `)` 缩进) | ℹ️ 无需修复 | 当前代码已正确 |
 | B5 (linter W001 误报) | ✅ 已修复 | `lint.rs:28-52` 上下文检查 |
-| B6-B17 | ⏸️ 待修复 | 按路线图排期 |
+| B6 (F-string 转义) | ✅ 已修复 | `lexer.rs` 新增 `\u{...}`/`\xNN`/`\0` |
+| B7 (Contract span) | ✅ 已修复 | `ast.rs`/`contracts.rs`/`parse_stmt.rs` 传递 mms 行号 |
+| B8 (safe_arith 冗余检查) | ✅ 已修复 | `safe_arith.rs` 移除 `checked_div`/`checked_rem` 零检查 |
+| B9 (lockfile 精确版本) | ✅ 已修复 | `lockfile.rs` 测试用 `=1.0.0` |
+| B10 (Span::contains 多行) | ℹ️ 无需修复 | 设计如此 |
+| B11 (pool send 错误丢弃) | ✅ 已修复 | `interp/pool.rs` 添加 `eprintln` |
+| B12 (diagnostic 列对齐) | ✅ 已修复 | `diagnostic/format.rs` 使用 `indicator_width` |
+| B13 (quote 双克隆) | ℹ️ 无需修复 | 设计如此 |
+| B14 (loader 导入重复) | ✅ 已修复 | `loader.rs` merge_all 添加 HashSet 去重 |
+| B15-B17 | ⏸️ 待修复 | 按路线图排期 |
 
 ---
 
@@ -560,24 +573,25 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | **Phase 1** — FFI 可信基础 | ✅ 全部完成（F1-F8, G5, G10） |
 | **G2** — 枚举 match tag | ✅ 已完成 |
 
-### Phase 2 — 语言特性 FFI 就绪（P1，待开始）
+### Phase 2 — 语言特性 FFI 就绪（P1）
 
-| 目标 | 工期 | 依赖 |
-|------|------|------|
-| G1: 闭包 env struct + trampoline | 2-4 周 | 依赖 G5 |
-| Shared: handle 去重 + cleanup | 1-2 周 | 依赖 F4 |
+| 目标 | 状态 | 工期 | 依赖 |
+|------|------|------|------|
+| G1a: 闭包 env struct `{fn_ptr, env_ptr}` + 栈分配 | ✅ 已完成 | 1 周 | 依赖 G5 |
+| G1b: FFI trampoline（LLVM thunk + 全局变量） | ✅ 已完成 | 1 周 | 依赖 G1a |
+| Shared: handle 去重 + cleanup | ⏸️ 待开始 | 1-2 周 | 依赖 F4 |
 
-### Phase 3 — 工程化 + 补充修复（待开始）
+### Phase 3 — 工程化 + 补充修复
 
-| 目标 | 工期 | 依赖 |
-|------|------|------|
-| B6: F-string 转义序列补全 | 0.5 天 | 无 |
-| B7: Contract span 行号传递 | 0.5 天 | 无 |
-| B8-B14: 安全/诊断/模块修复 | 2-3 天 | 无 |
-| G9: 跨文件模块 E2E | 1 天 | 无 |
-| F9: Python binding generator | 1-2 天 | 无 |
-| F10: errno 完整映射 | 0.5 天 | 无 |
-| N6: 启用 ASan 测试 | 0.5 天 | 依赖 G10 |
+| 目标 | 状态 | 工期 | 依赖 |
+|------|------|------|------|
+| B6: F-string 转义序列补全 | ✅ 已完成 | — | 无 |
+| B7: Contract span 行号传递 | ✅ 已完成 | — | 无 |
+| B8-B14: 安全/诊断/模块修复 | ✅ 全部完成 | — | 无 |
+| G9: 跨文件模块 E2E | ⏸️ 待开始 | 1 天 | 无 |
+| F9: Python binding generator | ⏸️ 待开始 | 1-2 天 | 无 |
+| F10: errno 完整映射 | ⏸️ 待开始 | 0.5 天 | 无 |
+| N6: 启用 ASan 测试 | 🔶 部分完成（UBSan + ASan string 已启用，ASan list 仍忽略） | 0.5 天 | 依赖 G10 |
 
 ### Phase 4 — 语言完善
 

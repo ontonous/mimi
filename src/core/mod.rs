@@ -760,7 +760,8 @@ impl<'a> Checker<'a> {
             Type::Tuple(_) => false,
             Type::Option(_) | Type::Result(_, _) => false,
             Type::Array(_, _) | Type::Slice(_) => false,
-            Type::Func(_, _) => false,
+            // G1b: Accept closures (Type::Func) as extern callback params
+            Type::Func(_, _) => true,
             Type::Newtype(name, inner) => {
                 if let Some(tdef) = self.types.get(name) {
                     if tdef.attributes.contains(&TypeAttribute::ReprC) {

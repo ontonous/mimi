@@ -173,6 +173,24 @@ fn e2e_closure_multiple_capture() {
     assert_eq!(stdout.trim(), "37");
 }
 
+#[test]
+fn e2e_closure_extern_callback() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        extern "C" {
+            func test_callback(x: i32, cb: func(i32) -> i32) -> i32
+        }
+        func main() -> i32 {
+            let factor = 2
+            let cb = fn(n: i32) -> i32 { n * factor }
+            let result = test_callback(5, cb)
+            println(result)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "10");
+}
+
 // ===================== Error Handling =====================
 
 #[test]

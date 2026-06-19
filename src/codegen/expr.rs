@@ -2776,6 +2776,42 @@ impl<'ctx> CodeGenerator<'ctx> {
             compiled_args.push(self.compile_expr(arg, vars)?);
         }
 
+        // G1b: Convert closure struct args to thunk pointers for extern callback params
+        if let Some(param_types) = self.extern_param_types.get(name).cloned() {
+            for (i, compiled) in compiled_args.iter_mut().enumerate() {
+                if i >= param_types.len() { break; }
+                let (cb_params, cb_ret) = match &param_types[i] {
+                    crate::ast::Type::ExternFunc(p, r) => (p.as_slice(), r.as_ref()),
+                    crate::ast::Type::Func(p, r) => (p.as_slice(), r.as_ref()),
+                    _ => continue,
+                };
+                if let BasicValueEnum::StructValue(sv) = compiled {
+                        let struct_ty = sv.get_type();
+                        if struct_ty.get_field_types().len() == 2 {
+                            let fn_ptr = self.builder.build_extract_value(*sv, 0, "cb_fn_ptr")
+                                .map_err(|e| format!("extract fn_ptr: {}", e))?;
+                            let env_ptr = self.builder.build_extract_value(*sv, 1, "cb_env_ptr")
+                                .map_err(|e| format!("extract env_ptr: {}", e))?;
+                            let cb_fn_ptr = fn_ptr.into_pointer_value();
+                            let cb_env_ptr = env_ptr.into_pointer_value();
+                            let thunk_entry = self.get_or_create_callback_thunk(cb_params, cb_ret)
+                                .map_err(|e| format!("callback thunk: {}", e))?;
+                            self.builder.build_store(
+                                thunk_entry.fn_ptr_global.as_pointer_value(), cb_fn_ptr,
+                            ).map_err(|e| format!("store fn_ptr: {}", e))?;
+                            self.builder.build_store(
+                                thunk_entry.env_ptr_global.as_pointer_value(), cb_env_ptr,
+                            ).map_err(|e| format!("store env_ptr: {}", e))?;
+                            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                            let thunk_ptr = thunk_entry.thunk_fn.as_global_value().as_pointer_value();
+                            let casted = self.builder.build_pointer_cast(thunk_ptr, i8_ptr_ty, "thunk_i8")
+                                .map_err(|e| format!("bitcast thunk: {}", e))?;
+                            *compiled = casted.into();
+                        }
+                    }
+                }
+            }
+
         let metadata_args: Vec<_> = compiled_args.iter().map(|v| {
             match v {
                 BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),

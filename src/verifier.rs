@@ -288,7 +288,7 @@ impl Verifier {
         }
 
         let z3_result = Z3Int::new_const("result");
-        vars.insert_int("result", z3_result);
+        vars.insert_int("result", z3_result.clone());
 
         for (i, p) in func.params.iter().enumerate() {
             let old_name = old_names[i].as_str();
@@ -456,7 +456,7 @@ impl Verifier {
             for (name, z3_var) in &vars.real_vars {
                 if let Some(val) = model.eval(z3_var, true) {
                     if let Some((num, den)) = val.as_real() {
-                        let f = (*num as f64) / (*den as f64);
+                        let f = (num as f64) / (den as f64);
                         real_assignments.push((name.clone(), f));
                     }
                 }
@@ -499,7 +499,7 @@ impl Verifier {
                 } else if let Some(z3_var) = vars.get_real(name) {
                     model.eval(z3_var, true)
                         .and_then(|v| v.as_real())
-                        .map(|(num, _den)| *num != 0)
+                        .map(|(num, _den)| num != 0)
                         .unwrap_or(false)
                 } else {
                     false
@@ -516,7 +516,7 @@ impl Verifier {
                     } else if let Some(z3_var) = vars.get_real(&old_name) {
                         model.eval(z3_var, true)
                             .and_then(|v| v.as_real())
-                            .map(|(num, _den)| *num != 0)
+                            .map(|(num, _den)| num != 0)
                             .unwrap_or(false)
                     } else {
                         false
@@ -921,7 +921,7 @@ fn format_expr(expr: &Expr) -> String {
 
 fn format_stmt(stmt: &Stmt) -> String {
     match stmt {
-        Stmt::Let { name, .. } => format!("let {}", name),
+        Stmt::Let { pat, .. } => format!("let {:?}", pat),
         Stmt::Expr(expr) => format_expr(expr),
         Stmt::Return(Some(expr)) => format!("return {}", format_expr(expr)),
         Stmt::Return(None) => "return".to_string(),

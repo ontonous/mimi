@@ -1313,6 +1313,11 @@ int __mimi_extern_test_positive(int x) {
     return x;
 }
 
+// G1b: Test helper — calls cb(x) and returns the result
+int __mimi_extern_test_callback(int x, int (*cb)(int)) {
+    return cb(x);
+}
+
 void mimi_runtime_abort(const char* msg) {
     if (msg) {
         fprintf(stderr, "Contract violation: %s\n", msg);

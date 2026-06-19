@@ -22,6 +22,14 @@ use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Generated callback thunk for a closure→C function pointer conversion.
+/// G1b: Each thunk reads fn_ptr and env_ptr from its globals at call time.
+pub struct CallbackThunkEntry<'ctx> {
+    pub thunk_fn: inkwell::values::FunctionValue<'ctx>,
+    pub fn_ptr_global: inkwell::values::GlobalValue<'ctx>,
+    pub env_ptr_global: inkwell::values::GlobalValue<'ctx>,
+}
+
 pub struct CodeGenerator<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
@@ -55,6 +63,12 @@ pub struct CodeGenerator<'ctx> {
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
     vtable_globals: HashMap<String, inkwell::values::GlobalValue<'ctx>>,
     vtable_types: HashMap<String, inkwell::types::StructType<'ctx>>,
+    /// G1b: Parameter types for each extern function (by wrapper name).
+    extern_param_types: HashMap<String, Vec<crate::ast::Type>>,
+    /// G1b: Counter for naming unique callback thunk functions.
+    callback_thunk_counter: u64,
+    /// G1b: Cache of generated callback thunks, keyed by signature fingerprint.
+    callback_thunks: HashMap<String, CallbackThunkEntry<'ctx>>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -64,7 +78,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new(), extern_param_types: HashMap::new(), callback_thunk_counter: 0, callback_thunks: HashMap::new() }
     }
 
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
