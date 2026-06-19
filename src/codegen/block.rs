@@ -199,7 +199,30 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     self.builder.position_at_end(merge_bb);
                 }
-                Stmt::Break(_) | Stmt::Continue => {}
+                Stmt::Break(_) => {
+                    if let Some(target) = self.loop_break {
+                        self.builder.build_unconditional_branch(target)
+                            .map_err(|e| CompileError::LlvmError(format!("break error: {}", e)))?;
+                        let function = self.current_function()
+                            .ok_or_else(|| CompileError::LlvmError("codegen: no current function for break".to_string()))?;
+                        let unreachable = self.context.append_basic_block(function, "unreachable");
+                        self.builder.position_at_end(unreachable);
+                    } else {
+                        return Err(CompileError::BreakOutsideLoop);
+                    }
+                }
+                Stmt::Continue => {
+                    if let Some(target) = self.loop_continue {
+                        self.builder.build_unconditional_branch(target)
+                            .map_err(|e| CompileError::LlvmError(format!("continue error: {}", e)))?;
+                        let function = self.current_function()
+                            .ok_or_else(|| CompileError::LlvmError("codegen: no current function for continue".to_string()))?;
+                        let unreachable = self.context.append_basic_block(function, "unreachable");
+                        self.builder.position_at_end(unreachable);
+                    } else {
+                        return Err(CompileError::ContinueOutsideLoop);
+                    }
+                }
                 Stmt::MmsBlock { .. } => {
                     // Skip MMS blocks in codegen (they're for documentation/contracts)
                 }

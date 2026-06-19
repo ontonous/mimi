@@ -137,7 +137,7 @@ pub enum AllocatorKind {
 }
 
 /// C buffer wrapper that automatically frees memory on drop
-pub struct CBufferInner {
+pub(crate) struct CBufferInner {
     pub ptr: *mut u8,
     pub size: usize,
 }

@@ -682,8 +682,8 @@ static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pool_cond = PTHREAD_COND_INITIALIZER;
 static PoolTask pool_tasks[POOL_MAX_TASKS];
 static int pool_task_count = 0;
-static int pool_task_head = 0;
-static int pool_task_tail = 0;
+static size_t pool_task_head = 0;
+static size_t pool_task_tail = 0;
 static int pool_shutdown = 0;
 static int pool_active_threads = 0;
 static int pool_threads_initialized = 0;
@@ -743,6 +743,9 @@ void mimi_pool_submit(void* fn_ptr, void* arg) {
     pool_ensure_init();
     void* (*func)(void*) = (void* (*)(void*))fn_ptr;
     pthread_mutex_lock(&pool_mutex);
+    while (pool_task_tail - pool_task_head >= POOL_MAX_TASKS) {
+        pthread_cond_wait(&pool_cond, &pool_mutex);
+    }
     pool_tasks[pool_task_tail % POOL_MAX_TASKS].func = func;
     pool_tasks[pool_task_tail % POOL_MAX_TASKS].arg = arg;
     pool_task_tail++;
@@ -863,7 +866,36 @@ static int json_parse_string(JsonParser* jp, char** out, size_t* out_len) {
                         case 'n': *w++ = '\n'; break;
                         case 'r': *w++ = '\r'; break;
                         case 't': *w++ = '\t'; break;
-                        case 'u': { r += 4; *w++ = '?'; break; }
+                        case 'u': {
+                            r++;
+                            uint32_t cp = 0;
+                            for (int i = 0; i < 4; i++) {
+                                char c = *r;
+                                if (c >= '0' && c <= '9') cp = (cp << 4) | (unsigned)(c - '0');
+                                else if (c >= 'a' && c <= 'f') cp = (cp << 4) | (unsigned)(c - 'a' + 10);
+                                else if (c >= 'A' && c <= 'F') cp = (cp << 4) | (unsigned)(c - 'A' + 10);
+                                else { r--; break; }
+                                r++;
+                            }
+                            if (cp <= 0x7F) {
+                                *w++ = (char)cp;
+                            } else if (cp <= 0x7FF) {
+                                *w++ = (char)(0xC0 | (cp >> 6));
+                                *w++ = (char)(0x80 | (cp & 0x3F));
+                            } else if (cp <= 0xFFFF) {
+                                *w++ = (char)(0xE0 | (cp >> 12));
+                                *w++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                *w++ = (char)(0x80 | (cp & 0x3F));
+                            } else if (cp <= 0x10FFFF) {
+                                *w++ = (char)(0xF0 | (cp >> 18));
+                                *w++ = (char)(0x80 | ((cp >> 12) & 0x3F));
+                                *w++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                *w++ = (char)(0x80 | (cp & 0x3F));
+                            } else {
+                                *w++ = '?';
+                            }
+                            break;
+                        }
                         default: *w++ = *r; break;
                     }
                 } else {

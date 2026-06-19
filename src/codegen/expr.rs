@@ -1480,7 +1480,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result_llvm_ty_for_size = result.get_type();
         let byte_size_val = result_llvm_ty_for_size.size_of()
             .and_then(|v: inkwell::values::IntValue<'ctx>| v.get_zero_extended_constant())
-            .unwrap_or(8) as u64;
+            .unwrap_or(0) as u64;
         let byte_size = i64_ty.const_int(byte_size_val, false);
         let result_storage = self.builder.build_call(malloc_fn, &[
             BasicMetadataValueEnum::IntValue(byte_size),
@@ -1529,6 +1529,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         if self.in_parasteps {
             // Parasteps: submit to thread pool (avoids creating N OS threads)
+            self.pending_spawn_type = Some(result.get_type());
             let mimi_pool_submit_fn = self.module.get_function("mimi_pool_submit")
                 .ok_or("mimi_pool_submit not declared")?;
             self.builder.build_call(mimi_pool_submit_fn, &[
@@ -1607,15 +1608,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("expected pointer from pthread_join".into());
         };
         
-        // Cast from i8* to i64* and load the result value
-        let i64_ty = self.context.i64_type();
+        // Cast from i8* to result type pointer and load the result value
+        let result_type = self.pending_spawn_type.take().unwrap_or_else(|| self.context.i64_type().into());
         let result_typed = self.builder.build_pointer_cast(
             result_ptr,
-            i64_ty.ptr_type(inkwell::AddressSpace::default()),
-            "result_i64_ptr"
+            result_type.ptr_type(inkwell::AddressSpace::default()),
+            "result_typed_ptr"
         ).map_err(|e| format!("bitcast error: {}", e))?;
         let result_val = self.builder.build_load(
-            BasicTypeEnum::IntType(i64_ty),
+            result_type,
             result_typed,
             "spawn_result_val"
         ).map_err(|e| format!("load error: {}", e))?;

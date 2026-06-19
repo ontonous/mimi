@@ -1413,3 +1413,80 @@ fn e2e_asan_list_ops() {
     "#).unwrap();
     assert_eq!(stdout.trim(), "10\n20\n30");
 }
+
+// ===================== G3: break/continue inside if =====================
+
+#[test]
+fn e2e_break_inside_if() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let mut sum = 0
+            let mut i = 0
+            while i < 10 {
+                if i == 5 {
+                    i += 1
+                    break
+                }
+                sum += i
+                i += 1
+            }
+            println(sum)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "10");
+}
+
+#[test]
+fn e2e_continue_inside_if() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let mut sum = 0
+            let mut i = 0
+            while i < 6 {
+                i += 1
+                if i == 3 {
+                    continue
+                }
+                sum += i
+            }
+            println(sum)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "13");
+}
+
+// ===================== G4: ? operator E2E =====================
+
+#[test]
+fn e2e_try_operator_ok_path() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        type Res {
+            Ok(i32)
+            Err(string)
+        }
+
+        func safe_div(a: i32, b: i32) -> Res {
+            if b == 0 { Err("div by zero") } else { Ok(a / b) }
+        }
+
+        func compute() -> Res {
+            let x = safe_div(10, 2)?
+            let y = safe_div(x, 2)?
+            Ok(y + 1)
+        }
+
+        func main() -> i32 {
+            match compute() {
+                Ok(v) => println("result:", v),
+                Err(e) => println("error:", e),
+            }
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "result: 6");
+}
