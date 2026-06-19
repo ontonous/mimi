@@ -2407,6 +2407,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (lhs, rhs) = match (lhs, rhs) {
+            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                let lw = l.get_type().get_bit_width();
+                let rw = r.get_type().get_bit_width();
+                if lw == rw {
+                    (lhs, rhs)
+                } else if lw < rw {
+                    let ext = self.builder.build_int_z_extend(l, r.get_type(), "promote")
+                        .map_err(|e| format!("int promote error: {}", e))?;
+                    (ext.into(), rhs)
+                } else {
+                    let ext = self.builder.build_int_z_extend(r, l.get_type(), "promote")
+                        .map_err(|e| format!("int promote error: {}", e))?;
+                    (lhs, ext.into())
+                }
+            }
+            _ => (lhs, rhs),
+        };
         match op {
             BinOp::Add => match (lhs, rhs) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =>
@@ -2446,6 +2464,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, l, r, "eq").map_err(|e| format!("cmp error: {}", e))?.into()),
                 (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) =>
                     Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, l, r, "feq").map_err(|e| format!("cmp error: {}", e))?.into()),
+                (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| format!("strcmp error: {}", e))?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp, zero, "streq")
+                        .map_err(|e| format!("cmp error: {}", e))?.into())
+                }
                 _ => Err("eq requires same types".into()),
             },
             BinOp::NeCmp => match (lhs, rhs) {
@@ -2453,6 +2487,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, l, r, "ne").map_err(|e| format!("cmp error: {}", e))?.into()),
                 (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) =>
                     Ok(self.builder.build_float_compare(inkwell::FloatPredicate::ONE, l, r, "fne").map_err(|e| format!("cmp error: {}", e))?.into()),
+                (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| format!("strcmp error: {}", e))?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, cmp, zero, "strne")
+                        .map_err(|e| format!("cmp error: {}", e))?.into())
+                }
                 _ => Err("ne requires same types".into()),
             },
             BinOp::Lt => match (lhs, rhs) {

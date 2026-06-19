@@ -71,6 +71,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError(format!("expected basic value from {}", name)))
     }
 
+    fn current_fn_ret_type(&self) -> BasicTypeEnum<'ctx> {
+        self.current_function()
+            .and_then(|f| f.get_type().get_return_type())
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+    }
+
+    fn adjust_int_val(&self, val: BasicValueEnum<'ctx>, target: BasicTypeEnum<'ctx>) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match (val, target) {
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(ti)) => {
+                let src_w = iv.get_type().get_bit_width();
+                let dst_w = ti.get_bit_width();
+                if src_w == dst_w {
+                    Ok(iv.into())
+                } else if src_w < dst_w {
+                    self.builder.build_int_z_extend(iv, ti, "zext")
+                        .map(|v| v.into())
+                        .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))
+                } else {
+                    self.builder.build_int_truncate(iv, ti, "trunc")
+                        .map(|v| v.into())
+                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))
+                }
+            }
+            _ => Ok(val),
+        }
+    }
+
     fn cg_err<T>(&self, _code: &str, msg: impl Into<String>) -> Result<T, CompileError> {
         Err(CompileError::LlvmError(msg.into()))
     }

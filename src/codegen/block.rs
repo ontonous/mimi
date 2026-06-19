@@ -32,7 +32,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_expr(expr, vars)?;
                 }
                 Stmt::Return(Some(expr)) => {
-                    let val = self.compile_expr(expr, vars)?;
+                    let mut val = self.compile_expr(expr, vars)?;
+                    val = self.adjust_int_val(val, self.current_fn_ret_type())?;
                     self.builder.build_return(Some(&val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
                 }
@@ -40,13 +41,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.build_return(None).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
                 }
-                Stmt::Let { pat, init: Some(init), .. } => {
-                    let val = self.compile_expr(init, vars)?;
+                Stmt::Let { pat, init: Some(init), ty, .. } => {
+                    let mut val = self.compile_expr(init, vars)?;
                     let name = match pat {
                         Pattern::Variable(n) => n.clone(),
                         _ => continue,
                     };
-                    let llvm_ty = val.get_type();
+                    let llvm_ty = if let Some(decl_ty) = ty {
+                        let target = types::mimi_type_to_llvm(self.context, decl_ty)
+                            .unwrap_or_else(|| val.get_type());
+                        val = self.adjust_int_val(val, target)?;
+                        target
+                    } else {
+                        val.get_type()
+                    };
                     let alloca = self.builder.build_alloca(llvm_ty, &name)
                         .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                     self.builder.build_store(alloca, val)

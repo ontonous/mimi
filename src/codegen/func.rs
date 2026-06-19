@@ -133,7 +133,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        let mut last_val: BasicValueEnum = self.context.i64_type().const_int(0, false).into();
+        let default_val = match ret_type {
+            BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
+            BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+            _ => self.context.i64_type().const_int(0, false).into(),
+        };
+        let mut last_val: BasicValueEnum = default_val;
         for stmt in &func.body {
             // Run compensations before exit()
             if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
@@ -146,10 +151,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             match stmt {
                 Stmt::Expr(expr) => {
                     last_val = self.compile_expr(expr, &vars)?;
+                    last_val = self.adjust_int_val(last_val, ret_type)?;
                 }
                 Stmt::Return(Some(expr)) => {
                     self.pop_comp_scope();
                     let val = self.compile_expr(expr, &vars)?;
+                    let val = self.adjust_int_val(val, ret_type)?;
                     self.builder.build_return(Some(&val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
                 }
@@ -159,12 +166,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
-                    let val = self.compile_expr(init, &vars)?;
+                    let mut val = self.compile_expr(init, &vars)?;
                     let name = match pat {
                         Pattern::Variable(n) => n.clone(),
                         _ => continue,
                     };
-                    let llvm_ty = val.get_type();
+                    let llvm_ty = if let Some(decl_ty) = ty {
+                        let target = types::mimi_type_to_llvm(self.context, decl_ty)
+                            .unwrap_or_else(|| val.get_type());
+                        val = self.adjust_int_val(val, target)?;
+                        target
+                    } else {
+                        val.get_type()
+                    };
                     let alloca = self.builder.build_alloca(llvm_ty, &name)
                         .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                     self.builder.build_store(alloca, val)
@@ -700,7 +714,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_cap_scope();
 
         if !self.block_has_terminator() {
-            self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        let last_val = self.adjust_int_val(last_val, ret_type)?;
+        self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
         }
         self.type_map = prev_type_map;
         Ok(())
