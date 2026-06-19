@@ -214,3 +214,145 @@ func main() -> i32 { process(5) }
 
 // Helper wrappers
 use crate::tests::{check_source, compile_and_run};
+
+// ==============================
+// Fuzz: Edge case inputs
+// ==============================
+
+#[test]
+fn test_fuzz_empty_string() {
+    let val = super::run_source(r#"
+        func main() -> i32 { len("") }
+    "#);
+    assert_eq!(val, interp::Value::Int(0));
+}
+
+#[test]
+fn test_fuzz_large_integer() {
+    let val = super::run_source(r#"
+        func main() -> i64 { 9223372036854775807 }
+    "#);
+    assert_eq!(val, interp::Value::Int(9223372036854775807));
+}
+
+#[test]
+fn test_fuzz_negative_zero() {
+    let val = super::run_source(r#"
+        func main() -> i32 { -0 }
+    "#);
+    assert_eq!(val, interp::Value::Int(0));
+}
+
+#[test]
+fn test_fuzz_deeply_nested_if() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let x = 5
+            if x > 0 {
+                if x > 2 {
+                    if x > 4 {
+                        100
+                    } else {
+                        50
+                    }
+                } else {
+                    25
+                }
+            } else {
+                0
+            }
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(100));
+}
+
+#[test]
+fn test_fuzz_empty_list() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let xs: List<i32> = []
+            len(xs)
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(0));
+}
+
+#[test]
+fn test_fuzz_single_element_list() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let xs = [42]
+            xs[0]
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(42));
+}
+
+#[test]
+fn test_fuzz_nested_lists() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let xs = [[1, 2], [3, 4]]
+            xs[1][0]
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(3));
+}
+
+#[test]
+fn test_fuzz_string_concat_empty() {
+    let val = super::run_source(r#"
+        func main() -> string { "" + "" }
+    "#);
+    assert_eq!(val, interp::Value::String("".to_string()));
+}
+
+#[test]
+fn test_fuzz_bool_conversion() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let t = true
+            let f = false
+            let a = if t { 1 } else { 0 }
+            let b = if f { 2 } else { 0 }
+            a + b
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(1));
+}
+
+#[test]
+fn test_fuzz_while_zero_iterations() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let mut sum = 0
+            let mut i = 10
+            while i < 5 { sum = sum + i; i = i + 1 }
+            sum
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(0));
+}
+
+#[test]
+fn test_fuzz_recursive_factorial_zero() {
+    let val = super::run_source(r#"
+        func factorial(n: i32) -> i32 {
+            if n <= 1 { 1 } else { n * factorial(n - 1) }
+        }
+        func main() -> i32 { factorial(0) }
+    "#);
+    assert_eq!(val, interp::Value::Int(1));
+}
+
+#[test]
+fn test_fuzz_tuple_of_tuples() {
+    let val = super::run_source(r#"
+        func main() -> i32 {
+            let t = ((1, 2), (3, 4))
+            let inner = t.0
+            inner.1
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(2));
+}

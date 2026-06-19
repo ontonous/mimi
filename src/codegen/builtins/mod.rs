@@ -153,6 +153,14 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
             BasicMetadataTypeEnum::IntType(i64),
         ], false),
         Some(inkwell::module::Linkage::External));
+    // mimi_map_keys(handle) → MimiList* (i8*)
+    module.add_function("mimi_map_keys",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_map_values(handle) → MimiList* (i8*)
+    module.add_function("mimi_map_values",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External));
     module.add_function("mimi_value_type_name",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External));
@@ -279,10 +287,6 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External));
 
     // JSON functions (stubs for codegen)
-    // mimi_to_json(value_ptr: i8*) -> i8* (heap-allocated JSON string)
-    module.add_function("mimi_to_json",
-        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
-        Some(inkwell::module::Linkage::External));
     // mimi_is_valid_json(json_str: i8*) -> i32 (1 if valid, 0 if not)
     module.add_function("mimi_is_valid_json",
         i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
@@ -502,6 +506,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "map_set" => self.compile_map_set(args),
             "map_remove" => self.compile_map_remove(args),
             "map_from_list" => self.compile_map_from_list(args),
+            "keys" => self.compile_map_keys(args),
+            "values" => self.compile_map_values(args),
             "socket" => self.compile_socket(args),
             "connect" => self.compile_connect(args),
             "bind" => self.compile_bind(args),

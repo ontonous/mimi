@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::ast::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak as ArcWeak};

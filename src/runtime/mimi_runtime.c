@@ -877,15 +877,6 @@ const char* mimi_args_get(int64_t i) {
     return stored_argv[(int)i + 1]; // +1 to skip program name
 }
 
-/* ========== JSON stubs (actual implementation in Rust runtime) ========== */
-
-const char* mimi_to_json(void* value_ptr) {
-    (void)value_ptr;
-    /* Stub: returns empty JSON object */
-    char* result = strdup("{}");
-    return result;
-}
-
 /* ========== JSON parser (recursive descent, no external dependencies) ========== */
 
 /* Parser state */

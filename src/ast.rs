@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::span::Span;
 
 /// 意图锁后缀（直接复用 mimispec 的语义）。

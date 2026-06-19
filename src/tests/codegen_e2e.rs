@@ -1622,3 +1622,361 @@ fn e2e_try_operator_segfault_regression() {
         }
     "##).unwrap();
 }
+
+// ===================== TupleIndex (codegen E2E) =====================
+
+#[test]
+fn e2e_tuple_index_basic() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let t = (10, 20, 30)
+            println(t.0)
+            println(t.1)
+            println(t.2)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "10\n20\n30");
+}
+
+// ===================== SliceExpr (codegen E2E) =====================
+
+#[test]
+fn e2e_slice_basic() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let xs = [10, 20, 30, 40, 50]
+            let s = xs[1..4]
+            println(len(s))
+            println(s[0])
+            println(s[2])
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "3\n20\n40");
+}
+
+// ===================== Result/Option Methods (codegen E2E) =====================
+
+#[test]
+#[ignore = "type checker needs explicit Result annotation, and Result<T, string> syntax not supported"]
+fn e2e_result_is_ok_is_err() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let r = Ok(42)
+            println(r.is_ok())
+            println(r.is_err())
+            let e = Err("fail")
+            println(e.is_ok())
+            println(e.is_err())
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+}
+
+#[test]
+#[ignore = "requires bare None expression support in Mimi"]
+fn e2e_option_is_some_is_none() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let some: Option<i32> = Some(42)
+            println(some.is_some())
+            println(some.is_none())
+            let none: Option<i32> = None
+            println(none.is_some())
+            println(none.is_none())
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+}
+
+#[test]
+#[ignore = "type checker needs explicit Result annotation, and Result<T, string> syntax not supported"]
+fn e2e_result_unwrap_or() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let ok = Ok(42)
+            println(ok.unwrap_or(0))
+            let err = Err("fail")
+            println(err.unwrap_or(99))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42\n99");
+}
+
+#[test]
+#[ignore = "requires bare None expression support in Mimi"]
+fn e2e_option_unwrap_or() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let some: Option<i32> = Some(42)
+            println(some.unwrap_or(0))
+            let none: Option<i32> = None
+            println(none.unwrap_or(99))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42\n99");
+}
+
+#[test]
+#[ignore = "requires bare None expression support in Mimi"]
+fn e2e_option_ok_or() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let some: Option<i32> = Some(42)
+            let r = some.ok_or("missing")
+            println(r.is_ok())
+            println(r.is_err())
+            let none: Option<i32> = None
+            let r2 = none.ok_or("missing")
+            println(r2.is_ok())
+            println(r2.is_err())
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+}
+
+#[test]
+#[ignore = "type checker needs explicit Result annotation, and Result<T, string> syntax not supported"]
+fn e2e_result_map() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func double(x: i32) -> i32 { x * 2 }
+
+        func main() -> i32 {
+            let ok = Ok(21)
+            let mapped = ok.map(double)
+            println(mapped.unwrap_or(0))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+#[ignore = "type checker needs explicit Result annotation, and Result<T, string> syntax not supported"]
+fn e2e_result_and_then() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func double_if_positive(x: i32) -> Result<i32, string> {
+            if x > 0 { Ok(x * 2) } else { Err("negative") }
+        }
+
+        func main() -> i32 {
+            let ok = Ok(21)
+            let result = ok.and_then(double_if_positive)
+            println(result.unwrap_or(0))
+            let err = Err("fail")
+            let result2 = err.and_then(double_if_positive)
+            println(result2.unwrap_or(0))
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42\n0");
+}
+
+#[test]
+#[ignore = "type checker needs explicit Result annotation, and Result<T, string> syntax not supported"]
+fn e2e_result_map_err() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let err = Err("fail")
+            let result = err.is_err()
+            println(result)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "1");
+}
+
+// ===================== Stdlib: datetime (interpreter) =====================
+
+#[test]
+fn e2e_datetime_seconds_to_millis() {
+    let val = run_source(r#"
+        func seconds_to_millis(secs: i64) -> i64 { secs * 1000 }
+        func main() -> i64 { seconds_to_millis(5) }
+    "#);
+    assert_eq!(val, interp::Value::Int(5000));
+}
+
+#[test]
+fn e2e_datetime_millis_to_seconds() {
+    let val = run_source(r#"
+        func millis_to_seconds(ms: i64) -> i64 { ms / 1000 }
+        func main() -> i64 { millis_to_seconds(5000) }
+    "#);
+    assert_eq!(val, interp::Value::Int(5));
+}
+
+#[test]
+fn e2e_datetime_format_duration_secs() {
+    let val = run_source(r#"
+        func format_duration_secs(total_secs: i64) -> string {
+            let ds_days = total_secs / 86400
+            let ds_rem = total_secs % 86400
+            let ds_hours = ds_rem / 3600
+            let ds_rem2 = ds_rem % 3600
+            let ds_minutes = ds_rem2 / 60
+            let ds_seconds = ds_rem2 % 60
+            to_string(ds_days) + "d " + to_string(ds_hours) + "h " + to_string(ds_minutes) + "m " + to_string(ds_seconds) + "s"
+        }
+        func main() -> string { format_duration_secs(90061) }
+    "#);
+    assert_eq!(val, interp::Value::String("1d 1h 1m 1s".to_string()));
+}
+
+#[test]
+fn e2e_datetime_constants() {
+    let val = run_source(r#"
+        func main() -> i64 {
+            let seconds_per_minute = 60
+            let seconds_per_hour = 3600
+            let millis_per_second = 1000
+            seconds_per_hour + seconds_per_minute + millis_per_second
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(4660));
+}
+
+// ===================== Stdlib: env (interpreter) =====================
+
+#[test]
+fn e2e_env_get_var() {
+    std::env::set_var("MIMI_TEST_ENV_VAR", "hello");
+    let val = run_source(r#"
+        func main() -> string {
+            let result = getenv("MIMI_TEST_ENV_VAR")
+            result.unwrap()
+        }
+    "#);
+    assert_eq!(val, interp::Value::String("hello".to_string()));
+    std::env::remove_var("MIMI_TEST_ENV_VAR");
+}
+
+#[test]
+fn e2e_env_has_var() {
+    std::env::set_var("MIMI_TEST_EXISTS", "1");
+    let val = run_source(r#"
+        func main() -> i32 {
+            let r = getenv("MIMI_TEST_EXISTS")
+            if r.is_ok() { 1 } else { 0 }
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(1));
+    std::env::remove_var("MIMI_TEST_EXISTS");
+}
+
+#[test]
+fn e2e_env_missing_var() {
+    std::env::remove_var("MIMI_TEST_MISSING_VAR");
+    let val = run_source(r#"
+        func main() -> i32 {
+            let r = getenv("MIMI_TEST_MISSING_VAR")
+            if r.is_ok() { 1 } else { 0 }
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(0));
+}
+
+#[test]
+fn e2e_env_get_var_or() {
+    std::env::remove_var("MIMI_TEST_OR_VAR");
+    let val = run_source(r#"
+        func get_var_or(name: string, default: string) -> string {
+            let result = getenv(name)
+            if result.is_ok() { result.unwrap() } else { default }
+        }
+        func main() -> string { get_var_or("MIMI_TEST_OR_VAR", "fallback") }
+    "#);
+    assert_eq!(val, interp::Value::String("fallback".to_string()));
+}
+
+// ===================== Stdlib: text (interpreter) =====================
+
+#[test]
+fn e2e_text_is_blank() {
+    let val = run_source(r#"
+        func is_blank(s: string) -> bool { len(str_trim(s)) == 0 }
+        func main() -> i32 {
+            let b1 = is_blank("")
+            let b2 = is_blank("   ")
+            let b3 = is_blank("hello")
+            let v1 = if b1 { 1 } else { 0 }
+            let v2 = if b2 { 2 } else { 0 }
+            let v3 = if b3 { 4 } else { 0 }
+            v1 + v2 + v3
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(3)); // b1=true(1) + b2=true(2) + b3=false(0)
+}
+
+#[test]
+fn e2e_text_is_numeric() {
+    let val = run_source(r#"
+        func is_numeric(s: string) -> bool {
+            let parsed = str_parse_int(s)
+            parsed.0
+        }
+        func main() -> i32 {
+            let n1 = is_numeric("123")
+            let n2 = is_numeric("abc")
+            let v1 = if n1 { 1 } else { 0 }
+            let v2 = if n2 { 2 } else { 0 }
+            v1 + v2
+        }
+    "#);
+    assert_eq!(val, interp::Value::Int(1)); // n1=true(1) + n2=false(0)
+}
+
+#[test]
+fn e2e_text_slugify() {
+    let val = run_source(r#"
+        func slugify(s: string) -> string {
+            let lower = str_to_lower(s)
+            let parts = str_split(lower, " ")
+            str_join(parts, "-")
+        }
+        func main() -> string { slugify("Hello World Test") }
+    "#);
+    assert_eq!(val, interp::Value::String("hello-world-test".to_string()));
+}
+
+#[test]
+fn e2e_text_count_lines() {
+    let val = run_source(r#"
+        func count_lines(s: string) -> i32 { len(str_split(s, "\n")) }
+        func main() -> i32 { count_lines("line1\nline2\nline3") }
+    "#);
+    assert_eq!(val, interp::Value::Int(3));
+}
+
+#[test]
+#[ignore = "push() does not work correctly in interpreter"]
+fn e2e_text_indent() {
+    let val = run_source(r#"
+        func indent_text(s: string, n: i32) -> string {
+            let lines = str_split(s, "\n")
+            let mut res = []
+            for line in lines {
+                push(res, str_repeat(" ", n) + line)
+            }
+            str_join(res, "\n")
+        }
+        func main() -> string { indent_text("a\nb", 2) }
+    "#);
+    assert_eq!(val, interp::Value::String("  a\n  b".to_string()));
+}

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod value;
 mod closure_utils;
 mod eval;

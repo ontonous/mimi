@@ -303,4 +303,42 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     }
 
+    pub(super) fn compile_map_keys(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 { return Err("keys expects 1 argument (map handle)".into()); }
+        let map_handle = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("keys: first arg must be i64 map handle".into()),
+        };
+        let func = self.module.get_function("mimi_map_keys")
+            .ok_or("mimi_map_keys not declared")?;
+        let result = self.builder.build_call(func, &[
+            BasicMetadataValueEnum::IntValue(map_handle),
+        ], "map_keys_call")
+            .map_err(|e| format!("map_keys error: {}", e))?;
+        Ok(result.try_as_basic_value().left()
+            .ok_or("mimi_map_keys returned void")?)
+    }
+
+    pub(super) fn compile_map_values(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 { return Err("values expects 1 argument (map handle)".into()); }
+        let map_handle = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("values: first arg must be i64 map handle".into()),
+        };
+        let func = self.module.get_function("mimi_map_values")
+            .ok_or("mimi_map_values not declared")?;
+        let result = self.builder.build_call(func, &[
+            BasicMetadataValueEnum::IntValue(map_handle),
+        ], "map_values_call")
+            .map_err(|e| format!("map_values error: {}", e))?;
+        Ok(result.try_as_basic_value().left()
+            .ok_or("mimi_map_values returned void")?)
+    }
+
 }
