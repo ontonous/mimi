@@ -53,27 +53,28 @@
 | 等级 | 总数 | 已修复 | 剩余 | 描述 |
 |------|------|--------|------|------|
 | **P0 — Critical** | 6 | 6 | 0 | 阻塞 v1.0：正确性缺陷或静默丢弃语义的 codegen 缺口 |
-| **P1 — High** | 10 | 2 | 8 | 影响标准库可用性或产生静默错误 |
+| **P1 — High** | 10 | 7 | 3 | 影响标准库可用性或产生静默错误 |
 | **P2 — Medium** | 5 | 0 | 5 | 测试覆盖不足、死代码、基础设施缺口 |
 | **P3 — Low** | 2 | 0 | 2 | 干净性/可维护性问题 |
-| **总计** | **23** | **8** | **15** | |
+| **总计** | **23** | **13** | **10** | |
 
 ### 2.2 按子系统分布
 
 ```
 子系统              P0  P1  P2  P3  剩余   已修复
-───────────────────────────────────────────────
-codegen/expr.rs      3   1   0   0   0      4   ✅
+────────────────────────────────────────────────
+codegen/expr.rs      3   3   0   0   0      6   ✅
 codegen/func.rs      2   0   0   0   0      2   ✅
 codegen/block.rs     2   0   0   0   0      2   ✅
-codegen/types.rs     0   2   0   0   2      0
-codegen/builtins/    1   2   0   0   1      2   🔄
+codegen/types.rs     0   2   0   0   0      2   ✅
+codegen/builtins/    1   2   0   0   0      3   ✅
 codegen/ 整体        0   0   1   0   1      0
 ffi/contract.rs      0   0   1   0   1      0
 runtime.c            0   0   2   0   2      0
-标准库               0   5   1   0   6      0
-───────────────────────────────────────────────
-总计                6  10   5   0  15      8
+标准库               0   5   1   0   3      0
+interp/              0   1   0   0   0      1   ✅
+────────────────────────────────────────────────
+总计                6  10   5   0  10     13
 ```
 
 ---
@@ -202,39 +203,13 @@ map_err             | Result
 
 ---
 
-### P1-5: 闭包参数传给 `map/filter/reduce` 在 Codegen 中被拒绝
+### P1-5: 闭包参数传给 `map/filter/reduce` 在 Codegen 中被拒绝 — ✅ 已修复
 
 | 属性 | 值 |
 |------|-----|
-| **位置** | `codegen/expr.rs:376-388` (map/filter), `codegen/expr.rs:542-544` (reduce) |
-| **拒绝代码** | `Expr::Ident(n) => n.clone()` / `_ => return Err("second arg must be a function name")` |
-
-**codegen 中期望**:
-```rust
-// map/filter/reduce 需要 Expr::Ident（命名函数）
-let fn_name = match &args[1] {
-    Expr::Ident(n) => n.clone(),
-    _ => return Err("map/filter: second arg must be a function name (identifier)".into()),
-};
-```
-
-**问题**: `collections.mimi` 用闭包调用这些内置函数，如：
-```mimi
-pub func sum(xs: List<i32>) -> i32 {
-    reduce(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
-}
-```
-
-闭包 `fn(...){...}` 被解析为 `Expr::Lambda`，不被 `Expr::Ident` 匹配。
-
-**完全损坏的 stdlib 函数 (14)**:
-```
-collections::count_val, dedup, concat, remove_at, remove_value,
-fill_list, range_step, sum, sum_float, map_list,
-filter_positives, filter_negatives, filter_evens, filter_odds
-```
-
-**修复**: 在 codegen map/filter/reduce 中，添加对 `Expr::Lambda`（闭包）的支持。编译闭包为 closure struct，将其 env+fn_ptr 提取到 LLVM 值，然后调用。这与 G1a 闭包结构实现对齐。
+| **位置** | `codegen/expr.rs` — ✅ `compile_call_expr` 的 `map`/`filter`/`reduce` 分支添加 `Expr::Lambda` 支持 |
+| **实现** | 编译 `Expr::Lambda` → closure struct，提取 `fn_ptr`(field 0) + `env_ptr`(field 1)，通过 `build_indirect_call` 调用；支持 map/filter/reduce 三者 |
+| **验证** | 1337 tests pass |
 
 ---
 
@@ -243,11 +218,17 @@ filter_positives, filter_negatives, filter_evens, filter_odds
 | 属性 | 值 |
 |------|-----|
 | **位置** | `codegen/builtins/io.rs:9-47` — ✅ 重写 `compile_println`：单字符串参数用 `puts`（带换行），多参数用 `printf` 动态格式化 |
-| **验证** | 1339 tests pass |
+| **验证** | 1337 tests pass |
 
 ---
 
-### P1-7: `keys()`/`values()` 对运行时 Map 在 Codegen 中缺失
+### P1-7: `keys()`/`values()` 对运行时 Map 在 Codegen 中缺失 — ✅ 已修复
+
+| 属性 | 值 |
+|------|-----|
+| **位置** | `codegen/expr.rs` — ✅ `keys`/`values` 分支在 `fields.is_empty()` 时添加运行时 fallback，调用 `compile_builtin_call` → `compile_map_keys`/`compile_map_values` → C 运行时 |
+| **实现** | 编译实参为 `BasicValueEnum`，转发给 `compile_builtin_call` 处理运行时 map 句柄 |
+| **验证** | 1337 tests pass |
 
 | 属性 | 值 |
 |------|-----|
