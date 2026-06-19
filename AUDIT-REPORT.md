@@ -111,6 +111,7 @@ Source (.mimi)
 | 前轮 | **F2: C 崩溃恢复** — fork() 隔离 | `interp/ffi_call.rs` |
 | 前轮 | **F3: ensures result 绑定** — scope 注入 | `interp/ffi_call.rs` |
 | 前轮 | **B1-B5** — 深度审计补充修复 | 多个文件 |
+| 本轮 | **F6: 回调字符串泄漏** — FfiCallbackCtx arg_free_mask + trampoline libc::free | `interp/ffi_call.rs` |
 | 本轮 | **F6: free_callback 基础设施** — CallbackHandle::free_callback 字段 + register 参数 | `ffi/callback.rs`, `interp/ffi_call.rs` |
 | 本轮 | **G9: 跨文件模块 E2E** — module_key 相对路径 + merge_all 重名检测 | `loader.rs`, `main.rs`, `tests/loader.rs`, `tests/codegen_control.rs` |
 | 本轮 | **N2: spawn/await 结果类型** — pending_spawn_type 保存 LLVM 类型 | `codegen/expr.rs:1529-1618` |
@@ -131,6 +132,7 @@ Source (.mimi)
 | RC-5: SharedHandle Drop + id 字段 | P1 | `ffi/runtime.rs:105-238` | 自动清理 SHARED_TABLE |
 | E2: errno POSIX 全量映射 | P2 | `interp/ffi_call.rs:390-444` | 1-133 + `libc::strerror` fallback |
 | E3: StringTransfer NUL 处理 | P2 | `interp/ffi_call.rs:491-504` | strip NUL 防止 `CString::new` 失败 |
+| F6: 回调 C→Mimi 字符串释放 | P1 | `interp/ffi_call.rs:84-148,891-904` | FfiCallbackCtx arg_free_mask + trampoline libc::free |
 
 ---
 
@@ -195,9 +197,12 @@ Source (.mimi)
 
 ### F6: FFI 内存契约不完整 — C 返回值泄漏
 
-**严重度**: P0 → ⚠️ **部分修复**（StringOwned 已修复；回调 C→Mimi 字符串泄漏基础设施已添加，尚未完全接通）
+**严重度**: P0 → ✅ **已修复**（StringOwned 已修复；回调 C→Mimi 字符串泄漏本轮修复）
 
-**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景：`CallbackHandle` 新增 `free_callback: Option<fn(*mut c_void)>` 字段（`callback.rs:24-26`），`CallbackTable::register` 接受 `free_callback` 参数（`callback.rs:50-64`）。当前所有注册点传 `None`，C 侧 `malloc` 的字符串在回调返回后仍未自动释放——**基础设施就位，实际释放逻辑待接入**。
+**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景修复：
+- `FfiCallbackCtx.entries` 从 `HashMap<i64, (Value, bool)>` 扩展为 `HashMap<i64, (Value, bool, Vec<bool>)>`，新增 `arg_free_mask`
+- `value_to_ffi_callback` 在注册回调时根据 `param_types` 构建 `arg_free_mask`：`string`/`RawString`/`CBuffer` 类型参数标记为 `true`（C 分配，Mimi 需释放）
+- `mimi_callback_trampoline_fn` 在 Mimi closure 返回后，遍历 `arg_free_mask` 对标记参数调用 `libc::free` 释放 C 侧 `malloc`
 
 ---
 
@@ -324,7 +329,7 @@ Phase 2: 语言特性 FFI 就绪
 ├── G1b: FFI trampoline (P1) ── ✅ LLVM thunk + 全局变量
 ├── G5: Shared cleanup ──── handle 去重 + cleanup
 ├── G9: 跨文件模块 (P1) ── ✅ module_key + merge_all 重名检测 + E2E
-├── F6: 回调字符串释放 (P1) ── ⚠️ free_callback 基础设施就位，释放逻辑待接通
+├── F6: 回调字符串释放 (P1) ── ✅ arg_free_mask + trampoline libc::free
 └── comptime (P2) ──────── 独立路径
                  │
                  ▼
@@ -335,7 +340,7 @@ Phase 3: 工程化 + 绑定
 └── B6-B17: 深度审计 P1-P3 补充修复 ✅ 全部完成
 ```
 
-**当前状态**: Phase 1 全部完成，G1+G2+G9 已修复，**Shared RC 作用域清理本轮完成**，Phase 3 剩余 F9/N6。F5 列表/元组已通过 Json 支持；F6 StringOwned 已修复，回调 `free_callback` 基础设施就位。N1 ring-buffer 溢出已修复；N2 async await 类型截断已修复；G3/G6/G8 E2E 测试已通过；G4 `?` regression test 已添加；B15/B16 P3 修复完成。
+**当前状态**: Phase 1 全部完成，G1+G2+G9+F6 已修复，**Shared RC 作用域清理本轮完成**，Phase 3 剩余 F9/N6。F5 列表/元组已通过 Json 支持。N1 ring-buffer 溢出已修复；N2 async await 类型截断已修复；G3/G6/G8 E2E 测试已通过；G4 `?` regression test 已添加；B15/B16 P3 修复完成。**第十轮：F6 回调 C→Mimi 字符串泄漏修复完成**（`arg_free_mask` 约定 + `libc::free` trampoline）。
 
 ---
 
@@ -493,7 +498,7 @@ Phase 3: 工程化 + 绑定
 | **NEW-6 (JSON Unicode 转义)** | ✅ 已修复 | `runtime.c` JSON 解析器 `\u` 实现正确的 4-hex + UTF-8 编码 |
 | **NEW-7 (CBufferInner 死代码)** | ✅ 已修复 | `value.rs` CBufferInner 可见性限制为 pub(crate) |
 | **NEW-8 (errno 映射重复)** | ✅ 已修复 | `ffi_call.rs` 删除重复网络错误码块，修正 POSIX 错误码 80-96 |
-| **F6 基础设施 (CallbackHandle::free_callback)** | ⚠️ 基础设施就位 | `callback.rs:24-26` 新增 `free_callback` 字段；`register` 接受 free_callback；所有注册点传 `None`，C 字符串释放待接通 |
+| **F6 基础设施 (CallbackHandle::free_callback)** | ✅ 已修复 | `callback.rs:24-26` 新增 `free_callback` 字段；`register` 接受 free_callback；`interp/ffi_call.rs` FfiCallbackCtx arg_free_mask + trampoline libc::free 接通 |
 | **G9 (merge_all 重名检测)** | ✅ 已修复 | `loader.rs:56-68` `module_key` 相对路径；`loader.rs:209-241` `merge_all()` 返回 `Result<File, String>` |
 | **N2 (spawn/await 结果类型)** | ✅ 已修复 | `expr.rs:1529` `pending_spawn_type` 保存 spawn 表达式 LLVM 类型 |
 | **N1 (ring-buffer 溢出)** | ✅ 已修复 | `runtime.c:682-743` `size_t` head/tail + `pthread_cond_wait` 上限检查 |
@@ -634,6 +639,7 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | **F10/F11** — errno/UTF-8 补充 | ✅ 已完成（errno POSIX 全量 + NUL 处理） |
 | **第八轮** — network/time_env/value/json/ffi 深度审计 | ✅ 全部完成（NEW-1~8） |
 | **第九轮** — F6 free_callback 基础设施 + G9 merge_all + N1/N2/G3/G4/G6/G8/B15/B16 | ✅ 全部完成 |
+| **第十轮** — F6 回调 C→Mimi 字符串泄漏修复（arg_free_mask + libc::free trampoline） | ✅ 已完成 |
 
 ### 进行中 / 待开始
 
@@ -647,7 +653,7 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | G3/G4: break/continue + ? E2E | ✅ 已修复 | 0.5 天 | `block.rs` break/continue + `?` regression test |
 | G6/G8: Arena + async pthreads | ✅ 已修复 | 1 天 | E2E tests: arena scope + async spawn/await |
 | B15/B16: Span/Manifest | ✅ 已修复 | 0.5 天 | `span.rs` width 始终返回 end_col-start_col; `manifest.rs` EACCES 继续搜索 |
-| F6 剩余: 回调 C→Mimi 字符串释放接通 | ⏸️ 待开始 | 1 天 | `free_callback` 基础设施已就位 |
+| F6: 回调 C→Mimi 字符串泄漏 | ✅ 已修复 | arg_free_mask 约定 + trampoline libc::free（第 10 轮） |
 | **NEW-1~8 + Round 9** | **✅ 全部修复** | **—** | **—** |
 
 ### Phase 4 — 语言完善
@@ -684,7 +690,6 @@ G3/G4 (测试覆盖)、N1 (ring-buffer)、G6/G8 (arena/async)、comptime (C head
 
 | 项 | 位置 | 说明 |
 |----|------|------|
-| F6 剩余 | `interp/ffi_call.rs`（回调路径） | 基础设施已添加（`CallbackHandle::free_callback`），所有注册点传 `None`，C 侧 `malloc` 回调参数尚未自动释放 |
 | F9 | 新建文件 | Python binding generator（pybind11 stubs） |
 | N2 | `codegen/expr.rs:1529-1618` | ✅ 已修复：`pending_spawn_type` 保存 spawn 表达式结果类型，await 时按实际类型加载 |
 
