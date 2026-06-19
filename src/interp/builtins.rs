@@ -1234,4 +1234,95 @@ impl<'a> Interpreter<'a> {
             _ => Err("from_int: first arg must be an integer".into()),
         }
     }
+
+    // === I/O (stderr) ===
+    pub(crate) fn builtin_eprintln(&self, args: Vec<Value>) -> Result<Value, String> {
+        let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+        eprintln!("{}", parts.join(" "));
+        Ok(Value::Unit)
+    }
+
+    // === Process control ===
+    pub(crate) fn builtin_exit(&self, args: Vec<Value>) -> Result<Value, String> {
+        let code = if args.is_empty() {
+            0
+        } else {
+            match &args[0] {
+                Value::Int(n) => *n as i32,
+                _ => return Err("exit expects an integer exit code".into()),
+            }
+        };
+        std::process::exit(code)
+    }
+
+    // === Network builtins (stub implementations for interpreter) ===
+    pub(crate) fn builtin_socket(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 3 {
+            return Err("socket expects 3 arguments (domain, type, protocol)".into());
+        }
+        Err("socket: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_connect(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 3 {
+            return Err("connect expects 3 arguments (fd, host, port)".into());
+        }
+        Err("connect: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_bind(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("bind expects 2 arguments (fd, port)".into());
+        }
+        Err("bind: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_listen(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("listen expects 2 arguments (fd, backlog)".into());
+        }
+        Err("listen: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_accept(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 1 {
+            return Err("accept expects 1 argument (fd)".into());
+        }
+        Err("accept: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_send(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("send expects 2 arguments (fd, data)".into());
+        }
+        Err("send: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_recv(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("recv expects 2 arguments (fd, buf_size)".into());
+        }
+        Err("recv: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_close_fd(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 1 {
+            return Err("close_fd expects 1 argument (fd)".into());
+        }
+        Err("close_fd: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_http_get(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 1 {
+            return Err("http_get expects 1 argument (url)".into());
+        }
+        Err("http_get: network functions are not available in interpreter mode".into())
+    }
+
+    pub(crate) fn builtin_http_post(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("http_post expects 2 arguments (url, body)".into());
+        }
+        Err("http_post: network functions are not available in interpreter mode".into())
+    }
 }

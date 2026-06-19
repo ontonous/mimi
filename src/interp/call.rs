@@ -241,6 +241,18 @@ impl<'a> Interpreter<'a> {
             "parse" => self.builtin_parse(args),
             "str_to_c_str" => self.builtin_str_to_c_str(args),
             "c_str_to_string" => self.builtin_c_str_to_string(args),
+            "eprintln" => self.builtin_eprintln(args),
+            "exit" => self.builtin_exit(args),
+            "socket" => self.builtin_socket(args),
+            "connect" => self.builtin_connect(args),
+            "bind" => self.builtin_bind(args),
+            "listen" => self.builtin_listen(args),
+            "accept" => self.builtin_accept(args),
+            "send" => self.builtin_send(args),
+            "recv" => self.builtin_recv(args),
+            "close_fd" => self.builtin_close_fd(args),
+            "http_get" => self.builtin_http_get(args),
+            "http_post" => self.builtin_http_post(args),
             _ => {
                 // Check for pre-computed comptime function results
                 if let Some(result) = self.comptime_results.get(name) {
