@@ -107,8 +107,8 @@ fn json_get_string_exists() {
 
 #[test]
 fn json_get_string_missing_key() {
-    let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
-    assert_eq!(v, interp::Value::String("".into()));
+    let result = run_source_result(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
+    assert!(result.is_err(), "json_get_string with missing key should error");
 }
 
 #[test]
@@ -127,8 +127,8 @@ fn json_get_int_field() {
 
 #[test]
 fn json_get_int_missing_key() {
-    let v = run_source(r#"func main() -> i64 { json_get_int("{\"a\":1}", "nonexistent") }"#);
-    assert_eq!(v, interp::Value::Int(0));
+    let result = run_source_result(r#"func main() -> i64 { json_get_int("{\"a\":1}", "nonexistent") }"#);
+    assert!(result.is_err(), "json_get_int with missing key should error");
 }
 
 // json_get_element: extract from array
@@ -146,8 +146,8 @@ fn json_get_element_middle() {
 
 #[test]
 fn json_get_element_out_of_bounds() {
-    let v = run_source(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
-    assert_eq!(v, interp::Value::String("".into()));
+    let result = run_source_result(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
+    assert!(result.is_err(), "json_get_element out of bounds should error");
 }
 
 // json_get_element: nested objects in arrays
@@ -208,8 +208,8 @@ func main() -> str {
     json_get_string("{\"a\": true}", "missing")
 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String("".into()));
+    let result = run_source_result(src);
+    assert!(result.is_err(), "json_get_string with missing key should error");
 }
 
 #[test]
@@ -220,8 +220,8 @@ fn json_has_key_present() {
 
 #[test]
 fn json_has_key_missing() {
-    let v = run_source(r#"func main() -> bool { json_get_string("{\"x\":\"y\"}", "z") != "" }"#);
-    assert_eq!(v, interp::Value::Bool(false));
+    let result = run_source_result(r#"func main() -> bool { json_get_string("{\"x\":\"y\"}", "z") != "" }"#);
+    assert!(result.is_err(), "json_get_string with missing key should error");
 }
 
 // ===== is_valid_json =====

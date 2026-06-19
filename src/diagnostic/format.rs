@@ -168,21 +168,13 @@ pub fn format_parse_error(message: &str, span: &Span, filename: &str) -> String 
 
 /// Check if the terminal supports ANSI colors.
 pub fn colors_enabled() -> bool {
+    use std::io::IsTerminal;
     // Check NO_COLOR environment variable (https://no-color.org/)
     if std::env::var("NO_COLOR").is_ok() {
         return false;
     }
-    // Check if stdout is a terminal
-    atty_is_tty()
-}
-
-fn atty_is_tty() -> bool {
-    unsafe { libc_isatty(1) != 0 }
-}
-
-extern "C" {
-    #[link_name = "isatty"]
-    fn libc_isatty(fd: i32) -> i32;
+    // Check if stdout is a terminal (safe, no raw FFI)
+    std::io::stdout().is_terminal()
 }
 
 /// Strip ANSI escape codes from a string.

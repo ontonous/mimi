@@ -931,10 +931,13 @@ impl<'a> Interpreter<'a> {
                     Some(serde_json::Value::Bool(b)) => Ok(Value::String(if *b { "true".into() } else { "false".into() })),
                     Some(serde_json::Value::Number(n)) => Ok(Value::String(n.to_string())),
                     Some(serde_json::Value::Null) => Ok(Value::String("null".into())),
-                    Some(serde_json::Value::Array(_)) | Some(serde_json::Value::Object(_)) => {
-                        Ok(Value::String("".into()))
+                    Some(serde_json::Value::Array(_)) => {
+                        Err(format!("json_get_string: key '{}' is an array, not a string", key))
                     }
-                    None => Ok(Value::String("".into())),
+                    Some(serde_json::Value::Object(_)) => {
+                        Err(format!("json_get_string: key '{}' is an object, not a string", key))
+                    }
+                    None => Err(format!("json_get_string: key '{}' not found", key)),
                 }
             }
             _ => Err("json_get_string expects (string, string)".into()),
@@ -949,10 +952,11 @@ impl<'a> Interpreter<'a> {
                     .map_err(|e| format!("json_get_int parse error: {}", e))?;
                 match jv.get(key) {
                     Some(serde_json::Value::Number(n)) => {
-                        if let Some(i) = n.as_i64() { Ok(Value::Int(i)) }
-                        else { Ok(Value::Int(0)) }
+                        n.as_i64().map(Value::Int)
+                            .ok_or_else(|| format!("json_get_int: value for key '{}' is not an integer", key))
                     }
-                    _ => Ok(Value::Int(0)),
+                    Some(_) => Err(format!("json_get_int: key '{}' is not a number", key)),
+                    None => Err(format!("json_get_int: key '{}' not found", key)),
                 }
             }
             _ => Err("json_get_int expects (string, string)".into()),
@@ -965,9 +969,10 @@ impl<'a> Interpreter<'a> {
             (Value::String(json), Value::Int(idx)) => {
                 let jv: serde_json::Value = serde_json::from_str(json)
                     .map_err(|e| format!("json_get_element parse error: {}", e))?;
-                match jv.get(*idx as usize) {
+                let index = *idx as usize;
+                match jv.get(index) {
                     Some(val) => Ok(Value::String(val.to_string())),
-                    None => Ok(Value::String("".into())),
+                    None => Err(format!("json_get_element: index {} out of bounds", index)),
                 }
             }
             _ => Err("json_get_element expects (string, int)".into()),

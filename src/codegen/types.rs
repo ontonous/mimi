@@ -84,11 +84,11 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner_llvm], false)))
         }
         Type::Result(ok, err) => {
-            // Result<T, E> represented as {i1, T} — discriminant + ok payload (err ignored in codegen for now)
+            // Result<T, E> represented as {i1, T, E} — discriminant + ok payload + err payload
             let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
-            let _err_llvm = mimi_type_to_llvm(ctx, err);
+            let err_llvm = mimi_type_to_llvm(ctx, err).unwrap_or_else(|| BasicTypeEnum::IntType(ctx.i64_type()));
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
-            Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok_llvm], false)))
+            Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok_llvm, err_llvm], false)))
         }
         Type::Func(_args, _ret) => {
             // Closures represented as {fn_ptr: i8*, env_ptr: i8*}
