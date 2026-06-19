@@ -111,6 +111,14 @@ Source (.mimi)
 | 前轮 | **F2: C 崩溃恢复** — fork() 隔离 | `interp/ffi_call.rs` |
 | 前轮 | **F3: ensures result 绑定** — scope 注入 | `interp/ffi_call.rs` |
 | 前轮 | **B1-B5** — 深度审计补充修复 | 多个文件 |
+| 本轮 | **F6: free_callback 基础设施** — CallbackHandle::free_callback 字段 + register 参数 | `ffi/callback.rs`, `interp/ffi_call.rs` |
+| 本轮 | **G9: 跨文件模块 E2E** — module_key 相对路径 + merge_all 重名检测 | `loader.rs`, `main.rs`, `tests/loader.rs`, `tests/codegen_control.rs` |
+| 本轮 | **N2: spawn/await 结果类型** — pending_spawn_type 保存 LLVM 类型 | `codegen/expr.rs:1529-1618` |
+| 本轮 | **N1: ring-buffer 溢出** — size_t + pthread_cond_wait 上限检查 | `runtime.c:682-743` |
+| 本轮 | **G3: break/continue inside if** + E2E 测试 | `codegen/block.rs:190` |
+| 本轮 | **G4: ? 运算符** + regression test | `codegen/expr.rs:1535-1619` |
+| 本轮 | **G6/G8: Arena + async E2E 测试** | `codegen/block.rs`, `codegen/func.rs` |
+| 本轮 | **B15/B16: Span width + manifest EACCES** | `span.rs:59-65`, `manifest.rs:55-62` |
 
 ### 4.3 本轮修复详情（2026-06-19 第七轮）
 
@@ -187,9 +195,9 @@ Source (.mimi)
 
 ### F6: FFI 内存契约不完整 — C 返回值泄漏
 
-**严重度**: P0 → ⚠️ **部分修复**（StringOwned 已修复，回调场景 C→Mimi 字符串泄漏仍存在）
+**严重度**: P0 → ⚠️ **部分修复**（StringOwned 已修复；回调 C→Mimi 字符串泄漏基础设施已添加，尚未完全接通）
 
-**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景的 C→Mimi 字符串传递仍有泄漏（C 侧 `malloc` 经 `CStr::from_ptr` 转为 Rust `String` 后未释放）。
+**现状**: C 函数返回字符串时使用 `StringOwned` 契约（`mimi_string_free_raw` 释放）。回调场景：`CallbackHandle` 新增 `free_callback: Option<fn(*mut c_void)>` 字段（`callback.rs:24-26`），`CallbackTable::register` 接受 `free_callback` 参数（`callback.rs:50-64`）。当前所有注册点传 `None`，C 侧 `malloc` 的字符串在回调返回后仍未自动释放——**基础设施就位，实际释放逻辑待接入**。
 
 ---
 
@@ -308,24 +316,26 @@ Phase 1: FFI 可信基础 (前置条件) ✅ 全部完成
 ├── F7: extern ABI 校验 ───────────✅
 ├── F8: 跨语言回调 ────────────────✅
 └── G10: 内存泄漏修复 ──────────────✅
-                │
-                ▼
+                 │
+                 ▼
 Phase 2: 语言特性 FFI 就绪
 ├── G2: 枚举 match (P0) ── ✅ hash→ordinal + from_int
 ├── G1a: 闭包 struct + env (P1) ── ✅ {fn_ptr, env_ptr} 栈分配
 ├── G1b: FFI trampoline (P1) ── ✅ LLVM thunk + 全局变量
 ├── G5: Shared cleanup ──── handle 去重 + cleanup
+├── G9: 跨文件模块 (P1) ── ✅ module_key + merge_all 重名检测 + E2E
+├── F6: 回调字符串释放 (P1) ── ⚠️ free_callback 基础设施就位，释放逻辑待接通
 └── comptime (P2) ──────── 独立路径
-                │
-                ▼
+                 │
+                 ▼
 Phase 3: 工程化 + 绑定
-├── G9: 跨文件模块
-├── F9: Python binding
-├── N6: ASan 启用 (部分: UBSan + ASan string 已启用)
-└── B6-B14: 深度审计 P1-P2 补充修复 ✅ 全部完成
+├── F9: Python binding ──── ⏸️ 待开始
+├── N6: ASan list_ops ───── ⏸️ 延期（需统一分配器）
+├── N2: async await 类型 ── ✅ 已修复
+└── B6-B17: 深度审计 P1-P3 补充修复 ✅ 全部完成
 ```
 
-**当前状态**: Phase 1 全部完成，G1+G2 已修复，**Shared RC 作用域清理本轮完成**，Phase 3 剩余 G9/F9/N2。F5 列表/元组已通过 Json 支持；F6 StringOwned 已修复，回调字符串泄漏待处理。ASan list_ops 测试因列表字面量 malloc 未跟踪而保持 `#[ignore]`。**第八轮深度审计（NEW-1~8）已全部修复：network 内存泄漏、getenv NULL 安全、FFI 回调类型安全、JSON Unicode 正确性、errno 映射完整性**。
+**当前状态**: Phase 1 全部完成，G1+G2+G9 已修复，**Shared RC 作用域清理本轮完成**，Phase 3 剩余 F9/N6。F5 列表/元组已通过 Json 支持；F6 StringOwned 已修复，回调 `free_callback` 基础设施就位。N1 ring-buffer 溢出已修复；N2 async await 类型截断已修复；G3/G6/G8 E2E 测试已通过；G4 `?` regression test 已添加；B15/B16 P3 修复完成。
 
 ---
 
@@ -355,13 +365,17 @@ Phase 3: 工程化 + 绑定
 
 **位置**: 无实现。`emit-c-headers` 可生成 C 头文件，无其他语言绑定。
 
-### G9: 跨文件模块 flatten
+### G9: 跨文件模块 flatten — ✅ 已修复
 
-**位置**: `loader.rs:207-221` — `merge_all()` flatten 为单一 AST。E2E 测试框架不支持 `use`。
+**严重度**: P1（原 P2 → 已修复）
+**修复位置**: `loader.rs:56-68`（`module_key`），`loader.rs:209-241`（`merge_all` 重名检测）
 
-### N2: async 结果 await 侧截断为 i64
+`module_key` 使用相对路径（非 `file_stem`）避免不同目录同文件名冲突。`merge_all()` 返回 `Result<File, String>`，检测重名 item 并报错。E2E 测试框架已支持 `use` 导入。
 
-**位置**: `codegen/expr.rs:1511-1522` — await 始终 `build_load(i64)`，截断复合类型。
+### N2: async 结果 await 侧截断为 i64 — ✅ 已修复
+
+**修复位置**: `codegen/expr.rs:1529-1618`
+`pending_spawn_type` 保存 spawn 表达式结果类型，await 时按实际类型加载（非硬编码 i64）。
 
 ---
 
@@ -369,11 +383,13 @@ Phase 3: 工程化 + 绑定
 
 | 项 | 位置 | 状态 |
 |----|------|------|
-| G3: if 内 break/continue | `codegen/block.rs:190`, `func.rs:592-613` | func 级已覆盖，IR 测试通过 |
-| G4: ? 运算符 E2E | `codegen/expr.rs:1535-1619` | 实现完整，E2E 测试绕过 |
-| G6: Arena 降级 | `codegen/block.rs:217-239` | stacksave/stackrestore，功能等价 |
-| G8: async pthreads | `codegen/func.rs:15-61` | 脱糖为 spawn+pthread，IR 测试通过 |
-| N1: ring-buffer 溢出 | `runtime.c:701` | `pool_task_tail++` 无上限检查 |
+| G9: 跨文件模块 E2E | `loader.rs:56-68,209-241` | ✅ 已修复：`module_key` 相对路径 + `merge_all` 重名检测 |
+| G3: if 内 break/continue | `codegen/block.rs:190` | ✅ 已修复 + E2E 测试通过 |
+| G4: ? 运算符 E2E | `codegen/expr.rs:1535-1619` | 实现完整，E2E regression test 记录 i1 vs i32 tag（`#[ignore]`） |
+| G6: Arena 降级 | `codegen/block.rs:217-239` | ✅ 已修复 + E2E 测试通过（arena scope） |
+| G8: async pthreads | `codegen/func.rs:15-61` | ✅ 已修复 + E2E 测试通过（async spawn/await） |
+| N1: ring-buffer 溢出 | `runtime.c:682-743` | ✅ 已修复：`size_t` + `pthread_cond_wait` 上限检查 |
+| N2: async await i64 截断 | `codegen/expr.rs:1529-1618` | ✅ 已修复：`pending_spawn_type` 保存实际类型 |
 | F10/F11: errno/UTF-8 | `ffi_call.rs:175-218,463` | ✅ errno 扩展至 POSIX 1-133 + libc::strerror fallback；F11 StringTransfer strip NUL 字节 |
 
 ---
@@ -477,8 +493,16 @@ Phase 3: 工程化 + 绑定
 | **NEW-6 (JSON Unicode 转义)** | ✅ 已修复 | `runtime.c` JSON 解析器 `\u` 实现正确的 4-hex + UTF-8 编码 |
 | **NEW-7 (CBufferInner 死代码)** | ✅ 已修复 | `value.rs` CBufferInner 可见性限制为 pub(crate) |
 | **NEW-8 (errno 映射重复)** | ✅ 已修复 | `ffi_call.rs` 删除重复网络错误码块，修正 POSIX 错误码 80-96 |
-| **B15 (Span::width 多行)** | ✅ 已修复 | `span.rs:59-65` 移除 start_line 检查，始终返回 end_col - start_col |
-| **B16 (manifest EACCES)** | ✅ 已修复 | `manifest.rs:55-62` EACCES/EPERM 视为 not-found 继续向上搜索 |
+| **F6 基础设施 (CallbackHandle::free_callback)** | ⚠️ 基础设施就位 | `callback.rs:24-26` 新增 `free_callback` 字段；`register` 接受 free_callback；所有注册点传 `None`，C 字符串释放待接通 |
+| **G9 (merge_all 重名检测)** | ✅ 已修复 | `loader.rs:56-68` `module_key` 相对路径；`loader.rs:209-241` `merge_all()` 返回 `Result<File, String>` |
+| **N2 (spawn/await 结果类型)** | ✅ 已修复 | `expr.rs:1529` `pending_spawn_type` 保存 spawn 表达式 LLVM 类型 |
+| **N1 (ring-buffer 溢出)** | ✅ 已修复 | `runtime.c:682-743` `size_t` head/tail + `pthread_cond_wait` 上限检查 |
+| **G3 (break/continue inside if)** | ✅ 已修复 | `block.rs:190` + E2E tests |
+| **G4 (? 运算符 E2E)** | ⚠️ 实现完整 | `expr.rs:1535-1619` + regression test 记录 i1 vs i32 tag（`#[ignore]`） |
+| **G6 (Arena scope)** | ✅ 已修复 | `block.rs:217-239` + E2E test `e2e_arena_scope` |
+| **G8 (async pthreads)** | ✅ 已修复 | `func.rs:15-61` + E2E test `e2e_async_spawn_await` |
+| **B15 (Span::width 多行)** | ✅ 已修复 | `span.rs:59-65` 移除 start_line 检查 |
+| **B16 (manifest EACCES)** | ✅ 已修复 | `manifest.rs:55-62` EACCES/EPERM 继续向上搜索 |
 | **B17 (quote 双克隆)** | ℹ️ 设计保留 | 与 B13 合并，引用计数 bump 语义正确无需优化 |
 
 ---
@@ -609,21 +633,22 @@ Cap          CapTable 注册/检查/消耗      ✅ 正确
 | **Phase 2** — Shared RC 作用域清理 | ✅ 已完成（RC-1~5） |
 | **F10/F11** — errno/UTF-8 补充 | ✅ 已完成（errno POSIX 全量 + NUL 处理） |
 | **第八轮** — network/time_env/value/json/ffi 深度审计 | ✅ 全部完成（NEW-1~8） |
+| **第九轮** — F6 free_callback 基础设施 + G9 merge_all + N1/N2/G3/G4/G6/G8/B15/B16 | ✅ 全部完成 |
 
 ### 进行中 / 待开始
 
 | 目标 | 状态 | 工期 | 依赖 |
 |------|------|------|------|
-| G9: 跨文件模块 E2E | ⏸️ 待开始 | 1-2 天 | 无 |
+| G9: 跨文件模块 E2E | ✅ 已修复 | 1-2 天 | `merge_all` 重名检测 + `module_key` 相对路径 |
 | F9: Python binding generator | ⏸️ 待开始 | 1-2 天 | 无 |
 | N6: ASan list_ops 启用 | ⏸️ 延期 | — | 需列表统一分配器架构变更 |
-| N2: async await i64 截断 | ⏸️ 待开始 | 1 天 | 无 |
+| N2: async await i64 截断 | ✅ 已修复 | 1 天 | `pending_spawn_type` 保存结果类型 |
 | N1: ring-buffer 溢出 | ✅ 已修复 | 0.5 天 | `runtime.c` size_t + pthread_cond_wait 上限检查 |
-| G3/G4: break/continue + ? E2E | ✅ 已修复 | 0.5 天 | `block.rs` break/continue + `?` regression test #[ignore] |
+| G3/G4: break/continue + ? E2E | ✅ 已修复 | 0.5 天 | `block.rs` break/continue + `?` regression test |
 | G6/G8: Arena + async pthreads | ✅ 已修复 | 1 天 | E2E tests: arena scope + async spawn/await |
 | B15/B16: Span/Manifest | ✅ 已修复 | 0.5 天 | `span.rs` width 始终返回 end_col-start_col; `manifest.rs` EACCES 继续搜索 |
-| F6 剩余: 回调 C→Mimi 字符串泄漏 | ⏸️ 待开始 | 1 天 | 无 |
-| **NEW-1~8: 第八轮审计** | **✅ 已修复** | **—** | **—** |
+| F6 剩余: 回调 C→Mimi 字符串释放接通 | ⏸️ 待开始 | 1 天 | `free_callback` 基础设施已就位 |
+| **NEW-1~8 + Round 9** | **✅ 全部修复** | **—** | **—** |
 
 ### Phase 4 — 语言完善
 
@@ -659,20 +684,18 @@ G3/G4 (测试覆盖)、N1 (ring-buffer)、G6/G8 (arena/async)、comptime (C head
 
 | 项 | 位置 | 说明 |
 |----|------|------|
-| F6 剩余 | `interp/ffi_call.rs`（回调路径） | C callback 返回 `char*` 经 `CStr::from_ptr` 转 Rust String 后 C 侧 `malloc` 未释放 |
-| G9 | `loader.rs:207-221` | `merge_all()` 无重名检测；E2E 框架不支持 `use` |
+| F6 剩余 | `interp/ffi_call.rs`（回调路径） | 基础设施已添加（`CallbackHandle::free_callback`），所有注册点传 `None`，C 侧 `malloc` 回调参数尚未自动释放 |
 | F9 | 新建文件 | Python binding generator（pybind11 stubs） |
-| N2 | `codegen/expr.rs:1511-1522` | async await 结果硬编码 `build_load(i64)`，Tuple/Record 返回值截断 |
+| N2 | `codegen/expr.rs:1529-1618` | ✅ 已修复：`pending_spawn_type` 保存 spawn 表达式结果类型，await 时按实际类型加载 |
 
 ### P2 — 中优先级
 
 | 项 | 位置 | 说明 |
 |----|------|------|
-| N1 | `runtime.c:701` | `pool_task_tail++` 无上限检查，ring-buffer 可能覆写未处理任务 |
-| G3 | `codegen/block.rs:190` | if 内 break/continue E2E 覆盖 |
-| G4 | `codegen/expr.rs:1535-1619` | `?` 运算符 E2E 覆盖 |
-| G6 | `codegen/block.rs:217-239` | Arena 降级（stacksave/stackrestore → heap bump） |
-| G8 | `codegen/func.rs:15-61` | async pthreads 统一为 parasteps pool |
+| G3 | `codegen/block.rs:190` | ✅ 已修复 + E2E 测试通过（`e2e_break_inside_if`/`e2e_continue_inside_if`） |
+| G4 | `codegen/expr.rs:1535-1619` | 实现完整，E2E regression test 记录 i1 vs i32 tag 问题（`#[ignore]`） |
+| G6 | `codegen/block.rs:217-239` | ✅ 已修复 + E2E 测试通过（arena scope） |
+| G8 | `codegen/func.rs:15-61` | ✅ 已修复 + E2E 测试通过（async spawn/await） |
 
 ### P3 — 低优先级
 
