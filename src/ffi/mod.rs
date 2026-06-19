@@ -7,3 +7,4 @@ pub mod callback;
 
 pub use contract::{FfiArgContract, FfiContract, FfiRetContract};
 pub use runtime::{CAP_TABLE, SHARED_TABLE};
+pub use callback::CALLBACK_TABLE;

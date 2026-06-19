@@ -218,6 +218,7 @@ impl CHeaderGenerator {
                 format!("MimiHandle /* {} */", self.mimi_type_to_c_type(inner))
             }
             FfiArgContract::Json => "const char*".to_string(),
+            FfiArgContract::Callback { .. } => "void (*)(...)".to_string(),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }

@@ -1,6 +1,27 @@
 use super::*;
-use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract, CAP_TABLE, SHARED_TABLE};
+use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract, CAP_TABLE, SHARED_TABLE, CALLBACK_TABLE};
 use libffi::middle::{Cif, Type as FfiType, CodePtr, arg as ffi_arg};
+use libffi::low::{self as ffi_low};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+// F8: Thread-local context for synchronous callback invocation.
+// Set before each FFI call that involves callbacks, cleared after.
+// Maps callback_id -> (Mimi closure, ret_is_float).
+// SAFETY: The interpreter pointer is only valid during the synchronous
+// FFI call on the same thread. The closure value is cloned from the
+// interpreter's environment and lives for the duration of the call.
+thread_local! {
+    static FFI_CALLBACK_CTX: RefCell<FfiCallbackCtx> = RefCell::new(FfiCallbackCtx {
+        interp: std::ptr::null(),
+        entries: HashMap::new(),
+    });
+}
+
+struct FfiCallbackCtx {
+    interp: *const Interpreter<'static>,
+    entries: HashMap<i64, (Value, bool)>,
+}
 
 /// Holds borrow guards alive during a synchronous FFI C call.
 /// Stores the concrete guard type so it can be held across 'static boundaries.
@@ -9,6 +30,78 @@ enum FfiGuard {
     Write(std::sync::RwLockWriteGuard<'static, Value>),
     RefRead(std::cell::Ref<'static, Value>),
     RefWrite(std::cell::RefMut<'static, Value>),
+    /// A libffi closure (dynamic C-compatible function pointer) that must
+    /// remain alive for the duration of the C call, plus its boxed userdata.
+    CallbackClosure {
+        closure: Box<libffi::middle::Closure<'static>>,
+        userdata: Box<i64>,
+    },
+}
+
+// F8: C callback trampoline invoked by a libffi closure.
+// Reads the Mimi closure from the thread-local context by callback_id,
+// converts C args to Mimi Values, calls the closure, and writes the result.
+// SAFETY: Called from C (extern "C" context) during a synchronous FFI call.
+unsafe extern "C" fn mimi_callback_trampoline_fn(
+    cif: &ffi_low::ffi_cif,
+    result: &mut i64,
+    args: *const *const std::ffi::c_void,
+    userdata: &i64,
+) {
+    let callback_id = *userdata;
+    let entry = FFI_CALLBACK_CTX.with(|c| {
+        let ctx = c.borrow();
+        ctx.entries.get(&callback_id).cloned()
+    });
+    let Some((closure, ret_is_float)) = entry else {
+        *result = 0;
+        return;
+    };
+
+    // Extract C arguments from raw void pointers.
+    let nargs = cif.nargs as usize;
+    let mut mimi_args: Vec<Value> = Vec::with_capacity(nargs);
+    for i in 0..nargs {
+        let arg_ptr = *args.add(i);
+        if arg_ptr.is_null() {
+            mimi_args.push(Value::Int(0));
+            continue;
+        }
+        // For V1, treat all args as i64. Float is handled via to_bits.
+        let val = *(arg_ptr as *const i64);
+        mimi_args.push(Value::Int(val));
+    }
+
+    // Call the Mimi closure via interpreter
+    let interp_ptr = FFI_CALLBACK_CTX.with(|c| c.borrow().interp);
+    if interp_ptr.is_null() {
+        *result = 0;
+        return;
+    }
+    let interp = &mut *(interp_ptr as *mut Interpreter<'static>);
+    let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
+    match closure_result {
+        Ok(val) => {
+            if ret_is_float {
+                if let Value::Float(f) = val {
+                    *result = f.to_bits() as i64;
+                } else if let Value::Int(n) = val {
+                    *result = (n as f64).to_bits() as i64;
+                }
+            } else {
+                *result = match val {
+                    Value::Int(n) => n,
+                    Value::Bool(b) => b as i64,
+                    Value::Float(f) => f.to_bits() as i64,
+                    Value::Unit => 0,
+                    _ => 0,
+                };
+            }
+        }
+        Err(_) => {
+            *result = i64::MIN;
+        }
+    }
 }
 
 /// Extend a RwLockReadGuard's lifetime to 'static.
@@ -82,6 +175,11 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // F7: ABI runtime verification — validate contract completeness and function pointer
+        if self.verify_ffi {
+            self.verify_extern_abi(extern_func, contract)?;
+        }
+
         let mut c_args: Vec<i64> = Vec::with_capacity(args.len());
         let mut string_guards: Vec<std::ffi::CString> = Vec::new();
         let mut shared_handles: Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>> = Vec::new();
@@ -129,6 +227,7 @@ impl<'a> Interpreter<'a> {
             for arg_contract in &contract.args {
                 match arg_contract {
                     FfiArgContract::Float => cif_arg_types.push(FfiType::f64()),
+                    FfiArgContract::Callback { .. } => cif_arg_types.push(FfiType::pointer()),
                     _ => cif_arg_types.push(FfiType::i64()),
                 }
             }
@@ -177,12 +276,39 @@ impl<'a> Interpreter<'a> {
             let fn_ptr = *raw_fn;
             let code_ptr = CodePtr(fn_ptr);
 
+            // F8: Set up thread-local callback context if any callback contracts exist
+            let has_callbacks = contract.args.iter().any(|a| matches!(a, FfiArgContract::Callback { .. }));
+            if has_callbacks {
+                // SAFETY: self is a mutable reference that lives for the duration of
+                // the synchronous C call. The C call may invoke callbacks on the same
+                // thread, which will read this context.
+                let interp_ptr: *const Interpreter<'_> = self;
+                // SAFETY: The interpreter outlives the synchronous C call.
+                // The C call runs on the same thread and callbacks only execute
+                // during the C function's execution, which is within the scope
+                // of `self`.
+                let static_ptr = interp_ptr as *const Interpreter<'static>;
+                FFI_CALLBACK_CTX.with(|c| {
+                    c.borrow_mut().interp = static_ptr;
+                });
+            }
+
             // Call via libffi with correct ABI and crash protection
             let call_result = if self.verify_ffi {
                 self.call_ffi_with_fork_isolation(&cif, code_ptr, &ffi_args, &contract.ret)
             } else {
                 self.call_ffi_direct(&cif, code_ptr, &ffi_args, &contract.ret)
             };
+
+            // F8: Clear thread-local callback context
+            if has_callbacks {
+                FFI_CALLBACK_CTX.with(|c| {
+                    let mut ctx = c.borrow_mut();
+                    ctx.interp = std::ptr::null();
+                    ctx.entries.clear();
+                });
+            }
+
             call_result?
         };
 
@@ -377,6 +503,9 @@ impl<'a> Interpreter<'a> {
             FfiArgContract::Unsupported(ty) => {
                 Err(self.unsupported_ffi_arg_error(arg, ty))
             }
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.value_to_ffi_callback(arg, param_types, ret_type, string_guards, shared_handles, ffi_guards)
+            }
             FfiArgContract::RawPtr(_) => match arg {
                 // *T: immutable raw pointer
                 Value::Shared(arc) => {
@@ -506,6 +635,121 @@ impl<'a> Interpreter<'a> {
                     other
                 )),
             },
+        }
+    }
+
+    /// F8: Apply a Mimi closure value to arguments from within a C callback context.
+    /// Mirrors `apply_closure` in call.rs but designed for &self usage from a
+    /// C trampoline via raw pointer.
+    pub(crate) fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
+        match closure {
+            Value::Closure { params, body, captured, .. } => {
+                if params.len() != args.len() {
+                    return Err(format!(
+                        "closure expects {} arguments, got {}",
+                        params.len(),
+                        args.len()
+                    ));
+                }
+                self.push_scope();
+                for (n, v) in captured {
+                    self.bind(n, v.clone());
+                }
+                for (param, arg) in params.iter().zip(args) {
+                    self.bind(&param.name, arg);
+                }
+                let result = self.eval_block(body)?;
+                self.pop_scope();
+                if let Some(val) = self.early_return.take() {
+                    return Ok(val);
+                }
+                Ok(result.unwrap_or(Value::Unit))
+            }
+            _ => Err(format!("expected a closure, found {}", closure)),
+        }
+    }
+
+    /// F8: Convert a Mimi closure value to a C-compatible callback function pointer.
+    /// Registers the closure with the global callback table and creates a
+    /// dynamically generated trampoline via libffi.
+    fn value_to_ffi_callback(
+        &self,
+        arg: &Value,
+        param_types: &[Type],
+        ret_type: &Type,
+        _string_guards: &mut Vec<std::ffi::CString>,
+        _shared_handles: &mut Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>>,
+        ffi_guards: &mut Vec<FfiGuard>,
+    ) -> Result<i64, String> {
+        match arg {
+            Value::Closure { .. } => {
+                let closure = arg.clone();
+                let ret_is_float = matches!(ret_type, Type::Name(name, _) if name == "f64");
+
+                // Build CIF matching the callback signature
+                let mut cif_arg_types: Vec<FfiType> = Vec::with_capacity(param_types.len());
+                for pt in param_types {
+                    match pt {
+                        Type::Name(name, _) if name == "f64" => {
+                            cif_arg_types.push(FfiType::f64());
+                        }
+                        _ => {
+                            cif_arg_types.push(FfiType::i64());
+                        }
+                    }
+                }
+                let cif_ret = if ret_is_float {
+                    FfiType::f64()
+                } else {
+                    FfiType::i64()
+                };
+                let cif = Cif::new(cif_arg_types.into_iter(), cif_ret);
+
+                // Register with CALLBACK_TABLE so the trampoline can find it
+                // Use a dummy invoker (the real invocation is via thread-local ctx)
+                let cb_id = CALLBACK_TABLE.register(
+                    None,
+                    Some(Box::new(|_id: i64, _args: &[i64]| -> i64 { 0 })),
+                );
+
+                // Store the closure in the thread-local callback context
+                FFI_CALLBACK_CTX.with(|c| {
+                    let mut ctx = c.borrow_mut();
+                    ctx.entries.insert(cb_id, (closure, ret_is_float));
+                });
+
+                // Create a libffi Closure that generates a C-compatible function pointer
+                // The userdata (callback_id) must outlive the closure.
+                // We box the id and store it alongside the closure in FfiGuard.
+                let userdata = Box::new(cb_id);
+                let cb_ref = &*userdata as &i64 as *const i64;
+                // SAFETY: userdata box is leaked and kept alive in FfiGuard
+                let cb_ref_static: &'static i64 = unsafe { &*cb_ref };
+                let ffi_closure = libffi::middle::Closure::new(
+                    cif,
+                    mimi_callback_trampoline_fn as ffi_low::Callback<i64, i64>,
+                    cb_ref_static,
+                );
+
+                let code_ptr = ffi_closure.code_ptr();
+                let fn_ptr = code_ptr as *const unsafe extern "C" fn() as *const () as i64;
+
+                // Keep the closure and its userdata alive for the duration of the C call
+                ffi_guards.push(FfiGuard::CallbackClosure {
+                    closure: Box::new(ffi_closure),
+                    userdata,
+                });
+
+                Ok(fn_ptr)
+            }
+            Value::Int(n) => {
+                // Already an opaque function pointer (passed through from a previous call)
+                Ok(*n)
+            }
+            other => Err(format!(
+                "FFI safety: expected a closure or function pointer for callback parameter, found {}",
+                other
+            )),
         }
     }
 
@@ -692,6 +936,36 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// F7: Validate extern ABI — checks callback contract validity and
+    /// argument count.  Unsupported-type errors are handled separately by
+    /// `unsupported_ffi_arg_error` with richer context.
+    fn verify_extern_abi(
+        &self,
+        extern_func: &ExternFunc,
+        contract: &FfiContract,
+    ) -> Result<(), String> {
+        for (i, arg_contract) in contract.args.iter().enumerate() {
+            if let FfiArgContract::Callback { param_types, .. } = arg_contract {
+                if param_types.is_empty() {
+                    return Err(format!(
+                        "FFI safety: callback parameter {} of '{}' has zero parameters",
+                        i + 1,
+                        extern_func.name
+                    ));
+                }
+            }
+        }
+        if contract.args.len() != extern_func.params.len() {
+            return Err(format!(
+                "FFI safety: contract has {} args but extern '{}' declares {} params",
+                contract.args.len(),
+                extern_func.name,
+                extern_func.params.len()
+            ));
+        }
+        Ok(())
+    }
+
     /// Call a C function without crash protection via libffi.
     fn call_ffi_direct(
         &self,
@@ -841,5 +1115,45 @@ impl<'a> Interpreter<'a> {
             }
             _ => false,
         }
+    }
+}
+
+/// Debug formatting for FFI argument contract
+fn ffi_arg_contract_to_debug(c: &FfiArgContract) -> String {
+    match c {
+        FfiArgContract::Int => "i64".to_string(),
+        FfiArgContract::Float => "f64".to_string(),
+        FfiArgContract::StringBorrow => "const char* (borrowed)".to_string(),
+        FfiArgContract::StringTransfer => "char* (transferred)".to_string(),
+        FfiArgContract::Cap(m) => format!("cap({})", if *m == CapMode::Move { "move" } else { "borrow" }),
+        FfiArgContract::RawPtr(t) => format!("*{:?}", t),
+        FfiArgContract::RawPtrMut(t) => format!("*mut {:?}", t),
+        FfiArgContract::CShared(t) => format!("c_shared {:?}", t),
+        FfiArgContract::CBorrow(t) => format!("c_borrow {:?}", t),
+        FfiArgContract::CBorrowMut(t) => format!("c_borrow_mut {:?}", t),
+        FfiArgContract::Json => "json (char*)".to_string(),
+        FfiArgContract::Callback { param_types, ret_type } => {
+            let pts: Vec<String> = param_types.iter().map(|t| format!("{:?}", t)).collect();
+            format!("fn({}) -> {:?}", pts.join(", "), ret_type)
+        }
+        FfiArgContract::Unsupported(t) => format!("unsupported({})", t),
+    }
+}
+
+/// Debug formatting for FFI return contract
+fn ffi_ret_contract_to_debug(c: &FfiRetContract) -> String {
+    match c {
+        FfiRetContract::Unit => "void".to_string(),
+        FfiRetContract::Int => "i64".to_string(),
+        FfiRetContract::Float => "f64".to_string(),
+        FfiRetContract::String => "char* (borrowed)".to_string(),
+        FfiRetContract::StringOwned => "char* (owned)".to_string(),
+        FfiRetContract::Json => "json (char*)".to_string(),
+        FfiRetContract::RawPtr(t) => format!("*{:?}", t),
+        FfiRetContract::RawPtrMut(t) => format!("*mut {:?}", t),
+        FfiRetContract::CShared(t) => format!("c_shared {:?}", t),
+        FfiRetContract::CBorrow(t) => format!("c_borrow {:?}", t),
+        FfiRetContract::CBorrowMut(t) => format!("c_borrow_mut {:?}", t),
+        FfiRetContract::Unsupported(t) => format!("unsupported({})", t),
     }
 }

@@ -163,6 +163,10 @@ mod ffi_verification_tests {
         
         let contract = FfiContract::from_extern(&func);
         assert_eq!(contract.args.len(), 1);
-        assert!(matches!(contract.args[0], FfiArgContract::RawPtr(_)));
+        assert!(
+            matches!(contract.args[0], FfiArgContract::Callback { .. }),
+            "expected Callback contract for ExternFunc param, got {:?}",
+            contract.args[0]
+        );
     }
 }

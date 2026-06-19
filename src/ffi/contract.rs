@@ -55,6 +55,15 @@ pub enum FfiArgContract {
     /// JSON-serialized value: List, Record, Tuple etc. passed as a JSON string.
     /// The C side receives a `const char*` and must parse it.
     Json,
+    /// A C-compatible function pointer (callback).
+    /// The Mimi closure is registered with the CallbackTable and a dynamically
+    /// generated trampoline pointer is passed to C.
+    Callback {
+        /// Types of the callback's parameters.
+        param_types: Vec<Type>,
+        /// Return type of the callback.
+        ret_type: Box<Type>,
+    },
     /// A type that the type checker already rejects but which may still appear
     /// in runtime-only paths (e.g. tests that bypass `core::check`).  The
     /// wrapper reports this as an FFI safety error at call time.
@@ -181,9 +190,12 @@ impl FfiArgContract {
             Type::CBorrow(inner) => FfiArgContract::CBorrow(inner.clone()),
             Type::CBorrowMut(inner) => FfiArgContract::CBorrowMut(inner.clone()),
             Type::RawString => FfiArgContract::StringTransfer,
-            Type::ExternFunc(_, _) => {
-                // Function pointer - pass as opaque handle
-                FfiArgContract::RawPtr(Box::new(Type::Name("unit".to_string(), vec![])))
+            Type::ExternFunc(param_types, ret_type) => {
+                // Function pointer - register as callback with dynamic trampoline
+                FfiArgContract::Callback {
+                    param_types: param_types.clone(),
+                    ret_type: ret_type.clone(),
+                }
             }
             Type::CBuffer(inner) => {
                 // CBuffer is a managed pointer - pass as opaque handle
