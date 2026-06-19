@@ -125,14 +125,14 @@ pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename
                     } else {
                         line_text.len().saturating_sub(start_col)
                     };
+                    let indicator = "~".repeat(indicator_width.max(1));
                     out.push_str(&format!(
-                        " {}{: >width$}{} | {}{:^<width2$} {}{}\n",
+                        " {}{: >width$}{} | {}{}{} {}{}\n",
                         colors::DIM, "", colors::RESET,
                         " ".repeat(start_col),
-                        colors::CYAN, "",
+                        colors::CYAN, indicator,
                         note.message, colors::RESET,
                         width = gutter_width,
-                        width2 = indicator_width,
                     ));
                 }
             }
