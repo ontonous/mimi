@@ -236,6 +236,7 @@ impl<'a> Interpreter<'a> {
             "map_from_list" => self.builtin_map_from_list(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
+            "from_int" => self.builtin_from_int(args),
             "lexer" => self.builtin_lexer(args),
             "parse" => self.builtin_parse(args),
             "str_to_c_str" => self.builtin_str_to_c_str(args),

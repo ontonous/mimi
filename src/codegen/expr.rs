@@ -35,6 +35,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::TypeInfo(ty) => self.compile_typeinfo_expr(ty, vars),
             Expr::Old(inner) => self.compile_old_expr(inner, vars),
             Expr::Tuple(elems) => self.compile_tuple_expr(elems, vars),
+            Expr::TupleIndex(tuple_expr, index) => self.compile_tuple_index_expr(tuple_expr, *index, vars),
             Expr::If { cond, then_, else_ } => self.compile_if_expr(cond, then_, else_, vars),
             Expr::Range { start, end } => self.compile_range_expr(start, end, vars),
             Expr::SliceExpr { target, start, end } => self.compile_slice_expr(target, start, end, vars),
@@ -48,7 +49,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn compile_literal_expr(
+    pub(super) fn compile_literal_expr(
         &mut self,
         lit: &Lit,
         vars: &HashMap<String, VarEntry<'ctx>>,
@@ -1781,6 +1782,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let field_tys: Vec<BasicTypeEnum<'ctx>> = field_vals.iter().map(|v| v.get_type()).collect();
         let struct_ty = self.context.struct_type(&field_tys, false);
+        self.tuple_type_stack.push(struct_ty);
         let alloca = self.builder.build_alloca(struct_ty, "tuple")
             .map_err(|e| format!("alloca error: {}", e))?;
         for (i, val) in field_vals.iter().enumerate() {
@@ -1791,6 +1793,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         Ok(alloca.into())
     }
+
+    fn compile_tuple_index_expr(
+        &mut self,
+        tuple_expr: &Expr,
+        index: usize,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let tuple_val = self.compile_expr(tuple_expr, vars)?;
+        match tuple_val {
+            BasicValueEnum::PointerValue(pv) => {
+                let struct_ty = self.tuple_type_stack.last()
+                    .ok_or_else(|| "tuple type stack empty".to_string())?;
+                let field_gep = self.builder.build_struct_gep(*struct_ty, pv, index as u32, &format!("tuple_field_{}", index))
+                    .map_err(|e| format!("gep error: {}", e))?;
+                let field_types = struct_ty.get_field_types();
+                let field_ty = field_types.get(index)
+                    .ok_or_else(|| format!("tuple field {} out of bounds", index))?;
+                let field_ty = *field_ty;
+                self.builder.build_load(field_ty, field_gep, &format!("tuple_{}", index))
+                    .map_err(|e| format!("load error: {}", e))
+            }
+            BasicValueEnum::StructValue(sv) => {
+                self.builder.build_extract_value(sv, index as u32, &format!("tuple_{}", index))
+                    .map_err(|e| format!("extract tuple field {} error: {}", index, e))
+            }
+            _ => Err(format!("tuple index requires a tuple value, got {:?}", tuple_val)),
+        }
+    }
+
     fn compile_if_expr(
         &mut self,
         cond: &Expr,
@@ -2055,11 +2086,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Let { pat, init: Some(init), .. } => {
                     let val = self.compile_expr(init, &lambda_vars)?;
-                    let name = match pat { Pattern::Variable(n) => n.clone(), _ => continue };
-                    let llvm_ty = val.get_type();
-                    let alloca = self.builder.build_alloca(llvm_ty, &name).map_err(|e| format!("alloca error: {}", e))?;
-                    self.builder.build_store(alloca, val).map_err(|e| format!("store error: {}", e))?;
-                    lambda_vars.insert(name, (alloca, llvm_ty));
+                    self.compile_pattern_bind(pat, val, &mut lambda_vars)
+                        .map_err(|e| format!("pattern bind error: {}", e))?;
                 }
                 _ => {}
             }
@@ -2837,6 +2865,40 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Determine if an expression evaluates to a string type (for len() dispatch).
+    fn expr_is_string(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => true,
+            Expr::Ident(name) => {
+                self.var_type_names.get(name).map(|t| t == "string").unwrap_or(false)
+            }
+            Expr::Call(callee, _) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    matches!(name.as_str(),
+                        "to_string" | "int_to_string" | "float_to_string"
+                        | "input" | "read_file"
+                        | "str_char_at" | "str_substring" | "str_trim"
+                        | "str_to_upper" | "str_to_lower" | "str_repeat"
+                        | "str_replace" | "str_join"
+                        | "type_name" | "from_json" | "c_str_to_string"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Field(_, method) => {
+                matches!(method.as_str(),
+                    "to_string" | "trim" | "to_upper" | "to_lower"
+                    | "repeat" | "replace" | "char_at" | "substring"
+                )
+            }
+            Expr::Turbofish(name, _, _) => {
+                matches!(name.as_str(), "to_string")
+            }
+            _ => false,
+        }
+    }
+
     fn compile_call(
         &mut self,
         name: &str,
@@ -2896,6 +2958,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }).collect();
 
         // Dispatch builtins
+        if name == "len" && args.len() == 1 {
+            self.pending_len_is_string = self.expr_is_string(&args[0]);
+        }
         if super::builtins::is_builtin(name) {
             return self.compile_builtin_call(name, &metadata_args).map_err(|e| e.to_string());
         }

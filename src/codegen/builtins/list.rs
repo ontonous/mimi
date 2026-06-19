@@ -120,16 +120,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 match args[0] {
                     BasicMetadataValueEnum::PointerValue(pv) => {
-                        // Could be a string or list. Assume list struct { len, data* }
-                        let list_ty = self.context.struct_type(&[
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
-                        ], false);
-                        let len_gep = self.builder.build_struct_gep(list_ty, pv, 0, "list.len")
-                            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                        let len = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), len_gep, "len")
-                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                        Ok(len)
+                        if self.pending_len_is_string {
+                            // String: use strlen
+                            let strlen_fn = self.module.get_function("strlen")
+                                .ok_or_else(|| "strlen not declared".to_string())?;
+                            let len = self.builder.build_call(strlen_fn, &[
+                                BasicMetadataValueEnum::PointerValue(pv),
+                            ], "strlen")
+                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                                .try_as_basic_value().left()
+                                .ok_or("strlen returned void")?;
+                            Ok(len)
+                        } else {
+                            // List struct { i64 len, i8* data }: read first field
+                            let list_ty = self.context.struct_type(&[
+                                BasicTypeEnum::IntType(self.context.i64_type()),
+                                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                            ], false);
+                            let len_gep = self.builder.build_struct_gep(list_ty, pv, 0, "list.len")
+                                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                            let len = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), len_gep, "len")
+                                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                            Ok(len)
+                        }
                     }
                     _ => Err(CompileError::TypeMismatch("len expects a list or string pointer".to_string())),
                 }

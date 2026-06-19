@@ -1224,4 +1224,14 @@ impl<'a> Interpreter<'a> {
             _ => Err("parse expects a string source".into()),
         }
     }
+
+    pub(crate) fn builtin_from_int(&self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() < 1 {
+            return Err("from_int expects at least 1 argument (int)".into());
+        }
+        match &args[0] {
+            Value::Int(n) => Ok(Value::Int(*n)),
+            _ => Err("from_int: first arg must be an integer".into()),
+        }
+    }
 }

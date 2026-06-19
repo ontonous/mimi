@@ -59,14 +59,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
-                    let name = match pat {
-                        Pattern::Variable(n) => n.clone(),
-                        _ => continue,
-                    };
-                    // dyn Trait let-binding: build fat pointer from concrete value
+                    // dyn Trait let-binding: build fat pointer from concrete value (requires Variable pattern)
                     if let Some(Type::DynTrait(trait_names)) = &ty {
+                        let name = match pat {
+                            Pattern::Variable(n) => n.clone(),
+                            _ => return Err(CompileError::LlvmError(
+                                "dyn Trait binding requires a simple variable pattern".to_string()
+                            )),
+                        };
                         let concrete_val = self.compile_expr(init, vars)?;
-                        // Determine concrete type name
                         let concrete_type = match init {
                             Expr::Record { ty: Some(tn), .. } => tn.clone(),
                             Expr::Ident(var_name) => self.var_type_names.get(var_name).cloned().unwrap_or_default(),
@@ -82,7 +83,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ));
                         }
                         let trait_name = &trait_names[0];
-                        // Allocate concrete value on the stack
                         let concrete_ty = self.type_llvm.get(&concrete_type)
                             .cloned()
                             .unwrap_or_else(|| concrete_val.get_type());
@@ -94,7 +94,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let data_ptr = self.builder.build_pointer_cast(
                             data_alloca, i8_ptr, &format!("{}_data_i8", name)
                         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
-                        // Get vtable global
                         let vtable_key = format!("{}__{}", concrete_type, trait_name);
                         let vtable_gv = self.vtable_globals.get(&vtable_key)
                             .ok_or_else(|| CompileError::LlvmError(
@@ -104,7 +103,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             vtable_gv.as_pointer_value(), i8_ptr,
                             &format!("{}_vtable_i8", name)
                         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
-                        // Build fat pointer struct { ptr, ptr }
                         let fat_ty = BasicTypeEnum::StructType(
                             self.context.struct_type(&[
                                 BasicTypeEnum::PointerType(i8_ptr),
@@ -126,38 +124,57 @@ impl<'ctx> CodeGenerator<'ctx> {
                         vars.insert(name, (fat_alloca, fat_ty));
                         continue;
                     }
+                    // Non-dyn Trait: compile init and bind via recursive pattern matching
                     let mut val = self.compile_expr(init, vars)?;
-                    let llvm_ty = if let Some(decl_ty) = ty {
+                    if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
-                        target
-                    } else {
-                        val.get_type()
-                    };
-                    let alloca = self.builder.build_alloca(llvm_ty, &name)
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    if let Expr::Record { ty: Some(tn), .. } = init {
-                        self.var_type_names.insert(name.clone(), tn.clone());
-                    } else if let Expr::Call(callee, _) = init {
-                        if let Expr::Field(obj, method_name) = callee.as_ref() {
-                            if method_name == "spawn" {
-                                let obj_type = self.infer_object_type(obj, vars);
-                                if !obj_type.is_empty() {
-                                    self.var_type_names.insert(name.clone(), obj_type);
+                    }
+                    // For simple Variable patterns, track type info
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Record { ty: Some(tn), .. } = init {
+                            self.var_type_names.insert(name.clone(), tn.clone());
+                        } else if let Expr::Call(callee, _) = init {
+                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if method_name == "spawn" {
+                                    let obj_type = self.infer_object_type(obj, vars);
+                                    if !obj_type.is_empty() {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
                                 }
                             }
                         }
                     }
-                    vars.insert(name, (alloca, llvm_ty));
+                    self.compile_pattern_bind(pat, val, vars)?;
                 }
-                Stmt::Assign { target: Expr::Ident(name), value } => {
-                    let val = self.compile_expr(value, vars)?;
-                    if let Some(&(alloca, ty)) = vars.get(name) {
-                        self.assign_to_var(name, val, alloca, ty)?;
+                Stmt::Let { pat, init: None, ty, .. } => {
+                    // let x; or let (a, b); — needs type annotation
+                    if let Pattern::Variable(name) = pat {
+                        let llvm_ty = match ty {
+                            Some(decl_ty) => types::mimi_type_to_llvm(self.context, decl_ty)
+                                .ok_or_else(|| CompileError::LlvmError(
+                                    format!("unknown type for 'let {};'", name)
+                                ))?,
+                            None => return Err(CompileError::LlvmError(
+                                format!("'let {};' requires an explicit type annotation", name)
+                            )),
+                        };
+                        let alloca = self.builder.build_alloca(llvm_ty, name)
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        if let BasicTypeEnum::IntType(ty) = llvm_ty {
+                            self.builder.build_store(alloca, ty.const_int(0, false))
+                                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                        }
+                        vars.insert(name.clone(), (alloca, llvm_ty));
+                    } else {
+                        return Err(CompileError::LlvmError(
+                            format!("'let' with no initializer requires a simple variable pattern").to_string()
+                        ));
                     }
+                }
+                Stmt::Assign { target, value } => {
+                    self.compile_assign_stmt(target, value, vars)?;
                 }
                 Stmt::If { cond, then_, else_ } => {
                     let cond_val = self.compile_expr(cond, vars)?;
@@ -305,6 +322,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Block(block) => {
                     self.compile_block(block, vars)?;
                 }
+                Stmt::While { cond, body } => {
+                    self.compile_while_stmt(cond, body, vars)?;
+                }
+                Stmt::For { var, iterable, body } => {
+                    self.compile_for_stmt(var, iterable, body, vars)?;
+                }
                 _ => {}
             }
         }
@@ -371,16 +394,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Let { pat, init: Some(init), .. } => {
                     let val = self.compile_expr(init, vars)?;
-                    let name = match pat {
-                        Pattern::Variable(n) => n.clone(),
-                        _ => continue,
-                    };
-                    let llvm_ty = val.get_type();
-                    let alloca = self.builder.build_alloca(llvm_ty, &name)
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    vars.insert(name, (alloca, llvm_ty));
+                    self.compile_pattern_bind(pat, val, vars)?;
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, vars)?;
@@ -388,6 +402,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.assign_to_var(name, val, alloca, ty)?;
                         last_val = val;
                     }
+                }
+                Stmt::Assign { target: Expr::Field(obj, field_name), value } => {
+                    let val = self.compile_expr(value, vars)?;
+                    self.compile_field_assign(obj, field_name, val, vars)?;
+                    last_val = val;
+                }
+                Stmt::Assign { target: Expr::Index(obj, idx), value } => {
+                    let val = self.compile_expr(value, vars)?;
+                    self.compile_index_assign(obj, idx, val, vars)?;
+                    last_val = val;
+                }
+                Stmt::Assign { target: Expr::Unary(crate::ast::UnOp::Deref, inner), value } => {
+                    let val = self.compile_expr(value, vars)?;
+                    self.compile_deref_assign(inner, val, vars)?;
+                    last_val = val;
                 }
                 Stmt::If { cond, then_, else_ } => {
                     let cond_val = self.compile_expr(cond, vars)?;
@@ -478,6 +507,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         return Err(CompileError::ContinueOutsideLoop);
                     }
+                }
+                Stmt::While { cond, body } => {
+                    self.compile_while_stmt(cond, body, vars)?;
+                }
+                Stmt::For { var, iterable, body } => {
+                    self.compile_for_stmt(var, iterable, body, vars)?;
                 }
                 _ => {}
             }

@@ -13,21 +13,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.is_empty() {
                     return Err(CompileError::WrongArgCount("println expects at least 1 argument".to_string()));
                 }
-                // For string args: call puts (raw C string pointer)
-                // For integer args: call printf with "%ld\n"
-                let fmt_str = match args[0] {
-                    BasicMetadataValueEnum::PointerValue(_) => {
+                let i64_ty = self.context.i64_type();
+                // Single string arg: use puts (which appends newline automatically)
+                if args.len() == 1 {
+                    if let BasicMetadataValueEnum::PointerValue(_) = args[0] {
                         let puts = self.module.get_function("puts")
                             .ok_or_else(|| "puts not declared".to_string())?;
                         self.builder.build_call(puts, args, "puts_call")
                             .map_err(|e| CompileError::LlvmError(format!("puts error: {}", e)))?;
-                        return Ok(self.context.i64_type().const_int(0, false).into());
+                        return Ok(i64_ty.const_int(0, false).into());
                     }
-                    BasicMetadataValueEnum::IntValue(_) => "%ld\n",
-                    BasicMetadataValueEnum::FloatValue(_) => "%f\n",
-                    _ => "%p\n",
-                };
-                let fmt_global = self.builder.build_global_string_ptr(fmt_str, "fmt")
+                }
+                // Multiple args (or single non-string arg): build printf format and call printf
+                let mut fmt_str = String::new();
+                for arg in args {
+                    match arg {
+                        BasicMetadataValueEnum::PointerValue(_) => fmt_str.push_str("%s"),
+                        BasicMetadataValueEnum::IntValue(_) => fmt_str.push_str("%ld"),
+                        BasicMetadataValueEnum::FloatValue(_) => fmt_str.push_str("%f"),
+                        _ => fmt_str.push_str("%p"),
+                    }
+                }
+                fmt_str.push('\n');
+                let fmt_global = self.builder.build_global_string_ptr(&fmt_str, "println_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 let mut printf_args = vec![
                     BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
@@ -37,7 +45,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| "printf not declared".to_string())?;
                 self.builder.build_call(printf, &printf_args, "printf_call")
                     .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
-                Ok(self.context.i64_type().const_int(0, false).into())
+                Ok(i64_ty.const_int(0, false).into())
 
     }
 

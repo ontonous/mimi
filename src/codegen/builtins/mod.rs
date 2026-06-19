@@ -407,6 +407,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "socket" | "connect" | "bind" | "listen" | "accept"
         | "send" | "recv" | "close_fd"
         | "http_get" | "http_post"
+        | "from_int"
     )
 }
 

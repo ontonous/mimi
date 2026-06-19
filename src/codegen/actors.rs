@@ -245,36 +245,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
                     let mut val = self.compile_expr(init, &vars)?;
-                    let name = match pat {
-                        Pattern::Variable(n) => n.clone(),
-                        _ => continue,
-                    };
-                    let llvm_ty = if let Some(decl_ty) = ty {
+                    if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
-                        target
-                    } else {
-                        val.get_type()
-                    };
-                    let alloca = self.builder.build_alloca(llvm_ty, &name)
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    // Track type name from record expressions or spawn calls
-                    if let Expr::Record { ty: Some(tn), .. } = init {
-                        self.var_type_names.insert(name.clone(), tn.clone());
-                    } else if let Expr::Call(callee, _) = init {
-                        if let Expr::Field(obj, method_name) = callee.as_ref() {
-                            if method_name == "spawn" {
-                                let obj_type = self.infer_object_type(obj, &vars);
-                                if !obj_type.is_empty() {
-                                    self.var_type_names.insert(name.clone(), obj_type);
+                    }
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Record { ty: Some(tn), .. } = init {
+                            self.var_type_names.insert(name.clone(), tn.clone());
+                        } else if let Expr::Call(callee, _) = init {
+                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if method_name == "spawn" {
+                                    let obj_type = self.infer_object_type(obj, &vars);
+                                    if !obj_type.is_empty() {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
                                 }
                             }
                         }
                     }
-                    vars.insert(name, (alloca, llvm_ty));
+                    self.compile_pattern_bind(pat, val, &mut vars)?;
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, &vars)?;
