@@ -53,6 +53,25 @@ pub enum QuotedAst {
     },
     ExprStmt(Box<QuotedAst>),
     Return(Option<Box<QuotedAst>>),
+    Break(Option<Box<QuotedAst>>),
+    Continue,
+    While(Box<QuotedAst>, Box<QuotedAst>),
+    For(String, Box<QuotedAst>, Box<QuotedAst>),
+    Assign(Box<QuotedAst>, Box<QuotedAst>),
+    Arena(Box<QuotedAst>),
+    Unsafe(Box<QuotedAst>),
+    Drop(Box<QuotedAst>),
+    SharedLet {
+        kind: SharedKind,
+        name: String,
+        init: Box<QuotedAst>,
+    },
+    OnFailure(Box<QuotedAst>),
+    Parasteps(Box<QuotedAst>),
+    Alloc {
+        kind: AllocKind,
+        body: Box<QuotedAst>,
+    },
 }
 
 #[derive(Debug, Clone)]
