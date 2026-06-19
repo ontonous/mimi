@@ -24,21 +24,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         if self.parasteps_thread_ids.is_empty() {
             // Pool-based parasteps: wait for all pool tasks to complete
             let join_all_fn = self.module.get_function("mimi_pool_join_all")
-                .ok_or_else(|| CompileError::Generic("mimi_pool_join_all not declared".to_string()))?;
+                .ok_or_else(|| CompileError::LlvmError("mimi_pool_join_all not declared".to_string()))?;
             self.builder.build_call(join_all_fn, &[], "pool_join_all")
-                .map_err(|e| CompileError::Generic(format!("pool_join_all error: {}", e)))?;
+                .map_err(|e| CompileError::LlvmError(format!("pool_join_all error: {}", e)))?;
         } else {
             // Legacy pthread-based parasteps: join individual threads
             let i8_type = self.context.i8_type();
             let i8_ptr = i8_type.ptr_type(inkwell::AddressSpace::default());
             let join_fn = self.module.get_function("pthread_join")
-                .ok_or_else(|| CompileError::Generic("pthread_join not declared".to_string()))?;
+                .ok_or_else(|| CompileError::LlvmError("pthread_join not declared".to_string()))?;
             for &thread_id in &self.parasteps_thread_ids {
                 self.builder.build_call(join_fn, &[
                     BasicMetadataValueEnum::IntValue(thread_id),
                     BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()),
                 ], "parasteps_join")
-                    .map_err(|e| CompileError::Generic(format!("parasteps join error: {}", e)))?;
+                    .map_err(|e| CompileError::LlvmError(format!("parasteps join error: {}", e)))?;
             }
         }
         self.parasteps_thread_ids.clear();
@@ -90,17 +90,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let function = self.current_function()
-            .ok_or_else(|| CompileError::Generic("codegen: no current function for contract assert".to_string()))?;
+            .ok_or_else(|| CompileError::LlvmError("codegen: no current function for contract assert".to_string()))?;
         let pass_bb = self.context.append_basic_block(function, "contract_pass");
         let fail_bb = self.context.append_basic_block(function, "contract_fail");
 
         self.builder.build_conditional_branch(cond_bool, pass_bb, fail_bb)
-            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
         // Fail block: call abort/panic
         self.builder.position_at_end(fail_bb);
         let msg_ptr = self.builder.build_global_string_ptr(msg, "contract_msg")
-            .map_err(|e| CompileError::Generic(format!("string error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
         let abort_fn = self.module.get_function("mimi_runtime_abort")
             .unwrap_or_else(|| {
                 let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
@@ -112,9 +112,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.build_call(abort_fn, &[
             BasicMetadataValueEnum::PointerValue(msg_ptr.as_pointer_value()),
         ], "abort_call")
-            .map_err(|e| CompileError::Generic(format!("abort call error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("abort call error: {}", e)))?;
         self.builder.build_unconditional_branch(pass_bb)
-            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
         // Continue at pass block
         self.builder.position_at_end(pass_bb);

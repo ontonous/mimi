@@ -149,14 +149,14 @@ pub(crate) fn compile_and_run(src: &str) -> Result<String, String> {
 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
-    codegen.compile_file(&file)?;
+    codegen.compile_file(&file).map_err(|e| e.to_string())?;
 
     let tmp_dir = std::env::temp_dir().join(format!("mimi_e2e_{}_{}", std::process::id(), counter));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
     let obj_path = tmp_dir.join("test.o");
     let bin_path = if cfg!(target_os = "windows") { tmp_dir.join("test.exe") } else { tmp_dir.join("test") };
 
-    codegen.compile_to_object(&obj_path)?;
+    codegen.compile_to_object(&obj_path).map_err(|e| e.to_string())?;
 
     // Compile the C runtime
     let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
@@ -209,15 +209,16 @@ pub(crate) fn compile_and_verify_contracts(src: &str) -> Result<String, String> 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
     codegen.verify_contracts = true;
-    codegen.compile_file(&file)?;
+    codegen.compile_file(&file).map_err(|e| e.to_string())?;
 
     let tmp_dir = std::env::temp_dir().join(format!("mimi_e2e_{}_{}", std::process::id(), counter));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
     let obj_path = tmp_dir.join("test.o");
     let bin_path = if cfg!(target_os = "windows") { tmp_dir.join("test.exe") } else { tmp_dir.join("test") };
 
-    codegen.compile_to_object(&obj_path)?;
+    codegen.compile_to_object(&obj_path).map_err(|e| e.to_string())?;
 
+    // Compile the C runtime
     let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
     let runtime_o = tmp_dir.join("mimi_runtime.o");
     let rt_status = Command::new("cc")
@@ -252,3 +253,4 @@ pub(crate) fn compile_and_verify_contracts(src: &str) -> Result<String, String> 
 
     Ok(stdout)
 }
+

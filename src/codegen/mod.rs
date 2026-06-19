@@ -68,11 +68,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn expect_basic_value(&self, call: &inkwell::values::CallSiteValue<'ctx>, name: &str) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        call.try_as_basic_value().left().ok_or_else(|| CompileError::Generic(format!("codegen: expected basic value from {}", name)))
+        call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError(format!("expected basic value from {}", name)))
     }
 
-    fn cg_err<T>(&self, code: &str, msg: impl Into<String>) -> Result<T, CompileError> {
-        Err(CompileError::Generic(format!("[{}] {}", code, msg.into())))
+    fn cg_err<T>(&self, _code: &str, msg: impl Into<String>) -> Result<T, CompileError> {
+        Err(CompileError::LlvmError(msg.into()))
     }
 
     pub fn emit_ir(&self) -> String {
@@ -108,6 +108,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).ok_or_else(|| format!("failed to create target machine for triple '{}'", triple_ref))?;
 
         tm.write_to_file(&self.module, inkwell::targets::FileType::Object, output_path)
-            .map_err(|e| CompileError::Generic(format!("failed to write object file: {}", e)))
+            .map_err(|e| CompileError::Io(format!("failed to write object file: {}", e)))
     }
 }

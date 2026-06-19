@@ -494,9 +494,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "http_get" => self.compile_http_get(args),
             "http_post" => self.compile_http_post(args),
             "lexer" | "parse" => {
-                Err(CompileError::Generic(format!("'{}' is a runtime-only function, not available in codegen", name)))
+                Err(CompileError::BuiltinError(format!("'{}' is a runtime-only function, not available in codegen", name)))
             }
-            _ => Err(CompileError::Generic(format!("builtin '{}' not yet implemented in codegen", name))),
+            _ => Err(CompileError::BuiltinError(format!("builtin '{}' not yet implemented in codegen", name))),
         }
     }
 }

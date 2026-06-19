@@ -101,9 +101,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, param) in func.params.iter().enumerate() {
             if let Some(ty) = types::mimi_type_to_llvm(self.context, &param.ty) {
                 let alloca = self.builder.build_alloca(ty, &param.name)
-                    .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
-                self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::Generic("param index matches function signature".to_string()))?)
-                    .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::LlvmError("param index matches function signature".to_string()))?)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 vars.insert(param.name.clone(), (alloca, ty));
                 
                 // Track type name for method dispatch
@@ -150,12 +150,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(Some(expr)) => {
                     self.pop_comp_scope();
                     let val = self.compile_expr(expr, &vars)?;
-                    self.builder.build_return(Some(&val)).map_err(|e| CompileError::Generic(format!("return error: {}", e)))?;
+                    self.builder.build_return(Some(&val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
                 }
                 Stmt::Return(None) => {
                     self.pop_comp_scope();
-                    self.builder.build_return(None).map_err(|e| CompileError::Generic(format!("return error: {}", e)))?;
+                    self.builder.build_return(None).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
@@ -166,9 +166,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     };
                     let llvm_ty = val.get_type();
                     let alloca = self.builder.build_alloca(llvm_ty, &name)
-                        .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                     self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                     // Track type name from explicit annotation or record expression
                     if let Some(Type::Name(tn, _)) = ty {
                         self.var_type_names.insert(name.clone(), tn.clone());
@@ -186,7 +186,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let val = self.compile_expr(value, &vars)?;
                     if let Some(&(alloca, _)) = vars.get(name) {
                         self.builder.build_store(alloca, val)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                     }
                 }
                 Stmt::If { cond, then_, else_ } => {
@@ -197,27 +197,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Err(CompileError::TypeMismatch("if condition must be boolean".to_string()));
                     };
 
-                    let function = self.current_function().ok_or_else(|| CompileError::Generic("codegen: no current function for if".to_string()))?;
+                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for if".to_string()))?;
                     let then_bb = self.context.append_basic_block(function, "then");
                     let else_bb = self.context.append_basic_block(function, "else");
                     let merge_bb = self.context.append_basic_block(function, "ifcont");
 
                     self.builder.build_conditional_branch(cond_bool, then_bb, else_bb)
-                        .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                     // Then block
                     let then_val = {
                         self.builder.position_at_end(then_bb);
                         let mut then_vars = vars.clone();
                         let v = self.compile_block_last_val(then_, &mut then_vars)?;
-                        let current = self.builder.get_insert_block().ok_or_else(|| CompileError::Generic("codegen: no insert block for then block".to_string()))?;
+                        let current = self.builder.get_insert_block().ok_or_else(|| CompileError::LlvmError("codegen: no insert block for then block".to_string()))?;
                         if current.get_terminator().is_none() {
                             self.builder.build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                                .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                         }
                         v
                     };
-                    let then_bb_end = self.builder.get_insert_block().ok_or_else(|| CompileError::Generic("codegen: no insert block after then".to_string()))?;
+                    let then_bb_end = self.builder.get_insert_block().ok_or_else(|| CompileError::LlvmError("codegen: no insert block after then".to_string()))?;
 
                     // Else block
                     let else_val = {
@@ -225,28 +225,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Some(else_block) = else_ {
                             let mut else_vars = vars.clone();
                             let v = self.compile_block_last_val(else_block, &mut else_vars)?;
-                            let current = self.builder.get_insert_block().ok_or_else(|| CompileError::Generic("codegen: no insert block for else block".to_string()))?;
+                            let current = self.builder.get_insert_block().ok_or_else(|| CompileError::LlvmError("codegen: no insert block for else block".to_string()))?;
                             if current.get_terminator().is_none() {
                                 self.builder.build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                                    .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                             }
                             v
                         } else {
                             self.context.i64_type().const_int(0, false).into()
                         }
                     };
-                    let else_bb_end = self.builder.get_insert_block().ok_or_else(|| CompileError::Generic("codegen: no insert block after else".to_string()))?;
+                    let else_bb_end = self.builder.get_insert_block().ok_or_else(|| CompileError::LlvmError("codegen: no insert block after else".to_string()))?;
                     // No-else case: else_bb has no terminator yet — supply one
                     if else_bb_end.get_terminator().is_none() {
                         self.builder.build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                     }
 
                     // Continue at merge, produce phi if both branches have values
                     self.builder.position_at_end(merge_bb);
                     if then_val.get_type() == else_val.get_type() {
                         let phi = self.builder.build_phi(then_val.get_type(), "if_result")
-                            .map_err(|e| CompileError::Generic(format!("phi error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
                         phi.add_incoming(&[
                             (&then_val as &dyn inkwell::values::BasicValue, then_bb_end),
                             (&else_val as &dyn inkwell::values::BasicValue, else_bb_end),
@@ -255,14 +255,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 Stmt::While { cond, body } => {
-                    let function = self.current_function().ok_or_else(|| CompileError::Generic("codegen: no current function for while".to_string()))?;
+                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for while".to_string()))?;
                     let loop_bb = self.context.append_basic_block(function, "loop");
                     let body_bb = self.context.append_basic_block(function, "loopbody");
                     let merge_bb = self.context.append_basic_block(function, "loopcont");
 
                     // Jump to loop condition check
                     self.builder.build_unconditional_branch(loop_bb)
-                        .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                     // Loop condition
                     self.builder.position_at_end(loop_bb);
@@ -273,7 +273,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Err(CompileError::TypeMismatch("while condition must be boolean".to_string()));
                     };
                     self.builder.build_conditional_branch(cond_bool, body_bb, merge_bb)
-                        .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                     // Loop body
                     self.builder.position_at_end(body_bb);
@@ -284,7 +284,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_block(body, &mut vars)?;
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                     }
                     self.loop_break = old_break;
                     self.loop_continue = old_continue;
@@ -293,7 +293,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(merge_bb);
                 }
                 Stmt::For { var, iterable, body } => {
-                    let function = self.current_function().ok_or_else(|| CompileError::Generic("codegen: no current function for for".to_string()))?;
+                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for for".to_string()))?;
                     let iterable_val = self.compile_expr(iterable, &vars)?;
 
                     if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable {
@@ -303,28 +303,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let end_iv = if let BasicValueEnum::IntValue(iv) = end_val { iv } else { return Err(CompileError::TypeMismatch("range end must be i64".to_string())); };
 
                         let idx_alloca = self.builder.build_alloca(self.context.i64_type(), "idx")
-                            .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(idx_alloca, start_iv)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
                         let loop_bb = self.context.append_basic_block(function, "forloop");
                         let body_bb = self.context.append_basic_block(function, "forbody");
                         let merge_bb = self.context.append_basic_block(function, "forcont");
 
                         self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(loop_bb);
                         let idx_val = self.builder.build_load(
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             idx_alloca,
                             "idx"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                         let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("index must be i64".to_string())); };
                         let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx_iv, end_iv, "cmp")
-                            .map_err(|e| CompileError::Generic(format!("cmp error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
                         self.builder.build_conditional_branch(cmp, body_bb, merge_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(body_bb);
                         let old_break = self.loop_break.take();
@@ -333,9 +333,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.loop_continue = Some(loop_bb);
 
                         let elem_alloca = self.builder.build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
-                            .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(elem_alloca, idx_val)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                         vars.insert(var.clone(), (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())));
 
                         self.compile_block(body, &mut vars)?;
@@ -348,16 +348,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             idx_alloca,
                             "idx"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                         let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("index must be i64".to_string())); };
                         let one = self.context.i64_type().const_int(1, false);
                         let next_idx = self.builder.build_int_add(idx_iv, one, "next_idx")
-                            .map_err(|e| CompileError::Generic(format!("add error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
                         self.builder.build_store(idx_alloca, next_idx)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
                         self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(merge_bb);
                     } else {
@@ -369,10 +369,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicValueEnum::IntValue(iv) => {
                                 // Cast i64 (opaque pointer) to struct pointer
                                 let int_ptr = self.builder.build_int_to_ptr(iv, i8_ptr_ty, "list_as_ptr")
-                                    .map_err(|e| CompileError::Generic(format!("int_to_ptr error: {}", e)))?;
+                                    .map_err(|e| CompileError::LlvmError(format!("int_to_ptr error: {}", e)))?;
                                 int_ptr
                             }
-                            _ => return Err(CompileError::Generic("for loop requires a list or range".to_string())),
+                            _ => return Err(CompileError::LlvmError("for loop requires a list or range".to_string())),
                         };
 
                         let list_struct_ty = inkwell::types::BasicTypeEnum::StructType(
@@ -386,37 +386,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                             list_ptr,
                             0,
                             "list.len"
-                        ).map_err(|e| CompileError::Generic(format!("gep error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let list_len = self.builder.build_load(
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             list_len_gep,
                             "len"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
 
                         let idx_alloca = self.builder.build_alloca(self.context.i64_type(), "idx")
-                            .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(idx_alloca, self.context.i64_type().const_int(0, false))
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
                         let loop_bb = self.context.append_basic_block(function, "forloop");
                         let body_bb = self.context.append_basic_block(function, "forbody");
                         let merge_bb = self.context.append_basic_block(function, "forcont");
 
                         self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(loop_bb);
                         let idx_val = self.builder.build_load(
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             idx_alloca,
                             "idx"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                         let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("index must be i64".to_string())); };
-                        let len_iv = if let BasicValueEnum::IntValue(iv) = list_len { iv } else { return Err(CompileError::Generic("length must be i64".to_string())); };
+                        let len_iv = if let BasicValueEnum::IntValue(iv) = list_len { iv } else { return Err(CompileError::LlvmError("length must be i64".to_string())); };
                         let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx_iv, len_iv, "cmp")
-                            .map_err(|e| CompileError::Generic(format!("cmp error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
                         self.builder.build_conditional_branch(cmp, body_bb, merge_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(body_bb);
                         let old_break = self.loop_break.take();
@@ -429,13 +429,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             list_ptr,
                             1,
                             "list.data"
-                        ).map_err(|e| CompileError::Generic(format!("gep error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let data_ptr = self.builder.build_load(
                             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                             data_gep,
                             "data"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
-                        let data_pv = if let BasicValueEnum::PointerValue(pv) = data_ptr { pv } else { return Err(CompileError::Generic("data must be pointer".to_string())); };
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                        let data_pv = if let BasicValueEnum::PointerValue(pv) = data_ptr { pv } else { return Err(CompileError::LlvmError("data must be pointer".to_string())); };
 
                         // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
                         let elem_ptr = unsafe {
@@ -445,17 +445,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 &[idx_iv],
                                 "elem"
                             )
-                        }.map_err(|e| CompileError::Generic(format!("gep error: {}", e)))?;
+                        }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let elem = self.builder.build_load(
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             elem_ptr,
                             "elem_val"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
 
                         let elem_alloca = self.builder.build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
-                            .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(elem_alloca, elem)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                         vars.insert(var.clone(), (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())));
 
                         self.compile_block(body, &mut vars)?;
@@ -468,16 +468,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(self.context.i64_type()),
                             idx_alloca,
                             "idx"
-                        ).map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                        ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                         let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("index must be i64".to_string())); };
                         let one = self.context.i64_type().const_int(1, false);
                         let next_idx = self.builder.build_int_add(idx_iv, one, "next_idx")
-                            .map_err(|e| CompileError::Generic(format!("add error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
                         self.builder.build_store(idx_alloca, next_idx)
-                            .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
                         self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                         self.builder.position_at_end(merge_bb);
                     }
@@ -485,9 +485,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Break(_) => {
                     if let Some(target) = self.loop_break {
                         self.builder.build_unconditional_branch(target)
-                            .map_err(|e| CompileError::Generic(format!("break error: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("break error: {}", e)))?;
                         // Create unreachable block for subsequent statements
-                        let function = self.current_function().ok_or_else(|| CompileError::Generic("codegen: no current function for break".to_string()))?;
+                        let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for break".to_string()))?;
                         let unreachable = self.context.append_basic_block(function, "unreachable");
                         self.builder.position_at_end(unreachable);
                     } else {
@@ -497,8 +497,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Continue => {
                     if let Some(target) = self.loop_continue {
                         self.builder.build_unconditional_branch(target)
-                            .map_err(|e| CompileError::Generic(format!("continue error: {}", e)))?;
-                        let function = self.current_function().ok_or_else(|| CompileError::Generic("codegen: no current function for continue".to_string()))?;
+                            .map_err(|e| CompileError::LlvmError(format!("continue error: {}", e)))?;
+                        let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for continue".to_string()))?;
                         let unreachable = self.context.append_basic_block(function, "unreachable");
                         self.builder.position_at_end(unreachable);
                     } else {
@@ -527,16 +527,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let cap_val = self.builder.build_load(
                                         BasicTypeEnum::IntType(self.context.i64_type()),
                                         alloca, &format!("cap_val_{}", name))
-                                        .map_err(|e| CompileError::Generic(format!("load error: {}", e)))?;
+                                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                                     let name_global = self.builder.build_global_string_ptr(
                                         &format!("{}\0", name), &format!("cap_name_drop_{}", name))
-                                        .map_err(|e| CompileError::Generic(format!("string global error: {}", e)))?;
+                                        .map_err(|e| CompileError::LlvmError(format!("string global error: {}", e)))?;
                                     let name_ptr = name_global.as_pointer_value();
                                     self.builder.build_call(consume_fn, &[
                                         BasicMetadataValueEnum::IntValue(cap_val.into_int_value()),
                                         BasicMetadataValueEnum::PointerValue(name_ptr),
                                     ], &format!("cap_consume_{}", name))
-                                        .map_err(|e| CompileError::Generic(format!("cap_consume error: {}", e)))?;
+                                        .map_err(|e| CompileError::LlvmError(format!("cap_consume error: {}", e)))?;
                                 }
                             }
                         }
@@ -546,9 +546,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let val = self.compile_expr(init, &vars)?;
                     let llvm_ty = val.get_type();
                     let alloca = self.builder.build_alloca(llvm_ty, name)
-                        .map_err(|e| CompileError::Generic(format!("shared alloca error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("shared alloca error: {}", e)))?;
                     self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::Generic(format!("shared store error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
                     vars.insert(name.clone(), (alloca, llvm_ty));
                 }
                 Stmt::OnFailure(block) => {
@@ -556,12 +556,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_comp(block);
                 }
                 Stmt::Arena(block) => {
-                    let function = self.current_function().ok_or_else(|| CompileError::Generic("arena outside function".to_string()))?;
+                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("arena outside function".to_string()))?;
                     let arena_body_bb = self.context.append_basic_block(function, "arena_body");
                     let arena_cont_bb = self.context.append_basic_block(function, "arena_cont");
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(arena_body_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch to arena: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch to arena: {}", e)))?;
                     }
                     self.builder.position_at_end(arena_body_bb);
                     let saved = self.build_stacksave()?;
@@ -575,7 +575,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_stackrestore(saved)?;
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(arena_cont_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch after arena: {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch after arena: {}", e)))?;
                     }
                     self.builder.position_at_end(arena_cont_bb);
                 }
@@ -584,12 +584,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_block(block, &mut vars)?;
                 }
                 Stmt::Alloc { kind: AllocKind::Arena, body } => {
-                    let function = self.current_function().ok_or_else(|| CompileError::Generic("arena outside function".to_string()))?;
+                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("arena outside function".to_string()))?;
                     let arena_body_bb = self.context.append_basic_block(function, "arena_body");
                     let arena_cont_bb = self.context.append_basic_block(function, "arena_cont");
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(arena_body_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch to alloc(Arena): {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch to alloc(Arena): {}", e)))?;
                     }
                     self.builder.position_at_end(arena_body_bb);
                     let saved = self.build_stacksave()?;
@@ -603,7 +603,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_stackrestore(saved)?;
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(arena_cont_bb)
-                            .map_err(|e| CompileError::Generic(format!("branch after alloc(Arena): {}", e)))?;
+                            .map_err(|e| CompileError::LlvmError(format!("branch after alloc(Arena): {}", e)))?;
                     }
                     self.builder.position_at_end(arena_cont_bb);
                 }
@@ -625,7 +625,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_comp_scope();
         self.pop_cap_scope();
 
-        self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::Generic(format!("return error: {}", e)))?;
+        self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
         Ok(())
     }
 
@@ -683,9 +683,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             let resolved = self.resolve_type(&param.ty);
             if let Some(ty) = types::mimi_type_to_llvm(self.context, &resolved) {
                 let alloca = self.builder.build_alloca(ty, &param.name)
-                    .map_err(|e| CompileError::Generic(format!("alloca error: {}", e)))?;
-                self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::Generic("param index matches".to_string()))?)
-                    .map_err(|e| CompileError::Generic(format!("store error: {}", e)))?;
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::LlvmError("param index matches".to_string()))?)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 vars.insert(param.name.clone(), (alloca, ty));
                 if matches!(&param.ty, Type::Cap(_)) {
                     self.register_cap(&param.name, alloca);
@@ -700,7 +700,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_cap_scope();
 
         if !self.block_has_terminator() {
-            self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::Generic(format!("return error: {}", e)))?;
+            self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
         }
         self.type_map = prev_type_map;
         Ok(())
