@@ -405,26 +405,12 @@ impl<'a> Interpreter<'a> {
             };
 
             // F8: Clear thread-local callback context after the synchronous call.
-            // F3: Remove from CALLBACK_GLOBAL_STORE for synchronous-only callbacks
-            // (the common case). Async/off-thread callbacks that store the function
-            // pointer will find it via the global store's remaining entries; those
-            // are cleaned up via explicit mimi_callback_deregister or process exit.
+            // F3: Global store entries (CALLBACK_GLOBAL_STORE) and CALLBACK_TABLE
+            // entries are intentionally NOT removed here — they persist until
+            // explicitly deregistered via mimi_callback_deregister or process exit.
+            // This ensures async/off-thread callbacks (where C stores the function
+            // pointer and calls it later) can still find their closure and handle.
             if has_callbacks {
-                // Collect callback IDs that were added for THIS call
-                let ids: Vec<i64> = callback_ids.iter().copied().collect();
-                // Remove from global store (sync callbacks don't need persistence)
-                {
-                    let mut global = CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner());
-                    for id in &ids {
-                        global.remove(id);
-                    }
-                }
-                // Also remove from CALLBACK_TABLE since these were sync-only
-                for id in &ids {
-                    CALLBACK_TABLE.remove(*id);
-                }
-                // Restore the previous context (for nested FFI calls).
-                // If there's no saved context (top-level call), clear entirely.
                 if let Some(prev) = prev_ctx.take() {
                     FFI_CALLBACK_CTX.with(|c| {
                         let mut ctx = c.borrow_mut();
@@ -888,12 +874,7 @@ impl<'a> Interpreter<'a> {
                 // F3: Store the closure in BOTH the thread-local context (fast path
                 // for synchronous callbacks) and the global store (fallback for async/
                 // off-thread callbacks where TLS has been cleared).
-                let arg_free_mask: Vec<bool> = param_types
-                    .iter()
-                    .map(|pt| matches!(pt, Type::Name(n, _) if n == "string")
-                        || matches!(pt, Type::RawString)
-                        || matches!(pt, Type::CBuffer(_)))
-                    .collect();
+                let arg_free_mask = compute_arg_free_mask(param_types);
                 FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
                     ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
@@ -1369,6 +1350,17 @@ impl<'a> Interpreter<'a> {
     }
 }
 
+/// Compute which callback parameters are C-allocated strings that Mimi must free.
+/// `true` for `string`, `RawString`, and `CBuffer` types.
+pub(crate) fn compute_arg_free_mask(param_types: &[Type]) -> Vec<bool> {
+    param_types
+        .iter()
+        .map(|pt| matches!(pt, Type::Name(n, _) if n == "string")
+            || matches!(pt, Type::RawString)
+            || matches!(pt, Type::CBuffer(_)))
+        .collect()
+}
+
 /// Debug formatting for FFI argument contract
 fn ffi_arg_contract_to_debug(c: &FfiArgContract) -> String {
     match c {
@@ -1418,16 +1410,9 @@ mod callback_leak_tests {
     use super::*;
     use crate::ast::Type;
 
-    /// Helper: compute arg_free_mask as done in value_to_ffi_callback.
+    /// Helper: delegate to the module-level function.
     fn compute_free_mask(param_types: &[Type]) -> Vec<bool> {
-        let mut mask = Vec::new();
-        for pt in param_types {
-            let should_free = matches!(pt, Type::Name(n, _) if n == "string")
-                || matches!(pt, Type::RawString)
-                || matches!(pt, Type::CBuffer(_));
-            mask.push(should_free);
-        }
-        mask
+        compute_arg_free_mask(param_types)
     }
 
     #[test]

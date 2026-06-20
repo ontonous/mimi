@@ -17,7 +17,7 @@ use thiserror::Error;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Errno {
-    // === POSIX error codes 1–96 (Linux) ===
+    // === POSIX error codes 1–34 (Linux errno-base.h) ===
     #[error("EPERM (code 1): Operation not permitted")]
     EPERM,
     #[error("ENOENT (code 2): No such file or directory")]
@@ -86,122 +86,204 @@ pub enum Errno {
     EDOM,
     #[error("ERANGE (code 34): Math result not representable")]
     ERANGE,
-    #[error("ENODATA (code 35): No data available")]
-    ENODATA,
-    #[error("ETIME (code 36): Timer expired")]
-    ETIME,
-    #[error("ENOSR (code 37): Out of streams resources")]
-    ENOSR,
-    #[error("ENOSTR (code 38): Device not a stream")]
-    ENOSTR,
-    #[error("ENOSYS (code 39): Function not implemented")]
+
+    // === POSIX error codes 35–133 (Linux asm-generic/errno.h) ===
+    #[error("EDEADLK (code 35): Resource deadlock would occur")]
+    EDEADLK,
+    #[error("ENAMETOOLONG (code 36): File name too long")]
+    ENAMETOOLONG,
+    #[error("ENOLCK (code 37): No record locks available")]
+    ENOLCK,
+    #[error("ENOSYS (code 38): Invalid system call number")]
     ENOSYS,
+    #[error("ENOTEMPTY (code 39): Directory not empty")]
+    ENOTEMPTY,
     #[error("ELOOP (code 40): Too many symbolic links")]
     ELOOP,
-    #[error("ECANCELED (code 41): Operation canceled")]
-    ECANCELED,
-    #[error("EIDRM (code 42): Identifier removed")]
+    #[error("ENOMSG (code 42): No message of desired type")]
+    ENOMSG,
+    #[error("EIDRM (code 43): Identifier removed")]
     EIDRM,
-    #[error("ENOTSOCK (code 47): Socket operation on non-socket")]
+    #[error("ECHRNG (code 44): Channel number out of range")]
+    ECHRNG,
+    #[error("EL2NSYNC (code 45): Level 2 not synchronized")]
+    EL2NSYNC,
+    #[error("EL3HLT (code 46): Level 3 halted")]
+    EL3HLT,
+    #[error("EL3RST (code 47): Level 3 reset")]
+    EL3RST,
+    #[error("ELNRNG (code 48): Link number out of range")]
+    ELNRNG,
+    #[error("EUNATCH (code 49): Protocol driver not attached")]
+    EUNATCH,
+    #[error("ENOCSI (code 50): No CSI structure available")]
+    ENOCSI,
+    #[error("EL2HLT (code 51): Level 2 halted")]
+    EL2HLT,
+    #[error("EBADE (code 52): Invalid exchange")]
+    EBADE,
+    #[error("EBADR (code 53): Invalid request descriptor")]
+    EBADR,
+    #[error("EXFULL (code 54): Exchange full")]
+    EXFULL,
+    #[error("ENOANO (code 55): No anode")]
+    ENOANO,
+    #[error("EBADRQC (code 56): Invalid request code")]
+    EBADRQC,
+    #[error("EBADSLT (code 57): Invalid slot")]
+    EBADSLT,
+    #[error("EBFONT (code 59): Bad font file format")]
+    EBFONT,
+    #[error("ENOSTR (code 60): Device not a stream")]
+    ENOSTR,
+    #[error("ENODATA (code 61): No data available")]
+    ENODATA,
+    #[error("ETIME (code 62): Timer expired")]
+    ETIME,
+    #[error("ENOSR (code 63): Out of streams resources")]
+    ENOSR,
+    #[error("ENONET (code 64): Machine is not on the network")]
+    ENONET,
+    #[error("ENOPKG (code 65): Package not installed")]
+    ENOPKG,
+    #[error("EREMOTE (code 66): Object is remote")]
+    EREMOTE,
+    #[error("ENOLINK (code 67): Link has been severed")]
+    ENOLINK,
+    #[error("EADV (code 68): Advertise error")]
+    EADV,
+    #[error("ESRMNT (code 69): Srmount error")]
+    ESRMNT,
+    #[error("ECOMM (code 70): Communication error on send")]
+    ECOMM,
+    #[error("EPROTO (code 71): Protocol error")]
+    EPROTO,
+    #[error("EMULTIHOP (code 72): Multihop attempted")]
+    EMULTIHOP,
+    #[error("EDOTDOT (code 73): RFS specific error")]
+    EDOTDOT,
+    #[error("EBADMSG (code 74): Not a data message")]
+    EBADMSG,
+    #[error("EOVERFLOW (code 75): Value too large for defined data type")]
+    EOVERFLOW,
+    #[error("ENOTUNIQ (code 76): Name not unique on network")]
+    ENOTUNIQ,
+    #[error("EBADFD (code 77): File descriptor in bad state")]
+    EBADFD,
+    #[error("EREMCHG (code 78): Remote address changed")]
+    EREMCHG,
+    #[error("ELIBACC (code 79): Can not access a needed shared library")]
+    ELIBACC,
+    #[error("ELIBBAD (code 80): Accessing a corrupted shared library")]
+    ELIBBAD,
+    #[error("ELIBSCN (code 81): .lib section in a.out corrupted")]
+    ELIBSCN,
+    #[error("ELIBMAX (code 82): Attempting to link in too many shared libraries")]
+    ELIBMAX,
+    #[error("ELIBEXEC (code 83): Cannot exec a shared library directly")]
+    ELIBEXEC,
+    #[error("EILSEQ (code 84): Illegal byte sequence")]
+    EILSEQ,
+    #[error("ERESTART (code 85): Interrupted system call should be restarted")]
+    ERESTART,
+    #[error("ESTRPIPE (code 86): Streams pipe error")]
+    ESTRPIPE,
+    #[error("EUSERS (code 87): Too many users")]
+    EUSERS,
+    #[error("ENOTSOCK (code 88): Socket operation on non-socket")]
     ENOTSOCK,
-    #[error("EDESTADDRREQ (code 48): Destination address required")]
+    #[error("EDESTADDRREQ (code 89): Destination address required")]
     EDESTADDRREQ,
-    #[error("EMSGSIZE (code 49): Message too long")]
+    #[error("EMSGSIZE (code 90): Message too long")]
     EMSGSIZE,
-    #[error("EPROTOTYPE (code 50): Protocol wrong type for socket")]
+    #[error("EPROTOTYPE (code 91): Protocol wrong type for socket")]
     EPROTOTYPE,
-    #[error("ENOPROTOOPT (code 51): Protocol not available")]
+    #[error("ENOPROTOOPT (code 92): Protocol not available")]
     ENOPROTOOPT,
-    #[error("EPROTONOSUPPORT (code 52): Protocol not supported")]
+    #[error("EPROTONOSUPPORT (code 93): Protocol not supported")]
     EPROTONOSUPPORT,
-    #[error("ESOCKTNOSUPPORT (code 53): Socket type not supported")]
+    #[error("ESOCKTNOSUPPORT (code 94): Socket type not supported")]
     ESOCKTNOSUPPORT,
-    #[error("EOPNOTSUPP (code 54): Operation not supported on transport endpoint")]
+    #[error("EOPNOTSUPP (code 95): Operation not supported on transport endpoint")]
     EOPNOTSUPP,
-    #[error("ENOTSUP (code 55): Operation not supported")]
-    ENOTSUP,
-    #[error("EPFNOSUPPORT (code 56): Protocol family not supported")]
+    #[error("EPFNOSUPPORT (code 96): Protocol family not supported")]
     EPFNOSUPPORT,
-    #[error("EAFNOSUPPORT (code 57): Address family not supported by protocol")]
+    #[error("EAFNOSUPPORT (code 97): Address family not supported by protocol")]
     EAFNOSUPPORT,
-    #[error("EADDRINUSE (code 58): Address already in use")]
+    #[error("EADDRINUSE (code 98): Address already in use")]
     EADDRINUSE,
-    #[error("EADDRNOTAVAIL (code 59): Cannot assign requested address")]
+    #[error("EADDRNOTAVAIL (code 99): Cannot assign requested address")]
     EADDRNOTAVAIL,
-    #[error("ENETDOWN (code 60): Network is down")]
+    #[error("ENETDOWN (code 100): Network is down")]
     ENETDOWN,
-    #[error("ENETUNREACH (code 61): Network is unreachable")]
+    #[error("ENETUNREACH (code 101): Network is unreachable")]
     ENETUNREACH,
-    #[error("ENETRESET (code 62): Network dropped connection because of reset")]
+    #[error("ENETRESET (code 102): Network dropped connection because of reset")]
     ENETRESET,
-    #[error("ECONNABORTED (code 63): Software caused connection abort")]
+    #[error("ECONNABORTED (code 103): Software caused connection abort")]
     ECONNABORTED,
-    #[error("ECONNRESET (code 64): Connection reset by peer")]
+    #[error("ECONNRESET (code 104): Connection reset by peer")]
     ECONNRESET,
-    #[error("ENOBUFS (code 65): No buffer space available")]
+    #[error("ENOBUFS (code 105): No buffer space available")]
     ENOBUFS,
-    #[error("EISCONN (code 66): Transport endpoint is already connected")]
+    #[error("EISCONN (code 106): Transport endpoint is already connected")]
     EISCONN,
-    #[error("ENOTCONN (code 67): Transport endpoint is not connected")]
+    #[error("ENOTCONN (code 107): Transport endpoint is not connected")]
     ENOTCONN,
-    #[error("ESHUTDOWN (code 68): Cannot send after transport endpoint shutdown")]
+    #[error("ESHUTDOWN (code 108): Cannot send after transport endpoint shutdown")]
     ESHUTDOWN,
-    #[error("ETOOMANYREFS (code 69): Too many references: cannot splice")]
+    #[error("ETOOMANYREFS (code 109): Too many references: cannot splice")]
     ETOOMANYREFS,
-    #[error("ETIMEDOUT (code 70): Connection timed out")]
+    #[error("ETIMEDOUT (code 110): Connection timed out")]
     ETIMEDOUT,
-    #[error("ECONNREFUSED (code 71): Connection refused")]
+    #[error("ECONNREFUSED (code 111): Connection refused")]
     ECONNREFUSED,
-    #[error("EHOSTDOWN (code 72): Host is down")]
+    #[error("EHOSTDOWN (code 112): Host is down")]
     EHOSTDOWN,
-    #[error("EHOSTUNREACH (code 73): No route to host")]
+    #[error("EHOSTUNREACH (code 113): No route to host")]
     EHOSTUNREACH,
-    #[error("EALREADY (code 74): Operation already in progress")]
+    #[error("EALREADY (code 114): Operation already in progress")]
     EALREADY,
-    #[error("EINPROGRESS (code 75): Operation now in progress")]
+    #[error("EINPROGRESS (code 115): Operation now in progress")]
     EINPROGRESS,
-    #[error("ESTALE (code 76): Stale file handle")]
+    #[error("ESTALE (code 116): Stale file handle")]
     ESTALE,
-    #[error("EDQUOT (code 77): Quota exceeded")]
-    EDQUOT,
-    #[error("ENOMEDIUM (code 78): No medium found")]
-    ENOMEDIUM,
-    #[error("EMEDIUMTYPE (code 79): Wrong medium type")]
-    EMEDIUMTYPE,
-    #[error("ENOKEY (code 81): Required key not available")]
-    ENOKEY,
-    #[error("EKEYEXPIRED (code 82): Key has expired")]
-    EKEYEXPIRED,
-    #[error("EKEYREVOKED (code 83): Key has been revoked")]
-    EKEYREVOKED,
-    #[error("EKEYREJECTED (code 84): Key was rejected by service")]
-    EKEYREJECTED,
-    #[error("EOWNERDEAD (code 85): Owner died")]
-    EOWNERDEAD,
-    #[error("ENOTRECOVERABLE (code 86): State not recoverable")]
-    ENOTRECOVERABLE,
-    #[error("ERFKILL (code 87): Operation not possible due to RF-kill")]
-    ERFKILL,
-    #[error("EHWPOISON (code 88): Memory page has hardware error")]
-    EHWPOISON,
-    #[error("EUCLEAN (code 89): Structure needs cleaning")]
+    #[error("EUCLEAN (code 117): Structure needs cleaning")]
     EUCLEAN,
-    #[error("ENOTNAM (code 90): Not a XENIX named type file")]
+    #[error("ENOTNAM (code 118): Not a XENIX named type file")]
     ENOTNAM,
-    #[error("ENAVAIL (code 91): No XENIX semaphores available")]
+    #[error("ENAVAIL (code 119): No XENIX semaphores available")]
     ENAVAIL,
-    #[error("EISNAM (code 92): Is a named type file")]
+    #[error("EISNAM (code 120): Is a named type file")]
     EISNAM,
-    #[error("EREMOTEIO (code 93): Remote I/O error")]
+    #[error("EREMOTEIO (code 121): Remote I/O error")]
     EREMOTEIO,
-    #[error("EDEADLK (code 94): Resource deadlock would occur")]
-    EDEADLK,
-    #[error("ENOLCK (code 95): No record locks available")]
-    ENOLCK,
-    #[error("ENOTEMPTY (code 96): Directory not empty")]
-    ENOTEMPTY,
+    #[error("EDQUOT (code 122): Quota exceeded")]
+    EDQUOT,
+    #[error("ENOMEDIUM (code 123): No medium found")]
+    ENOMEDIUM,
+    #[error("EMEDIUMTYPE (code 124): Wrong medium type")]
+    EMEDIUMTYPE,
+    #[error("ECANCELED (code 125): Operation canceled")]
+    ECANCELED,
+    #[error("ENOKEY (code 126): Required key not available")]
+    ENOKEY,
+    #[error("EKEYEXPIRED (code 127): Key has expired")]
+    EKEYEXPIRED,
+    #[error("EKEYREVOKED (code 128): Key has been revoked")]
+    EKEYREVOKED,
+    #[error("EKEYREJECTED (code 129): Key was rejected by service")]
+    EKEYREJECTED,
+    #[error("EOWNERDEAD (code 130): Owner died")]
+    EOWNERDEAD,
+    #[error("ENOTRECOVERABLE (code 131): State not recoverable")]
+    ENOTRECOVERABLE,
+    #[error("ERFKILL (code 132): Operation not possible due to RF-kill")]
+    ERFKILL,
+    #[error("EHWPOISON (code 133): Memory page has hardware error")]
+    EHWPOISON,
 
-    /// Unknown errno code (not in the POSIX 1–96 range).
+    /// Unknown errno code (not in the POSIX 1–133 range).
     #[error("Unknown errno (code {0})")]
     Unknown(i32),
 
@@ -252,65 +334,104 @@ impl Errno {
             32 => Self::EPIPE,
             33 => Self::EDOM,
             34 => Self::ERANGE,
-            35 => Self::ENODATA,
-            36 => Self::ETIME,
-            37 => Self::ENOSR,
-            38 => Self::ENOSTR,
-            39 => Self::ENOSYS,
+            35 => Self::EDEADLK,
+            36 => Self::ENAMETOOLONG,
+            37 => Self::ENOLCK,
+            38 => Self::ENOSYS,
+            39 => Self::ENOTEMPTY,
             40 => Self::ELOOP,
-            41 => Self::ECANCELED,
-            42 => Self::EIDRM,
-            47 => Self::ENOTSOCK,
-            48 => Self::EDESTADDRREQ,
-            49 => Self::EMSGSIZE,
-            50 => Self::EPROTOTYPE,
-            51 => Self::ENOPROTOOPT,
-            52 => Self::EPROTONOSUPPORT,
-            53 => Self::ESOCKTNOSUPPORT,
-            54 => Self::EOPNOTSUPP,
-            55 => Self::ENOTSUP,
-            56 => Self::EPFNOSUPPORT,
-            57 => Self::EAFNOSUPPORT,
-            58 => Self::EADDRINUSE,
-            59 => Self::EADDRNOTAVAIL,
-            60 => Self::ENETDOWN,
-            61 => Self::ENETUNREACH,
-            62 => Self::ENETRESET,
-            63 => Self::ECONNABORTED,
-            64 => Self::ECONNRESET,
-            65 => Self::ENOBUFS,
-            66 => Self::EISCONN,
-            67 => Self::ENOTCONN,
-            68 => Self::ESHUTDOWN,
-            69 => Self::ETOOMANYREFS,
-            70 => Self::ETIMEDOUT,
-            71 => Self::ECONNREFUSED,
-            72 => Self::EHOSTDOWN,
-            73 => Self::EHOSTUNREACH,
-            74 => Self::EALREADY,
-            75 => Self::EINPROGRESS,
-            76 => Self::ESTALE,
-            77 => Self::EDQUOT,
-            78 => Self::ENOMEDIUM,
-            79 => Self::EMEDIUMTYPE,
-            81 => Self::ENOKEY,
-            82 => Self::EKEYEXPIRED,
-            83 => Self::EKEYREVOKED,
-            84 => Self::EKEYREJECTED,
-            85 => Self::EOWNERDEAD,
-            86 => Self::ENOTRECOVERABLE,
-            87 => Self::ERFKILL,
-            88 => Self::EHWPOISON,
-            89 => Self::EUCLEAN,
-            90 => Self::ENOTNAM,
-            91 => Self::ENAVAIL,
-            92 => Self::EISNAM,
-            93 => Self::EREMOTEIO,
-            94 => Self::EDEADLK,
-            95 => Self::ENOLCK,
-            96 => Self::ENOTEMPTY,
+            42 => Self::ENOMSG,
+            43 => Self::EIDRM,
+            44 => Self::ECHRNG,
+            45 => Self::EL2NSYNC,
+            46 => Self::EL3HLT,
+            47 => Self::EL3RST,
+            48 => Self::ELNRNG,
+            49 => Self::EUNATCH,
+            50 => Self::ENOCSI,
+            51 => Self::EL2HLT,
+            52 => Self::EBADE,
+            53 => Self::EBADR,
+            54 => Self::EXFULL,
+            55 => Self::ENOANO,
+            56 => Self::EBADRQC,
+            57 => Self::EBADSLT,
+            59 => Self::EBFONT,
+            60 => Self::ENOSTR,
+            61 => Self::ENODATA,
+            62 => Self::ETIME,
+            63 => Self::ENOSR,
+            64 => Self::ENONET,
+            65 => Self::ENOPKG,
+            66 => Self::EREMOTE,
+            67 => Self::ENOLINK,
+            68 => Self::EADV,
+            69 => Self::ESRMNT,
+            70 => Self::ECOMM,
+            71 => Self::EPROTO,
+            72 => Self::EMULTIHOP,
+            73 => Self::EDOTDOT,
+            74 => Self::EBADMSG,
+            75 => Self::EOVERFLOW,
+            76 => Self::ENOTUNIQ,
+            77 => Self::EBADFD,
+            78 => Self::EREMCHG,
+            79 => Self::ELIBACC,
+            80 => Self::ELIBBAD,
+            81 => Self::ELIBSCN,
+            82 => Self::ELIBMAX,
+            83 => Self::ELIBEXEC,
+            84 => Self::EILSEQ,
+            85 => Self::ERESTART,
+            86 => Self::ESTRPIPE,
+            87 => Self::EUSERS,
+            88 => Self::ENOTSOCK,
+            89 => Self::EDESTADDRREQ,
+            90 => Self::EMSGSIZE,
+            91 => Self::EPROTOTYPE,
+            92 => Self::ENOPROTOOPT,
+            93 => Self::EPROTONOSUPPORT,
+            94 => Self::ESOCKTNOSUPPORT,
+            95 => Self::EOPNOTSUPP,
+            96 => Self::EPFNOSUPPORT,
+            97 => Self::EAFNOSUPPORT,
+            98 => Self::EADDRINUSE,
+            99 => Self::EADDRNOTAVAIL,
+            100 => Self::ENETDOWN,
+            101 => Self::ENETUNREACH,
+            102 => Self::ENETRESET,
+            103 => Self::ECONNABORTED,
+            104 => Self::ECONNRESET,
+            105 => Self::ENOBUFS,
+            106 => Self::EISCONN,
+            107 => Self::ENOTCONN,
+            108 => Self::ESHUTDOWN,
+            109 => Self::ETOOMANYREFS,
+            110 => Self::ETIMEDOUT,
+            111 => Self::ECONNREFUSED,
+            112 => Self::EHOSTDOWN,
+            113 => Self::EHOSTUNREACH,
+            114 => Self::EALREADY,
+            115 => Self::EINPROGRESS,
+            116 => Self::ESTALE,
+            117 => Self::EUCLEAN,
+            118 => Self::ENOTNAM,
+            119 => Self::ENAVAIL,
+            120 => Self::EISNAM,
+            121 => Self::EREMOTEIO,
+            122 => Self::EDQUOT,
+            123 => Self::ENOMEDIUM,
+            124 => Self::EMEDIUMTYPE,
+            125 => Self::ECANCELED,
+            126 => Self::ENOKEY,
+            127 => Self::EKEYEXPIRED,
+            128 => Self::EKEYREVOKED,
+            129 => Self::EKEYREJECTED,
+            130 => Self::EOWNERDEAD,
+            131 => Self::ENOTRECOVERABLE,
+            132 => Self::ERFKILL,
+            133 => Self::EHWPOISON,
             _ => {
-                // SAFETY: libc::strerror returns a valid pointer to a thread-local error string for valid errno codes.
                 let name = unsafe {
                     let c_str = libc::strerror(code);
                     if !c_str.is_null() {
@@ -361,63 +482,103 @@ impl Errno {
             Self::EPIPE => 32,
             Self::EDOM => 33,
             Self::ERANGE => 34,
-            Self::ENODATA => 35,
-            Self::ETIME => 36,
-            Self::ENOSR => 37,
-            Self::ENOSTR => 38,
-            Self::ENOSYS => 39,
+            Self::EDEADLK => 35,
+            Self::ENAMETOOLONG => 36,
+            Self::ENOLCK => 37,
+            Self::ENOSYS => 38,
+            Self::ENOTEMPTY => 39,
             Self::ELOOP => 40,
-            Self::ECANCELED => 41,
-            Self::EIDRM => 42,
-            Self::ENOTSOCK => 47,
-            Self::EDESTADDRREQ => 48,
-            Self::EMSGSIZE => 49,
-            Self::EPROTOTYPE => 50,
-            Self::ENOPROTOOPT => 51,
-            Self::EPROTONOSUPPORT => 52,
-            Self::ESOCKTNOSUPPORT => 53,
-            Self::EOPNOTSUPP => 54,
-            Self::ENOTSUP => 55,
-            Self::EPFNOSUPPORT => 56,
-            Self::EAFNOSUPPORT => 57,
-            Self::EADDRINUSE => 58,
-            Self::EADDRNOTAVAIL => 59,
-            Self::ENETDOWN => 60,
-            Self::ENETUNREACH => 61,
-            Self::ENETRESET => 62,
-            Self::ECONNABORTED => 63,
-            Self::ECONNRESET => 64,
-            Self::ENOBUFS => 65,
-            Self::EISCONN => 66,
-            Self::ENOTCONN => 67,
-            Self::ESHUTDOWN => 68,
-            Self::ETOOMANYREFS => 69,
-            Self::ETIMEDOUT => 70,
-            Self::ECONNREFUSED => 71,
-            Self::EHOSTDOWN => 72,
-            Self::EHOSTUNREACH => 73,
-            Self::EALREADY => 74,
-            Self::EINPROGRESS => 75,
-            Self::ESTALE => 76,
-            Self::EDQUOT => 77,
-            Self::ENOMEDIUM => 78,
-            Self::EMEDIUMTYPE => 79,
-            Self::ENOKEY => 81,
-            Self::EKEYEXPIRED => 82,
-            Self::EKEYREVOKED => 83,
-            Self::EKEYREJECTED => 84,
-            Self::EOWNERDEAD => 85,
-            Self::ENOTRECOVERABLE => 86,
-            Self::ERFKILL => 87,
-            Self::EHWPOISON => 88,
-            Self::EUCLEAN => 89,
-            Self::ENOTNAM => 90,
-            Self::ENAVAIL => 91,
-            Self::EISNAM => 92,
-            Self::EREMOTEIO => 93,
-            Self::EDEADLK => 94,
-            Self::ENOLCK => 95,
-            Self::ENOTEMPTY => 96,
+            Self::ENOMSG => 42,
+            Self::EIDRM => 43,
+            Self::ECHRNG => 44,
+            Self::EL2NSYNC => 45,
+            Self::EL3HLT => 46,
+            Self::EL3RST => 47,
+            Self::ELNRNG => 48,
+            Self::EUNATCH => 49,
+            Self::ENOCSI => 50,
+            Self::EL2HLT => 51,
+            Self::EBADE => 52,
+            Self::EBADR => 53,
+            Self::EXFULL => 54,
+            Self::ENOANO => 55,
+            Self::EBADRQC => 56,
+            Self::EBADSLT => 57,
+            Self::EBFONT => 59,
+            Self::ENOSTR => 60,
+            Self::ENODATA => 61,
+            Self::ETIME => 62,
+            Self::ENOSR => 63,
+            Self::ENONET => 64,
+            Self::ENOPKG => 65,
+            Self::EREMOTE => 66,
+            Self::ENOLINK => 67,
+            Self::EADV => 68,
+            Self::ESRMNT => 69,
+            Self::ECOMM => 70,
+            Self::EPROTO => 71,
+            Self::EMULTIHOP => 72,
+            Self::EDOTDOT => 73,
+            Self::EBADMSG => 74,
+            Self::EOVERFLOW => 75,
+            Self::ENOTUNIQ => 76,
+            Self::EBADFD => 77,
+            Self::EREMCHG => 78,
+            Self::ELIBACC => 79,
+            Self::ELIBBAD => 80,
+            Self::ELIBSCN => 81,
+            Self::ELIBMAX => 82,
+            Self::ELIBEXEC => 83,
+            Self::EILSEQ => 84,
+            Self::ERESTART => 85,
+            Self::ESTRPIPE => 86,
+            Self::EUSERS => 87,
+            Self::ENOTSOCK => 88,
+            Self::EDESTADDRREQ => 89,
+            Self::EMSGSIZE => 90,
+            Self::EPROTOTYPE => 91,
+            Self::ENOPROTOOPT => 92,
+            Self::EPROTONOSUPPORT => 93,
+            Self::ESOCKTNOSUPPORT => 94,
+            Self::EOPNOTSUPP => 95,
+            Self::EPFNOSUPPORT => 96,
+            Self::EAFNOSUPPORT => 97,
+            Self::EADDRINUSE => 98,
+            Self::EADDRNOTAVAIL => 99,
+            Self::ENETDOWN => 100,
+            Self::ENETUNREACH => 101,
+            Self::ENETRESET => 102,
+            Self::ECONNABORTED => 103,
+            Self::ECONNRESET => 104,
+            Self::ENOBUFS => 105,
+            Self::EISCONN => 106,
+            Self::ENOTCONN => 107,
+            Self::ESHUTDOWN => 108,
+            Self::ETOOMANYREFS => 109,
+            Self::ETIMEDOUT => 110,
+            Self::ECONNREFUSED => 111,
+            Self::EHOSTDOWN => 112,
+            Self::EHOSTUNREACH => 113,
+            Self::EALREADY => 114,
+            Self::EINPROGRESS => 115,
+            Self::ESTALE => 116,
+            Self::EUCLEAN => 117,
+            Self::ENOTNAM => 118,
+            Self::ENAVAIL => 119,
+            Self::EISNAM => 120,
+            Self::EREMOTEIO => 121,
+            Self::EDQUOT => 122,
+            Self::ENOMEDIUM => 123,
+            Self::EMEDIUMTYPE => 124,
+            Self::ECANCELED => 125,
+            Self::ENOKEY => 126,
+            Self::EKEYEXPIRED => 127,
+            Self::EKEYREVOKED => 128,
+            Self::EKEYREJECTED => 129,
+            Self::EOWNERDEAD => 130,
+            Self::ENOTRECOVERABLE => 131,
+            Self::ERFKILL => 132,
+            Self::EHWPOISON => 133,
             Self::Unknown(c) | Self::UnknownWithName(c, _) => *c,
             Self::Generic(_) => 0,
         }

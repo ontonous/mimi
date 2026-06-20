@@ -23,7 +23,7 @@ pub fn abi_to_llvm_call_conv(abi: &str) -> u32 {
         "vectorcall" => 81,          // LLVM_CallingConv::X86_VectorCall
         "win64" => 77,               // LLVM_CallingConv::Win64
         "aarch64_vector" => 88,      // LLVM_CallingConv::AArch64_VectorCall
-        "sysv64" => 99,              // LLVM_CallingConv::AArch64_SYSV (ARM64 SysV ABI)
+        "sysv64" => 99,              // LLVM_CallingConv::X86_64_SysV (x86-64 System V ABI)
         "arm_aapcs" => 97,           // LLVM_CallingConv::ARM_AAPCS
         "arm_aapcs_vfp" => 98,       // LLVM_CallingConv::ARM_AAPCS_VFP
         _ => 0,  // Default to C calling convention

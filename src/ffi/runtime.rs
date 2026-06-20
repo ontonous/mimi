@@ -537,11 +537,11 @@ impl MimiThreadPool {
     }
 }
 
-static MIMI_POOL: LazyLock<Option<MimiThreadPool>> = LazyLock::new(|| {
+static MIMI_POOL: LazyLock<MimiThreadPool> = LazyLock::new(|| {
     let size = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    Some(MimiThreadPool::new(size))
+    MimiThreadPool::new(size)
 });
 
 /// Submit a function pointer to the thread pool.
@@ -558,16 +558,12 @@ pub unsafe extern "C" fn mimi_pool_submit(
     fn_ptr: extern "C" fn(*mut u8) -> *mut u8,
     arg: *mut u8,
 ) {
-    if let Some(pool) = MIMI_POOL.as_ref() {
-        pool.submit_raw(fn_ptr, arg);
-    }
+    MIMI_POOL.submit_raw(fn_ptr, arg);
 }
 
 /// Block until all submitted pool tasks complete.
 /// Uses a pending task counter and Condvar to properly synchronize.
 #[no_mangle]
 pub extern "C" fn mimi_pool_join_all() {
-    if let Some(pool) = MIMI_POOL.as_ref() {
-        pool.join_all();
-    }
+    MIMI_POOL.join_all();
 }
