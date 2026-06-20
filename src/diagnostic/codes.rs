@@ -237,7 +237,7 @@ pub fn describe(code: &str) -> &'static str {
         E0228 => "variant argument count mismatch",
         E0229 => "list element type mismatch",
         E0230 => "comprehension guard must be bool",
-        E0231 => "unknown type (overlaps E0407; E0407 preferred for undefined types)",
+        E0231 => "type not allowed in this context (e.g., FFI passport type in non-extern)",
         E0232 => "list element type mismatch",
         E0233 => "cannot assign through non-mutable reference",
         E0234 => "missing return value",

@@ -478,54 +478,36 @@ impl<'a> Interpreter<'a> {
         Ok(Value::String(type_name))
     }
 
+    /// Extract a string type name from a Value (either Value::String or Value::Type).
+    fn resolve_type_name_arg<'v>(&self, v: &'v Value) -> Result<&'v String, InterpError> {
+        match v {
+            Value::String(name) => Ok(name),
+            Value::Type(name) => Ok(name),
+            _ => Err(InterpError::new("expected a type name string or Type value")),
+        }
+    }
+
     pub(crate) fn builtin_type_fields(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
             return Err(InterpError::new("type_fields expects 1 argument (a type name string)"));
         }
-        match &args[0] {
-            Value::String(name) => {
-                if let Some(type_def) = self.type_defs.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Record(fields) => {
-                            let field_names: Vec<Value> = fields.iter()
-                                .map(|f| Value::String(f.name.clone()))
-                                .collect();
-                            Ok(Value::List(field_names))
-                        }
-                        TypeDefKind::Enum(variants) => {
-                            let variant_names: Vec<Value> = variants.iter()
-                                .map(|v| Value::String(v.name.clone()))
-                                .collect();
-                            Ok(Value::List(variant_names))
-                        }
-                        _ => Ok(Value::List(vec![])),
-                    }
-                } else {
-                    Err(InterpError::new(format!("unknown type '{}'", name)))
-                }
+        let name = self.resolve_type_name_arg(&args[0])?;
+        let type_def = self.type_defs.get(name)
+            .ok_or_else(|| InterpError::new(format!("unknown type '{}'", name)))?;
+        match &type_def.kind {
+            TypeDefKind::Record(fields) => {
+                let field_names: Vec<Value> = fields.iter()
+                    .map(|f| Value::String(f.name.clone()))
+                    .collect();
+                Ok(Value::List(field_names))
             }
-            Value::Type(name) => {
-                if let Some(type_def) = self.type_defs.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Record(fields) => {
-                            let field_names: Vec<Value> = fields.iter()
-                                .map(|f| Value::String(f.name.clone()))
-                                .collect();
-                            Ok(Value::List(field_names))
-                        }
-                        TypeDefKind::Enum(variants) => {
-                            let variant_names: Vec<Value> = variants.iter()
-                                .map(|v| Value::String(v.name.clone()))
-                                .collect();
-                            Ok(Value::List(variant_names))
-                        }
-                        _ => Ok(Value::List(vec![])),
-                    }
-                } else {
-                    Err(InterpError::new(format!("unknown type '{}'", name)))
-                }
+            TypeDefKind::Enum(variants) => {
+                let variant_names: Vec<Value> = variants.iter()
+                    .map(|v| Value::String(v.name.clone()))
+                    .collect();
+                Ok(Value::List(variant_names))
             }
-            _ => Err(InterpError::new("type_fields expects a type name string or Type value")),
+            _ => Ok(Value::List(vec![])),
         }
     }
 
@@ -533,38 +515,17 @@ impl<'a> Interpreter<'a> {
         if args.len() != 1 {
             return Err(InterpError::new("type_variants expects 1 argument (a type name string)"));
         }
-        match &args[0] {
-            Value::String(name) => {
-                if let Some(type_def) = self.type_defs.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Enum(variants) => {
-                            let variant_names: Vec<Value> = variants.iter()
-                                .map(|v| Value::String(v.name.clone()))
-                                .collect();
-                            Ok(Value::List(variant_names))
-                        }
-                        _ => Ok(Value::List(vec![])),
-                    }
-                } else {
-                    Err(InterpError::new(format!("unknown type '{}'", name)))
-                }
+        let name = self.resolve_type_name_arg(&args[0])?;
+        let type_def = self.type_defs.get(name)
+            .ok_or_else(|| InterpError::new(format!("unknown type '{}'", name)))?;
+        match &type_def.kind {
+            TypeDefKind::Enum(variants) => {
+                let variant_names: Vec<Value> = variants.iter()
+                    .map(|v| Value::String(v.name.clone()))
+                    .collect();
+                Ok(Value::List(variant_names))
             }
-            Value::Type(name) => {
-                if let Some(type_def) = self.type_defs.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Enum(variants) => {
-                            let variant_names: Vec<Value> = variants.iter()
-                                .map(|v| Value::String(v.name.clone()))
-                                .collect();
-                            Ok(Value::List(variant_names))
-                        }
-                        _ => Ok(Value::List(vec![])),
-                    }
-                } else {
-                    Err(InterpError::new(format!("unknown type '{}'", name)))
-                }
-            }
-            _ => Err(InterpError::new("type_variants expects a type name string or Type value")),
+            _ => Ok(Value::List(vec![])),
         }
     }
 

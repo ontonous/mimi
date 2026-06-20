@@ -68,40 +68,66 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 /// Verify that MMS rule attachments are consistent.
 /// Rules must be attached to a following entity; orphan rules are errors.
 pub fn verify_rules(file: &File) -> Vec<String> {
+    let mut errors = Vec::new();
     for item in &file.items {
         match item {
             Item::Func(func) => {
-                verify_rules_in_block(&func.body);
+                verify_rules_in_block(&func.body, &mut errors, &func.name);
             }
             Item::Module(module) => {
                 for item in &module.items {
                     if let Item::Func(func) = item {
-                        verify_rules_in_block(&func.body);
+                        verify_rules_in_block(&func.body, &mut errors, &func.name);
                     }
                 }
             }
             _ => {}
         }
     }
-    Vec::new()
+    errors
 }
 
-fn verify_rules_in_block(block: &[Stmt]) {
+fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str) {
+    let mut last_was_rule = false;
+    let mut rule_pos = String::new();
     for stmt in block {
         match stmt {
+            Stmt::Desc(text) if text.starts_with("rule:") => {
+                // Rule must be followed by requires/ensures or a block that contains them.
+                // For now, flag any consecutive rules without intervening contract.
+                if last_was_rule {
+                    errors.push(format!(
+                        "consecutive rules without attached contract in '{}': '{}'",
+                        context, text
+                    ));
+                }
+                last_was_rule = true;
+                rule_pos = text.clone();
+            }
+            Stmt::Requires(_, _) | Stmt::Ensures(_, _) => {
+                last_was_rule = false;
+            }
             Stmt::Block(inner) => {
-                verify_rules_in_block(inner);
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                verify_rules_in_block(body);
-            }
-            Stmt::If { then_, else_, .. } => {
-                verify_rules_in_block(then_);
-                if let Some(else_) = else_ {
-                    verify_rules_in_block(else_);
+                verify_rules_in_block(inner, errors, context);
+                // A block after a rule potentially contains the contract
+                if last_was_rule {
+                    last_was_rule = false;
                 }
             }
-            _ => {}
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                verify_rules_in_block(body, errors, context);
+                last_was_rule = false;
+            }
+            Stmt::If { then_, else_, .. } => {
+                verify_rules_in_block(then_, errors, context);
+                if let Some(else_) = else_ {
+                    verify_rules_in_block(else_, errors, context);
+                }
+                last_was_rule = false;
+            }
+            _ => {
+                last_was_rule = false;
+            }
         }
     }
 }
@@ -1011,7 +1037,7 @@ impl<'a> Checker<'a> {
                     };
                     self.errors.push(
                         Diagnostic::error_code(
-                            crate::diagnostic::codes::E0231,
+                            crate::diagnostic::codes::E0407,
                             format!("unknown type '{}' in {}", name, context),
                             Span::single(self.current_line, self.current_col),
                         ).with_help(help)
@@ -1055,7 +1081,7 @@ impl<'a> Checker<'a> {
             }
             Type::Newtype(name, inner) => {
                 if !self.types.contains_key(name) && !self.newtypes.contains_key(name) {
-                    self.emit_code(crate::diagnostic::codes::E0231, format!("unknown newtype '{}' in {}", name, context));
+                    self.emit_code(crate::diagnostic::codes::E0407, format!("unknown newtype '{}' in {}", name, context));
                 }
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }

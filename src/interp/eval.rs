@@ -972,7 +972,10 @@ impl<'a> Interpreter<'a> {
                     });
                     Ok(Value::Future(Arc::new(std::sync::Mutex::new(rx))))
                 } else {
-                    // For non-actor spawns, evaluate directly
+                    // Non-actor `spawn expr` — evaluate directly.
+                    // Type checker marks this as Future<T>, but at runtime the
+                    // value is unwrapped immediately (no threading). This is a
+                    // known gap between compile-time and runtime types (#6).
                     self.eval_expr(expr)
                 }
             }
