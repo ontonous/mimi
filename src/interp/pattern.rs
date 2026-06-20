@@ -17,15 +17,18 @@ impl<'a> Interpreter<'a> {
                 // Check if this is a zero-arity constructor (enum variant without payload).
                 // The parser produces Pattern::Variable for bare identifiers like `Red`,
                 // but we must treat them as constructor patterns at runtime.
+                // If the name matches a constructor AND the value actually IS that variant,
+                // treat as constructor match. Otherwise, fall through to variable binding.
                 if self.constructors.contains_key(name) {
-                    match value {
-                        Value::Variant(vname, _) if vname == name => true,
-                        _ => false,
+                    if let Value::Variant(vname, _) = value {
+                        if vname == name {
+                            return true;
+                        }
                     }
-                } else {
-                    bindings.push((name.clone(), value.clone()));
-                    true
+                    // Not actually a constructor match — bind the value to the variable instead.
                 }
+                bindings.push((name.clone(), value.clone()));
+                true
             }
             Pattern::Literal(l) => {
                 let expected = match l {

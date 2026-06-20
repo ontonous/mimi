@@ -469,7 +469,12 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
+        (Value::Float(a), Value::Float(b)) => {
+            let diff = (a - b).abs();
+            if diff == 0.0 { return true; }
+            let scale = a.abs().max(b.abs());
+            diff <= f64::EPSILON * scale.max(1.0)
+        }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
@@ -509,7 +514,19 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                 false
             }
         }
+        (Value::Shared(a), Value::Shared(b)) => {
+            if let (Ok(va), Ok(vb)) = (a.read(), b.read()) { values_equal(&va, &vb) } else { false }
+        }
+        (Value::LocalShared(a), Value::LocalShared(b)) => {
+            values_equal(&*a.0.borrow(), &*b.0.borrow())
+        }
+        (Value::Cap(a), Value::Cap(b)) => a == b,
+        (Value::Range { start: as_, end: ae }, Value::Range { start: bs, end: be }) => as_ == bs && ae == be,
         (Value::Type(a), Value::Type(b)) => a == b,
+        (Value::Allocator(a), Value::Allocator(b)) => a == b,
+        (Value::DynTrait { data: ad, concrete_type: at, .. }, Value::DynTrait { data: bd, concrete_type: bt, .. }) => {
+            at == bt && values_equal(ad, bd)
+        }
         _ => false,
     }
 }

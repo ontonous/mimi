@@ -130,6 +130,52 @@ pub(crate) fn collect_expr_free_vars(
         Expr::Old(expr) => {
             collect_expr_free_vars(expr, bound, free);
         }
+        // Newly handled expression types for correct closure capture
+        Expr::Comprehension { expr: ce, iter, guard, .. } => {
+            collect_expr_free_vars(ce, bound, free);
+            collect_expr_free_vars(iter, bound, free);
+            if let Some(g) = guard {
+                collect_expr_free_vars(g, bound, free);
+            }
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_expr_free_vars(cond, bound, free);
+            let mut inner_bound = bound.clone();
+            for s in then_ {
+                collect_stmt_free_vars(s, bound, free, &mut inner_bound);
+            }
+            if let Some(eb) = else_ {
+                let mut inner_bound = bound.clone();
+                for s in eb {
+                    collect_stmt_free_vars(s, bound, free, &mut inner_bound);
+                }
+            }
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_expr_free_vars(target, bound, free);
+            if let Some(s) = start { collect_expr_free_vars(s, bound, free); }
+            if let Some(e) = end { collect_expr_free_vars(e, bound, free); }
+        }
+        Expr::Range { start, end } => {
+            collect_expr_free_vars(start, bound, free);
+            collect_expr_free_vars(end, bound, free);
+        }
+        Expr::Turbofish(_, _, args) => {
+            for a in args {
+                collect_expr_free_vars(a, bound, free);
+            }
+        }
+        Expr::QuoteInterpolate(inner) => {
+            collect_expr_free_vars(inner, bound, free);
+        }
+        Expr::TupleIndex(obj, _) => {
+            collect_expr_free_vars(obj, bound, free);
+        }
+        Expr::TypeOf(inner) => {
+            collect_expr_free_vars(inner, bound, free);
+        }
+        // Expr::Literal, Expr::Quote, Expr::Comptime, Expr::TypeInfo have no free vars
+        // or their content is compile-time only
         _ => {}
     }
 }
