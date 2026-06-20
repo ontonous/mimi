@@ -638,3 +638,63 @@ fn code_lens_no_symbols() {
     let lenses = server.compute_code_lens(text, "file:///test.mimi");
     assert!(lenses.is_empty(), "no definitions should yield no lenses");
 }
+
+// ── Call Hierarchy ───────────────────────────────────────────────
+
+#[test]
+fn prepare_call_hierarchy_function() {
+    let server = LspServer::new();
+    let text = "func hello() -> i32 { 42 }";
+    let items = server.compute_prepare_call_hierarchy(text, "file:///test.mimi", 0, 6);
+    assert_eq!(items.len(), 1, "should find 1 call hierarchy item");
+    assert_eq!(items[0]["name"].as_str().unwrap(), "hello");
+}
+
+#[test]
+fn prepare_call_hierarchy_no_match() {
+    let server = LspServer::new();
+    let text = "func hello() -> i32 { 42 }";
+    let items = server.compute_prepare_call_hierarchy(text, "file:///test.mimi", 0, 99);
+    assert!(items.is_empty(), "cursor at end of line should not match");
+}
+
+#[test]
+fn prepare_call_hierarchy_empty_text() {
+    let server = LspServer::new();
+    let items = server.compute_prepare_call_hierarchy("", "file:///test.mimi", 0, 0);
+    assert!(items.is_empty(), "empty text should yield no items");
+}
+
+#[test]
+fn incoming_calls_basic() {
+    let server = LspServer::new();
+    let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { helper() }";
+    let calls = server.compute_incoming_calls(text, "file:///test.mimi", "helper");
+    assert!(!calls.is_empty(), "helper should have incoming calls");
+    assert_eq!(calls[0]["from"]["name"].as_str().unwrap(), "main");
+}
+
+#[test]
+fn incoming_calls_no_calls() {
+    let server = LspServer::new();
+    let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { 0 }";
+    let calls = server.compute_incoming_calls(text, "file:///test.mimi", "helper");
+    assert!(calls.is_empty(), "helper should have no incoming calls");
+}
+
+#[test]
+fn outgoing_calls_basic() {
+    let server = LspServer::new();
+    let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { helper() }";
+    let calls = server.compute_outgoing_calls(text, "file:///test.mimi", "main");
+    assert!(!calls.is_empty(), "main should have outgoing calls");
+    assert_eq!(calls[0]["to"]["name"].as_str().unwrap(), "helper");
+}
+
+#[test]
+fn outgoing_calls_no_calls() {
+    let server = LspServer::new();
+    let text = "func main() -> i32 { 42 }";
+    let calls = server.compute_outgoing_calls(text, "file:///test.mimi", "main");
+    assert!(calls.is_empty(), "main should have no outgoing calls");
+}
