@@ -59,12 +59,9 @@ enum Command {
         /// Enable runtime contract verification
         #[arg(long)]
         verify_contracts: bool,
-        /// Enable FFI contract verification (requires/ensures checking); use --skip-verify-ffi to disable
-        #[arg(long, default_value_t = true)]
-        verify_ffi: bool,
-        /// Skip FFI contract verification (overrides --verify-ffi)
+        /// Enable FFI contract verification (requires/ensures checking)
         #[arg(long)]
-        skip_verify_ffi: bool,
+        verify_ffi: bool,
         /// Default allocator type: system, arena, or bump
         #[arg(long, default_value = "system")]
         allocator: String,
@@ -103,6 +100,12 @@ enum Command {
         /// Local path
         #[arg(short, long)]
         path: Option<String>,
+        /// Git repository URL
+        #[arg(long)]
+        git: Option<String>,
+        /// Git tag or branch
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Remove a dependency
     Remove {
@@ -150,9 +153,6 @@ enum Command {
         /// Verify contracts: compile requires/ensures as runtime asserts
         #[arg(long)]
         verify_contracts: bool,
-        /// Build as shared library (.so) instead of executable
-        #[arg(long)]
-        shared: bool,
     },
     /// Generate C header file from extern declarations
     EmitCHeaders {
@@ -167,9 +167,6 @@ enum Command {
         /// Output path for the pybind11 C++ source file
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the compiled Mimi shared library (.so) for CMakeLists.txt linking
-        #[arg(long)]
-        mimi_lib: Option<PathBuf>,
     },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
@@ -236,10 +233,7 @@ fn main() {
     let args = Args::parse();
     let result = match args.cmd {
         Command::Check { path, extract_contracts, strict, verify_rules } => check(path.as_deref(), extract_contracts, strict, verify_rules),
-        Command::Run { path, verify_contracts, verify_ffi, skip_verify_ffi, allocator, strict } => {
-            let ffi_check = verify_ffi && !skip_verify_ffi;
-            run(path.as_deref(), verify_contracts, ffi_check, &allocator, strict)
-        }
+        Command::Run { path, verify_contracts, verify_ffi, allocator, strict } => run(path.as_deref(), verify_contracts, verify_ffi, &allocator, strict),
         Command::Test { path, allocator, filter, verbose, strict } => test(path.as_deref(), &allocator, filter.as_deref(), verbose, strict),
         Command::Init { name } => init(name.as_deref()),
         Command::Add { name, version, path } => add(&name, version.as_deref(), path.as_deref()),
@@ -250,9 +244,9 @@ fn main() {
         Command::Fmt { files, check } => fmt_files(&files, check),
         Command::Lint { files } => lint_files(&files),
         Command::Verify { path } => verify(path.as_deref()),
-        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts, shared } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts, shared),
+        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts),
         Command::EmitCHeaders { path, output } => emit_c_headers(path.as_deref(), output.as_deref()),
-        Command::EmitPyBindings { path, output, mimi_lib } => emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
+        Command::EmitPyBindings { path, output } => emit_py_bindings(path.as_deref(), output.as_deref()),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
@@ -386,8 +380,8 @@ fn mms(files: &[PathBuf], show_ast: bool, json: bool, render: bool, latex: bool)
         };
 
         let errors: Vec<MmsJsonError> = result.errors.iter().map(|e| MmsJsonError {
-            line: e.line,
-            col: e.col,
+            line: e.line(),
+            col: e.col(),
             message: e.to_string(),
         }).collect();
 
@@ -432,7 +426,7 @@ fn mms(files: &[PathBuf], show_ast: bool, json: bool, render: bool, latex: bool)
                 let src_ref = Some(source.as_str());
                 let filename = &path.display().to_string();
                 for err in &result.errors {
-                    let span = crate::span::Span::single(err.line, err.col);
+                    let span = crate::span::Span::single(err.line(), err.col());
                     let diag = crate::diagnostic::Diagnostic::error(err.to_string(), span);
                     let formatted = format_diagnostic(&diag, src_ref, filename);
                     if use_color {
@@ -1097,7 +1091,7 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, shared: bool) -> Result<(), String> {
+fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -1137,7 +1131,6 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
     codegen.strict = strict;
     codegen.no_std = no_std;
     codegen.verify_contracts = verify_contracts;
-    codegen.shared = shared;
 
     codegen.compile_file(&merged_file).map_err(|e| e.to_string())?;
 
@@ -1148,11 +1141,7 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
 
     let output_path_buf = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let mut out = path.clone();
-        if shared {
-            out.set_extension("so");
-        } else {
-            out.set_extension("");
-        }
+        out.set_extension("");
         out
     });
     let output_path = output.unwrap_or(&output_path_buf);
@@ -1168,9 +1157,6 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
     if no_std {
         rt_cmd.arg("-DMIMI_NO_STD");
     }
-    if shared {
-        rt_cmd.arg("-fPIC");
-    }
     let rt_status = rt_cmd
         .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
         .status()
@@ -1180,14 +1166,9 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
         return Err("C runtime compilation failed".into());
     }
 
-    // Link with cc to create executable or shared library
+    // Link with cc to create executable
     let mut cmd = std::process::Command::new("cc");
-    if shared {
-        cmd.arg("-shared").arg("-fPIC");
-        if no_std {
-            cmd.arg("-nostdlib");
-        }
-    } else if no_std {
+    if no_std {
         cmd.arg("-nostdlib").arg("-static");
     } else {
         cmd.arg("-no-pie");
@@ -1205,8 +1186,7 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
     let _ = std::fs::remove_file(&runtime_o);
 
     if status.success() {
-        let kind = if shared { "shared library" } else { "executable" };
-        println!("✓ Compiled {} → {} ({})", path.display(), output_path.display(), kind);
+        println!("✓ Compiled {} → {}", path.display(), output_path.display());
     } else {
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
@@ -1238,8 +1218,7 @@ fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
 
     for item in &file.items {
         if let Item::Func(f) = item {
-            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
-            if has_intent && !f.commitment.is_locked() {
+            if !f.commitment.is_locked() {
                 return Err(format!(
                     "function '{}' has uncommitted intent (no $ suffix on desc/rule); add '$' to lock before promoting",
                     f.name
@@ -1322,16 +1301,10 @@ fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), Stri
     let file = parser::Parser::new(tokens).parse_file()?;
 
     let mut extern_funcs = Vec::new();
-    let mut exported_funcs = Vec::new();
     let mut type_defs = std::collections::HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
 
-    let header = if exported_funcs.is_empty() {
-        ffi::c_header::generate_c_header(&extern_funcs, type_defs)?
-    } else {
-        ffi::c_header::generate_c_header_with_exported(&extern_funcs, &exported_funcs, type_defs)?
-    };
+    let header = ffi::c_header::generate_c_header(&extern_funcs, type_defs)?;
 
     match output {
         Some(out_path) => {
@@ -1346,7 +1319,7 @@ fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), Stri
     Ok(())
 }
 
-fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>, mimi_lib: Option<&Path>) -> Result<(), String> {
+fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -1354,26 +1327,8 @@ fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>, mimi_lib: Option
     let file = parser::Parser::new(tokens).parse_file()?;
 
     let mut extern_funcs = Vec::new();
-    let mut exported_funcs = Vec::new();
     let mut type_defs = std::collections::HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
-    // Also include exported functions as extern-like declarations for Python bindings
-    for ef in &exported_funcs {
-        let extern_func = ast::ExternFunc {
-            name: ef.name.clone(),
-            params: ef.params.iter().map(|p| ast::ExternParam {
-                name: p.name.clone(),
-                ty: p.ty.clone(),
-                cap_mode: None,
-            }).collect(),
-            ret: ef.ret.clone(),
-            requires: None,
-            ensures: None,
-            variadic: false,
-        };
-        extern_funcs.push(extern_func);
-    }
 
     let pkg_name = path
         .file_stem()
@@ -1381,31 +1336,21 @@ fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>, mimi_lib: Option
         .unwrap_or("mimi_module")
         .to_string();
 
-            let gen = ffi::py_bind::PyBindGenerator::new(type_defs, &pkg_name);
-            let bindings = gen.generate(&extern_funcs)
-                .map_err(|e| format!("failed to generate bindings: {}", e))?;
+    let bindings = ffi::py_bind::PyBindGenerator::new(type_defs, &pkg_name)
+        .generate(&extern_funcs)
+        .map_err(|e| format!("failed to generate bindings: {}", e))?;
 
     match output {
         Some(out_path) => {
             std::fs::write(out_path, &bindings)
                 .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
             println!("✓ Generated Python bindings: {}", out_path.display());
-            // Emit .pyi type stub next to the .cpp
-            let pyi_out = out_path.with_extension("pyi");
-            if let Ok(pyi) = gen.generate_pyi(&extern_funcs) {
-                std::fs::write(&pyi_out, &pyi)
-                    .map_err(|e| format!("failed to write {}: {}", pyi_out.display(), e))?;
-                println!("✓ Generated Python type stubs: {}", pyi_out.display());
-            }
             // Also emit a CMakeLists.txt next to the output
             let cmake_out = out_path.with_extension("cmake");
-            let cmake_out = out_path.with_extension("cmake");
-            let mimi_lib_str = mimi_lib.map(|p| p.display().to_string()).unwrap_or_default();
             let cmake = ffi::py_bind::generate_cmake_snippet(
                 &pkg_name,
                 "./",
                 "/usr/local/lib",
-                &mimi_lib_str,
             );
             std::fs::write(&cmake_out, cmake)
                 .map_err(|e| format!("failed to write {}: {}", cmake_out.display(), e))?;
@@ -1459,14 +1404,11 @@ fn install(_all: bool) -> Result<(), String> {
         .map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     let mut installed = 0;
-    let mut lock = lockfile::Lockfile::load(&dir)?
-        .unwrap_or_else(lockfile::Lockfile::new);
     for dep in &deps {
         if let Some(git_url) = &dep.git {
+            // Git dependency: clone
             let clone_dir = deps_dir.join(&dep.name);
             let tag_arg = dep.tag.as_deref().unwrap_or("main");
-
-            // Try to fetch and checkout the git tag to resolve a stable version
             let status = std::process::Command::new("git")
                 .arg("clone").arg("--branch").arg(tag_arg)
                 .arg("--depth").arg("1")
@@ -1477,18 +1419,7 @@ fn install(_all: bool) -> Result<(), String> {
                 println!("  ⚠ git clone failed for {}", dep.name);
                 continue;
             }
-            // Resolve the actual commit hash as the "version" for pinning
-            let resolved_version = if let Ok(output) = std::process::Command::new("git")
-                .arg("rev-parse").arg("--short").arg("HEAD")
-                .current_dir(&clone_dir)
-                .output()
-            {
-                String::from_utf8_lossy(&output.stdout).trim().to_string()
-            } else {
-                tag_arg.to_string()
-            };
-            println!("  ✓ {} (git: {} @ {} -> {})", dep.name, git_url, tag_arg, resolved_version);
-            lock.add_package(&dep.name, &resolved_version, Some(&format!("git+{}", git_url)), None);
+            println!("  ✓ {} (git: {} @ {})", dep.name, git_url, tag_arg);
             installed += 1;
         } else {
             let source = dep.path.as_deref().unwrap_or("registry");
@@ -1522,7 +1453,6 @@ fn install(_all: bool) -> Result<(), String> {
                     copy_dir_recursive(&src, &dst)
                         .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
                     println!("  ✓ {} v{}", dep.name, v);
-                    lock.add_package(&dep.name, &v, Some("registry"), None);
                     installed += 1;
                 }
                 None => {
@@ -1543,12 +1473,18 @@ fn install(_all: bool) -> Result<(), String> {
             copy_dir_recursive(&src, &dst)
                 .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
             println!("  ✓ {} (path: {})", dep.name, source);
-            lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), None);
             installed += 1;
         }
         }
     }
 
+    let mut lock = lockfile::Lockfile::load(&dir)?
+        .unwrap_or_else(lockfile::Lockfile::new);
+    for dep in &deps {
+        let source = dep.path.as_deref().unwrap_or("registry");
+        let version = dep.version.as_deref().unwrap_or("*");
+        lock.add_package(&dep.name, version, Some(source), None);
+    }
     lock.save(&dir)?;
 
     println!("Installed {} package(s).", installed);
@@ -1675,37 +1611,6 @@ fn collect_extern_and_types(
                         items: m.items.clone(),
                     },
                     extern_funcs,
-                    type_defs,
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Collect Mimi→C exported functions (marked `extern "C" func`) and type defs.
-fn collect_exported_and_types(
-    file: &File,
-    exported_funcs: &mut Vec<ast::FuncDef>,
-    type_defs: &mut HashMap<String, ast::TypeDef>,
-) {
-    for item in &file.items {
-        match item {
-            Item::Func(f) => {
-                if f.extern_abi.is_some() {
-                    exported_funcs.push(f.clone());
-                }
-            }
-            Item::Type(t) => {
-                type_defs.insert(t.name.clone(), t.clone());
-            }
-            Item::Module(m) => {
-                collect_exported_and_types(
-                    &ast::File {
-                        imports: Vec::new(),
-                        items: m.items.clone(),
-                    },
-                    exported_funcs,
                     type_defs,
                 );
             }
