@@ -200,11 +200,11 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     }
 }
 
-// F5: Removed unsafe extend_guard_read/extend_guard_write transmute helpers.
-// Use `SharedHandle::borrow_static()` / `SharedHandle::borrow_mut_static()`
-// instead — these are defined on the handle and use a single encapsulated
-// transmute that is sound because the underlying Arc<RwLock<Value>> lives
-// in the static SHARED_TABLE for the process lifetime.
+// F5: Guard lifetime extension: FfiGuard stores Arc<RwLock<Value>> after the guard
+// so that on drop, the guard is released first (unlocking the RwLock) before the
+// Arc potentially frees it. The transmute from '_ to 'static is sound because
+// the Arc in the enum variant keeps the underlying data alive for the duration
+// of the C call.
 
 
 
@@ -1215,7 +1215,7 @@ impl<'a> Interpreter<'a> {
     /// If the child process crashes (SIGSEGV, SIGBUS, etc.), returns an Err.
     ///
     /// ⚠ SAFETY: fork() is only safe in single-threaded contexts.
-    /// The fork lock + pthread_atfork guards against concurrent operations,
+    /// The fork lock serializes fork() against concurrent FFI operations,
     /// but async-signal-safety of libffi calls in the child is not guaranteed.
     fn call_ffi_with_fork_isolation(
         &self,

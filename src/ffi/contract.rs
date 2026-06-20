@@ -164,7 +164,7 @@ impl FfiContract {
                 | "mq_open" | "mq_send" | "mq_receive" | "mq_close" | "mq_unlink"
                 | "clock_gettime" | "clock_settime" | "timer_create" | "timer_settime"
                 | "getenv" | "setenv" | "unsetenv" | "putenv"
-                | "system" | "popen" | "pclose" | "execl" | "execle" | "execlp" | "execv" | "execve" | "execvp"
+                | "system" | "popen" | "pclose" | "execl" | "execle" | "execlp" | "execv" | "execvp"
                 | "realpath" | "canonicalize_file_name"
                 | "tempnam" | "tmpfile" | "mkstemp" | "mkdtemp"
                 | "getopt" | "getopt_long" | "getopt_long_only"
