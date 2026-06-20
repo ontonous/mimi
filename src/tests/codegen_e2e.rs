@@ -1774,7 +1774,6 @@ fn e2e_option_ok_or() {
 }
 
 #[test]
-#[ignore = "compile_variant_method: named function arg not yet supported in codegen map/and_then"]
 fn e2e_result_map() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
@@ -1791,7 +1790,6 @@ fn e2e_result_map() {
 }
 
 #[test]
-#[ignore = "compile_variant_method: named function arg not yet supported in codegen map/and_then"]
 fn e2e_result_and_then() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"

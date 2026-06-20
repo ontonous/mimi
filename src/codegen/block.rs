@@ -133,13 +133,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // For simple Variable patterns, track type info
                     if let Pattern::Variable(name) = pat {
-                        if let Expr::Record { ty: Some(tn), .. } = init {
+                        if let Some(Type::Name(tn, _)) = &ty {
+                            self.var_type_names.insert(name.clone(), tn.clone());
+                        } else if let Expr::Record { ty: Some(tn), .. } = init {
                             self.var_type_names.insert(name.clone(), tn.clone());
                         } else if let Expr::Call(callee, _) = init {
                             if let Expr::Field(obj, method_name) = callee.as_ref() {
                                 if method_name == "spawn" {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if !obj_type.is_empty() {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
+                                } else if matches!(method_name.as_str(), "map" | "and_then" | "map_err" | "ok_or") {
+                                    let obj_type = self.infer_object_type(obj, vars);
+                                    if obj_type == "Result" || obj_type == "Option" {
                                         self.var_type_names.insert(name.clone(), obj_type);
                                     }
                                 }

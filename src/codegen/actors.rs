@@ -260,6 +260,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if !obj_type.is_empty() {
                                         self.var_type_names.insert(name.clone(), obj_type);
                                     }
+                                } else if matches!(method_name.as_str(), "map" | "and_then" | "map_err" | "ok_or") {
+                                    let obj_type = self.infer_object_type(obj, &vars);
+                                    if obj_type == "Result" || obj_type == "Option" {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
                                 }
                             }
                         }
