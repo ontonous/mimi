@@ -1200,6 +1200,52 @@ impl LspServer {
                 }
                 return items;
             }
+            "extern" => {
+                // ABI string completions
+                items.push(serde_json::json!({
+                    "label": "\"C\" { ... }",
+                    "kind": 14, // Keyword
+                    "detail": "extern \"C\" block with C function declarations",
+                    "insertText": "\"C\" {\n\t${1}\n}",
+                    "insertTextFormat": 2, // Snippet
+                }));
+                items.push(serde_json::json!({
+                    "label": "\"stdcall\" { ... }",
+                    "kind": 14,
+                    "detail": "extern \"stdcall\" block (Windows)",
+                    "insertText": "\"stdcall\" {\n\t${1}\n}",
+                    "insertTextFormat": 2,
+                }));
+                // Common C functions
+                let c_funcs = vec![
+                    ("strlen", "strlen(s: string) -> i64", "get string length"),
+                    ("printf", "printf(format: &i8, ...) -> i32", "print formatted"),
+                    ("malloc", "malloc(size: i64) -> *mut i8", "allocate memory"),
+                    ("free", "free(ptr: *mut i8)", "free memory"),
+                    ("memcpy", "memcpy(dest: *mut i8, src: *mut i8, n: i64) -> *mut i8", "copy memory"),
+                    ("memset", "memset(s: *mut i8, c: i32, n: i64) -> *mut i8", "set memory"),
+                    ("puts", "puts(s: &i8) -> i32", "print string with newline"),
+                    ("exit", "exit(code: i32)", "exit program"),
+                    ("atoi", "atoi(s: &i8) -> i32", "string to int"),
+                    ("atof", "atof(s: &i8) -> f64", "string to float"),
+                    ("rand", "rand() -> i32", "random number"),
+                    ("srand", "srand(seed: i32)", "seed random"),
+                    ("abs", "abs(x: i32) -> i32", "absolute value"),
+                    ("clock", "clock() -> i64", "processor time"),
+                    ("time", "time(t: *mut i64) -> i64", "current time"),
+                ];
+                for (name, sig, desc) in c_funcs {
+                    items.push(serde_json::json!({
+                        "label": name,
+                        "kind": 3, // Function
+                        "detail": format!("extern fn {};  // {}", sig, desc),
+                        "insertText": format!("func {};", sig),
+                        "insertTextFormat": 2, // Snippet
+                        "documentation": desc,
+                    }));
+                }
+                return items;
+            }
             _ => {} // Fall through to default "top" context
         }
 

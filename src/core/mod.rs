@@ -698,10 +698,20 @@ impl<'a> Checker<'a> {
                     for param in &func.params {
                         let resolved = self.resolve_type(&param.ty);
                         if !self.is_valid_extern_type(&resolved, false) {
+                            let type_str = fmt_type(&resolved);
+                            let help = if type_str.contains("List") || type_str.starts_with('[') {
+                                format!("type '{}' is a Mimi list/array and cannot cross the C ABI boundary directly. \
+                                    Use a pointer (*T / *mut T) to pass array data, or serialize to JSON via the builtin JSON module.", type_str)
+                            } else if type_str.contains("Option") || type_str.contains("Result") {
+                                format!("type '{}' is an algebraic data type and cannot cross the C ABI boundary. \
+                                    Use a plain type or a pointer (*T).", type_str)
+                            } else {
+                                format!("type '{}' is not allowed across the C ABI boundary. \
+                                    Use scalar types (i32, i64, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.", type_str)
+                            };
                             self.emit_code(crate::diagnostic::codes::E0231, format!(
-                                "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. \
-                                 Use scalar types, *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, or #[repr(C)] records.",
-                                param.name, fmt_type(&resolved)
+                                "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. {}",
+                                param.name, type_str, help
                             ));
                         }
                     }

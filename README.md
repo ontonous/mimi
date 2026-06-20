@@ -248,6 +248,31 @@ mimi/
 
 ---
 
+## 快速上手：5 分钟 FFI 调用
+
+调用 C 标准库 `strlen`，从零到运行：
+
+```mimi
+// 1. 声明外部函数
+extern "C" {
+    func strlen(s: string) -> i64;
+}
+
+// 2. 在主函数中调用
+func main() {
+    let len = strlen("Hello from Mimi FFI!")
+    println("字符串长度:", len)
+}
+```
+
+```bash
+mimi run demo.mimi   # 输出: 字符串长度: 22
+```
+
+更多 FFI 示例见 [readme/10-ffi.md](readme/10-ffi.md)。
+
+---
+
 ## 文档导航
 
 | 文档 | 说明 | 适合读者 |
