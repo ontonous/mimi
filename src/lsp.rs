@@ -2,18 +2,21 @@ use crate::{core, lexer, parser, fmt};
 use crate::ast::{Item, Expr, Stmt, FuncDef, TypeDef, TypeDefKind, Type};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 
 const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
 
 /// LSP server for Mimi language
 pub struct LspServer {
-    documents: HashMap<String, String>,
+    pub(crate) documents: HashMap<String, String>,
+    workspace_root: Option<PathBuf>,
 }
 
 impl LspServer {
     pub fn new() -> Self {
         LspServer {
             documents: HashMap::new(),
+            workspace_root: None,
         }
     }
 
@@ -72,6 +75,23 @@ impl LspServer {
 
         match method {
             "initialize" => {
+                // Store workspace root if provided
+                self.workspace_root = msg.get("params")
+                    .and_then(|p| p.get("rootUri"))
+                    .and_then(|u| u.as_str())
+                    .and_then(|u| u.strip_prefix("file://"))
+                    .map(|p| {
+                        // Decode percent-encoded characters
+                        let decoded = percent_decode(p);
+                        PathBuf::from(decoded)
+                    });
+                // Fall back to rootPath
+                if self.workspace_root.is_none() {
+                    self.workspace_root = msg.get("params")
+                        .and_then(|p| p.get("rootPath"))
+                        .and_then(|p| p.as_str())
+                        .map(|p| PathBuf::from(p));
+                }
                 let result = serde_json::json!({
                     "capabilities": {
                         "textDocumentSync": {
@@ -101,9 +121,10 @@ impl LspServer {
                             },
                             "full": true
                         },
-                        "diagnosticProvider": {
-                            "interFileDependencies": false,
-                            "workspaceDiagnostics": false
+                        "codeActionProvider": true,
+                        "workspaceSymbolProvider": true,
+                        "codeLensProvider": {
+                            "resolveProvider": false
                         },
                         "foldingRangeProvider": true,
                         "documentFormattingProvider": true,
@@ -444,6 +465,44 @@ impl LspServer {
                     "result": hints
                 }))
             }
+            "textDocument/codeAction" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                let context = msg.get("params")?.get("context")?;
+                let actions = self.compute_code_actions(uri, context);
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": actions
+                }))
+            }
+            "workspace/symbol" => {
+                let query = msg.get("params")
+                    .and_then(|p| p.get("query"))
+                    .and_then(|q| q.as_str())
+                    .unwrap_or("");
+                let symbols = self.compute_workspace_symbols(query);
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": symbols
+                }))
+            }
+            "textDocument/codeLens" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                let text = self.documents.get(uri)?;
+                let lenses = self.compute_code_lens(text, uri);
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": lenses
+                }))
+            }
             "shutdown" => {
                 Some(serde_json::json!({
                     "jsonrpc": "2.0",
@@ -506,6 +565,7 @@ impl LspServer {
                     crate::diagnostic::Severity::Note => 3,
                     crate::diagnostic::Severity::Help => 4,
                 };
+                let code = err.code.clone().unwrap_or_default();
                 diagnostics.push(serde_json::json!({
                     "range": {
                         "start": { "line": err.span.start_line.saturating_sub(1), "character": err.span.start_col.saturating_sub(1) },
@@ -513,6 +573,7 @@ impl LspServer {
                     },
                     "severity": severity,
                     "source": "mimi",
+                    "code": code,
                     "message": err.message
                 }));
             }
@@ -1764,6 +1825,229 @@ impl LspServer {
         }
     }
 
+    /// Compute code actions (quick fixes) for the given diagnostics context
+    pub fn compute_code_actions(&self, uri: &str, context: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut actions = Vec::new();
+        let Some(diagnostics) = context.get("diagnostics").and_then(|d| d.as_array()) else {
+            return actions;
+        };
+        for diag in diagnostics {
+            let Some(code) = diag.get("code").and_then(|c| c.as_str()) else { continue };
+            let Some(msg) = diag.get("message").and_then(|m| m.as_str()) else { continue };
+            let range = diag.get("range").cloned().unwrap_or_default();
+            match code {
+                crate::diagnostic::codes::E0400 => {
+                    if let Some(name) = extract_quoted_name(msg) {
+                        let edit = serde_json::json!({
+                            "changes": {
+                                uri: [
+                                    {
+                                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                                        "newText": format!("let {} = \n", name)
+                                    }
+                                ]
+                            }
+                        });
+                        actions.push(serde_json::json!({
+                            "title": format!("Create variable `{}`", name),
+                            "kind": "quickfix",
+                            "diagnostics": [diag.clone()],
+                            "edit": edit
+                        }));
+                    }
+                }
+                crate::diagnostic::codes::E0401 => {
+                    if let Some(name) = extract_quoted_name(msg) {
+                        let edit = serde_json::json!({
+                            "changes": {
+                                uri: [
+                                    {
+                                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                                        "newText": format!("func {}() -> i32 {{\n    \n}}\n", name)
+                                    }
+                                ]
+                            }
+                        });
+                        actions.push(serde_json::json!({
+                            "title": format!("Create function `{}`", name),
+                            "kind": "quickfix",
+                            "diagnostics": [diag.clone()],
+                            "edit": edit
+                        }));
+                    }
+                }
+                crate::diagnostic::codes::E0406 => {
+                    if let Some(name) = extract_quoted_name(msg) {
+                        let edit = serde_json::json!({
+                            "changes": {
+                                uri: [
+                                    {
+                                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                                        "newText": format!("trait {} {{\n    \n}}\n", name)
+                                    }
+                                ]
+                            }
+                        });
+                        actions.push(serde_json::json!({
+                            "title": format!("Create trait `{}`", name),
+                            "kind": "quickfix",
+                            "diagnostics": [diag.clone()],
+                            "edit": edit
+                        }));
+                    }
+                }
+                crate::diagnostic::codes::E0231 | crate::diagnostic::codes::E0407 => {
+                    if let Some(name) = extract_quoted_name(msg) {
+                        let edit = serde_json::json!({
+                            "changes": {
+                                uri: [
+                                    {
+                                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                                        "newText": format!("type {} = i64\n", name)
+                                    }
+                                ]
+                            }
+                        });
+                        actions.push(serde_json::json!({
+                            "title": format!("Create type alias `{}`", name),
+                            "kind": "quickfix",
+                            "diagnostics": [diag.clone()],
+                            "edit": edit
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+        actions
+    }
+
+    /// Compute workspace symbols (across all known .mimi files)
+    pub fn compute_workspace_symbols(&self, query: &str) -> Vec<serde_json::Value> {
+        let mut symbols = Vec::new();
+        let query_lower = query.to_lowercase();
+
+        let mut sources: Vec<(String, String)> = self.documents.iter()
+            .map(|(uri, text)| (uri.clone(), text.clone()))
+            .collect();
+
+        if let Some(root) = &self.workspace_root {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("mimi") {
+                        let uri = format!("file://{}", path.display());
+                        if !self.documents.contains_key(&uri) {
+                            if let Ok(text) = std::fs::read_to_string(&path) {
+                                sources.push((uri, text));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (uri, text) in &sources {
+            let file = match self.parse_with_recovery(text) {
+                Some(f) => f,
+                None => continue,
+            };
+            for item in &file.items {
+                match item {
+                    Item::Func(f) => {
+                        if !query_lower.is_empty() && !f.name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains(&format!("func {}", f.name))).unwrap_or(0);
+                        symbols.push(ws_symbol(&f.name, 12, uri, def_line, ""));
+                    }
+                    Item::Type(t) => {
+                        if !query_lower.is_empty() && !t.name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains(&format!("type {}", t.name))).unwrap_or(0);
+                        let kind = match &t.kind {
+                            TypeDefKind::Record(_) => 23,
+                            TypeDefKind::Enum(_) => 10,
+                            TypeDefKind::Union(_) => 24,
+                            _ => 4,
+                        };
+                        symbols.push(ws_symbol(&t.name, kind, uri, def_line, ""));
+                        if let TypeDefKind::Enum(variants) = &t.kind {
+                            for variant in variants {
+                                if !query_lower.is_empty() && !variant.name.to_lowercase().contains(&query_lower) { continue; }
+                                let v_line = text.lines().position(|l| l.contains(&variant.name)).unwrap_or(def_line);
+                                symbols.push(ws_symbol(&format!("{}::{}", t.name, variant.name), 23, uri, v_line, &t.name));
+                            }
+                        }
+                    }
+                    Item::Trait(t) => {
+                        if !query_lower.is_empty() && !t.name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains(&format!("trait {}", t.name))).unwrap_or(0);
+                        symbols.push(ws_symbol(&t.name, 17, uri, def_line, ""));
+                    }
+                    Item::Impl(i) => {
+                        if !query_lower.is_empty() && !i.type_name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains("impl")).unwrap_or(0);
+                        symbols.push(ws_symbol(&i.type_name, 25, uri, def_line, &i.trait_name));
+                    }
+                    Item::Actor(a) => {
+                        if !query_lower.is_empty() && !a.name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains(&format!("actor {}", a.name))).unwrap_or(0);
+                        symbols.push(ws_symbol(&a.name, 23, uri, def_line, ""));
+                    }
+                    Item::Module(m) => {
+                        if !query_lower.is_empty() && !m.name.to_lowercase().contains(&query_lower) { continue; }
+                        let def_line = text.lines().position(|l| l.contains(&format!("module {}", m.name))).unwrap_or(0);
+                        symbols.push(ws_symbol(&m.name, 2, uri, def_line, ""));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        symbols
+    }
+
+    /// Compute code lenses for a document: reference counts
+    pub fn compute_code_lens(&self, text: &str, _uri: &str) -> Vec<serde_json::Value> {
+        let mut lenses = Vec::new();
+        let file = match self.parse_with_recovery(text) {
+            Some(f) => f,
+            None => return lenses,
+        };
+        for item in &file.items {
+            match item {
+                Item::Func(f) => {
+                    let def_line = text.lines().position(|l| l.contains(&format!("func {}", f.name))).unwrap_or(0);
+                    lenses.push(code_lens_value(def_line, count_text_references(text, &f.name)));
+                }
+                Item::Type(t) => {
+                    let def_line = text.lines().position(|l| l.contains(&format!("type {}", t.name))).unwrap_or(0);
+                    lenses.push(code_lens_value(def_line, count_text_references(text, &t.name)));
+                }
+                Item::Trait(t) => {
+                    let def_line = text.lines().position(|l| l.contains(&format!("trait {}", t.name))).unwrap_or(0);
+                    lenses.push(code_lens_value(def_line, count_text_references(text, &t.name)));
+                }
+                Item::Impl(i) => {
+                    let def_line = text.lines().position(|l| l.contains("impl")).unwrap_or(0);
+                    lenses.push(serde_json::json!({
+                        "range": {
+                            "start": { "line": def_line, "character": 0 },
+                            "end": { "line": def_line, "character": 0 }
+                        },
+                        "command": {
+                            "title": format!("{} method{}", i.methods.len(), if i.methods.len() == 1 { "" } else { "s" }),
+                            "command": ""
+                        }
+                    }));
+                }
+                Item::Actor(a) => {
+                    let def_line = text.lines().position(|l| l.contains(&format!("actor {}", a.name))).unwrap_or(0);
+                    lenses.push(code_lens_value(def_line, count_text_references(text, &a.name)));
+                }
+                _ => {}
+            }
+        }
+        lenses
+    }
+
     /// Format a type for human-readable display
     fn type_display(ty: &Type) -> String {
         match ty {
@@ -1866,4 +2150,70 @@ impl LspServer {
 
         current_line[word_start..word_end].to_string()
     }
+}
+
+/// Extract a name between single quotes from a diagnostic message
+fn extract_quoted_name(msg: &str) -> Option<String> {
+    let start = msg.find('\'')?;
+    let rest = &msg[start + 1..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+/// Build a workspace symbol JSON object
+fn ws_symbol(name: &str, kind: u32, uri: &str, line: usize, container: &str) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "name": name,
+        "kind": kind,
+        "location": {
+            "uri": uri,
+            "range": {
+                "start": { "line": line, "character": 0 },
+                "end": { "line": line, "character": 0 }
+            }
+        }
+    });
+    if !container.is_empty() {
+        obj["containerName"] = serde_json::Value::String(container.to_string());
+    }
+    obj
+}
+
+/// Build a code lens JSON object showing reference count at given line
+fn code_lens_value(line: usize, count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "range": {
+            "start": { "line": line, "character": 0 },
+            "end": { "line": line, "character": 0 }
+        },
+        "command": {
+            "title": format!("{} reference{}", count, if count == 1 { "" } else { "s" }),
+            "command": ""
+        }
+    })
+}
+
+/// Count how many times a name appears in text (simple substring match on each line)
+fn count_text_references(text: &str, name: &str) -> usize {
+    text.lines().filter(|l| l.contains(name)).count()
+}
+
+/// Decode percent-encoded URI characters (minimal implementation)
+fn percent_decode(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&hex);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

@@ -16,7 +16,7 @@ fn lsp_initialize() {
     let caps = &resp["result"]["capabilities"];
     assert!(caps.get("textDocumentSync").is_some());
     assert!(caps.get("completionProvider").is_some());
-    assert!(caps.get("diagnosticProvider").is_some());
+    assert!(caps.get("codeActionProvider").is_some());
 }
 
 #[test]

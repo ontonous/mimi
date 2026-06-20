@@ -481,3 +481,160 @@ fn folding_range_multiple_functions() {
     let ranges = server.compute_folding_ranges(text);
     assert!(ranges.len() >= 2, "should have folding ranges for 2 functions");
 }
+
+// ── Code Actions ──────────────────────────────────────────────────
+
+#[test]
+fn code_action_undefined_variable() {
+    let server = LspServer::new();
+    let text = "func main() {\n    foo\n}";
+    let diags = server.compute_diagnostics(text);
+    let context = serde_json::json!({ "diagnostics": diags });
+    let actions = server.compute_code_actions("file:///test.mimi", &context);
+    let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+    assert!(titles.contains(&"Create variable `foo`"), "should offer create variable fix for E0400");
+}
+
+#[test]
+fn code_action_undefined_function() {
+    let server = LspServer::new();
+    let text = "func main() {\n    bar()\n}";
+    let diags = server.compute_diagnostics(text);
+    let context = serde_json::json!({ "diagnostics": diags });
+    let actions = server.compute_code_actions("file:///test.mimi", &context);
+    let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+    assert!(titles.contains(&"Create function `bar`"), "should offer create function fix for E0401");
+}
+
+#[test]
+fn code_action_undefined_type() {
+    let server = LspServer::new();
+    // Use `type Foo = Bar` — `Bar` is an undefined type
+    let text = "type Foo = Bar";
+    let diags = server.compute_diagnostics(text);
+    assert!(!diags.is_empty(), "should have diagnostics for undefined type 'Bar': {:?}", diags);
+    eprintln!("diagnostics: {:?}", diags);
+    let context = serde_json::json!({ "diagnostics": diags });
+    let actions = server.compute_code_actions("file:///test.mimi", &context);
+    let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+    // Accept both E0231 and E0407 based fixes
+    let has_fix = titles.iter().any(|t| t.starts_with("Create type"));
+    assert!(has_fix, "should offer create type fix, got titles: {:?}", titles);
+}
+
+#[test]
+fn code_action_no_diagnostics_empty() {
+    let server = LspServer::new();
+    let context = serde_json::json!({ "diagnostics": [] });
+    let actions = server.compute_code_actions("file:///test.mimi", &context);
+    assert!(actions.is_empty(), "no diagnostics should yield no actions");
+}
+
+#[test]
+fn code_action_handle_message_roundtrip() {
+    let mut server = LspServer::new();
+    let open_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///test_code_action.mimi",
+                "text": "func main() {\n    x\n}"
+            }
+        }
+    });
+    server.handle_message(&open_msg);
+
+    // Get diagnostics first (will be pushed as notification)
+    let diags = server.compute_diagnostics("func main() {\n    x\n}");
+    assert!(!diags.is_empty(), "should have undefined variable diagnostic");
+
+    // Send codeAction request
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": "file:///test_code_action.mimi" },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+            "context": { "diagnostics": diags }
+        }
+    });
+    let response = server.handle_message(&msg);
+    assert!(response.is_some(), "codeAction should return response");
+    let resp = response.unwrap();
+    let actions = resp["result"].as_array().unwrap();
+    assert!(!actions.is_empty(), "should have code actions");
+    let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+    assert!(titles.contains(&"Create variable `x`"), "roundtrip should produce create variable");
+}
+
+// ── Workspace Symbols ────────────────────────────────────────────
+
+#[test]
+fn workspace_symbols_all() {
+    let mut server = LspServer::new();
+    server.documents.insert("file:///test.mimi".to_string(),
+        "func hello() -> i32 { 42 }\ntype Foo = i64\nmodule bar { }".to_string());
+    let symbols = server.compute_workspace_symbols("");
+    assert!(symbols.len() >= 3, "should find at least 3 symbols, got {}", symbols.len());
+    let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert!(names.contains(&"hello"), "should find function hello");
+    assert!(names.contains(&"Foo"), "should find type Foo");
+    assert!(names.contains(&"bar"), "should find module bar");
+}
+
+#[test]
+fn workspace_symbols_query_filter() {
+    let mut server = LspServer::new();
+    server.documents.insert("file:///test.mimi".to_string(),
+        "func hello() { }\nfunc world() { }\ntype MyType = i64".to_string());
+    let symbols = server.compute_workspace_symbols("hello");
+    assert_eq!(symbols.len(), 1, "should find exactly 1 symbol matching 'hello'");
+    assert_eq!(symbols[0]["name"].as_str().unwrap(), "hello");
+}
+
+#[test]
+fn workspace_symbols_empty_query_returns_all() {
+    let mut server = LspServer::new();
+    server.documents.insert("file:///test.mimi".to_string(),
+        "func a() { }\nfunc b() { }".to_string());
+    let symbols = server.compute_workspace_symbols("");
+    assert!(symbols.len() >= 2, "empty query should return all symbols");
+}
+
+#[test]
+fn workspace_symbols_no_documents_empty() {
+    let mut server = LspServer::new();
+    let symbols = server.compute_workspace_symbols("");
+    assert!(symbols.is_empty(), "no documents should yield no symbols");
+}
+
+// ── Code Lens ─────────────────────────────────────────────────────
+
+#[test]
+fn code_lens_function_references() {
+    let server = LspServer::new();
+    let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { helper() }";
+    let lenses = server.compute_code_lens(text, "file:///test.mimi");
+    assert!(!lenses.is_empty(), "should have code lenses");
+    // helper appears in 2 lines (definition + call), main appears only in definition
+    let titles: Vec<&str> = lenses.iter().filter_map(|l| l["command"]["title"].as_str()).collect();
+    assert!(titles.iter().any(|t| t == &"2 references"), "helper should have 2 references, got: {:?}", titles);
+    assert!(titles.iter().any(|t| t == &"1 reference"), "main should have 1 reference, got: {:?}", titles);
+}
+
+#[test]
+fn code_lens_empty_text() {
+    let server = LspServer::new();
+    let lenses = server.compute_code_lens("", "file:///test.mimi");
+    assert!(lenses.is_empty(), "empty text should yield no lenses");
+}
+
+#[test]
+fn code_lens_no_symbols() {
+    let server = LspServer::new();
+    let text = "let x = 42";
+    let lenses = server.compute_code_lens(text, "file:///test.mimi");
+    assert!(lenses.is_empty(), "no definitions should yield no lenses");
+}
