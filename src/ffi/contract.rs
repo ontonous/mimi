@@ -99,6 +99,43 @@ pub enum FfiRetContract {
     Unsupported(String),
 }
 
+/// Functions whose return values (i32/i64) conventionally indicate error via
+/// negative values / -1, triggering automatic errno capture after the C call.
+/// Used by both `FfiContract` and the Python binding generator.
+pub const ERRNO_CHECK_FUNC_NAMES: &[&str] = &[
+    "errno", "strerror", "perror",
+    "open", "openat", "creat", "fopen", "fdopen",
+    "read", "write", "pread", "pwrite", "readv", "writev",
+    "socket", "connect", "bind", "listen", "accept", "accept4",
+    "send", "recv", "sendto", "recvfrom", "sendmsg", "recvmsg",
+    "close", "shutdown", "dup", "dup2", "dup3",
+    "fcntl", "ioctl", "poll", "select", "epoll_create", "epoll_ctl", "epoll_wait",
+    "fork", "execve", "wait", "waitpid", "waitid",
+    "kill", "raise", "signal", "sigaction", "sigprocmask",
+    "pipe", "pipe2", "mkfifo", "socketpair",
+    "getaddrinfo", "freeaddrinfo", "getnameinfo",
+    "gethostbyname", "gethostbyaddr",
+    "dlopen", "dlsym", "dlerror", "dlclose",
+    "mmap", "munmap", "mprotect", "msync",
+    "opendir", "readdir", "closedir",
+    "stat", "fstat", "lstat", "access", "chmod", "chown",
+    "link", "unlink", "rename", "symlink", "mkdir", "rmdir",
+    "mount", "umount", "chdir", "fchdir", "getcwd",
+    "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
+    "time", "ctime", "localtime", "gmtime",
+    "strtol", "strtoll", "strtoul", "strtoull", "atoi", "atol",
+    "malloc", "calloc", "realloc", "posix_memalign",
+    "pthread_create", "pthread_join", "pthread_mutex_lock", "pthread_mutex_unlock",
+    "sem_init", "sem_wait", "sem_post", "sem_destroy",
+    "mq_open", "mq_send", "mq_receive", "mq_close", "mq_unlink",
+    "clock_gettime", "clock_settime", "timer_create", "timer_settime",
+    "getenv", "setenv", "unsetenv", "putenv",
+    "system", "popen", "pclose", "execl", "execle", "execlp", "execv", "execvp",
+    "realpath", "canonicalize_file_name",
+    "tempnam", "tmpfile", "mkstemp", "mkdtemp",
+    "getopt", "getopt_long", "getopt_long_only",
+];
+
 impl FfiContract {
     /// Build a contract from an extern function declaration.
     ///
@@ -135,40 +172,9 @@ impl FfiContract {
         // (convention: negative return values indicate errors).
         // Uses exact function name matching (not `contains`) to avoid false
         // positives on wrapper functions like `my_open_wrapper`.
+        let fname: &str = &func.name;
         let check_errno = matches!(&func.ret, Some(Type::Name(name, _)) if name == "i32" || name == "i64")
-            && matches!(func.name.as_str(),
-                "errno" | "strerror" | "perror"
-                | "open" | "openat" | "creat" | "fopen" | "fdopen"
-                | "read" | "write" | "pread" | "pwrite" | "readv" | "writev"
-                | "socket" | "connect" | "bind" | "listen" | "accept" | "accept4"
-                | "send" | "recv" | "sendto" | "recvfrom" | "sendmsg" | "recvmsg"
-                | "close" | "shutdown" | "dup" | "dup2" | "dup3"
-                | "fcntl" | "ioctl" | "poll" | "select" | "epoll_create" | "epoll_ctl" | "epoll_wait"
-                | "fork" | "execve" | "wait" | "waitpid" | "waitid"
-                | "kill" | "raise" | "signal" | "sigaction" | "sigprocmask"
-                | "pipe" | "pipe2" | "mkfifo" | "socketpair"
-                | "getaddrinfo" | "freeaddrinfo" | "getnameinfo"
-                | "gethostbyname" | "gethostbyaddr"
-                | "dlopen" | "dlsym" | "dlerror" | "dlclose"
-                | "mmap" | "munmap" | "mprotect" | "msync"
-                | "opendir" | "readdir" | "closedir"
-                | "stat" | "fstat" | "lstat" | "access" | "chmod" | "chown"
-                | "link" | "unlink" | "rename" | "symlink" | "mkdir" | "rmdir"
-                | "mount" | "umount" | "chdir" | "fchdir" | "getcwd"
-                | "setjmp" | "longjmp" | "sigsetjmp" | "siglongjmp"
-                | "time" | "ctime" | "localtime" | "gmtime"
-                | "strtol" | "strtoll" | "strtoul" | "strtoull" | "atoi" | "atol"
-                | "malloc" | "calloc" | "realloc" | "posix_memalign"
-                | "pthread_create" | "pthread_join" | "pthread_mutex_lock" | "pthread_mutex_unlock"
-                | "sem_init" | "sem_wait" | "sem_post" | "sem_destroy"
-                | "mq_open" | "mq_send" | "mq_receive" | "mq_close" | "mq_unlink"
-                | "clock_gettime" | "clock_settime" | "timer_create" | "timer_settime"
-                | "getenv" | "setenv" | "unsetenv" | "putenv"
-                | "system" | "popen" | "pclose" | "execl" | "execle" | "execlp" | "execv" | "execvp"
-                | "realpath" | "canonicalize_file_name"
-                | "tempnam" | "tmpfile" | "mkstemp" | "mkdtemp"
-                | "getopt" | "getopt_long" | "getopt_long_only"
-            );
+            && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
 
         Self {
             args,

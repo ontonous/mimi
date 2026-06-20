@@ -285,10 +285,10 @@ pub extern "C" fn mimi_shared_get_ptr(handle: i64) -> *const Value {
 /// Free a Value that was obtained via `mimi_shared_get_ptr`.
 /// This must be called for every non-null pointer returned by `mimi_shared_get_ptr`.
 #[no_mangle]
-pub extern "C" fn mimi_value_free(ptr: *mut Value) {
+pub extern "C" fn mimi_value_free(ptr: *const Value) {
     if !ptr.is_null() {
         // SAFETY: ptr is a non-null pointer to a heap-allocated Value, previously obtained via Box::into_raw.
-        unsafe { drop(Box::from_raw(ptr)); }
+        unsafe { drop(Box::from_raw(ptr as *mut Value)); }
     }
 }
 
@@ -433,7 +433,7 @@ use std::thread;
 /// Global thread pool for generated code.
 pub struct MimiThreadPool {
     workers: Vec<thread::JoinHandle<()>>,
-    sender: std_mpsc::Sender<RawTask>,
+    sender: Option<std_mpsc::Sender<RawTask>>,
     /// Tracks pending task count for `join_all`.
     pending: Arc<Mutex<i32>>,
     /// Signaled when `pending` reaches zero.
@@ -478,18 +478,20 @@ impl MimiThreadPool {
             workers.push(worker);
         }
 
-        MimiThreadPool { workers, sender, pending, completion }
+        MimiThreadPool { workers, sender: Some(sender), pending, completion }
     }
 
     pub fn submit_raw(&self, func: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
         let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
-        let _ = self.sender.send(RawTask {
-            func,
-            arg,
-            pending: Arc::clone(&self.pending),
-            completion: Arc::clone(&self.completion),
-        });
+        if let Some(ref sender) = self.sender {
+            let _ = sender.send(RawTask {
+                func,
+                arg,
+                pending: Arc::clone(&self.pending),
+                completion: Arc::clone(&self.completion),
+            });
+        }
     }
 
     pub fn submit<F: FnOnce() + Send + 'static>(&self, job: F) {
@@ -520,12 +522,14 @@ impl MimiThreadPool {
         }
         let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
-        let _ = self.sender.send(RawTask {
-            func: data_trampoline,
-            arg: data as *mut u8,
-            pending: Arc::clone(&self.pending),
-            completion: Arc::clone(&self.completion),
-        });
+        if let Some(ref sender) = self.sender {
+            let _ = sender.send(RawTask {
+                func: data_trampoline,
+                arg: data as *mut u8,
+                pending: Arc::clone(&self.pending),
+                completion: Arc::clone(&self.completion),
+            });
+        }
     }
 
     /// Wait until all submitted tasks have completed.
@@ -533,6 +537,17 @@ impl MimiThreadPool {
         let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         while *count > 0 {
             count = self.completion.wait(count).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for MimiThreadPool {
+    fn drop(&mut self) {
+        // Drop the sender first to close the channel, signaling workers to exit.
+        drop(self.sender.take());
+        // Join worker threads.
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
         }
     }
 }

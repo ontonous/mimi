@@ -156,6 +156,16 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     // Call the Mimi closure via interpreter
     let interp_ptr = FFI_CALLBACK_CTX.with(|c| c.borrow().interp);
     if interp_ptr.is_null() {
+        // F3: Closure found in global store but no interpreter available.
+        // This happens when C invokes the callback off-thread or after the
+        // original synchronous FFI call has returned and TLS was cleared.
+        // Full async/off-thread callback evaluation is a known limitation
+        // tracked in the MimiSpec FFI roadmap.
+        eprintln!(
+            "[mimi] WARNING: callback {} invoked without an interpreter context. \
+             Returning 0. Async/off-thread callback evaluation is not yet supported.",
+            callback_id,
+        );
         *result = 0;
         return;
     }
