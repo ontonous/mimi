@@ -150,6 +150,9 @@ enum Command {
         /// Verify contracts: compile requires/ensures as runtime asserts
         #[arg(long)]
         verify_contracts: bool,
+        /// Build as shared library (.so) instead of executable
+        #[arg(long)]
+        shared: bool,
     },
     /// Generate C header file from extern declarations
     EmitCHeaders {
@@ -164,6 +167,9 @@ enum Command {
         /// Output path for the pybind11 C++ source file
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Path to the compiled Mimi shared library (.so) for CMakeLists.txt linking
+        #[arg(long)]
+        mimi_lib: Option<PathBuf>,
     },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
@@ -244,9 +250,9 @@ fn main() {
         Command::Fmt { files, check } => fmt_files(&files, check),
         Command::Lint { files } => lint_files(&files),
         Command::Verify { path } => verify(path.as_deref()),
-        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts),
+        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts, shared } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts, shared),
         Command::EmitCHeaders { path, output } => emit_c_headers(path.as_deref(), output.as_deref()),
-        Command::EmitPyBindings { path, output } => emit_py_bindings(path.as_deref(), output.as_deref()),
+        Command::EmitPyBindings { path, output, mimi_lib } => emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
         Command::Doc { path, format } => doc(&path, &format),
         Command::Mms { files, ast, json, render, latex } => mms(&files, ast, json, render, latex),
@@ -1091,7 +1097,7 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool) -> Result<(), String> {
+fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, shared: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -1141,7 +1147,11 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
 
     let output_path_buf = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let mut out = path.clone();
-        out.set_extension("");
+        if shared {
+            out.set_extension("so");
+        } else {
+            out.set_extension("");
+        }
         out
     });
     let output_path = output.unwrap_or(&output_path_buf);
@@ -1157,6 +1167,9 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
     if no_std {
         rt_cmd.arg("-DMIMI_NO_STD");
     }
+    if shared {
+        rt_cmd.arg("-fPIC");
+    }
     let rt_status = rt_cmd
         .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
         .status()
@@ -1166,9 +1179,14 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
         return Err("C runtime compilation failed".into());
     }
 
-    // Link with cc to create executable
+    // Link with cc to create executable or shared library
     let mut cmd = std::process::Command::new("cc");
-    if no_std {
+    if shared {
+        cmd.arg("-shared").arg("-fPIC");
+        if no_std {
+            cmd.arg("-nostdlib");
+        }
+    } else if no_std {
         cmd.arg("-nostdlib").arg("-static");
     } else {
         cmd.arg("-no-pie");
@@ -1186,7 +1204,8 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
     let _ = std::fs::remove_file(&runtime_o);
 
     if status.success() {
-        println!("✓ Compiled {} → {}", path.display(), output_path.display());
+        let kind = if shared { "shared library" } else { "executable" };
+        println!("✓ Compiled {} → {} ({})", path.display(), output_path.display(), kind);
     } else {
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
@@ -1326,7 +1345,7 @@ fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), Stri
     Ok(())
 }
 
-fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
+fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>, mimi_lib: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -1372,10 +1391,12 @@ fn emit_py_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), St
             println!("✓ Generated Python bindings: {}", out_path.display());
             // Also emit a CMakeLists.txt next to the output
             let cmake_out = out_path.with_extension("cmake");
+            let mimi_lib_str = mimi_lib.map(|p| p.display().to_string()).unwrap_or_default();
             let cmake = ffi::py_bind::generate_cmake_snippet(
                 &pkg_name,
                 "./",
                 "/usr/local/lib",
+                &mimi_lib_str,
             );
             std::fs::write(&cmake_out, cmake)
                 .map_err(|e| format!("failed to write {}: {}", cmake_out.display(), e))?;

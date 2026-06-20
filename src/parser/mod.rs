@@ -376,16 +376,15 @@ impl Parser {
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl_def()?)),
             TokenKind::Extern => {
                 // Check if this is `extern "C" func` (export) or `extern "C" { ... }` (import)
-                let saved_pos = self.pos;
-                let tok = self.peek();
-                let has_abi_string = matches!(tok.kind, TokenKind::String(_));
+                // Peek at the token AFTER `extern` to see if it's a string literal
+                let has_abi_string = self.tokens.get(self.pos + 1)
+                    .map(|t| matches!(t.kind, TokenKind::String(_)))
+                    .unwrap_or(false);
                 if has_abi_string {
                     // Peek past the string to see if next is `func`
-                    let abi_str_pos = self.pos;
-                    self.advance(); // consume string
-                    let after_abi = self.peek_kind().clone();
-                    self.pos = saved_pos; // restore
-                    if matches!(after_abi, TokenKind::Func) {
+                    let after_abi = self.tokens.get(self.pos + 2)
+                        .map(|t| &t.kind);
+                    if matches!(after_abi, Some(TokenKind::Func)) {
                         // extern "C" func ... { body } — Mimi → C export
                         self.advance(); // consume `extern`
                         let abi = {

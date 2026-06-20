@@ -275,7 +275,30 @@ fn func_param_name(index: usize) -> String {
 }
 
 /// Generate a CMakeLists.txt snippet for building the Python extension.
-pub fn generate_cmake_snippet(module_name: &str, header_path: &str, lib_path: &str) -> String {
+/// `mimi_lib_path` is the path to the user's compiled Mimi shared library (.so),
+/// or empty string if unavailable.
+pub fn generate_cmake_snippet(module_name: &str, header_path: &str, lib_path: &str, mimi_lib_path: &str) -> String {
+    let mimi_lib_link = if mimi_lib_path.is_empty() {
+        String::new()
+    } else {
+        // Strip lib prefix and .so suffix to get the link target name
+        let libname = std::path::Path::new(mimi_lib_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.strip_prefix("lib").unwrap_or(s))
+            .unwrap_or("mimi_module");
+        format!(
+            "find_library(MIMI_USER_LIB NAMES {libname} PATHS \"{dir}\")
+target_link_libraries({module_name} PRIVATE ${{MIMI_USER_LIB}})
+",
+            libname = libname,
+            module_name = module_name,
+            dir = std::path::Path::new(mimi_lib_path).parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| ".".to_string()),
+        )
+    };
+
     format!(
 r#"cmake_minimum_required(VERSION 3.14)
 project({module_name}_bindings LANGUAGES CXX)
@@ -286,7 +309,7 @@ find_library(MIMI_RUNTIME_LIB NAMES mimi_runtime PATHS "{lib_path}")
 pybind11_add_module({module_name} bindings.cpp)
 target_include_directories({module_name} PRIVATE "{header_path}")
 target_link_libraries({module_name} PRIVATE ${{MIMI_RUNTIME_LIB}})
-set_target_properties({module_name} PROPERTIES
+{mimi_lib_link}set_target_properties({module_name} PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
 )
@@ -294,6 +317,7 @@ set_target_properties({module_name} PROPERTIES
         module_name = module_name,
         header_path = header_path,
         lib_path = lib_path,
+        mimi_lib_link = mimi_lib_link,
     )
 }
 
@@ -358,9 +382,16 @@ mod tests {
 
     #[test]
     fn test_cmake_snippet() {
-        let cmake = generate_cmake_snippet("my_mod", "/usr/local/include/mimi", "/usr/local/lib");
+        let cmake = generate_cmake_snippet("my_mod", "/usr/local/include/mimi", "/usr/local/lib", "");
         assert!(cmake.contains("pybind11_add_module(my_mod"));
         assert!(cmake.contains("find_package(pybind11 REQUIRED)"));
         assert!(cmake.contains("CXX_STANDARD 17"));
+    }
+
+    #[test]
+    fn test_cmake_snippet_with_mimi_lib() {
+        let cmake = generate_cmake_snippet("my_mod", "/usr/local/include/mimi", "/usr/local/lib", "/home/user/mymod.so");
+        assert!(cmake.contains("find_library(MIMI_USER_LIB"));
+        assert!(cmake.contains("my_mod PRIVATE ${MIMI_USER_LIB}"));
     }
 }
