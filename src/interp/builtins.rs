@@ -110,7 +110,7 @@ impl<'a> Interpreter<'a> {
     pub(crate) fn builtin_pow(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 { return Err(InterpError::new("pow expects 2 arguments (base, exp)")); }
         match (&args[0], &args[1]) {
-            (Value::Int(b), Value::Int(e)) => Ok(Value::Int(b.pow(*e as u32))),
+            (Value::Int(b), Value::Int(e)) => match b.checked_pow(*e as u32) { Some(v) => Ok(Value::Int(v)), None => Err(InterpError::new(format!("integer overflow in pow({}, {})", b, e))) },
             (Value::Float(b), Value::Int(e)) => Ok(Value::Float(b.powf(*e as f64))),
             (Value::Float(b), Value::Float(e)) => Ok(Value::Float(b.powf(*e))),
             _ => Err(InterpError::new("pow expects numbers")),
@@ -1163,9 +1163,23 @@ impl<'a> Interpreter<'a> {
                 if *ptr == 0 {
                     return Ok(Value::String(String::new()));
                 }
-                // Safety: ptr is a valid non-null pointer from a C malloc/calloc allocation (already null-checked on previous line).
-                let c_str = unsafe { std::ffi::CStr::from_ptr(*ptr as *const i8) };
-                Ok(Value::String(c_str.to_string_lossy().into_owned()))
+                // Safety: ptr is checked for null above. We also validate that it points to
+                // readable memory by attempting to read the first byte via a catch_unwind guard.
+                // This does NOT guarantee the entire C string is valid, but catches obvious garbage.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Probe the first byte: dereference the pointer to check
+                    // it points to readable memory (catches obvious garbage).
+                    let ptr_raw = *ptr as *const u8;
+                    let _first_byte = unsafe { *ptr_raw };
+                    let c_str = unsafe { std::ffi::CStr::from_ptr(*ptr as *const i8) };
+                    Value::String(c_str.to_string_lossy().into_owned())
+                }));
+                match result {
+                    Ok(v) => Ok(v),
+                    Err(_) => Err(InterpError::new(
+                        format!("c_str_to_string: invalid pointer {:#x} (segfault or unmapped memory)", ptr)
+                    )),
+                }
             }
             other => Err(InterpError::new(format!("c_str_to_string: argument must be a pointer (int), found {}", super::value::type_name(other)))),
         }

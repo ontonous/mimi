@@ -1787,26 +1787,21 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         return true;
     }
     // Normalize Type::Name("Result", [T, E]) <-> Type::Result(T, E) and Type::Name("Option", [T]) <-> Type::Option(T)
-    let norm_a = match a {
-        Type::Name(n, args) if n == "Result" && args.len() == 2 => {
-            Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone()))
-        }
-        Type::Name(n, args) if n == "Option" && args.len() == 1 => {
-            Type::Option(Box::new(args[0].clone()))
-        }
-        _ => a.clone(),
-    };
-    let norm_b = match b {
-        Type::Name(n, args) if n == "Result" && args.len() == 2 => {
-            Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone()))
-        }
-        Type::Name(n, args) if n == "Option" && args.len() == 1 => {
-            Type::Option(Box::new(args[0].clone()))
-        }
-        _ => b.clone(),
-    };
-    match (&norm_a, &norm_b) {
+    // Compare args directly without cloning to allocate new enum variants.
+    match (a, b) {
         (Type::Name(na, aa), Type::Name(nb, ab)) => na == nb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| same_type(x, y)),
+        (Type::Name(n, args), Type::Result(ok, err)) if n == "Result" && args.len() == 2 => {
+            same_type(&args[0], ok) && same_type(&args[1], err)
+        }
+        (Type::Result(ok, err), Type::Name(n, args)) if n == "Result" && args.len() == 2 => {
+            same_type(ok, &args[0]) && same_type(err, &args[1])
+        }
+        (Type::Name(n, args), Type::Option(inner)) if n == "Option" && args.len() == 1 => {
+            same_type(&args[0], inner)
+        }
+        (Type::Option(inner), Type::Name(n, args)) if n == "Option" && args.len() == 1 => {
+            same_type(inner, &args[0])
+        }
         (Type::Ref(_, a), Type::Ref(_, b)) => same_type(a, b),
         (Type::RefMut(_, a), Type::RefMut(_, b)) => same_type(a, b),
         (Type::Option(a), Type::Option(b)) => same_type(a, b),

@@ -361,7 +361,18 @@ impl<'a> Interpreter<'a> {
 
             // F8: Set up thread-local callback context if any callback contracts exist
             let has_callbacks = contract.args.iter().any(|a| matches!(a, FfiArgContract::Callback { .. }));
+            let mut prev_ctx: Option<FfiCallbackCtx> = None;
             if has_callbacks {
+                // Save the previous context to handle nested FFI calls correctly.
+                // If an FFI callback invokes another FFI call on the same thread,
+                // the old context is restored after the inner call completes.
+                prev_ctx = Some(FFI_CALLBACK_CTX.with(|c| {
+                    let ctx = c.borrow();
+                    FfiCallbackCtx {
+                        interp: ctx.interp,
+                        entries: ctx.entries.clone(),
+                    }
+                }));
                 // SAFETY: self is a mutable reference that lives for the duration of
                 // the synchronous C call. The C call may invoke callbacks on the same
                 // thread, which will read this context.
@@ -372,7 +383,8 @@ impl<'a> Interpreter<'a> {
                 // of `self`.
                 let static_ptr = interp_ptr as *const Interpreter<'static>;
                 FFI_CALLBACK_CTX.with(|c| {
-                    c.borrow_mut().interp = static_ptr;
+                    let mut ctx = c.borrow_mut();
+                    ctx.interp = static_ptr;
                 });
             }
 
@@ -384,17 +396,39 @@ impl<'a> Interpreter<'a> {
             };
 
             // F8: Clear thread-local callback context after the synchronous call.
-            // F3: Do NOT remove from CALLBACK_TABLE or CALLBACK_GLOBAL_STORE — those
-            // keep the closure alive for async/off-thread callbacks. C code that
-            // stores the function pointer can invoke it later via the global fallback.
-            // Entries are implicitly cleaned up when the Mimi process exits, or can
-            // be explicitly deregistered via mimi_callback_deregister (C ABI).
+            // F3: Remove from CALLBACK_GLOBAL_STORE for synchronous-only callbacks
+            // (the common case). Async/off-thread callbacks that store the function
+            // pointer will find it via the global store's remaining entries; those
+            // are cleaned up via explicit mimi_callback_deregister or process exit.
             if has_callbacks {
-                FFI_CALLBACK_CTX.with(|c| {
-                    let mut ctx = c.borrow_mut();
-                    ctx.interp = std::ptr::null();
-                    ctx.entries.clear();
-                });
+                // Collect callback IDs that were added for THIS call
+                let ids: Vec<i64> = callback_ids.iter().copied().collect();
+                // Remove from global store (sync callbacks don't need persistence)
+                {
+                    let mut global = CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner());
+                    for id in &ids {
+                        global.remove(id);
+                    }
+                }
+                // Also remove from CALLBACK_TABLE since these were sync-only
+                for id in &ids {
+                    CALLBACK_TABLE.remove(*id);
+                }
+                // Restore the previous context (for nested FFI calls).
+                // If there's no saved context (top-level call), clear entirely.
+                if let Some(prev) = prev_ctx.take() {
+                    FFI_CALLBACK_CTX.with(|c| {
+                        let mut ctx = c.borrow_mut();
+                        ctx.interp = prev.interp;
+                        ctx.entries = prev.entries;
+                    });
+                } else {
+                    FFI_CALLBACK_CTX.with(|c| {
+                        let mut ctx = c.borrow_mut();
+                        ctx.interp = std::ptr::null();
+                        ctx.entries.clear();
+                    });
+                }
             }
 
             call_result?

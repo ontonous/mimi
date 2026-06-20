@@ -190,8 +190,8 @@ unsafe impl Sync for CBufferInner {}
 
 impl Drop for CBufferInner {
     fn drop(&mut self) {
-        if !self.ptr.is_null() && self.size > 0 {
-            // Safety: ptr is a valid non-null pointer previously allocated by libc::malloc/calloc; size > 0 ensures we only free valid allocations.
+        if !self.ptr.is_null() {
+            // Safety: ptr is a valid non-null pointer previously allocated by libc::malloc/calloc.
             unsafe {
                 libc::free(self.ptr as *mut libc::c_void);
             }
@@ -388,6 +388,32 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
         Value::Ref(rc) | Value::RefMut(rc) => {
             if let Ok(v) = rc.read() {
                 contains_arena_ref(&v, arena_id)
+            } else {
+                false
+            }
+        }
+        Value::Closure { captured, .. } => captured.values().any(|v| contains_arena_ref(v, arena_id)),
+        Value::Shared(arc) => {
+            if let Ok(v) = arc.read() {
+                contains_arena_ref(&v, arena_id)
+            } else {
+                false
+            }
+        }
+        Value::WeakShared(arc) => {
+            if let Some(arc) = arc.upgrade() {
+                if let Ok(v) = arc.read() {
+                    return contains_arena_ref(&v, arena_id);
+                }
+            }
+            false
+        }
+        Value::LocalShared(inner) => {
+            contains_arena_ref(&*inner.0.borrow(), arena_id)
+        }
+        Value::WeakLocal(inner) => {
+            if let Some(rc) = inner.0.upgrade() {
+                contains_arena_ref(&*rc.borrow(), arena_id)
             } else {
                 false
             }
