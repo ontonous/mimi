@@ -1344,12 +1344,90 @@ fn e2e_shared_var_copy() {
     let stdout = compile_and_run(r#"
         func main() -> i32 {
             shared x = 42;
-            let v = x;  // shared ref copy (retain)
+            let v = x;
             println(v)
             0
         }
     "#).unwrap();
     assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_shared_var_assign() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            shared x = 42;
+            x = 100
+            println(x)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "100");
+}
+
+#[test]
+fn e2e_shared_field_access() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            shared p = Point { x: 10, y: 20 };
+            println(p.x)
+            println(p.y)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "10\n20");
+}
+
+#[test]
+fn e2e_shared_field_assign() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            shared p = Point { x: 10, y: 20 };
+            p.x = 30
+            println(p.x)
+            println(p.y)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "30\n20");
+}
+
+#[test]
+fn e2e_shared_field_access_via_copy() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            shared p = Point { x: 10, y: 20 };
+            let q = p;
+            println(q.x)
+            println(q.y)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "10\n20");
+}
+
+#[test]
+fn e2e_shared_write_through_copy() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            shared p = Point { x: 10, y: 20 };
+            let q = p;
+            q.x = 99
+            println(p.x)
+            println(q.x)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "99\n99");
 }
 
 #[test]

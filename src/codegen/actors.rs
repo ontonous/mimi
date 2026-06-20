@@ -249,7 +249,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Expr::Ident(src_name) = init {
                             if self.shared_var_names.contains(src_name.as_str()) {
                                 self.compile_shared_ref_copy(name, src_name, &mut vars)?;
-                                self.var_type_names.insert(name.clone(), src_name.clone());
                                 continue;
                             }
                         }
@@ -485,8 +484,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
                     self.compile_block(block, &mut vars)?;
                 }
-                Stmt::SharedLet { name, init, .. } => {
-                    self.compile_shared_let_stmt(name, init, &mut vars)?;
+                Stmt::SharedLet { kind, name, ty, init } => {
+                    self.compile_shared_let_stmt(&kind, name, &ty, init, &mut vars)?;
                 }
                 Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
                 Stmt::Block(block) => {

@@ -129,7 +129,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Expr::Ident(src_name) = init {
                             if self.shared_var_names.contains(src_name.as_str()) {
                                 self.compile_shared_ref_copy(name, src_name, vars)?;
-                                self.var_type_names.insert(name.clone(), src_name.clone());
                                 continue;
                             }
                         }
@@ -297,8 +296,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Drop: evaluate expression and discard result (for linear capabilities)
                     self.compile_expr(expr, vars)?;
                 }
-                Stmt::SharedLet { name, init, .. } => {
-                    self.compile_shared_let_stmt(name, init, vars)?;
+                Stmt::SharedLet { kind, name, ty, init } => {
+                    self.compile_shared_let_stmt(&kind, name, &ty, init, vars)?;
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit

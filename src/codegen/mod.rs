@@ -249,16 +249,79 @@ impl<'ctx> CodeGenerator<'ctx> {
         fallback
     }
 
-    /// G5: Compile a `shared let` statement with heap allocation and refcounting.
+    /// G5: Compile a `shared let` / `local_shared let` / `weak` statement.
     pub(super) fn compile_shared_let_stmt(
         &mut self,
+        kind: &crate::ast::SharedKind,
         name: &String,
+        ty: &Option<crate::ast::Type>,
         init: &Expr,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
-        let val = self.compile_expr(init, vars)?;
-        let llvm_ty = val.get_type();
         let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+
+        // Track type name for downstream field access / inference
+        if let Some(decl_ty) = ty {
+            let tn = crate::core::fmt_type(decl_ty);
+            self.var_type_names.insert(name.clone(), tn);
+        } else if let Expr::Record { ty: Some(tn), .. } = init {
+            self.var_type_names.insert(name.clone(), tn.clone());
+        } else if let Expr::Call(callee, _) = init {
+            if let Expr::Ident(fname) = callee.as_ref() {
+                if let Some(fdef) = self.func_defs.get(fname) {
+                    if let Some(ret_ty) = &fdef.ret {
+                        self.var_type_names.insert(name.clone(), crate::core::fmt_type(ret_ty));
+                    }
+                }
+            }
+        }
+
+        match kind {
+            crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
+                // Weak reference: init must be an existing shared variable.
+                // Store the heap pointer without calling mimi_rc_retain.
+                if let Expr::Ident(src_name) = init {
+                    let &(src_alloca, val_ty) = vars.get(src_name)
+                        .ok_or_else(|| CompileError::LlvmError(
+                            format!("weak source '{}' not found", src_name)))?;
+                    let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+                    let heap_ptr_typed = self.builder.build_load(
+                        BasicTypeEnum::PointerType(ptr_ty), src_alloca,
+                        &format!("{}_weak_load", name),
+                    ).map_err(|e| CompileError::LlvmError(format!("weak load: {}", e)))?.into_pointer_value();
+                    let new_alloca = self.builder.build_alloca(ptr_ty, name)
+                        .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                    self.builder.build_store(new_alloca, heap_ptr_typed)
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    vars.insert(name.clone(), (new_alloca, val_ty));
+                    self.shared_var_names.insert(name.clone());
+                    // Weak refs are NOT registered for release (no strong ref held)
+                    return Ok(());
+                }
+                return Err(CompileError::LlvmError(
+                    "weak requires an existing shared variable as initialiser".to_string()));
+            }
+            _ => {}
+        }
+
+        let mut val = self.compile_expr(init, vars)?;
+        // If the initialiser returns a pointer (e.g. record literal builds an
+        // alloca and returns its address), load the value first so we store the
+        // actual data on the heap, not a stack pointer.
+        let llvm_ty = if let BasicValueEnum::PointerValue(pv) = val {
+            let ty_name = self.var_type_names.get(name.as_str())
+                .or_else(|| {
+                    if let Expr::Record { ty: Some(tn), .. } = init { Some(tn) } else { None }
+                });
+            let pointee_ty = ty_name.and_then(|tn| self.type_llvm.get(tn)).cloned()
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            let loaded = self.builder.build_load(pointee_ty, pv, &format!("{}_val", name))
+                .map_err(|e| CompileError::LlvmError(format!("shared load init: {}", e)))?;
+            val = loaded;
+            loaded.get_type()
+        } else {
+            val.get_type()
+        };
 
         let ty_size_bytes = llvm_ty.size_of()
             .and_then(|v: inkwell::values::IntValue<'ctx>| v.get_zero_extended_constant())
@@ -341,8 +404,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 4. Register the i8* pointer for release on scope exit
         self.register_shared_var(heap_i8);
 
-        // 5. Track as shared
+        // 5. Track type name and shared status
         self.shared_var_names.insert(new_name.to_string());
+        if let Some(tn) = self.var_type_names.get(src_name) {
+            self.var_type_names.insert(new_name.to_string(), tn.clone());
+        }
         vars.insert(new_name.to_string(), (new_alloca, val_ty));
 
         Ok(())
