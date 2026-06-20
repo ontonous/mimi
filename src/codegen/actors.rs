@@ -218,9 +218,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     last_val = self.adjust_int_val(last_val, ret_type)?;
                 }
                 Stmt::Return(Some(expr)) => {
-                    self.pop_comp_scope();
-                    self.free_heap_allocs()?;
                     self.pop_shared_scope()?;
+                    self.free_heap_allocs()?;
+                    self.pop_comp_scope();
                     self.pop_cap_scope();
                     let mut val = self.compile_expr(expr, &vars)?;
                     val = self.adjust_int_val(val, self.current_fn_ret_type())?;
@@ -232,9 +232,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Return(None) => {
-                    self.pop_comp_scope();
-                    self.free_heap_allocs()?;
                     self.pop_shared_scope()?;
+                    self.free_heap_allocs()?;
+                    self.pop_comp_scope();
                     self.pop_cap_scope();
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
@@ -244,37 +244,68 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
+                    // Shared ref copy: let v = shared_var
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Ident(src_name) = init {
+                            if self.shared_var_names.contains(src_name.as_str()) {
+                                self.compile_shared_ref_copy(name, src_name, &mut vars)?;
+                                continue;
+                            }
+                        }
+                    }
                     let mut val = self.compile_expr(init, &vars)?;
-                    let name = match pat {
-                        Pattern::Variable(n) => n.clone(),
-                        _ => continue,
-                    };
-                    let llvm_ty = if let Some(decl_ty) = ty {
+                    if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
-                        target
-                    } else {
-                        val.get_type()
-                    };
-                    let alloca = self.builder.build_alloca(llvm_ty, &name)
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                    self.builder.build_store(alloca, val)
-                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    // Track type name from record expressions or spawn calls
-                    if let Expr::Record { ty: Some(tn), .. } = init {
-                        self.var_type_names.insert(name.clone(), tn.clone());
-                    } else if let Expr::Call(callee, _) = init {
-                        if let Expr::Field(obj, method_name) = callee.as_ref() {
-                            if method_name == "spawn" {
-                                let obj_type = self.infer_object_type(obj, &vars);
-                                if !obj_type.is_empty() {
-                                    self.var_type_names.insert(name.clone(), obj_type);
+                    }
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Record { ty: Some(tn), .. } = init {
+                            self.var_type_names.insert(name.clone(), tn.clone());
+                        } else if let Expr::Call(callee, _) = init {
+                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if method_name == "spawn" {
+                                    let obj_type = self.infer_object_type(obj, &vars);
+                                    if !obj_type.is_empty() {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
+                                } else if matches!(method_name.as_str(), "map" | "and_then" | "map_err" | "ok_or") {
+                                    let obj_type = self.infer_object_type(obj, &vars);
+                                    if obj_type == "Result" || obj_type == "Option" {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
+                                }
+                            } else if let Expr::Ident(func_name) = callee.as_ref() {
+                                match func_name.as_str() {
+                                    "Ok" | "Err" => {
+                                        self.var_type_names.insert(name.clone(), "Result".to_string());
+                                    }
+                                    "Some" | "None" => {
+                                        self.var_type_names.insert(name.clone(), "Option".to_string());
+                                    }
+                                    _ => {
+                                        if let Some(fdef) = self.func_defs.get(func_name) {
+                                            if let Some(ret_ty) = &fdef.ret {
+                                                match ret_ty {
+                                                    Type::ImplTrait(traits) => {
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            format!("impl {}", traits.join(" + ")),
+                                                        );
+                                                    }
+                                                    Type::Name(tn, _) => {
+                                                        self.var_type_names.insert(name.clone(), tn.clone());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    vars.insert(name, (alloca, llvm_ty));
+                    self.compile_pattern_bind(pat, val, &mut vars)?;
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, &vars)?;
@@ -313,56 +344,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(merge_bb);
                 }
                 Stmt::For { var, iterable, body } => {
-                    let function = self.current_function()
-                        .ok_or_else(|| CompileError::LlvmError("codegen: no current function for for loop in actor method".to_string()))?;
-                    if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable {
-                        let start_val = self.compile_expr(start_expr, &vars)?;
-                        let end_val = self.compile_expr(end_expr, &vars)?;
-                        let start_iv = if let BasicValueEnum::IntValue(iv) = start_val { iv } else { return Err(CompileError::TypeMismatch("range start must be i64".to_string())); };
-                        let end_iv = if let BasicValueEnum::IntValue(iv) = end_val { iv } else { return Err(CompileError::TypeMismatch("range end must be i64".to_string())); };
-                        let idx_alloca = self.builder.build_alloca(self.context.i64_type(), "idx")
-                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                        self.builder.build_store(idx_alloca, start_iv)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        let loop_bb = self.context.append_basic_block(function, "forloop");
-                        let body_bb = self.context.append_basic_block(function, "forbody");
-                        let merge_bb = self.context.append_basic_block(function, "forcont");
-                        self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                        self.builder.position_at_end(loop_bb);
-                        let idx_val = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), idx_alloca, "idx")
-                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                        let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("idx must be i64".to_string())); };
-                        let cmp = self.builder.build_int_compare(inkwell::IntPredicate::SLT, idx_iv, end_iv, "cmp")
-                            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-                        self.builder.build_conditional_branch(cmp, body_bb, merge_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                        self.builder.position_at_end(body_bb);
-                        let elem_alloca = self.builder.build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
-                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                        let old_break = self.loop_break.replace(merge_bb);
-                        let old_continue = self.loop_continue.replace(loop_bb);
-                        self.builder.build_store(elem_alloca, idx_val)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        vars.insert(var.clone(), (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())));
-                        self.compile_block(body, &mut vars)?;
-                        vars.remove(var);
-                        self.loop_break = old_break;
-                        self.loop_continue = old_continue;
-                        let idx_val = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), idx_alloca, "idx")
-                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                        let idx_iv = if let BasicValueEnum::IntValue(iv) = idx_val { iv } else { return Err(CompileError::TypeMismatch("idx must be i64".to_string())); };
-                        let one = self.context.i64_type().const_int(1, false);
-                        let next_idx = self.builder.build_int_add(idx_iv, one, "next_idx")
-                            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                        self.builder.build_store(idx_alloca, next_idx)
-                            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        self.builder.build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                        self.builder.position_at_end(merge_bb);
-                    } else {
-                        return Err(CompileError::UnsupportedStmt("for loop requires range in codegen".to_string()));
-                    }
+                    self.compile_for_stmt(var, iterable, body, &mut vars)?;
                 }
                 Stmt::While { cond, body } => {
                     let function = self.current_function()
@@ -403,68 +385,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_comp(block);
                 }
                 Stmt::Arena(block) => {
-                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("arena outside function".to_string()))?;
-                    let arena_body_bb = self.context.append_basic_block(function, "arena_body");
-                    let arena_cont_bb = self.context.append_basic_block(function, "arena_cont");
-                    if !self.block_has_terminator() {
-                        self.builder.build_unconditional_branch(arena_body_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch to arena: {}", e)))?;
-                    }
-                    self.builder.position_at_end(arena_body_bb);
-                    let saved = self.build_stacksave()?;
-                    let vars_before: std::collections::HashSet<String> = vars.keys().cloned().collect();
-                    self.compile_block(block, &mut vars)?;
-                    for k in vars.keys().cloned().collect::<Vec<_>>() {
-                        if !vars_before.contains(&k) {
-                            vars.remove(&k);
-                        }
-                    }
-                    self.build_stackrestore(saved)?;
-                    if !self.block_has_terminator() {
-                        self.builder.build_unconditional_branch(arena_cont_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch after arena: {}", e)))?;
-                    }
-                    self.builder.position_at_end(arena_cont_bb);
+                    self.compile_arena_block(block, &mut vars, "arena")?;
                 }
                 Stmt::Alloc { kind: AllocKind::Arena, body } => {
-                    let function = self.current_function().ok_or_else(|| CompileError::LlvmError("arena outside function".to_string()))?;
-                    let arena_body_bb = self.context.append_basic_block(function, "arena_body");
-                    let arena_cont_bb = self.context.append_basic_block(function, "arena_cont");
-                    if !self.block_has_terminator() {
-                        self.builder.build_unconditional_branch(arena_body_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch to alloc(Arena): {}", e)))?;
-                    }
-                    self.builder.position_at_end(arena_body_bb);
-                    let saved = self.build_stacksave()?;
-                    let vars_before: std::collections::HashSet<String> = vars.keys().cloned().collect();
-                    self.compile_block(body, &mut vars)?;
-                    for k in vars.keys().cloned().collect::<Vec<_>>() {
-                        if !vars_before.contains(&k) {
-                            vars.remove(&k);
-                        }
-                    }
-                    self.build_stackrestore(saved)?;
-                    if !self.block_has_terminator() {
-                        self.builder.build_unconditional_branch(arena_cont_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch after alloc(Arena): {}", e)))?;
-                    }
-                    self.builder.position_at_end(arena_cont_bb);
+                    self.compile_arena_block(body, &mut vars, "alloc(Arena)")?;
                 }
                 Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
                     self.compile_block(block, &mut vars)?;
                 }
-                Stmt::SharedLet { name, init, .. } => {
-                    self.compile_shared_let_stmt(name, init, &mut vars)?;
+                Stmt::SharedLet { kind, name, ty, init } => {
+                    self.compile_shared_let_stmt(&kind, name, &ty, init, &mut vars)?;
                 }
                 Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
+                Stmt::Block(block) => {
+                    self.compile_block(block, &mut vars)?;
+                }
                 _ => {}
             }
         }
         
         self.check_unconsumed_caps()?;
-        self.pop_comp_scope();
-        self.free_heap_allocs()?;
         self.release_all_shared()?;
+        self.free_heap_allocs()?;
+        self.pop_comp_scope();
         self.pop_cap_scope();
         
         if !self.block_has_terminator() {

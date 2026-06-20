@@ -68,41 +68,73 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 /// Verify that MMS rule attachments are consistent.
 /// Rules must be attached to a following entity; orphan rules are errors.
 pub fn verify_rules(file: &File) -> Vec<String> {
+    let mut errors = Vec::new();
     for item in &file.items {
         match item {
             Item::Func(func) => {
-                verify_rules_in_block(&func.body);
+                verify_rules_in_block(&func.body, &mut errors, &func.name);
             }
             Item::Module(module) => {
                 for item in &module.items {
                     if let Item::Func(func) = item {
-                        verify_rules_in_block(&func.body);
+                        verify_rules_in_block(&func.body, &mut errors, &func.name);
                     }
                 }
             }
             _ => {}
         }
     }
-    Vec::new()
+    errors
 }
 
-fn verify_rules_in_block(block: &[Stmt]) {
+fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str) {
+    let mut last_was_rule = false;
+    let mut rule_pos = String::new();
     for stmt in block {
         match stmt {
+            Stmt::Desc(text) if text.starts_with("rule:") => {
+                // Rule must be followed by requires/ensures or a block that contains them.
+                // For now, flag any consecutive rules without intervening contract.
+                if last_was_rule {
+                    errors.push(format!(
+                        "consecutive rules without attached contract in '{}': '{}'",
+                        context, text
+                    ));
+                }
+                last_was_rule = true;
+                rule_pos = text.clone();
+            }
+            Stmt::Requires(_, _) | Stmt::Ensures(_, _) => {
+                last_was_rule = false;
+            }
             Stmt::Block(inner) => {
-                verify_rules_in_block(inner);
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                verify_rules_in_block(body);
-            }
-            Stmt::If { then_, else_, .. } => {
-                verify_rules_in_block(then_);
-                if let Some(else_) = else_ {
-                    verify_rules_in_block(else_);
+                verify_rules_in_block(inner, errors, context);
+                // A block after a rule potentially contains the contract
+                if last_was_rule {
+                    last_was_rule = false;
                 }
             }
-            _ => {}
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                verify_rules_in_block(body, errors, context);
+                last_was_rule = false;
+            }
+            Stmt::If { then_, else_, .. } => {
+                verify_rules_in_block(then_, errors, context);
+                if let Some(else_) = else_ {
+                    verify_rules_in_block(else_, errors, context);
+                }
+                last_was_rule = false;
+            }
+            _ => {
+                last_was_rule = false;
+            }
         }
+    }
+    if last_was_rule {
+        errors.push(format!(
+            "orphan rule without attached contract at end of '{}': '{}'",
+            context, rule_pos
+        ));
     }
 }
 
@@ -137,6 +169,8 @@ struct Checker<'a> {
     borrows: Vec<HashMap<String, BorrowState>>,
     /// Track trait definitions: trait_name -> list of method names
     traits: HashMap<String, Vec<String>>,
+    /// Track trait generic params: trait_name -> list of generic param names
+    trait_generics: HashMap<String, Vec<String>>,
     /// Track trait implementations: (trait_name, type_name) -> list of method names
     impls: HashMap<(String, String), Vec<String>>,
     /// Track where clauses for functions: func_name -> (type_param, bounds)
@@ -188,6 +222,7 @@ impl<'a> Checker<'a> {
             cap_vars: vec![HashMap::new()],
             borrows: vec![HashMap::new()],
             traits: HashMap::new(),
+            trait_generics: HashMap::new(),
             impls: HashMap::new(),
             where_clauses: HashMap::new(),
             func_effects: HashMap::new(),
@@ -495,10 +530,19 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                let allow_passport = f.extern_abi.is_some();
                 for (i, p) in f.params.iter().enumerate() {
-                    self.check_type_well_formed(&params[i], &format!("parameter '{}' of function '{}'", p.name, qualified_name));
+                    if allow_passport {
+                        self.check_type_well_formed_allow_passport(&params[i], &format!("parameter '{}' of function '{}'", p.name, qualified_name));
+                    } else {
+                        self.check_type_well_formed(&params[i], &format!("parameter '{}' of function '{}'", p.name, qualified_name));
+                    }
                 }
-                self.check_type_well_formed(&ret, &format!("return type of function '{}'", qualified_name));
+                if allow_passport {
+                    self.check_type_well_formed_allow_passport(&ret, &format!("return type of function '{}'", qualified_name));
+                } else {
+                    self.check_type_well_formed(&ret, &format!("return type of function '{}'", qualified_name));
+                }
                 self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                 self.funcs.insert(qualified_name.clone(), (params, ret));
                 // Store generic parameters if present
@@ -561,6 +605,12 @@ impl<'a> Checker<'a> {
                             self.check_type_well_formed(&field_ty, &format!("field '{}' of record '{}'", field.name, t.name));
                         }
                     }
+                    TypeDefKind::Union(fields) => {
+                        for field in fields {
+                            let field_ty = self.resolve_type(&field.ty);
+                            self.check_type_well_formed(&field_ty, &format!("field '{}' of union '{}'", field.name, t.name));
+                        }
+                    }
                 }
                 self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
                 self.types.insert(t.name.clone(), t.clone());
@@ -595,7 +645,7 @@ impl<'a> Checker<'a> {
                 // Collect actor methods as functions
                 for method in &actor.methods {
                     if self.funcs.contains_key(&method.name) {
-                        self.emit(format!("duplicate function definition '{}'", method.name));
+                        self.emit_code(crate::diagnostic::codes::E0402, format!("duplicate function definition '{}'", method.name));
                         return;
                     }
                     let generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
@@ -621,6 +671,10 @@ impl<'a> Checker<'a> {
             Item::Trait(trait_def) => {
                 let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits.insert(trait_def.name.clone(), method_names.clone());
+                let generic_names: Vec<String> = trait_def.generics.iter().map(|g| g.name.clone()).collect();
+                self.trait_generics.insert(trait_def.name.clone(), generic_names.clone());
+                // Push trait generics into scope so method signatures can reference them
+                self.generic_scope.extend(generic_names.iter().cloned());
                 // Store trait method signatures for argument validation
                 for method in &trait_def.methods {
                     let params: Vec<Type> = method.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
@@ -632,6 +686,7 @@ impl<'a> Checker<'a> {
                         (params, ret),
                     );
                 }
+                self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
                 let method_names: Vec<String> = impl_def.methods.iter().map(|m| m.name.clone()).collect();
@@ -647,10 +702,12 @@ impl<'a> Checker<'a> {
                         .push((impl_def.trait_name.clone(), method_name.clone()));
                 }
                 // Also register impl methods as functions with self parameter
+                let impl_generic_names: Vec<String> = impl_def.generics.iter().map(|g| g.name.clone()).collect();
+                self.generic_scope.extend(impl_generic_names.iter().cloned());
                 for method in &impl_def.methods {
                     let generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
                     self.generic_scope.extend(generic_names.iter().cloned());
-                    let mut params = vec![Type::Name(impl_def.type_name.clone(), vec![])];
+                    let mut params = vec![Type::Name(impl_def.type_name.clone(), impl_def.type_args.clone())];
                     params.extend(method.params.iter().map(|p| self.resolve_type(&p.ty)));
                     let ret = method
                         .ret
@@ -665,6 +722,7 @@ impl<'a> Checker<'a> {
                     let key = format!("{}_{}", impl_def.type_name, method.name);
                     self.funcs.insert(key, (params, ret));
                 }
+                self.generic_scope.truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
                 // Register extern functions for type checking
@@ -672,10 +730,20 @@ impl<'a> Checker<'a> {
                     for param in &func.params {
                         let resolved = self.resolve_type(&param.ty);
                         if !self.is_valid_extern_type(&resolved, false) {
+                            let type_str = fmt_type(&resolved);
+                            let help = if type_str.contains("List") || type_str.starts_with('[') {
+                                format!("type '{}' is a Mimi list/array and cannot cross the C ABI boundary directly. \
+                                    Use a pointer (*T / *mut T) to pass array data, or serialize to JSON via the builtin JSON module.", type_str)
+                            } else if type_str.contains("Option") || type_str.contains("Result") {
+                                format!("type '{}' is an algebraic data type and cannot cross the C ABI boundary. \
+                                    Use a plain type or a pointer (*T).", type_str)
+                            } else {
+                                format!("type '{}' is not allowed across the C ABI boundary. \
+                                    Use scalar types (i32, i64, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.", type_str)
+                            };
                             self.emit_code(crate::diagnostic::codes::E0231, format!(
-                                "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. \
-                                 Use scalar types, *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, or #[repr(C)] records.",
-                                param.name, fmt_type(&resolved)
+                                "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. {}",
+                                param.name, type_str, help
                             ));
                         }
                     }
@@ -693,7 +761,15 @@ impl<'a> Checker<'a> {
         match ty {
             Type::Name(name, args) => {
                 if let Some(aliased) = self.aliases.get(name) {
-                    // Simple aliases do not carry generic args in v0.2
+                    if let Some(generics) = self.type_generics.get(name) {
+                        if !args.is_empty() && args.len() == generics.len() {
+                            let type_map: HashMap<String, Type> = generics.iter()
+                                .zip(args.iter())
+                                .map(|(g, a)| (g.name.clone(), a.clone()))
+                                .collect();
+                            return subst_type_params(aliased, generics, &type_map);
+                        }
+                    }
                     aliased.clone()
                 } else if let Some(inner_ty) = self.newtypes.get(name) {
                     // This is a newtype - wrap the resolved inner type in Type::Newtype with name
@@ -736,11 +812,12 @@ impl<'a> Checker<'a> {
     /// extern function signature.
     fn is_valid_extern_type(&self, ty: &Type, _in_pointer: bool) -> bool {
         match ty {
-            // Scalars and #[repr(C)] user types
+            // Scalars and #[repr(C)] user types (Enum, Record, Union)
             Type::Name(name, _) => {
                 matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit")
                 || (self.types.get(name).map(|t| t.attributes.contains(&TypeAttribute::ReprC)).unwrap_or(false)
-                    && matches!(self.types.get(name).map(|t| &t.kind), Some(TypeDefKind::Enum(_))))
+                    && matches!(self.types.get(name).map(|t| &t.kind),
+                        Some(TypeDefKind::Enum(_)) | Some(TypeDefKind::Record(_)) | Some(TypeDefKind::Union(_))))
             }
             // Capabilities
             Type::Cap(_) => true,
@@ -756,8 +833,9 @@ impl<'a> Checker<'a> {
             Type::Ref(_, _) | Type::RefMut(_, _) => false,
             // Shared ownership is not allowed directly; must use c_shared
             Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) | Type::WeakLocal(_) => false,
-            // Composite Mimi types are not allowed
-            Type::Tuple(_) => false,
+            // Composite Mimi types
+            // Tuple is allowed — serialized as JSON over FFI boundary
+            Type::Tuple(_) => true,
             Type::Option(_) | Type::Result(_, _) => false,
             Type::Array(_, _) | Type::Slice(_) => false,
             // G1b: Accept closures (Type::Func) as extern callback params
@@ -801,7 +879,7 @@ impl<'a> Checker<'a> {
                     if let Some(init) = &field.init {
                         let init_ty = self.infer_expr(init, &mut vec![HashMap::new()]);
                         if !same_type(&field_ty, &init_ty) {
-                            self.emit(format!(
+                            self.emit_code(crate::diagnostic::codes::E0209, format!(
                                 "actor field '{}' initializer type {} does not match field type {}",
                                 field.name,
                                 fmt_type(&init_ty),
@@ -843,6 +921,8 @@ impl<'a> Checker<'a> {
                 let generic_names: Vec<String> = trait_def.generics.iter().map(|g| g.name.clone()).collect();
                 self.generic_scope.extend(generic_names.iter().cloned());
                 for method in &trait_def.methods {
+                    let method_generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
+                    self.generic_scope.extend(method_generic_names.iter().cloned());
                     for param in &method.params {
                         let resolved = self.resolve_type(&param.ty);
                         self.check_type_well_formed(&resolved, &format!("trait '{}' method '{}'", trait_def.name, method.name));
@@ -851,6 +931,7 @@ impl<'a> Checker<'a> {
                         let resolved = self.resolve_type(ret);
                         self.check_type_well_formed(&resolved, &format!("trait '{}' method '{}' return", trait_def.name, method.name));
                     }
+                    self.generic_scope.truncate(self.generic_scope.len() - method_generic_names.len());
                 }
                 self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
             }
@@ -874,18 +955,41 @@ impl<'a> Checker<'a> {
                     let implemented: Vec<String> = impl_def.methods.iter().map(|m| m.name.clone()).collect();
                     for required in &required_methods {
                         if !implemented.contains(required) {
-                            self.emit(format!(
+                            self.emit_code(crate::diagnostic::codes::E0252, format!(
                                 "missing method '{}' in impl of trait '{}' for '{}'",
                                 required, impl_def.trait_name, impl_def.type_name
                             ));
                         }
                     }
                 }
-                // Check impl method bodies
+                // Check impl method bodies with self bound to the implementing type
+                let impl_generic_names: Vec<String> = impl_def.generics.iter().map(|g| g.name.clone()).collect();
+                self.generic_scope.extend(impl_generic_names.iter().cloned());
                 for method in &impl_def.methods {
                     self.set_pos(method.pos.0, method.pos.1);
-                    self.check_func(method);
+                    let method_generic_names: Vec<String> = method.generics.iter().map(|g| g.name.clone()).collect();
+                    self.generic_scope.extend(method_generic_names.iter().cloned());
+                    let ret = method
+                        .ret
+                        .as_ref()
+                        .map(|t| self.resolve_type(t))
+                        .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
+                    // Bind self with the implementing type
+                    scopes[0].insert("self".to_string(), Type::Name(impl_def.type_name.clone(), impl_def.type_args.clone()));
+                    for p in &method.params {
+                        let ty = self.resolve_type(&p.ty);
+                        scopes[0].insert(p.name.clone(), ty);
+                    }
+                    self.var_scopes.push(HashMap::new());
+                    self.cap_vars.push(HashMap::new());
+                    self.check_block(&method.body, &ret, &mut scopes);
+                    self.check_unconsumed_caps();
+                    self.var_scopes.pop();
+                    self.cap_vars.pop();
+                    self.generic_scope.truncate(self.generic_scope.len() - method_generic_names.len());
                 }
+                self.generic_scope.truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(_) => {
                 // Extern blocks are collected but not type-checked in v1.1
@@ -894,50 +998,15 @@ impl<'a> Checker<'a> {
     }
 
     fn is_builtin_type(name: &str) -> bool {
-        matches!(name, "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "List" | "Future" | "Result" | "Option")
+        Self::builtin_type_names().contains(&name.to_string())
     }
 
-    /// Check if a type is Copy (all fields are Copy for records, all variants Copy for enums).
-    #[allow(dead_code)]
-    fn is_copy_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Name(name, _) => {
-                // Built-in scalar types are Copy
-                if matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "unit") {
-                    return true;
-                }
-                // Check user-defined types
-                if let Some(type_def) = self.types.get(name) {
-                    match &type_def.kind {
-                        TypeDefKind::Record(fields) => {
-                            fields.iter().all(|f| self.is_copy_type(&f.ty))
-                        }
-                        TypeDefKind::Enum(variants) => {
-                            variants.iter().all(|v| {
-                                match &v.payload {
-                                    None => true,
-                                    Some(VariantPayload::Tuple(types)) => {
-                                        types.iter().all(|t| self.is_copy_type(t))
-                                    }
-                                    Some(VariantPayload::Record(fields)) => {
-                                        fields.iter().all(|f| self.is_copy_type(&f.ty))
-                                    }
-                                }
-                            })
-                        }
-                        TypeDefKind::Alias(inner) => self.is_copy_type(inner),
-                        TypeDefKind::Newtype(inner) => self.is_copy_type(inner),
-                    }
-                } else {
-                    false
-                }
-            }
-            Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_type(e)),
-            Type::Shared(_) | Type::LocalShared(_) => true,
-            Type::Ref(_, _) | Type::RefMut(_, _) => true,
-            Type::Array(inner, _) => self.is_copy_type(inner),
-            _ => false,
-        }
+    fn builtin_type_names() -> Vec<String> {
+        vec![
+            "i32".into(), "i64".into(), "f64".into(), "bool".into(),
+            "string".into(), "unit".into(), "List".into(), "Future".into(),
+            "Result".into(), "Option".into(),
+        ]
     }
 
     fn check_type_well_formed(&mut self, ty: &Type, context: &str) {
@@ -963,14 +1032,30 @@ impl<'a> Checker<'a> {
                     && !self.types.contains_key(name)
                     && !self.generic_scope.contains(name)
                 {
-                    self.emit_code(crate::diagnostic::codes::E0231, format!("unknown type '{}' in {}", name, context));
+                    let mut candidates: Vec<String> = self.types.keys().cloned().collect();
+                    candidates.extend(self.generic_scope.clone());
+                    candidates.extend(Self::builtin_type_names());
+                    let suggestion = suggest_name(name, &candidates, 3);
+                    let help = if let Some(suggested) = suggestion {
+                        format!("type '{}' not found — did you mean '{}'?", name, suggested)
+                    } else {
+                        "check the type name spelling or add a 'type' declaration".to_string()
+                    };
+                    self.errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0407,
+                            format!("unknown type '{}' in {}", name, context),
+                            Span::single(self.current_line, self.current_col),
+                        ).with_help(help)
+                    );
                 }
                 for arg in args {
                     self.check_type_well_formed_inner(arg, context, allow_passport);
                 }
             }
             Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
-                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) | Type::WeakLocal(inner)
+                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
+                | Type::WeakLocal(inner)
                 | Type::RawPtr(inner) | Type::RawPtrMut(inner)
                 | Type::CShared(inner) | Type::CBorrow(inner) | Type::CBorrowMut(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
@@ -1002,7 +1087,7 @@ impl<'a> Checker<'a> {
             }
             Type::Newtype(name, inner) => {
                 if !self.types.contains_key(name) && !self.newtypes.contains_key(name) {
-                    self.emit(format!("unknown newtype '{}' in {}", name, context));
+                    self.emit_code(crate::diagnostic::codes::E0407, format!("unknown newtype '{}' in {}", name, context));
                 }
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
@@ -1015,7 +1100,7 @@ impl<'a> Checker<'a> {
             Type::DynTrait(traits) => {
                 for trait_name in traits {
                     if !self.traits.contains_key(trait_name) {
-                        self.emit(format!("unknown trait '{}' in dyn Trait in {}", trait_name, context));
+                        self.emit_code(crate::diagnostic::codes::E0406, format!("unknown trait '{}' in dyn Trait in {}", trait_name, context));
                     }
                 }
             }
@@ -1031,7 +1116,8 @@ impl<'a> Checker<'a> {
                 | Type::RawString => true,
             Type::Name(_, args) => args.iter().any(Self::type_contains_passport),
             Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
-                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) | Type::WeakLocal(inner)
+                | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
+                | Type::WeakLocal(inner)
                 | Type::Array(inner, _) | Type::Slice(inner) => Self::type_contains_passport(inner),
             Type::Result(ok, err) => Self::type_contains_passport(ok) || Self::type_contains_passport(err),
             Type::Tuple(elems) => elems.iter().any(Self::type_contains_passport),
@@ -1070,7 +1156,9 @@ impl<'a> Checker<'a> {
             let ty = self.resolve_type(&p.ty);
             // If param is a cap type, track it
             if matches!(&ty, Type::Cap(_)) {
-                self.cap_vars.last_mut().expect("scope stack non-empty").insert(p.name.clone(), false);
+                if let Some(s) = self.cap_vars.last_mut() {
+                    s.insert(p.name.clone(), false);
+                }
             }
             scopes[0].insert(p.name.clone(), ty);
         }
@@ -1081,10 +1169,13 @@ impl<'a> Checker<'a> {
         }
         // Check all-return-paths requirement
         if !matches!(&ret, Type::Name(n, _) if n == "unit") && !self.block_returns_on_all_paths(&func.body) {
-            self.emit(format!(
-                "function '{}' does not return on all paths (missing return in some branches)",
-                func.name
-            ));
+            self.errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0255,
+                    format!("function '{}' does not return on all paths (missing return in some branches)", func.name),
+                    Span::single(self.current_line, self.current_col),
+                ).with_help("add a return statement or make the last expression return the appropriate type")
+            );
         }
         self.check_block(&func.body, &ret, &mut scopes);
         // Check for unconsumed caps before popping
@@ -1129,7 +1220,8 @@ impl<'a> Checker<'a> {
                 }
                 Stmt::Expr(Expr::Match(_, arms)) => {
                     return arms.iter().all(|arm| {
-                        self.block_returns_on_all_paths(&[Stmt::Expr(arm.body.clone())])
+                        let block = vec![Stmt::Expr(arm.body.clone())];
+                        self.block_returns_on_all_paths(&block)
                     });
                 }
                 _ => {}
@@ -1145,7 +1237,7 @@ impl<'a> Checker<'a> {
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in unconsumed {
-                self.emit(format!(
+                self.emit_code(crate::diagnostic::codes::E0256, format!(
                     "linear capability '{}' must be consumed (via drop) before end of scope",
                     name
                 ));
@@ -1215,7 +1307,9 @@ impl<'a> Checker<'a> {
                     _ => false,
                 };
                 if !is_constructor {
-                    scopes.last_mut().expect("scope stack non-empty").insert(name.clone(), subject.clone());
+                    if let Some(s) = scopes.last_mut() {
+                        s.insert(name.clone(), subject.clone());
+                    }
                 }
             }
             Pattern::Literal(l) => {
@@ -1228,11 +1322,17 @@ impl<'a> Checker<'a> {
                     Lit::Unit => Type::Name("unit".into(), vec![]),
                 };
                 if !same_type(subject, &lit_ty) {
-                    self.emit(format!(
-                        "pattern literal type {} does not match subject {}",
-                        fmt_type(&lit_ty),
-                        fmt_type(subject)
-                    ));
+                    self.errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0225,
+                            format!(
+                                "pattern literal type {} does not match subject {}",
+                                fmt_type(&lit_ty),
+                                fmt_type(subject)
+                            ),
+                            Span::single(self.current_line, self.current_col),
+                        ).with_help(format!("change the pattern to match type {}", fmt_type(subject)))
+                    );
                 }
             }
             Pattern::Constructor(name, pats) => {
@@ -1241,7 +1341,7 @@ impl<'a> Checker<'a> {
                     if let Type::Result(ok_ty, err_ty) = subject {
                         let expected_ty = if name == "Ok" { ok_ty } else { err_ty };
                         if pats.len() != 1 {
-                            self.emit(format!("'{}' expects 1 argument, got {}", name, pats.len()));
+                            self.emit_code(crate::diagnostic::codes::E0228, format!("'{}' expects 1 argument, got {}", name, pats.len()));
                         } else {
                             self.check_pattern(&pats[0], expected_ty, scopes);
                         }
@@ -1252,7 +1352,7 @@ impl<'a> Checker<'a> {
                 if name == "Some" && matches!(subject, Type::Option(_)) {
                     if let Type::Option(inner) = subject {
                         if pats.len() != 1 {
-                            self.emit(format!("'Some' expects 1 argument, got {}", pats.len()));
+                            self.emit_code(crate::diagnostic::codes::E0228, format!("'Some' expects 1 argument, got {}", pats.len()));
                         } else {
                             self.check_pattern(&pats[0], inner, scopes);
                         }
@@ -1261,7 +1361,7 @@ impl<'a> Checker<'a> {
                 }
                 if name == "None" && matches!(subject, Type::Option(_)) {
                     if !pats.is_empty() {
-                        self.emit("'None' expects no arguments".to_string());
+                        self.emit_code(crate::diagnostic::codes::E0227, "'None' expects no arguments".to_string());
                     }
                     return;
                 }
@@ -1280,7 +1380,7 @@ impl<'a> Checker<'a> {
                                     match &variant.payload {
                                         None => {
                                             if !pats.is_empty() {
-                                                self.emit(format!(
+                                                self.emit_code(crate::diagnostic::codes::E0227, format!(
                                                     "variant '{}' takes no arguments",
                                                     name
                                                 ));
@@ -1289,7 +1389,7 @@ impl<'a> Checker<'a> {
                                         Some(VariantPayload::Tuple(types)) => {
                                             let types: Vec<Type> = types.clone();
                                             if pats.len() != types.len() {
-                                                self.emit(format!(
+                                                self.emit_code(crate::diagnostic::codes::E0228, format!(
                                                     "variant '{}' expects {} arguments, got {}",
                                                     name,
                                                     types.len(),
@@ -1303,7 +1403,7 @@ impl<'a> Checker<'a> {
                                         }
                                         Some(VariantPayload::Record(fields)) => {
                                             if pats.len() != fields.len() {
-                                                self.emit(format!(
+                                                self.emit_code(crate::diagnostic::codes::E0228, format!(
                                                     "variant '{}' record expects {} fields, got {}",
                                                     name,
                                                     fields.len(),
@@ -1318,12 +1418,12 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 } else {
-                                    self.emit(format!("variant '{}' not found in type '{}'", name, tdef.name));
+                                    self.emit_code(crate::diagnostic::codes::E0226, format!("variant '{}' not found in type '{}'", name, tdef.name));
                                 }
                             }
                             TypeDefKind::Newtype(inner) => {
                                 if pats.len() != 1 {
-                                    self.emit(format!(
+                                    self.emit_code(crate::diagnostic::codes::E0228, format!(
                                         "newtype '{}' pattern expects exactly one argument",
                                         name
                                     ));
@@ -1332,12 +1432,30 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             _ => {
-                                self.emit(format!("'{}' is not an enum variant", name));
+                                self.emit_code(crate::diagnostic::codes::E0226, format!("'{}' is not an enum variant", name));
                             }
                         }
                     }
                     None => {
-                        self.emit(format!("undefined constructor '{}'", name));
+                        let mut constructors: Vec<String> = Vec::new();
+                        for tdef in self.types.values() {
+                            match &tdef.kind {
+                                TypeDefKind::Enum(variants) => {
+                                    constructors.extend(variants.iter().map(|v| v.name.clone()));
+                                }
+                                TypeDefKind::Newtype(_) => {
+                                    constructors.push(tdef.name.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        let suggestion = suggest_name(name, &constructors, 3);
+                        let msg = if let Some(s) = suggestion {
+                            format!("undefined constructor '{}' — did you mean '{}'?", name, s)
+                        } else {
+                            format!("undefined constructor '{}'", name)
+                        };
+                        self.emit_code(crate::diagnostic::codes::E0226, msg);
                     }
                 }
             }
@@ -1345,7 +1463,7 @@ impl<'a> Checker<'a> {
                 match subject {
                     Type::Tuple(types) => {
                         if pats.len() != types.len() {
-                            self.emit(format!(
+                            self.emit_code(crate::diagnostic::codes::E0251, format!(
                                 "tuple pattern expects {} elements, found {}",
                                 types.len(),
                                 pats.len()
@@ -1357,7 +1475,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
-                        self.emit(format!(
+                        self.emit_code(crate::diagnostic::codes::E0251, format!(
                             "cannot match tuple pattern against non-tuple type {}",
                             fmt_type(subject)
                         ));
@@ -1368,7 +1486,7 @@ impl<'a> Checker<'a> {
                 match subject {
                     Type::Array(inner, size) => {
                         if pats.len() != *size {
-                            self.emit(format!(
+                            self.emit_code(crate::diagnostic::codes::E0251, format!(
                                 "array pattern expects {} elements, found {}",
                                 size,
                                 pats.len()
@@ -1384,7 +1502,7 @@ impl<'a> Checker<'a> {
                         // For now, just check against the inner type if available
                     }
                     _ => {
-                        self.emit(format!(
+                        self.emit_code(crate::diagnostic::codes::E0251, format!(
                             "cannot match array pattern against non-array type {}",
                             fmt_type(subject)
                         ));
@@ -1406,7 +1524,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
-                        self.emit(format!(
+                        self.emit_code(crate::diagnostic::codes::E0251, format!(
                             "cannot match slice pattern against non-slice type {}",
                             fmt_type(subject)
                         ));
@@ -1447,6 +1565,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check if a type variable name occurs within a type (occurs check).
+    /// Prevents infinite types like `T = List<T>`.
+    fn occurs_check(name: &str, ty: &Type) -> bool {
+        match ty {
+            Type::Name(n, args) => n == name || args.iter().any(|a| Self::occurs_check(name, a)),
+            Type::Ref(_, inner) | Type::RefMut(_, inner) => Self::occurs_check(name, inner),
+            Type::Option(inner) => Self::occurs_check(name, inner),
+            Type::Result(ok, err) => Self::occurs_check(name, ok) || Self::occurs_check(name, err),
+            Type::Tuple(elems) => elems.iter().any(|e| Self::occurs_check(name, e)),
+            Type::Func(args, ret) => args.iter().any(|a| Self::occurs_check(name, a)) || Self::occurs_check(name, ret),
+            Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner) | Type::WeakLocal(inner) => Self::occurs_check(name, inner),
+            Type::Newtype(_, inner) => Self::occurs_check(name, inner),
+            Type::Array(inner, _) | Type::Slice(inner) => Self::occurs_check(name, inner),
+            Type::ExternFunc(args, ret) => args.iter().any(|a| Self::occurs_check(name, a)) || Self::occurs_check(name, ret),
+            Type::CBuffer(inner) | Type::RawPtr(inner) | Type::RawPtrMut(inner) | Type::CShared(inner) | Type::CBorrow(inner) | Type::CBorrowMut(inner) => Self::occurs_check(name, inner),
+            _ => false,
+        }
+    }
+
     /// Infer type parameter bindings from a parameter type and actual argument type
     fn infer_type_params(
         &self,
@@ -1456,9 +1593,16 @@ impl<'a> Checker<'a> {
         type_map: &mut HashMap<String, Type>,
     ) {
         match param {
+            Type::Name(name, _) if is_type_param(name, generics) => {
+                if !Self::occurs_check(name, actual) {
+                    type_map.entry(name.clone()).or_insert_with(|| actual.clone());
+                }
+            }
             Type::Name(name, p_args) => {
                 if is_type_param(name, generics) {
-                    type_map.entry(name.clone()).or_insert_with(|| actual.clone());
+                    if !Self::occurs_check(name, actual) {
+                        type_map.entry(name.clone()).or_insert_with(|| actual.clone());
+                    }
                 } else if !p_args.is_empty() {
                     if let Type::Name(_, a_args) = actual {
                         if p_args.len() == a_args.len() {
@@ -1512,7 +1656,7 @@ impl<'a> Checker<'a> {
         }
         // Check if it's a type name (actor/record or enum)
         if let Some(tdef) = self.types.get(name) {
-            if matches!(tdef.kind, TypeDefKind::Record(_) | TypeDefKind::Enum(_)) {
+            if matches!(tdef.kind, TypeDefKind::Record(_) | TypeDefKind::Enum(_) | TypeDefKind::Union(_)) {
                 // This is a type name - return it as a type
                 return Type::Name(name.into(), vec![]);
             }
@@ -1576,13 +1720,54 @@ pub fn is_type_param(name: &str, generics: &[GenericParam]) -> bool {
     generics.iter().any(|g| g.name == name)
 }
 
-/// Substitute type parameters in a type
+/// Check if a type name appears within a type (occurs check).
+/// Prevents infinite recursion from self-referential type substitutions.
+fn occurs_check(name: &str, ty: &Type, generics: &[GenericParam]) -> bool {
+    match ty {
+        Type::Name(n, args) => {
+            if n == name { return true; }
+            args.iter().any(|a| occurs_check(name, a, generics))
+        }
+        Type::Ref(_, inner) => occurs_check(name, inner, generics),
+        Type::RefMut(_, inner) => occurs_check(name, inner, generics),
+        Type::Option(inner) => occurs_check(name, inner, generics),
+        Type::Result(ok, err) => occurs_check(name, ok, generics) || occurs_check(name, err, generics),
+        Type::Tuple(elems) => elems.iter().any(|e| occurs_check(name, e, generics)),
+        Type::Func(args, ret) => args.iter().any(|a| occurs_check(name, a, generics)) || occurs_check(name, ret, generics),
+        Type::Shared(inner) => occurs_check(name, inner, generics),
+        Type::LocalShared(inner) => occurs_check(name, inner, generics),
+        Type::Weak(inner) => occurs_check(name, inner, generics),
+        Type::WeakLocal(inner) => occurs_check(name, inner, generics),
+        Type::RawPtr(inner) => occurs_check(name, inner, generics),
+        Type::RawPtrMut(inner) => occurs_check(name, inner, generics),
+        Type::CShared(inner) => occurs_check(name, inner, generics),
+        Type::CBorrow(inner) => occurs_check(name, inner, generics),
+        Type::CBorrowMut(inner) => occurs_check(name, inner, generics),
+        Type::Newtype(_, inner) => occurs_check(name, inner, generics),
+        Type::ExternFunc(args, ret) => args.iter().any(|a| occurs_check(name, a, generics)) || occurs_check(name, ret, generics),
+        Type::CBuffer(inner) => occurs_check(name, inner, generics),
+        Type::Array(inner, _) => occurs_check(name, inner, generics),
+        Type::Slice(inner) => occurs_check(name, inner, generics),
+        Type::Cap(_) | Type::Nothing | Type::RawString | Type::Allocator | Type::Infer
+        | Type::ImplTrait(_) | Type::DynTrait(_) => false,
+    }
+}
+
+/// Substitute type parameters in a type.
+/// If substitution would cause infinite recursion (self-referential type),
+/// returns the original type unchanged to let downstream checks catch the mismatch.
 pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMap<String, Type>) -> Type {
     match ty {
         Type::Name(name, args) => {
             if is_type_param(name, generics) {
                 if let Some(concrete) = type_map.get(name) {
-                    concrete.clone()
+                    // Occurs check: if concrete type references this parameter,
+                    // return original to prevent infinite recursion.
+                    if occurs_check(name, concrete, generics) {
+                        ty.clone()
+                    } else {
+                        concrete.clone()
+                    }
                 } else {
                     ty.clone()
                 }
@@ -1630,9 +1815,29 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
     }
 }
 
-fn same_type(a: &Type, b: &Type) -> bool {
+pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
+    // Only treat 'unknown' as matching if BOTH sides are unknown.
+    // Single-sided unknown would mask cascade errors — let the
+    // real type propagate so subsequent checks detect mismatches.
+    if matches!(a, Type::Name(n, _) if n == "unknown") && matches!(b, Type::Name(n, _) if n == "unknown") {
+        return true;
+    }
+    // Normalize Type::Name("Result", [T, E]) <-> Type::Result(T, E) and Type::Name("Option", [T]) <-> Type::Option(T)
+    // Compare args directly without cloning to allocate new enum variants.
     match (a, b) {
         (Type::Name(na, aa), Type::Name(nb, ab)) => na == nb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| same_type(x, y)),
+        (Type::Name(n, args), Type::Result(ok, err)) if n == "Result" && args.len() == 2 => {
+            same_type(&args[0], ok) && same_type(&args[1], err)
+        }
+        (Type::Result(ok, err), Type::Name(n, args)) if n == "Result" && args.len() == 2 => {
+            same_type(ok, &args[0]) && same_type(err, &args[1])
+        }
+        (Type::Name(n, args), Type::Option(inner)) if n == "Option" && args.len() == 1 => {
+            same_type(&args[0], inner)
+        }
+        (Type::Option(inner), Type::Name(n, args)) if n == "Option" && args.len() == 1 => {
+            same_type(inner, &args[0])
+        }
         (Type::Ref(_, a), Type::Ref(_, b)) => same_type(a, b),
         (Type::RefMut(_, a), Type::RefMut(_, b)) => same_type(a, b),
         (Type::Option(a), Type::Option(b)) => same_type(a, b),
@@ -1655,38 +1860,56 @@ fn same_type(a: &Type, b: &Type) -> bool {
             n == n2
         }
         (Type::Allocator, Type::Allocator) => true,
-        (Type::Infer, _) | (_, Type::Infer) => true,
+        (Type::Infer, Type::Infer) => true,
         (Type::Array(a_inner, a_size), Type::Array(b_inner, b_size)) => {
             a_size == b_size && same_type(a_inner, b_inner)
         }
         (Type::Slice(a), Type::Slice(b)) => same_type(a, b),
         (Type::ImplTrait(a), Type::ImplTrait(b)) => a == b,
         (Type::DynTrait(a), Type::DynTrait(b)) => a == b,
+        (Type::Nothing, Type::Nothing) => true,
+        (Type::RawString, Type::RawString) => true,
+        (Type::ExternFunc(a_args, a_ret), Type::ExternFunc(b_args, b_ret)) => {
+            a_args.len() == b_args.len()
+                && a_args.iter().zip(b_args.iter()).all(|(x, y)| same_type(x, y))
+                && same_type(a_ret, b_ret)
+        }
+        (Type::CBuffer(a), Type::CBuffer(b)) => same_type(a, b),
+        (Type::RawPtr(a), Type::RawPtr(b)) => same_type(a, b),
+        (Type::RawPtrMut(a), Type::RawPtrMut(b)) => same_type(a, b),
+        (Type::CShared(a), Type::CShared(b)) => same_type(a, b),
+        (Type::CBorrow(a), Type::CBorrow(b)) => same_type(a, b),
+        (Type::CBorrowMut(a), Type::CBorrowMut(b)) => same_type(a, b),
         _ => false,
     }
 }
 
 /// Check if a concrete type can be coerced to a dyn Trait type (e.g., Circle → dyn Drawable)
-fn is_trait_coercion(declared: &Type, init_ty: &Type) -> bool {
+/// `impls` maps (trait_name, type_name) -> method_names
+fn is_trait_coercion(declared: &Type, init_ty: &Type, impls: &HashMap<(String, String), Vec<String>>) -> bool {
     match (declared, init_ty) {
-        (Type::DynTrait(_), Type::Name(_, _)) => true,
+        (Type::DynTrait(trait_names), Type::Name(ty_name, _)) => {
+            trait_names.iter().all(|trait_name| {
+                impls.contains_key(&(trait_name.clone(), ty_name.clone()))
+            })
+        }
         _ => false,
     }
 }
 
-fn is_int(t: &Type) -> bool {
+pub(crate) fn is_int(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "i32" || n == "i64")
 }
 
-fn is_numeric(t: &Type) -> bool {
+pub(crate) fn is_numeric(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "i32" || n == "i64" || n == "f64")
 }
 
-fn is_bool(t: &Type) -> bool {
+pub(crate) fn is_bool(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "bool")
 }
 
-fn is_string(t: &Type) -> bool {
+pub(crate) fn is_string(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "string")
 }
 

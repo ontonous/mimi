@@ -2,17 +2,13 @@ use super::*;
 use crate::ffi::FfiContract;
 
 impl<'a> Interpreter<'a> {
-    pub(crate) fn call_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, String> {
+    pub(crate) fn call_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, InterpError> {
         if func.params.len() != args.len() {
             let expected_types: Vec<String> = func.params.iter().map(|p| crate::core::fmt_type(&p.ty)).collect();
             let actual_types: Vec<String> = args.iter().map(|a| crate::interp::value::type_name(a).to_string()).collect();
-            return Err(format!(
-                "function '{}' expects {} arguments [{}], got {} [{}]",
-                func.name,
-                func.params.len(),
-                expected_types.join(", "),
-                args.len(),
-                actual_types.join(", ")
+            return Err(InterpError::new(
+                format!("function '{}' expects {} arguments [{}], got {} [{}]",
+                    func.name, func.params.len(), expected_types.join(", "), args.len(), actual_types.join(", "))
             ));
         }
         
@@ -28,7 +24,7 @@ impl<'a> Interpreter<'a> {
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(args) {
             old_snapshots.insert(p.name.clone(), a.clone());
-            self.bind(&p.name, a);
+            self.bind(&p.name, a)?;
         }
 
         // Extract and check requires conditions
@@ -39,7 +35,7 @@ impl<'a> Interpreter<'a> {
                     if !is_truthy(&cond) {
                         self.pop_scope();
                         self.pop_call();
-                        return Err(format!("requires condition failed for '{}': {}", func.name, cond));
+                        return Err(InterpError::new(format!("requires condition failed for '{}': {}", func.name, cond)));
                     }
                 }
             }
@@ -54,17 +50,17 @@ impl<'a> Interpreter<'a> {
         if self.verify_contracts {
             if let Ok(Some(ref rv)) = result {
                 self.push_scope();
-                self.bind("result", rv.clone());
+                self.bind("result", rv.clone())?;
                 // Bind old snapshots for old(x) access
                 for (name, val) in &old_snapshots {
-                    self.bind(&format!("old_{}", name), val.clone());
+                    self.bind(&format!("old_{}", name), val.clone())?;
                 }
                 let ensures_ok = (|| {
                     for stmt in &func.body {
                         if let Stmt::Ensures(expr, _) = stmt {
                             let cond = self.eval_expr(expr)?;
                             if !is_truthy(&cond) {
-                                return Err(format!("ensures condition failed for '{}': {}", func.name, cond));
+                                return Err(InterpError::new(format!("ensures condition failed for '{}': {}", func.name, cond)));
                             }
                         }
                     }
@@ -90,23 +86,22 @@ impl<'a> Interpreter<'a> {
         result.map(|v| v.unwrap_or(Value::Unit))
     }
 
-    pub fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, String> {
+    pub fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, InterpError> {
         // First check if the name is bound to a closure in the local scope
         if let Some(v) = self.lookup(name) {
             match v {
                 Value::Closure { params, ret: _, body, captured } => {
                     if params.len() != args.len() {
-                        return Err(format!(
-                            "closure '{}' expects {} arguments, got {}",
-                            name, params.len(), args.len()
+                        return Err(InterpError::new(
+                            format!("closure '{}' expects {} arguments, got {}", name, params.len(), args.len())
                         ));
                     }
                     self.push_scope();
                     for (n, val) in &captured {
-                        self.bind(n, val.clone());
+                        self.bind(n, val.clone())?;
                     }
                     for (p, a) in params.iter().zip(args) {
-                        self.bind(&p.name, a);
+                        self.bind(&p.name, a)?;
                     }
                     let result = self.eval_block(&body);
                     self.pop_scope();
@@ -124,7 +119,7 @@ impl<'a> Interpreter<'a> {
 
         // Handle Actor.spawn() calls
         if let Some(actor_name) = name.strip_suffix(".spawn") {
-            return self.spawn_actor(actor_name, args);
+            return self.spawn_actor(actor_name);
         }
 
         // Handle extern function calls via their FFI contract (wrapper layer).
@@ -132,19 +127,20 @@ impl<'a> Interpreter<'a> {
             let contract = self.ffi_contracts.get(name).cloned()
                 .unwrap_or_else(|| FfiContract::from_extern(&extern_func));
             return self.call_extern(&extern_func, &contract, args)
-                .map_err(|e| e.to_string());
+                .map_err(|e| InterpError::new(e.to_string()));
         }
 
         if let Some(&arity) = self.constructors.get(name) {
             if args.len() != arity {
-                return Err(format!(
+                return Err(InterpError::new(format!(
                     "constructor '{}' expects {} arguments, got {}",
                     name, arity, args.len()
-                ));
+                )));
             }
             // Check if this is a newtype constructor - wrap in Value::Newtype
             if *self.newtype_constructors.get(name).unwrap_or(&false) && args.len() == 1 {
-                return Ok(Value::Newtype(Box::new(args.into_iter().next().expect("args.len() == 1 guaranteed single element"))));
+                let val = args.into_iter().next().ok_or_else(|| InterpError::new("newtype constructor: expected one argument"))?;
+                return Ok(Value::Newtype(Box::new(val)));
             }
             return Ok(Value::Variant(name.into(), args));
         }
@@ -236,46 +232,58 @@ impl<'a> Interpreter<'a> {
             "map_from_list" => self.builtin_map_from_list(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
+            "from_int" => self.builtin_from_int(args),
             "lexer" => self.builtin_lexer(args),
             "parse" => self.builtin_parse(args),
             "str_to_c_str" => self.builtin_str_to_c_str(args),
             "c_str_to_string" => self.builtin_c_str_to_string(args),
+            "eprintln" => self.builtin_eprintln(args),
+            "exit" => self.builtin_exit(args),
+            "socket" => self.builtin_socket(args),
+            "connect" => self.builtin_connect(args),
+            "bind" => self.builtin_bind(args),
+            "listen" => self.builtin_listen(args),
+            "accept" => self.builtin_accept(args),
+            "send" => self.builtin_send(args),
+            "recv" => self.builtin_recv(args),
+            "close_fd" => self.builtin_close_fd(args),
+            "http_get" => self.builtin_http_get(args),
+            "http_post" => self.builtin_http_post(args),
             _ => {
                 // Check for pre-computed comptime function results
                 if let Some(result) = self.comptime_results.get(name) {
                     return Ok(result.clone());
                 }
-                Err(format!("undefined function '{}'", name))
+                Err(InterpError::new(format!("undefined function '{}'", name)))
             }
         }
     }
 
     /// Call an async function - spawns a new thread and returns a Future
-    fn call_async_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, String> {
+    fn call_async_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, InterpError> {
         if func.params.len() != args.len() {
-            return Err(format!(
-                "function {} expects {} arguments, got {}",
-                func.name,
-                func.params.len(),
-                args.len()
+            return Err(InterpError::new(
+                format!("function {} expects {} arguments, got {}", func.name, func.params.len(), args.len())
             ));
         }
 
-        // Clone the function, arguments, and module file for the new thread
+        // Clone the function and arguments for the new thread
         let func_clone = func.clone();
         let args_clone = args;
-        let file_clone = self.file.clone();
 
         // Create a channel for the result
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Spawn a new thread to execute the async function body directly
+        let file_clone = self.file.clone();
         super::pool::get_pool().execute(move || {
-            let static_file = Box::leak(Box::new(file_clone));
-            let mut interp = Interpreter::new(static_file);
+            let mut interp = Interpreter::new(&file_clone);
             interp.push_scope();
             for (p, a) in func_clone.params.iter().zip(args_clone) {
-                interp.bind(&p.name, a);
+                if let Err(e) = interp.bind(&p.name, a) {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
             }
             let block_result = interp.eval_block(&func_clone.body).map(|v| v.unwrap_or(Value::Unit));
             let result = interp.early_return.take()
@@ -288,26 +296,26 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(rx))))
     }
 
-    pub(crate) fn call_method(&mut self, obj: &Value, method: &str, args: Vec<Value>) -> Result<Value, String> {
+    pub(crate) fn call_method(&mut self, obj: &Value, method: &str, args: Vec<Value>) -> Result<Value, InterpError> {
         match obj {
             Value::Shared(arc) => {
                 match method {
                     "clone" => Ok(Value::Shared(Arc::clone(arc))),
                     "deref" | "inner" => {
-                        let inner = arc.read().map_err(|e| format!("shared read lock failed: {}", e))?;
+                        let inner = arc.read().map_err(|e| InterpError::new(format!("shared read lock failed: {}", e)))?;
                         Ok(inner.clone())
                     }
-                    _ => Err(format!("shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj))),
+                    _ => Err(InterpError::new(format!("shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj)))),
                 }
             }
             Value::LocalShared(rc) => {
                 match method {
-                    "clone" => Ok(Value::LocalShared(SendRc(Rc::clone(&rc.0)))),
+                    "clone" => Ok(Value::LocalShared(LocalSharedInner::clone_rc(&rc))),
                     "deref" | "inner" => {
-                        let inner = rc.0.borrow();
+                        let inner = rc.borrow();
                         Ok(inner.clone())
                     }
-                    _ => Err(format!("local_shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj))),
+                    _ => Err(InterpError::new(format!("local_shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj)))),
                 }
             }
             Value::WeakShared(w) => {
@@ -318,7 +326,7 @@ impl<'a> Interpreter<'a> {
                             None => Ok(Value::Variant("None".into(), vec![])),
                         }
                     }
-                    _ => Err(format!("weak_shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj))),
+                    _ => Err(InterpError::new(format!("weak_shared value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj)))),
                 }
             }
             Value::WeakLocal(w) => {
@@ -329,7 +337,7 @@ impl<'a> Interpreter<'a> {
                             None => Ok(Value::Variant("None".into(), vec![])),
                         }
                     }
-                    _ => Err(format!("weak_local value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj))),
+                    _ => Err(InterpError::new(format!("weak_local value has no method '{}' (type: {})", method, crate::interp::value::type_name(obj)))),
                 }
             }
             Value::Cap(names) => {
@@ -343,7 +351,7 @@ impl<'a> Interpreter<'a> {
                             .collect();
                         Ok(Value::Tuple(tuple))
                     }
-                    _ => Err(format!("cap value has no method '{}' — available: split, consume, is_consumed", method)),
+                    _ => Err(InterpError::new(format!("cap value has no method '{}' — available: split, consume, is_consumed", method))),
                 }
             }
             Value::Actor(actor_arc) => {
@@ -371,7 +379,7 @@ impl<'a> Interpreter<'a> {
                         // For actor methods, we need to call with self bound to this actor
                         self.push_scope();
                         // Bind 'self' to the actor handle itself (for self.field access via RwLock)
-                        self.bind("self", obj.clone());
+                        self.bind("self", obj.clone())?;
 
                         let result = self.call_func(func, args);
 
@@ -390,11 +398,11 @@ impl<'a> Interpreter<'a> {
                                 let func = func.clone();
                                 // Call the trait method with self = the concrete value
                                 self.push_scope();
-                                self.bind("self", *data.clone());
+                                self.bind("self", *data.clone())?;
                                 // If the concrete value is a record, bind its fields too
                                 if let Value::Record(_, fields) = data.as_ref() {
                                     for (field_name, field_value) in fields {
-                                        self.bind(field_name, field_value.clone());
+                                        self.bind(field_name, field_value.clone())?;
                                     }
                                 }
                                 let result = self.call_func(&func, args);
@@ -404,8 +412,8 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                Err(format!("cannot call method '{}' on dyn {} (concrete type: {})",
-                    method, trait_names.join(" + "), concrete_type))
+                Err(InterpError::new(format!("cannot call method '{}' on dyn {} (concrete type: {})",
+                    method, trait_names.join(" + "), concrete_type)))
             }
             Value::Record(type_name, fields) => {
                 // Handle built-in derive methods before trait dispatch
@@ -438,10 +446,10 @@ impl<'a> Interpreter<'a> {
                                 let fields = fields.clone();
                                 // Found trait method - call it with self = the record
                                 self.push_scope();
-                                self.bind("self", obj.clone());
+                                self.bind("self", obj.clone())?;
                                 // Bind record fields to scope
                                 for (field_name, field_value) in &fields {
-                                    self.bind(field_name, field_value.clone());
+                                    self.bind(field_name, field_value.clone())?;
                                 }
                                 let result = self.call_func(&func, args);
                                 self.pop_scope();
@@ -458,11 +466,24 @@ impl<'a> Interpreter<'a> {
                     }
                     _ => {
                         let type_label = type_name.as_deref().unwrap_or("Record");
-                        Err(format!("record '{}' has no method '{}'", type_label, method))
+                        Err(InterpError::new(format!("record '{}' has no method '{}'", type_label, method)))
                     }
                 }
             }
             Value::String(s) => {
+                // Try trait method dispatch via type_impls first
+                if let Some(impls) = self.type_impls.get("string") {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            self.push_scope();
+                            self.bind("self", obj.clone())?;
+                            let result = self.call_func(&func, args);
+                            self.pop_scope();
+                            return result;
+                        }
+                    }
+                }
                 match method {
                     "len" => Ok(Value::Int(s.chars().count() as i64)),
                     "trim" => Ok(Value::String(s.trim().to_string())),
@@ -552,7 +573,7 @@ impl<'a> Interpreter<'a> {
                                 let si = si as usize;
                                 let ei = ei as usize;
                                 if ei > chars.len() {
-                                    return Err(format!("substring: end {} out of bounds (len {})", ei, chars.len()));
+                                    return Err(InterpError::new(format!("substring: end {} out of bounds (len {})", ei, chars.len())));
                                 }
                                 let sub: String = chars[si..ei].iter().collect();
                                 Ok(Value::String(sub))
@@ -572,13 +593,26 @@ impl<'a> Interpreter<'a> {
                             _ => Err("index_of expects a string argument".into()),
                         }
                     }
-                    _ => Err(format!("string has no method '{}'", method)),
+                    _ => Err(InterpError::new(format!("string has no method '{}'", method))),
                 }
             }
             Value::List(list) => {
+                // Try trait method dispatch via type_impls first
+                if let Some(impls) = self.type_impls.get("List") {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            self.push_scope();
+                            self.bind("self", obj.clone())?;
+                            let result = self.call_func(&func, args);
+                            self.pop_scope();
+                            return result;
+                        }
+                    }
+                }
                 match method {
                     "len" => Ok(Value::Int(list.len() as i64)),
-                    _ => Err(format!("List has no method '{}'", method)),
+                    _ => Err(InterpError::new(format!("List has no method '{}'", method))),
                 }
             }
             Value::Variant(name, vals) => {
@@ -587,7 +621,7 @@ impl<'a> Interpreter<'a> {
                     // ===== Option methods =====
                     ("Some" | "Ok", "unwrap") | ("Some" | "Ok", "expect") => {
                         if vals.is_empty() {
-                            Err(format!("{}::{} has no inner value", name, method))
+                            Err(InterpError::new(format!("{}::{} has no inner value", name, method)))
                         } else {
                             Ok(vals[0].clone())
                         }
@@ -595,18 +629,18 @@ impl<'a> Interpreter<'a> {
                     ("None", "unwrap") => Err("called unwrap() on None".into()),
                     ("None", "expect") => {
                         let msg = if args.is_empty() { "called expect() on None" } else { &args[0].to_string() };
-                        Err(format!("{}", msg))
+                        Err(InterpError::new(format!("{}", msg)))
                     }
                     ("Err", "unwrap") | ("Err", "expect") => {
                         let msg = if vals.is_empty() { "called unwrap() on Err".to_string() } else { format!("called unwrap() on Err({})", vals[0]) };
-                        Err(msg)
+                        Err(InterpError::new(msg))
                     }
 
                     ("Some", "unwrap_or") | ("Ok", "unwrap_or") => {
                         Ok(vals[0].clone())
                     }
                     ("None", "unwrap_or") | ("Err", "unwrap_or") => {
-                        args.into_iter().next().ok_or("unwrap_or requires a default value".to_string())
+                        args.into_iter().next().ok_or_else(|| InterpError::new("unwrap_or requires a default value".to_string()))
                     }
 
                     ("Some", "is_some") | ("Ok", "is_some") | ("Some", "is_ok") | ("Ok", "is_ok") => {
@@ -668,35 +702,19 @@ impl<'a> Interpreter<'a> {
                     ("Some", "map_err") => Ok(obj.clone()),
                     ("None", "map_err") => Ok(Value::Variant("None".into(), vec![])),
 
-                    _ => Err(format!("variant '{}' has no method '{}'", name, method)),
+                    _ => Err(InterpError::new(format!("variant '{}' has no method '{}'", name, method))),
                 }
             }
-            _ => Err(format!("cannot call method '{}' on value {}", method, obj)),
+            _ => Err(InterpError::new(format!("cannot call method '{}' on value {}", method, obj))),
         }
     }
 
     /// Apply a closure value to arguments
-    fn apply_closure(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
+    fn apply_closure(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, InterpError> {
         match closure {
-            Value::Closure { params, body, captured, .. } => {
-                if params.len() != args.len() {
-                    return Err(format!("closure expects {} arguments, got {}", params.len(), args.len()));
-                }
-                self.push_scope();
-                for (n, v) in captured {
-                    self.bind(n, v.clone());
-                }
-                for (param, arg) in params.iter().zip(args) {
-                    self.bind(&param.name, arg);
-                }
-                let result = self.eval_block(body)?;
-                self.pop_scope();
-                if let Some(val) = self.early_return.take() {
-                    return Ok(val);
-                }
-                Ok(result.unwrap_or(Value::Unit))
-            }
-            _ => Err(format!("expected a closure, found {}", closure)),
+            Value::Closure { params, body, captured, .. } =>
+                self.apply_closure_inner(params, body, captured, args),
+            _ => Err(InterpError::new(format!("expected a closure, found {}", closure))),
         }
     }
 }
