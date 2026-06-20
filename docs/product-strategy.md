@@ -23,7 +23,7 @@
 ### 3. 实验性项目命名
 
 - **original-project-mimispec**：从现有开源项目反向生成的 .mms 意图文件仓库，用于展示跨语言重构能力。
-- **original-project-mimi**（未来）：真正用 mimi 语言重写的项目，但 mimi 语言开发遥遥无期，暂不启动。
+- **original-project-mimi**（未来）：真正用 mimi 语言重写的实验性项目。mimi 语言编译器（`mimi/`）已在积极开发中（v0.7.0），待成熟后再启动此实验。
 
 ### 4. 核心竞争力
 

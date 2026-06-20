@@ -801,9 +801,11 @@ G3/G4 (测试覆盖)、N1 (ring-buffer)、G6/G8 (arena/async)、comptime (C head
 | LSP | `src/lsp.rs` | 1,089 |
 | C 运行时 | `src/runtime/mimi_runtime.{c,h}` | 1,277+122 |
 | 测试 | `src/tests/` (66 文件) | 17,770 |
-| FFI 文档 | `docs/ffi-glue.md`, `docs/ffi-ownership-abi.md` | 944 |
+| FFI 文档 | `ffi-ownership-abi.md`（权威）、`ffi-glue.md`（已归档） | 944 |
 | 诊断/错误 | `src/{error,span,lint,fmt,contracts,ast,lexer,loader,manifest,lockfile,safe_arith}.rs` + `src/diagnostic/` | ~5,000 |
 
 ---
 
 *本报告基于 2026-06-19 的代码状态（八轮评估整合：六轮原始 + 第七轮 RC/FFI + 第八轮 network/time_env/value/json）。Mimi 是完整的系统语言，FFI 是杀手级应用场景。所有语言特性服务于"让跨语言编排更安全、更可验证"。如语言版本升级，请同步修订本报告。*
+
+> ⏳ **历史归档**：本文档基于 Mimi v0.7.0（2026-06-19）。审计覆盖面、测试计数等信息已随项目演进而过时。保留以供历史参考。

@@ -280,3 +280,7 @@
 ## 当前状态
 
 所有核心 FFI 安全基础设施（阶段 0-3）已完成。解释器与 codegen 两条路径均已接入 passport 类型、cap 验证、合约检查。`mimi verify` 命令使用 Z3 SMT 求解器验证 requires/ensures 合约。
+
+---
+
+> ⏳ **历史归档**：本文档已整合至 `mimi/docs/ffi-ownership-abi.md`（FFI 设计权威文档，§8 实施路线图）。保留以供历史参考。

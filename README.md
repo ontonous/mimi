@@ -281,7 +281,8 @@ mimi run demo.mimi   # 输出: 字符串长度: 22
 | [mimi.md](docs/mimi.md) | 语言设计规范 v1.0 | 语言实现者、贡献者 |
 | [design-decisions.md](docs/design-decisions.md) | 设计决策与语言对比 | 想了解"为什么这样设计"的人 |
 | [future-vision.md](docs/future-vision.md) | 长期愿景 v1.x/L4 | 核心开发者、架构师 |
-| [ffi-glue.md](docs/ffi-glue.md) | FFI 与多语言胶水 | 需要跨语言集成的开发者 |
+| [ffi-ownership-abi.md](docs/ffi-ownership-abi.md) | **FFI 设计** — 双栈边界、护照类型、实现路线图 | 需要跨语言集成的开发者 |
+| [readme/10-ffi.md](readme/10-ffi.md) | FFI 用户指南 | 快速上手的开发者 |
 | [product-strategy.md](docs/product-strategy.md) | 产品与开源策略 | 项目管理者、投资者 |
 
 ---

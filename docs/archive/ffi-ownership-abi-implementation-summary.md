@@ -33,3 +33,7 @@ Based on `mimi/docs/ffi-ownership-abi.md`, I've completed Stage 2 and Stage 3 of
 - Distinguish verifiable logical contracts from unverifiable effect contracts
 
 **Deferred**: Codegen wrapper enhancement (complex LLVM IR generation)
+
+---
+
+> ⏳ **历史归档**：本文档已整合至 `mimi/docs/ffi-ownership-abi.md`（FFI 设计权威文档）。保留以供历史参考。

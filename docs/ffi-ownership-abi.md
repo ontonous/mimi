@@ -1,9 +1,11 @@
 # Mimi 所有权模型与 C ABI 的双栈边界设计
 
-> **状态**：设计草案  
-> **版本**：v0.2.0  
-> **最后更新**：2026-06-17  
-> **相关文档**：`ffi-glue.md`、`design-decisions.md`、`readme/10-ffi.md`
+> **本文档是 FFI 设计的权威来源**，整合了原 `ffi-ownership-abi.md`（设计）、`ffi-ownership-abi-roadmap.md`（路线图）和 `ffi-ownership-abi-implementation-summary.md`（实现摘要）的内容。原文件已归档至 `mimi/docs/archive/`。
+
+> **状态**：设计草案（核心基础设施已实现）  
+> **版本**：v0.7.0  
+> **最后更新**：2026-06-20  
+> **相关文档**：`readme/10-ffi.md`（用户指南）
 
 ---
 
@@ -450,52 +452,55 @@ enum FfiParamKind {
 
 ---
 
-## 8. 实施路线图
+## 8. 实施路线图与当前状态
 
-### 阶段 0：现状止损
+> **实现状态（v0.7.0）**：阶段 0-3 已完成并经过测试验证。阶段 4-7 为规划中的后续工作。
+
+### ✅ 阶段 0：现状止损（已完成）
 
 - 收紧 `call_extern` 允许参数类型，禁止 `shared`、`&T`、`&mut T`、记录、列表直接传 extern；
 - 明确 `string` 默认 borrow，`into_raw()` 显式转移；
 - `cap` 传 FFI 时改为不透明句柄。
 
-### 阶段 1：新增边界类型
+### ✅ 阶段 1：新增边界类型（已完成）
 
 - 在 AST/类型系统中新增：`*T`、`*mut T`、`c_shared T`、`c_borrow T`、`c_borrow_mut T`、`raw string`；
 - parser 支持新类型；
 - type checker 在 extern 块中强制使用护照类型。
 
-### 阶段 2：自动生成 wrapper
+### ✅ 阶段 2：自动生成 wrapper（已完成）
 
 - 为每个 extern 函数生成 Mimi wrapper；
 - wrapper 负责参数/结果转换、cap 验证、生命周期保持；
 - 用户调用实际走到 wrapper。
 
-### 阶段 3：FFI 运行时库
+### ✅ 阶段 3：FFI 运行时库（已完成）
 
-- 实现 `libmimi_ffi_rt`；
+- 实现 `libmimi_ffi_rt`（Rust：`src/ffi/runtime.rs`）；
 - 解释器和 codegen 都链接并调用它；
-- codegen 生成 `shared` / 借用的运行时结构。
+- codegen 生成 `shared` / 借用的运行时结构；
+- C 头文件 `mimi/docs/mimi_ffi_rt.h` 声明运行时函数。
 
-### 阶段 4：形式化验证边界
+### ⏳ 阶段 4：形式化验证边界（P3）
 
 - 把 extern 函数的 `requires`/`ensures` 生成到 wrapper；
 - Z3/SMT 在 wrapper 上验证边界转换的正确性；
 - 明确区分可验证的逻辑合约与不可验证的效应合约；
 - 提供 `--verify-ffi` 模式。
 
-### 阶段 5：`#[repr(C)]` 泛型与 C 头生成
+### ⏳ 阶段 5：`#[repr(C)]` 泛型与 C 头生成（P4）
 
 - 为 extern 块中的泛型类型触发单态化；
 - `mimi build --emit-c-headers` 输出每个实例化的 C 布局；
 - extern 块内禁止未实例化的泛型参数。
 
-### 阶段 6：异步 FFI 回调
+### ⏳ 阶段 6：异步 FFI 回调（P4）
 
 - 支持 `extern "C" fn` 函数指针类型；
 - 手动 trampoline 把 C 回调转发到 Actor；
 - v1.1 自动生成 Actor trampoline。
 
-### 阶段 7：语法显式化与废弃旧行为
+### ⏳ 阶段 7：语法显式化与废弃旧行为（P5）
 
 - `extern "C"` 默认只接受护照类型；
 - 旧的危险 FFI 用法产生编译错误；
@@ -507,10 +512,10 @@ enum FfiParamKind {
 
 | 文档 | 关系 |
 |---|---|
-| `readme/10-ffi.md` | 需要同步更新 extern 语法、类型映射、cap 传递模式 |
-| `ffi-glue.md` | 需要补充双栈模型、wrapper 生成、`libmimi_ffi_rt` 设计 |
-| `design-decisions.md` | 需要把本设计作为一项核心设计决策纳入 |
+| `readme/10-ffi.md` | 用户指南（本文档为深度设计文档） |
+| `design-decisions.md` | 把本设计中关键决策纳入语言设计考量 |
 | `readme/03-memory.md` | 需要补充 `c_shared` / `c_borrow` 等边界类型与 shared/借用的关系 |
+| `mimi/docs/archive/ffi-glue.md` | 历史愿景文档（已归档） |
 
 ---
 
