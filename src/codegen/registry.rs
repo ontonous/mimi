@@ -306,7 +306,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut param_tys = Vec::new();
             for p in &ef.params {
                 let ty = match &p.ty {
-                    crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()) => {
+                    crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())) => {
                         list_ptr_ty
                     }
                     _ => self.type_to_llvm_for_extern(&p.ty),
@@ -317,7 +317,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut extern_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
             for p in &ef.params {
                 let llvm_ty = match &p.ty {
-                    crate::ast::Type::Name(n, _) if n == "string" || n == "List" || self.record_type_names.contains(n.as_str()) => {
+                    crate::ast::Type::Name(n, _) if n == "string" || n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())) => {
                         BasicMetadataTypeEnum::PointerType(i8_ptr_ty)
                     }
                     // F7: Tuple extern params are serialized to JSON, passed as i8*
@@ -333,7 +333,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             let wrapper_ret_ty = match &ef.ret {
                 Some(ty) => {
-                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str())) {
+                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str()))) {
                         list_struct_ty
                     // F7: Tuple return — wrapper returns the LLVM struct type
                     } else if matches!(ty, crate::ast::Type::Tuple(_)) {
@@ -347,7 +347,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             let extern_ret_ty = match &ef.ret {
                 Some(ty) => {
-                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str())) {
+                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str()))) {
                         BasicTypeEnum::PointerType(i8_ptr_ty)
                     // F7: Tuple return — C returns JSON string (i8*)
                     } else if matches!(ty, crate::ast::Type::Tuple(_)) {
@@ -515,7 +515,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 format!("string param {}: expected pointer from struct field 0", i))),
                         });
                     }
-                    crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()) => {
+                    crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())) => {
                         let list_ptr = param.into_pointer_value();
                         let len_gep = self.builder.build_struct_gep(
                             list_struct_sty, list_ptr, 0, &format!("list_len_gep_{}", i))
@@ -770,7 +770,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 matches!(ret_ty, crate::ast::Type::Tuple(_))
             });
             let needs_json_deserialize = ef.ret.as_ref().map_or(false, |ret_ty| {
-                matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || self.record_type_names.contains(n.as_str()))
+                matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
             }) || is_tuple_return;
             if needs_json_deserialize {
                 let ret = call.try_as_basic_value().left()
@@ -1052,9 +1052,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         self.type_llvm.insert(t.name.clone(), llvm_ty);
         self.type_defs.insert(t.name.clone(), t.clone());
-        // Track record types for JSON FFI serialization
+        // Track record types for FFI serialization
         if matches!(t.kind, crate::ast::TypeDefKind::Record(_)) {
             self.record_type_names.insert(t.name.clone());
+            if t.attributes.contains(&TypeAttribute::ReprC) {
+                self.repr_c_record_names.insert(t.name.clone());
+            }
         }
         Ok(())
     }
