@@ -52,26 +52,30 @@ impl Manifest {
         if dir.is_file() {
             dir = dir.parent().unwrap_or(&dir).to_path_buf();
         }
-        loop {
-            match Self::load(&dir) {
-                Ok(Some(manifest)) => return Ok(Some((dir, manifest))),
-                Ok(None) => {}
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("EACCES")
-                        || err_str.contains("EPERM")
-                        || err_str.contains("Permission denied")
-                    {
-                        // Permission error: treat as not found and continue searching up
-                    } else {
-                        return Err(e);
+        let max_depth = 64;
+        for _ in 0..max_depth {
+            // Check permission first to avoid false errors on inaccessible directories
+            let toml_path = dir.join("mimi.toml");
+            match std::fs::metadata(&toml_path) {
+                Ok(_) => {
+                    match Self::load(&dir) {
+                        Ok(Some(manifest)) => return Ok(Some((dir, manifest))),
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
                     }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    // Permission error: skip this directory and continue upward
+                }
+                Err(_) => {
+                    // File not found or other non-permission error: continue
                 }
             }
             if !dir.pop() {
                 return Ok(None);
             }
         }
+        Err("max search depth exceeded while looking for mimi.toml".into())
     }
 
     /// Get the entry point file path

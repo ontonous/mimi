@@ -1459,11 +1459,14 @@ fn install(_all: bool) -> Result<(), String> {
         .map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     let mut installed = 0;
+    let mut lock = lockfile::Lockfile::load(&dir)?
+        .unwrap_or_else(lockfile::Lockfile::new);
     for dep in &deps {
         if let Some(git_url) = &dep.git {
-            // Git dependency: clone
             let clone_dir = deps_dir.join(&dep.name);
             let tag_arg = dep.tag.as_deref().unwrap_or("main");
+
+            // Try to fetch and checkout the git tag to resolve a stable version
             let status = std::process::Command::new("git")
                 .arg("clone").arg("--branch").arg(tag_arg)
                 .arg("--depth").arg("1")
@@ -1474,7 +1477,18 @@ fn install(_all: bool) -> Result<(), String> {
                 println!("  ⚠ git clone failed for {}", dep.name);
                 continue;
             }
-            println!("  ✓ {} (git: {} @ {})", dep.name, git_url, tag_arg);
+            // Resolve the actual commit hash as the "version" for pinning
+            let resolved_version = if let Ok(output) = std::process::Command::new("git")
+                .arg("rev-parse").arg("--short").arg("HEAD")
+                .current_dir(&clone_dir)
+                .output()
+            {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                tag_arg.to_string()
+            };
+            println!("  ✓ {} (git: {} @ {} -> {})", dep.name, git_url, tag_arg, resolved_version);
+            lock.add_package(&dep.name, &resolved_version, Some(&format!("git+{}", git_url)), None);
             installed += 1;
         } else {
             let source = dep.path.as_deref().unwrap_or("registry");
@@ -1508,6 +1522,7 @@ fn install(_all: bool) -> Result<(), String> {
                     copy_dir_recursive(&src, &dst)
                         .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
                     println!("  ✓ {} v{}", dep.name, v);
+                    lock.add_package(&dep.name, &v, Some("registry"), None);
                     installed += 1;
                 }
                 None => {
@@ -1528,18 +1543,12 @@ fn install(_all: bool) -> Result<(), String> {
             copy_dir_recursive(&src, &dst)
                 .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
             println!("  ✓ {} (path: {})", dep.name, source);
+            lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), None);
             installed += 1;
         }
         }
     }
 
-    let mut lock = lockfile::Lockfile::load(&dir)?
-        .unwrap_or_else(lockfile::Lockfile::new);
-    for dep in &deps {
-        let source = dep.path.as_deref().unwrap_or("registry");
-        let version = dep.version.as_deref().unwrap_or("*");
-        lock.add_package(&dep.name, version, Some(source), None);
-    }
     lock.save(&dir)?;
 
     println!("Installed {} package(s).", installed);

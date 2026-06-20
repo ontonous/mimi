@@ -132,6 +132,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_version_exact_fallback() {
+        let available = ["0.1.0", "0.2.0", "1.0.0"];
+        // Bare "1.0.0" is not a valid semver requirement, so it falls through to exact match
+        assert_eq!(Lockfile::resolve_version("1.0.0", &available), Some("1.0.0".into()));
+        // Should return None if no exact match
+        assert_eq!(Lockfile::resolve_version("9.9.9", &available), None);
+    }
+
+    #[test]
     fn resolve_version_caret() {
         let available = ["0.1.0", "0.2.0", "1.0.0", "1.1.0", "2.0.0"];
         assert_eq!(Lockfile::resolve_version("^1.0", &available), Some("1.1.0".into()));

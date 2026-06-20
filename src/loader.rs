@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::{core, lexer, parser, manifest};
+use crate::{core, lexer, parser, manifest, lockfile};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -53,6 +53,8 @@ pub struct ModuleLoader {
     modules: HashMap<String, LoadedModule>,
     /// Dependency paths from mimi.toml: dep_name -> resolved path
     dep_paths: HashMap<String, PathBuf>,
+    /// Lockfile entries keyed by dependency name
+    lock_entries: HashMap<String, lockfile::LockEntry>,
     /// Set of paths currently being loaded (cycle detection)
     visiting: HashSet<PathBuf>,
 }
@@ -75,6 +77,7 @@ impl ModuleLoader {
             loaded: HashMap::new(),
             modules: HashMap::new(),
             dep_paths: HashMap::new(),
+            lock_entries: HashMap::new(),
             visiting: HashSet::new(),
         };
         // Try to load mimi.toml and resolve dependency paths
@@ -87,6 +90,12 @@ impl ModuleLoader {
                             loader.dep_paths.insert(dep.name.clone(), dep_path);
                         }
                     }
+                }
+            }
+            // Also load the lockfile if present, for reproducibility verification
+            if let Ok(Some(lf)) = lockfile::Lockfile::load(&dir) {
+                for entry in lf.package {
+                    loader.lock_entries.insert(entry.name.clone(), entry);
                 }
             }
         }
@@ -185,6 +194,25 @@ impl ModuleLoader {
                 let dep_root = dep_dir.with_extension("mimi");
                 if dep_root.exists() && path.len() == 1 {
                     return Ok(dep_root);
+                }
+            }
+        }
+
+        // Try .mimi/deps/ (dependencies installed via `mimi install`)
+        let deps_dir = self.base_dir.join(".mimi").join("deps");
+        if deps_dir.exists() {
+            if let Some(first) = path.first() {
+                let dep_root = deps_dir.join(first);
+                if dep_root.exists() {
+                    let dep_relative: PathBuf = path.iter().skip(1).collect();
+                    let dep_path = dep_root.join(&dep_relative).with_extension("mimi");
+                    if dep_path.exists() {
+                        return Ok(dep_path);
+                    }
+                    let dep_root_file = dep_root.with_extension("mimi");
+                    if dep_root_file.exists() && path.len() == 1 {
+                        return Ok(dep_root_file);
+                    }
                 }
             }
         }
