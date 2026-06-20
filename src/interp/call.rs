@@ -477,6 +477,19 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::String(s) => {
+                // Try trait method dispatch via type_impls first
+                if let Some(impls) = self.type_impls.get("string") {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            self.push_scope();
+                            self.bind("self", obj.clone());
+                            let result = self.call_func(&func, args);
+                            self.pop_scope();
+                            return result;
+                        }
+                    }
+                }
                 match method {
                     "len" => Ok(Value::Int(s.chars().count() as i64)),
                     "trim" => Ok(Value::String(s.trim().to_string())),
@@ -590,6 +603,19 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::List(list) => {
+                // Try trait method dispatch via type_impls first
+                if let Some(impls) = self.type_impls.get("List") {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            self.push_scope();
+                            self.bind("self", obj.clone());
+                            let result = self.call_func(&func, args);
+                            self.pop_scope();
+                            return result;
+                        }
+                    }
+                }
                 match method {
                     "len" => Ok(Value::Int(list.len() as i64)),
                     _ => Err(format!("List has no method '{}'", method)),

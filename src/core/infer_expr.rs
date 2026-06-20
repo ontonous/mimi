@@ -142,9 +142,9 @@ impl<'a> Checker<'a> {
                                 if let Some((trait_name, _)) = methods.iter().find(|(_, m)| m == method_name) {
                                     let trait_name = trait_name.clone();
                                     if let Some((params, ret)) = self.trait_method_sigs.get(&(trait_name.clone(), method_name.clone())).cloned() {
-                                        // Validate arguments (skip first param which is self)
+                                        // Validate arguments against method params (no self in trait sigs)
                                         let user_args = &args;
-                                        let method_params = if !params.is_empty() { &params[1..] } else { &params };
+                                        let method_params = &params;
                                         if user_args.len() != method_params.len() {
                                             self.emit_code(crate::diagnostic::codes::E0257, format!(
                                                 "method '{}' of trait '{}' expects {} arguments, got {}",
@@ -211,7 +211,7 @@ impl<'a> Checker<'a> {
                             for trait_name in traits {
                                 if let Some((params, ret)) = self.trait_method_sigs.get(&(trait_name.clone(), method_name.clone())).cloned() {
                                     let user_args = &args;
-                                    let method_params = if !params.is_empty() { &params[1..] } else { &params };
+                                    let method_params = &params;
                                     if user_args.len() != method_params.len() {
                                         self.emit_code(crate::diagnostic::codes::E0257, format!(
                                             "method '{}' of trait '{}' expects {} arguments, got {}",
@@ -244,7 +244,7 @@ impl<'a> Checker<'a> {
                             for trait_name in traits {
                                 if let Some((params, ret)) = self.trait_method_sigs.get(&(trait_name.clone(), method_name.clone())).cloned() {
                                     let user_args = &args;
-                                    let method_params = if !params.is_empty() { &params[1..] } else { &params };
+                                    let method_params = &params;
                                     if user_args.len() != method_params.len() {
                                         self.emit_code(crate::diagnostic::codes::E0257, format!(
                                             "method '{}' of trait '{}' expects {} arguments, got {}",

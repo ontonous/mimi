@@ -179,6 +179,27 @@ impl Parser {
         }
     }
 
+    /// Expect a keyword token that doubles as a type name (i32, i64, f64, bool, string, unit)
+    fn expect_keyword_as_type_name(&mut self) -> Result<String, ParseError> {
+        let tok = self.peek();
+        let name = match &tok.kind {
+            TokenKind::I32 => "i32",
+            TokenKind::I64 => "i64",
+            TokenKind::F64 => "f64",
+            TokenKind::Bool => "bool",
+            TokenKind::StringKw => "string",
+            TokenKind::Unit => "unit",
+            _ => return Err(ParseError::new(
+                format!("expected type name, found {}", tok.kind),
+                tok.line,
+                tok.col,
+            )),
+        };
+        let name = name.to_string();
+        self.advance();
+        Ok(name)
+    }
+
     fn skip_newlines(&mut self) {
         while matches!(self.peek_kind(), TokenKind::Newline) {
             self.advance();
@@ -502,7 +523,12 @@ impl Parser {
         self.expect(TokenKind::Impl, "`impl`")?;
         let trait_name = self.expect_ident()?;
         self.expect(TokenKind::For, "`for`")?;
-        let type_name = self.expect_ident()?;
+        // Accept both identifiers and keyword tokens as type names (e.g., "string", "int", "bool")
+        let type_name = if self.at(&TokenKind::Ident("".into())) {
+            self.expect_ident()?
+        } else {
+            self.expect_keyword_as_type_name()?
+        };
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         let mut methods = Vec::new();

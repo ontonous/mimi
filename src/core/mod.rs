@@ -906,10 +906,27 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Check impl method bodies
+                // Check impl method bodies with self bound to the implementing type
                 for method in &impl_def.methods {
                     self.set_pos(method.pos.0, method.pos.1);
-                    self.check_func(method);
+                    let ret = method
+                        .ret
+                        .as_ref()
+                        .map(|t| self.resolve_type(t))
+                        .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                    let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
+                    // Bind self with the implementing type
+                    scopes[0].insert("self".to_string(), Type::Name(impl_def.type_name.clone(), vec![]));
+                    for p in &method.params {
+                        let ty = self.resolve_type(&p.ty);
+                        scopes[0].insert(p.name.clone(), ty);
+                    }
+                    self.var_scopes.push(HashMap::new());
+                    self.cap_vars.push(HashMap::new());
+                    self.check_block(&method.body, &ret, &mut scopes);
+                    self.check_unconsumed_caps();
+                    self.var_scopes.pop();
+                    self.cap_vars.pop();
                 }
             }
             Item::ExternBlock(_) => {

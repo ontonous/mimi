@@ -1,3 +1,47 @@
+// Str: Trait for string operations.
+trait Str {
+    func len() -> i32
+    func trim() -> string
+    func to_upper() -> string
+    func to_lower() -> string
+    func parse_int() -> Result<i32, string>
+    func parse_float() -> Result<f64, string>
+    func contains(sub: string) -> bool
+    func starts_with(prefix: string) -> bool
+    func ends_with(suffix: string) -> bool
+    func split(delimiter: string) -> List<string>
+    func replace(from: string, to: string) -> string
+    func repeat(n: i32) -> string
+    func char_at(index: i32) -> string
+    func substring(start: i32, end: i32) -> string
+    func index_of(sub: string) -> i32
+}
+
+// Str implementation for built-in string type.
+impl Str for string {
+    func len() -> i32 { len(self) }
+    func trim() -> string { str_trim(self) }
+    func to_upper() -> string { str_to_upper(self) }
+    func to_lower() -> string { str_to_lower(self) }
+    func parse_int() -> Result<i32, string> {
+        let p = str_parse_int(self)
+        if p.0 { Ok(p.1) } else { Err("parse_int: invalid integer") }
+    }
+    func parse_float() -> Result<f64, string> {
+        let p = str_parse_float(self)
+        if p.0 { Ok(p.1) } else { Err("parse_float: invalid float") }
+    }
+    func contains(sub: string) -> bool { str_contains(self, sub) }
+    func starts_with(prefix: string) -> bool { str_starts_with(self, prefix) }
+    func ends_with(suffix: string) -> bool { str_ends_with(self, suffix) }
+    func split(delimiter: string) -> List<string> { str_split(self, delimiter) }
+    func replace(from: string, to: string) -> string { str_replace(self, from, to) }
+    func repeat(n: i32) -> string { str_repeat(self, n) }
+    func char_at(index: i32) -> string { str_char_at(self, index) }
+    func substring(start: i32, end: i32) -> string { str_substring(self, start, end) }
+    func index_of(sub: string) -> i32 { str_index_of(self, sub).1 }
+}
+
 // is_empty: Returns true if s has length 0.
 pub func is_empty(s: string) -> bool {
     len(s) == 0
