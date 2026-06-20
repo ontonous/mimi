@@ -18,6 +18,20 @@ pub func print_err(s: string) {
     eprintln(s)
 }
 
+// IoOps: Trait for I/O operations on string.
+trait IoOps {
+    func print_line()
+    func print_raw()
+    func print_err()
+}
+
+// IoOps implementation for built-in string type.
+impl IoOps for string {
+    func print_line() { println(self) }
+    func print_raw()  { print(self) }
+    func print_err()  { eprintln(self) }
+}
+
 // print_lines: Prints each element of xs on its own line.
 pub func print_lines(xs: List<string>) {
     for pl_x in xs {
