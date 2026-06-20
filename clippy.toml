@@ -1,0 +1,5 @@
+# Deny unwrap/expect in production code.
+# Use proper error propagation (? operator) or safe defaults instead.
+# Test modules are exempt via #[allow(clippy::unwrap_used)].
+disallowed-macros = []
+

@@ -873,7 +873,7 @@ impl<'a> Lexer<'a> {
                         self.line, self.col
                     ));
                 }
-                let current = *self.indent_stack.last().expect("indent stack non-empty");
+                let current = *self.indent_stack.last().unwrap_or(&0);
                 if spaces > current {
                     self.indent_stack.push(spaces);
                     tokens.push(Token {
@@ -883,7 +883,7 @@ impl<'a> Lexer<'a> {
                         col: spaces,
                     });
                 } else if spaces < current {
-                    while *self.indent_stack.last().expect("indent stack non-empty") > spaces {
+                    while *self.indent_stack.last().unwrap_or(&0) > spaces {
                         self.indent_stack.pop();
                         tokens.push(Token {
                             kind: TokenKind::Dedent,
@@ -892,7 +892,7 @@ impl<'a> Lexer<'a> {
                             col: spaces,
                         });
                     }
-                    if *self.indent_stack.last().expect("indent stack non-empty") != spaces {
+                    if *self.indent_stack.last().unwrap_or(&0) != spaces {
                         return Err(format!(
                             "dedent does not match any indentation level at {}:{}",
                             self.line, self.col
@@ -962,7 +962,7 @@ impl<'a> Lexer<'a> {
                 }
                 '0'..='9' => (self.scan_number(), Commitment::None),
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    let first = self.advance().expect("peek confirmed non-EOF");
+                    let first = self.advance().unwrap_or('\0');
                     let (name, commitment) = self.scan_ident(first);
                     (Self::keyword_or_ident(&name), commitment)
                 }

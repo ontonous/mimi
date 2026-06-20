@@ -353,6 +353,28 @@ impl std::fmt::Display for Value {
     }
 }
 
+/// Check if a Value tree contains any LocalShared or WeakLocal variants.
+/// Used as a runtime assertion before sending Values across thread boundaries.
+pub(crate) fn contains_local_shared(v: &Value) -> bool {
+    match v {
+        Value::LocalShared(_) | Value::WeakLocal(_) => true,
+        Value::List(elems) => elems.iter().any(contains_local_shared),
+        Value::Tuple(elems) => elems.iter().any(contains_local_shared),
+        Value::Record(_, fields) => fields.values().any(contains_local_shared),
+        Value::Variant(_, args) => args.iter().any(contains_local_shared),
+        Value::Newtype(inner) => contains_local_shared(inner),
+        Value::DynTrait { data, .. } => contains_local_shared(data),
+        Value::Ref(rc) | Value::RefMut(rc) => {
+            if let Ok(v) = rc.read() {
+                contains_local_shared(&v)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
     match v {
         Value::ArenaRef(id, _) => *id == arena_id,

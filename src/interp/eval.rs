@@ -428,6 +428,14 @@ impl<'a> Interpreter<'a> {
             Stmt::Parasteps(block) => {
                 // Parasteps block: execute spawn statements in parallel
                 // Collect spawn expressions and their results
+                // Runtime assertion: scan current scope for LocalShared values
+                for scope in &self.env {
+                    for val in scope.values() {
+                        if crate::interp::value::contains_local_shared(val) {
+                            return Err("parasteps: local_shared values cannot cross thread boundary".into());
+                        }
+                    }
+                }
                 let mut last_value = None;
                 type SpawnReceiver = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, String>>>>;
                 let mut futures: Vec<SpawnReceiver> = Vec::new();
@@ -436,7 +444,10 @@ impl<'a> Interpreter<'a> {
                 for stmt in block {
                     match stmt {
                         Stmt::Expr(Expr::Spawn(expr)) => {
-                            // Create a future for concurrent execution
+                            // Runtime assertion: no LocalShared values cross thread boundaries
+                            if crate::interp::value::contains_local_shared(&self.eval_expr(expr)?) {
+                                return Err("parasteps: local_shared values cannot cross thread boundary".into());
+                            }
                             let (tx, rx) = std::sync::mpsc::channel();
                             let expr = expr.clone();
                             let file = self.file.clone();
