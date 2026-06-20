@@ -617,61 +617,37 @@ impl Verifier {
                     BinOp::EqCmp => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l == r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l == r
-                            }
+                            _ => false,
                         }
                     }
                     BinOp::NeCmp => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l != r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l != r
-                            }
+                            _ => false,
                         }
                     }
                     BinOp::Lt => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l < r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l < r
-                            }
+                            _ => false,
                         }
                     }
                     BinOp::Gt => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l > r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l > r
-                            }
+                            _ => false,
                         }
                     }
                     BinOp::Le => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l <= r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l <= r
-                            }
+                            _ => false,
                         }
                     }
                     BinOp::Ge => {
                         match (Self::resolve_to_i64(lhs, model, vars), Self::resolve_to_i64(rhs, model, vars)) {
                             (Some(l), Some(r)) => l >= r,
-                            _ => {
-                                let l = Self::eval_expr_on_model(lhs, model, vars);
-                                let r = Self::eval_expr_on_model(rhs, model, vars);
-                                l >= r
-                            }
+                            _ => false,
                         }
                     }
                     _ => {
@@ -790,9 +766,12 @@ impl Verifier {
             }
         }
 
-        let body_text: String = func.body.iter().map(|s| format_stmt(s)).collect::<Vec<_>>().join(" ");
+        let mut used_params: Vec<String> = Vec::new();
+        for stmt in &func.body {
+            collect_idents_in_stmt(stmt, &mut used_params);
+        }
         let unused_params: Vec<&str> = param_names.iter()
-            .filter(|p| !body_text.contains(p.as_str()))
+            .filter(|p| !used_params.contains(p))
             .map(|s| s.as_str())
             .collect();
         if !unused_params.is_empty() {
@@ -1013,6 +992,8 @@ impl Verifier {
                     false
                 }
             }
+            Expr::Binary(_, lhs, rhs) => self.is_real_expr(lhs, vars) || self.is_real_expr(rhs, vars),
+            Expr::Unary(_, inner) => self.is_real_expr(inner, vars),
             _ => false,
         }
     }
@@ -1040,9 +1021,19 @@ fn extract_body_return(block: &Block) -> Option<Expr> {
 fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(Lit::Int(n)) => format!("{}", n),
+        Expr::Literal(Lit::Float(f)) => format!("{}", f),
         Expr::Literal(Lit::Bool(b)) => format!("{}", b),
         Expr::Literal(Lit::String(s)) => format!("\"{}\"", s),
+        Expr::Literal(Lit::Unit) => "()".to_string(),
+        Expr::Literal(Lit::FString(parts)) => {
+            let inner: String = parts.iter().map(|p| match p {
+                crate::ast::FStringPart::Text(t) => t.clone(),
+                crate::ast::FStringPart::Interp(e) => format!("{}", format_expr(e)),
+            }).collect();
+            format!("f\"{}\"", inner)
+        }
         Expr::Ident(name) => name.clone(),
+        Expr::Old(inner) => format!("old({})", format_expr(inner)),
         Expr::Binary(op, l, r) => {
             let op_str = match op {
                 BinOp::Add => "+",
@@ -1087,6 +1078,155 @@ pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
     let mut verifier = Verifier::new()?;
     Ok(verifier.verify_file(&file))
+}
+
+fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            if !idents.contains(name) {
+                idents.push(name.clone());
+            }
+        }
+        Expr::Binary(_, lhs, rhs) => {
+            collect_idents_in_expr(lhs, idents);
+            collect_idents_in_expr(rhs, idents);
+        }
+        Expr::Unary(_, inner) => collect_idents_in_expr(inner, idents),
+        Expr::Old(inner) => collect_idents_in_expr(inner, idents),
+        Expr::Call(callee, args) => {
+            collect_idents_in_expr(callee, idents);
+            for arg in args {
+                collect_idents_in_expr(arg, idents);
+            }
+        }
+        Expr::Field(obj, _) => collect_idents_in_expr(obj, idents),
+        Expr::Index(obj, idx) => {
+            collect_idents_in_expr(obj, idents);
+            collect_idents_in_expr(idx, idents);
+        }
+        Expr::Tuple(elems) => {
+            for e in elems {
+                collect_idents_in_expr(e, idents);
+            }
+        }
+        Expr::List(elems) => {
+            for e in elems {
+                collect_idents_in_expr(e, idents);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for f in fields {
+                collect_idents_in_expr(&f.value, idents);
+            }
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_idents_in_expr(cond, idents);
+            for s in then_ {
+                collect_idents_in_stmt(s, idents);
+            }
+            if let Some(e) = else_ {
+                for s in e {
+                    collect_idents_in_stmt(s, idents);
+                }
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_idents_in_expr(scrutinee, idents);
+            for arm in arms {
+                collect_idents_in_expr(&arm.body, idents);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            for s in body {
+                collect_idents_in_stmt(s, idents);
+            }
+        }
+        Expr::Comprehension { expr, iter, guard, .. } => {
+            collect_idents_in_expr(expr, idents);
+            collect_idents_in_expr(iter, idents);
+            if let Some(g) = guard {
+                collect_idents_in_expr(g, idents);
+            }
+        }
+        Expr::Range { start, end } => {
+            collect_idents_in_expr(start, idents);
+            collect_idents_in_expr(end, idents);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_idents_in_expr(target, idents);
+            if let Some(s) = start {
+                collect_idents_in_expr(s, idents);
+            }
+            if let Some(e) = end {
+                collect_idents_in_expr(e, idents);
+            }
+        }
+        Expr::Turbofish(_, _, args) => {
+            for a in args {
+                collect_idents_in_expr(a, idents);
+            }
+        }
+        Expr::Try(inner) | Expr::Spawn(inner) | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner) | Expr::TypeOf(inner) => {
+            collect_idents_in_expr(inner, idents);
+        }
+        Expr::Comptime(body) | Expr::Quote(body) => {
+            for s in body {
+                collect_idents_in_stmt(s, idents);
+            }
+        }
+        Expr::TupleIndex(obj, _) => collect_idents_in_expr(obj, idents),
+        _ => {}
+    }
+}
+
+fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
+    match stmt {
+        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Drop(e) => collect_idents_in_expr(e, idents),
+        Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue => {}
+        Stmt::Break(Some(e)) => collect_idents_in_expr(e, idents),
+        Stmt::Let { init: Some(e), .. } | Stmt::SharedLet { init: e, .. } => collect_idents_in_expr(e, idents),
+        Stmt::Let { init: None, .. } => {}
+        Stmt::Assign { target, value } => {
+            collect_idents_in_expr(target, idents);
+            collect_idents_in_expr(value, idents);
+        }
+        Stmt::If { cond, then_, else_ } => {
+            collect_idents_in_expr(cond, idents);
+            for s in then_ {
+                collect_idents_in_stmt(s, idents);
+            }
+            if let Some(e) = else_ {
+                for s in e {
+                    collect_idents_in_stmt(s, idents);
+                }
+            }
+        }
+        Stmt::While { cond, body } | Stmt::For { iterable: cond, body, .. } => {
+            collect_idents_in_expr(cond, idents);
+            for s in body {
+                collect_idents_in_stmt(s, idents);
+            }
+        }
+        Stmt::Block(block) | Stmt::Arena(block) | Stmt::OnFailure(block)
+        | Stmt::Parasteps(block) | Stmt::Unsafe(block) => {
+            for s in block {
+                collect_idents_in_stmt(s, idents);
+            }
+        }
+        Stmt::Alloc { body, .. } => {
+            for s in body {
+                collect_idents_in_stmt(s, idents);
+            }
+        }
+        Stmt::Requires(e, _) | Stmt::Ensures(e, _) => collect_idents_in_expr(e, idents),
+        Stmt::Math(exprs) => {
+            for e in exprs {
+                collect_idents_in_expr(e, idents);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse_contract_expr(text: &str) -> Result<Expr, String> {
