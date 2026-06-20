@@ -142,6 +142,8 @@ fn arb_type_check_expr() -> impl Strategy<Value = String> {
         (intv(), "[1-9][0-9]{0,2}").prop_map(|(a, b): (i64, String)| format!("{} % {}", a, b)),
         // String ops
         (strv(), strv()).prop_map(|(a, b): (String, String)| format!("\"{}\" + \"{}\"", a, b)),
+        // Float ops
+        any::<f64>().prop_map(|n| format!("{}", n)),
         // List literals
         prop::collection::vec(intv(), 0..5).prop_map(|vs| {
             let items: Vec<String> = vs.into_iter().map(|v| v.to_string()).collect();
@@ -166,6 +168,190 @@ proptest! {
             if let Ok(file) = crate::parser::Parser::new(tokens).parse_file() {
                 let _ = core::check(&file);
             }
+        }
+    }
+}
+
+/// Strategy for generating programs that can be compiled and run.
+/// These produce syntactically valid Mimi programs with a main function.
+fn arb_runnable_program() -> impl Strategy<Value = String> {
+    fn intv() -> impl Strategy<Value = i64> { -50i64..50i64 }
+    fn boolv() -> impl Strategy<Value = bool> { any::<bool>() }
+    fn ident() -> impl Strategy<Value = String> { "[a-z][a-z0-9_]{0,6}".prop_map(|s: String| s) }
+
+    // A local expression: literal, variable, or simple op
+    let local_expr = prop_oneof![
+        intv().prop_map(|n| n.to_string()),
+        Just("x".into()),
+        Just("y".into()),
+        (intv(), intv()).prop_map(|(a, b)| format!("{} + {}", a, b)),
+        (intv(), intv()).prop_map(|(a, b)| format!("{} * {}", a, b)),
+    ];
+
+    let stmt = prop_oneof![
+        // let x = <expr>;
+        (ident(), local_expr.clone()).prop_map(|(name, expr)| format!("let {} = {};", name, expr)),
+        // let mut x = <expr>;
+        (ident(), local_expr.clone()).prop_map(|(name, expr)| format!("let mut {} = {};", name, expr)),
+        // x = <expr>;  (only assign to x, which is declared as mutable)
+        (local_expr.clone()).prop_map(|expr| format!("x = {};", expr)),
+    ];
+
+    proptest::collection::vec(stmt, 0..6).prop_map(|stmts| {
+        let body = if stmts.is_empty() {
+            "0".to_string()
+        } else {
+            let mut s = stmts.join("\n    ");
+            s.push_str("\n    x");
+            s
+        };
+        format!("func main() -> i64 {{\n    let x = 0;\n    let mut y = 0;\n    {}\n}}", body)
+    })
+}
+
+proptest! {
+    /// Interpreter should never panic on random runnable programs.
+    /// Runtime errors (overflow, div by zero) are acceptable — panics are not.
+    #[test]
+    fn interp_never_panics_on_runnable(src in arb_runnable_program()) {
+        let lexer = crate::lexer::Lexer::new(&src);
+        if let Ok(toks) = lexer.tokenize() {
+            if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
+                if core::check(&file).is_ok() {
+                    let mut interp = crate::interp::Interpreter::new(&file);
+                    let _ = interp.run();
+                }
+            }
+        }
+    }
+
+    /// Interpreter never panics running float-literal programs.
+    #[test]
+    fn interp_never_panics_on_floats(src in any::<f64>()) {
+        let s = format!("func main() -> f64 {{ {} }}", src);
+        let lexer = crate::lexer::Lexer::new(&s);
+        if let Ok(toks) = lexer.tokenize() {
+            if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
+                if core::check(&file).is_ok() {
+                    let mut interp = crate::interp::Interpreter::new(&file);
+                    let _ = interp.run();
+                }
+            }
+        }
+    }
+}
+
+// ── Interpreter correctness proptests ──
+
+proptest! {
+    #[test]
+    fn interp_float_literal(n in -1e10f64..1e10f64) {
+        // Skip NaN — NaN != NaN in equality check
+        prop_assume!(!n.is_nan());
+        let src = format!("func main() -> f64 {{ {} }}", n);
+        if let crate::interp::Value::Float(result) = run_source(&src) {
+            prop_assert!((result - n).abs() <= f64::EPSILON * n.abs().max(1.0),
+                "float literal mismatch: expected {}, got {}", n, result);
+        }
+    }
+
+    #[test]
+    fn interp_float_negation(n in -1e5f64..1e5f64) {
+        let src = format!("func main() -> f64 {{ -({}) }}", n);
+        if let crate::interp::Value::Float(result) = run_source(&src) {
+            prop_assert!((result - (-n)).abs() <= f64::EPSILON * n.abs().max(1.0),
+                "float neg mismatch: expected {}, got {}", -n, result);
+        }
+    }
+
+    #[test]
+    fn interp_string_len(s in "[a-z]{0,20}") {
+        let src = format!("func main() -> i32 {{ len(\"{}\") }}", s);
+        if let crate::interp::Value::Int(result) = run_source(&src) {
+            prop_assert_eq!(result, s.len() as i64);
+        }
+    }
+
+    #[test]
+    fn interp_if_bool_identity(b in any::<bool>()) {
+        let src = format!("func main() -> i32 {{ if {} {{ 1 }} else {{ 0 }} }}", b);
+        if let crate::interp::Value::Int(result) = run_source(&src) {
+            let expected = if b { 1 } else { 0 };
+            prop_assert_eq!(result, expected);
+        }
+    }
+}
+
+// ── Closet capture / borrow proptests ──
+
+proptest! {
+    #[test]
+    fn closure_capture_simple(n in -100i64..100) {
+        let src = format!(r#"
+func main() -> i64 {{
+    let x = {};
+    let f = fn() -> i64 {{ x }};
+    f()
+}}"#, n);
+        if let crate::interp::Value::Int(result) = run_source(&src) {
+            prop_assert_eq!(result, n);
+        }
+    }
+
+    #[test]
+    fn ref_identity(n in -100i64..100i64) {
+        let src = format!(r#"
+func main() -> i64 {{
+    let x = {};
+    let r = &x;
+    *r
+}}"#, n);
+        if let crate::interp::Value::Int(result) = run_source(&src) {
+            prop_assert_eq!(result, n);
+        }
+    }
+
+    #[test]
+    fn list_literal_len(n in 0usize..8) {
+        let items: Vec<String> = (0..n).map(|i| format!("{}", i)).collect();
+        let list_str = items.join(", ");
+        let src = format!("func main() -> i32 {{ len([{}]) }}", list_str);
+        if let crate::interp::Value::Int(result) = run_source(&src) {
+            prop_assert_eq!(result, n as i64);
+        }
+    }
+}
+
+// ── Type system property tests ──
+
+proptest! {
+    /// subst_type_params should never change the type when no type params match.
+    #[test]
+    fn subst_type_params_noop_with_empty_map(t in arb_type()) {
+        let empty_map = std::collections::HashMap::new();
+        let result = core::subst_type_params(&t, &[], &empty_map);
+        prop_assert_eq!(format!("{:?}", &result), format!("{:?}", &t),
+            "subst_type_params with empty map changed the type");
+    }
+
+    /// fmt_type should produce the same result for same_type types.
+    #[test]
+    fn fmt_type_consistent_for_equal_types(a in arb_type(), b in arb_type()) {
+        if core::same_type(&a, &b) {
+            prop_assert_eq!(crate::core::fmt_type(&a), crate::core::fmt_type(&b),
+                "same_type types should have the same fmt_type output");
+        }
+    }
+
+    /// is_int, is_numeric, is_bool, is_string are mutually exclusive for base types.
+    #[test]
+    fn type_predicates_mutually_exclusive(t in arb_type()) {
+        let int_count = [is_int(&t), is_numeric(&t), is_bool(&t), is_string(&t)]
+            .iter().filter(|&&x| x).count();
+        // A type can be is_int AND is_numeric (they overlap), but not bool+int, etc.
+        prop_assert!(int_count <= 2, "too many true predicates for {:?}", t);
+        if is_bool(&t) {
+            prop_assert!(!is_int(&t) && !is_string(&t));
         }
     }
 }
