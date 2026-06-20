@@ -1,5 +1,5 @@
 use crate::{core, lexer, parser, fmt};
-use crate::ast::{Item, Expr, Stmt, FuncDef, TypeDef};
+use crate::ast::{Item, Expr, Stmt, FuncDef, TypeDef, TypeDefKind, Type};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 
@@ -74,14 +74,23 @@ impl LspServer {
             "initialize" => {
                 let result = serde_json::json!({
                     "capabilities": {
-                        "textDocumentSync": 1,
+                        "textDocumentSync": {
+                            "openClose": true,
+                            "change": 1,
+                            "save": {
+                                "includeText": false
+                            }
+                        },
                         "completionProvider": {
                             "triggerCharacters": [".", ":"]
                         },
                         "hoverProvider": true,
                         "definitionProvider": true,
+                        "implementationProvider": true,
                         "referencesProvider": true,
-                        "renameProvider": true,
+                        "renameProvider": {
+                            "prepareProvider": true
+                        },
                         "signatureHelpProvider": {
                             "triggerCharacters": ["("]
                         },
@@ -170,6 +179,25 @@ impl LspServer {
                 self.documents.remove(uri);
                 None
             }
+            "textDocument/didSave" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                if let Some(text) = self.documents.get(uri) {
+                    let diagnostics = self.compute_diagnostics(text);
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": uri,
+                            "diagnostics": diagnostics
+                        }
+                    }))
+                } else {
+                    None
+                }
+            }
             "textDocument/completion" => {
                 let uri = msg.get("params")?
                     .get("textDocument")?
@@ -220,6 +248,23 @@ impl LspServer {
                     "result": definition
                 }))
             }
+            "textDocument/implementation" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                let position = msg.get("params")?
+                    .get("position")?;
+                let line = position.get("line")?.as_u64()? as usize;
+                let character = position.get("character")?.as_u64()? as usize;
+                let text = self.documents.get(uri)?;
+                let impls = self.compute_go_to_implementation(text, line, character, uri);
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": impls
+                }))
+            }
             "textDocument/documentSymbol" => {
                 let uri = msg.get("params")?
                     .get("textDocument")?
@@ -253,6 +298,29 @@ impl LspServer {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": references
+                }))
+            }
+            "textDocument/prepareRename" => {
+                let uri = msg.get("params")?
+                    .get("textDocument")?
+                    .get("uri")?
+                    .as_str()?;
+                let position = msg.get("params")?
+                    .get("position")?;
+                let line = position.get("line")?.as_u64()? as usize;
+                let character = position.get("character")?.as_u64()? as usize;
+                let text = self.documents.get(uri)?;
+                let word = self.get_word_at(text, line, character);
+                if word.is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "start": { "line": line, "character": self.word_start_col(text, line, character) },
+                        "end": { "line": line, "character": character + self.word_end_offset(text, line, character) }
+                    }
                 }))
             }
             "textDocument/rename" => {
@@ -604,6 +672,44 @@ impl LspServer {
         None
     }
 
+    /// Go to implementation for a trait name: find all `impl` blocks for this trait
+    pub fn compute_go_to_implementation(&self, text: &str, line: usize, character: usize, uri: &str) -> Vec<serde_json::Value> {
+        let word = self.get_word_at(text, line, character);
+        if word.is_empty() {
+            return Vec::new();
+        }
+
+        let mut locations = Vec::new();
+        if let Some(file) = self.parse_with_recovery(text) {
+            // Check if word is a trait name
+            let is_trait = file.items.iter().any(|item| {
+                matches!(item, Item::Trait(t) if t.name == word)
+            });
+            if !is_trait {
+                return locations; // Not a trait — no implementations to find
+            }
+
+            // Find all impl blocks for this trait
+            for impl_def in &file.items {
+                if let Item::Impl(imp) = impl_def {
+                    if imp.trait_name == word {
+                        let impl_line = text.lines().position(|l| {
+                            l.contains("impl") && l.contains(&word)
+                        }).unwrap_or(0);
+                        locations.push(serde_json::json!({
+                            "uri": uri,
+                            "range": {
+                                "start": { "line": impl_line, "character": 0 },
+                                "end": { "line": impl_line, "character": 100 }
+                            }
+                        }));
+                    }
+                }
+            }
+        }
+        locations
+    }
+
     pub fn compute_hover(&self, text: &str, line: usize, character: usize) -> Option<serde_json::Value> {
         // Get the word at cursor position
         let lines: Vec<&str> = text.lines().collect();
@@ -626,29 +732,119 @@ impl LspServer {
                     match item {
                         Item::Func(f) if f.name == word => {
                             let params: Vec<String> = f.params.iter()
-                                .map(|p| format!("{}: {:?}", p.name, p.ty))
+                                .map(|p| format!("{}: {}", p.name, Self::type_display(&p.ty)))
                                 .collect();
-                            let ret = f.ret.as_ref().map(|t| format!(" -> {:?}", t)).unwrap_or_default();
+                            let ret = f.ret.as_ref().map(|t| format!(" -> {}", Self::type_display(t))).unwrap_or_default();
+                            let generics = if f.generics.is_empty() {
+                                String::new()
+                            } else {
+                                let g: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
+                                format!("[{}]", g.join(", "))
+                            };
                             return Some(serde_json::json!({
                                 "contents": {
                                     "kind": "markdown",
-                                    "value": format!("**func** `{}({}){}`", word, params.join(", "), ret)
+                                    "value": format!("**func** `{}{}({}){}`", word, generics, params.join(", "), ret)
                                 }
                             }));
                         }
                         Item::Type(t) if t.name == word => {
+                            let mut detail = format!("**type** `{}`", word);
+                            match &t.kind {
+                                TypeDefKind::Record(fields) => {
+                                    if !fields.is_empty() {
+                                        let field_strs: Vec<String> = fields.iter()
+                                            .map(|f| format!("  `{}: {}`", f.name, Self::type_display(&f.ty)))
+                                            .collect();
+                                        detail.push_str("\n\nFields:\n");
+                                        detail.push_str(&field_strs.join("\n"));
+                                    }
+                                }
+                                TypeDefKind::Enum(variants) => {
+                                    if !variants.is_empty() {
+                                        let var_strs: Vec<String> = variants.iter()
+                                            .map(|v| format!("  `{}`", v.name))
+                                            .collect();
+                                        detail.push_str("\n\nVariants:\n");
+                                        detail.push_str(&var_strs.join("\n"));
+                                    }
+                                }
+                                TypeDefKind::Alias(inner) => {
+                                    detail.push_str(&format!(" = {}", Self::type_display(inner)));
+                                }
+                                TypeDefKind::Newtype(inner) => {
+                                    detail.push_str(&format!(" (newtype over {})", Self::type_display(inner)));
+                                }
+                                TypeDefKind::Union(fields) => {
+                                    if !fields.is_empty() {
+                                        let field_strs: Vec<String> = fields.iter()
+                                            .map(|f| format!("  `{}: {}`", f.name, Self::type_display(&f.ty)))
+                                            .collect();
+                                        detail.push_str("\n\nUnion fields:\n");
+                                        detail.push_str(&field_strs.join("\n"));
+                                    }
+                                }
+                            }
                             return Some(serde_json::json!({
                                 "contents": {
                                     "kind": "markdown",
-                                    "value": format!("**type** `{}`", word)
+                                    "value": detail
+                                }
+                            }));
+                        }
+                        Item::Trait(t) if t.name == word => {
+                            let methods: Vec<String> = t.methods.iter()
+                                .map(|m| {
+                                    let params: Vec<String> = m.params.iter()
+                                        .map(|p| format!("{}: {}", p.name, Self::type_display(&p.ty)))
+                                        .collect();
+                                    let ret = m.ret.as_ref().map(|r| format!(" -> {}", Self::type_display(r))).unwrap_or_default();
+                                    format!("  `fn {}({}){}`", m.name, params.join(", "), ret)
+                                })
+                                .collect();
+                            let detail = if methods.is_empty() {
+                                format!("**trait** `{}`", word)
+                            } else {
+                                format!("**trait** `{}`\n\nMethods:\n{}", word, methods.join("\n"))
+                            };
+                            return Some(serde_json::json!({
+                                "contents": {
+                                    "kind": "markdown",
+                                    "value": detail
+                                }
+                            }));
+                        }
+                        Item::Impl(imp) if imp.type_name == word => {
+                            let methods: Vec<String> = imp.methods.iter()
+                                .map(|m| format!("  `fn {}(...)`", m.name))
+                                .collect();
+                            let detail = if methods.is_empty() {
+                                format!("**impl** `{} for {}`", imp.trait_name, imp.type_name)
+                            } else {
+                                format!("**impl** `{} for {}`\n\nMethods:\n{}", imp.trait_name, imp.type_name, methods.join("\n"))
+                            };
+                            return Some(serde_json::json!({
+                                "contents": {
+                                    "kind": "markdown",
+                                    "value": detail
                                 }
                             }));
                         }
                         Item::Module(m) if m.name == word => {
+                            let item_count = m.items.len();
                             return Some(serde_json::json!({
                                 "contents": {
                                     "kind": "markdown",
-                                    "value": format!("**module** `{}`", word)
+                                    "value": format!("**module** `{}` ({} items)", word, item_count)
+                                }
+                            }));
+                        }
+                        Item::Actor(a) if a.name == word => {
+                            let method_names: Vec<&str> = a.methods.iter().map(|m| m.name.as_str()).collect();
+                            return Some(serde_json::json!({
+                                "contents": {
+                                    "kind": "markdown",
+                                    "value": format!("**actor** `{}`\n\nMethods: {}", word, method_names.join(", "))
                                 }
                             }));
                         }
@@ -1387,6 +1583,88 @@ impl LspServer {
             }
             _ => {}
         }
+    }
+
+    /// Format a type for human-readable display
+    fn type_display(ty: &Type) -> String {
+        match ty {
+            Type::Name(name, params) => {
+                if params.is_empty() {
+                    name.clone()
+                } else {
+                    let inner: Vec<String> = params.iter().map(Self::type_display).collect();
+                    format!("{}[{}]", name, inner.join(", "))
+                }
+            }
+            Type::Ref(lt, inner) => {
+                let lt_str = lt.as_ref().map(|l| format!("'{} ", l)).unwrap_or_default();
+                format!("&{} {}", lt_str, Self::type_display(inner))
+            }
+            Type::RefMut(lt, inner) => {
+                let lt_str = lt.as_ref().map(|l| format!("'{} ", l)).unwrap_or_default();
+                format!("&{} mut {}", lt_str, Self::type_display(inner))
+            }
+            Type::Tuple(elems) => {
+                let inner: Vec<String> = elems.iter().map(Self::type_display).collect();
+                format!("({})", inner.join(", "))
+            }
+            Type::Func(params, ret) => {
+                let p: Vec<String> = params.iter().map(Self::type_display).collect();
+                format!("fn({}) -> {}", p.join(", "), Self::type_display(ret))
+            }
+            Type::ExternFunc(params, ret) => {
+                let p: Vec<String> = params.iter().map(Self::type_display).collect();
+                format!("extern fn({}) -> {}", p.join(", "), Self::type_display(ret))
+            }
+            Type::RawPtr(inner) => format!("*{}", Self::type_display(inner)),
+            Type::RawPtrMut(inner) => format!("*mut {}", Self::type_display(inner)),
+            Type::CShared(inner) => format!("c_shared {}", Self::type_display(inner)),
+            Type::CBorrow(inner) => format!("c_borrow {}", Self::type_display(inner)),
+            Type::CBorrowMut(inner) => format!("c_borrow_mut {}", Self::type_display(inner)),
+            Type::Option(inner) => format!("Option<{}>", Self::type_display(inner)),
+            Type::Result(ok, err) => format!("Result<{}, {}>", Self::type_display(ok), Self::type_display(err)),
+            Type::Shared(inner) => format!("shared {}", Self::type_display(inner)),
+            Type::LocalShared(inner) => format!("local_shared {}", Self::type_display(inner)),
+            Type::Weak(inner) => format!("weak {}", Self::type_display(inner)),
+            Type::WeakLocal(inner) => format!("weak_local {}", Self::type_display(inner)),
+            Type::Newtype(name, inner) => format!("{} (newtype over {})", name, Self::type_display(inner)),
+            Type::Array(inner, n) => format!("[{}; {}]", Self::type_display(inner), n),
+            Type::Slice(inner) => format!("[{}]", Self::type_display(inner)),
+            Type::ImplTrait(ts) => format!("impl {}", ts.join(" + ")),
+            Type::DynTrait(ts) => format!("dyn {}", ts.join(" + ")),
+            Type::RawString => "RawString".to_string(),
+            Type::Cap(name) => format!("cap {}", name),
+            Type::CBuffer(inner) => format!("CBuffer<{}>", Self::type_display(inner)),
+            Type::Nothing => "!".to_string(),
+            Type::Allocator => "Allocator".to_string(),
+            Type::Infer => "_".to_string(),
+        }
+    }
+
+    /// Get the column of the word start at the given position
+    pub fn word_start_col(&self, text: &str, line: usize, character: usize) -> usize {
+        let lines: Vec<&str> = text.lines().collect();
+        let current_line = match lines.get(line) {
+            Some(l) => l,
+            None => return character,
+        };
+        let before_cursor: String = current_line.chars().take(character).collect();
+        before_cursor.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    /// Get the number of characters from the cursor to the end of the word
+    pub fn word_end_offset(&self, text: &str, line: usize, character: usize) -> usize {
+        let lines: Vec<&str> = text.lines().collect();
+        let current_line = match lines.get(line) {
+            Some(l) => l,
+            None => return 0,
+        };
+        let after_cursor: String = current_line.chars().skip(character).collect();
+        after_cursor.find(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| i)
+            .unwrap_or_else(|| current_line.len().saturating_sub(character))
     }
 
     /// Helper: get the word at a given position
