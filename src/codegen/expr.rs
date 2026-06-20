@@ -1012,8 +1012,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(format!("[E0708] cannot dispatch method '{}' on {}", method_name, obj_type));
                 }
 
-                // 4. Fallback: field access or error
+                // 4. Try enum constructor: {Type}_{Variant}(args)
                 if self.type_defs.contains_key(&obj_type) {
+                    let ctor_name = format!("{}_{}", obj_type, method_name);
+                    if let Some(function) = self.module.get_function(&ctor_name) {
+                        let mut compiled_args = Vec::new();
+                        for arg in args {
+                            compiled_args.push(self.compile_expr(arg, vars)?);
+                        }
+                        let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                            BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                            BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                            BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                            BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                        }).collect();
+                        let call = self.builder.build_call(function, &metadata_args, "enum_ctor")
+                            .map_err(|e| format!("enum ctor call error: {}", e))?;
+                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                            self.context.i64_type().const_int(0, false).into()
+                        ));
+                    }
                     Err(format!("method '{}' not compiled for type '{}' (missing crate?)", method_name, obj_type))
                 } else {
                     Err(format!("cannot call method '{}' on unknown type '{}'", method_name, obj_type))
