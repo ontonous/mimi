@@ -364,9 +364,13 @@ impl Verifier {
             }
         }
 
+        let num_real_params = func.params.iter()
+            .filter(|p| matches!(&p.ty, Type::Name(n, _) if n == "f64"))
+            .count();
         let constraint_count = requires_exprs.len()
             + math_exprs.len()
-            + func.params.len()
+            + func.params.len()  // old_* equality constraints (int)
+            + num_real_params    // old_* equality constraints (real)
             + if body_return.is_some() { 1 } else { 0 };
 
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())) {
