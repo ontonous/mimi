@@ -187,6 +187,8 @@ pub(crate) struct E2EConfig {
     pub use_asan: bool,
     pub use_ubsan: bool,
     pub valgrind_args: Vec<String>,
+    /// Optional extra C source code to compile and link into the test binary.
+    pub extra_c_src: Option<String>,
 }
 
 impl Default for E2EConfig {
@@ -197,6 +199,7 @@ impl Default for E2EConfig {
             use_asan: false,
             use_ubsan: false,
             valgrind_args: vec!["--tool=memcheck".into(), "--error-exitcode=1".into(), "--leak-check=full".into()],
+            extra_c_src: None,
         }
     }
 }
@@ -244,8 +247,36 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
         return Err(format!("runtime compile failed with exit code {:?}", rt_status.code()));
     }
 
+    let mut object_files = vec![runtime_o.clone(), obj_path.clone()];
+
+    // Compile extra C source if provided
+    if let Some(extra_c) = &config.extra_c_src {
+        let extra_c_path = tmp_dir.join("extra_test.c");
+        std::fs::write(&extra_c_path, extra_c).map_err(|e| format!("write extra c: {}", e))?;
+        let extra_o = tmp_dir.join("extra_test.o");
+        let mut cc_extra = Command::new("cc");
+        cc_extra.arg("-c").arg(&extra_c_path).arg("-o").arg(&extra_o);
+        if config.use_asan {
+            cc_extra.arg("-fsanitize=address");
+        }
+        if config.use_ubsan {
+            cc_extra.arg("-fsanitize=undefined").arg("-fno-sanitize-recover=all");
+        }
+        let extra_status = cc_extra.status()
+            .map_err(|e| format!("extra c compile: {}", e))?;
+        if !extra_status.success() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!("extra C source compile failed with exit code {:?}", extra_status.code()));
+        }
+        object_files.push(extra_o);
+    }
+
     let mut cc_link = Command::new("cc");
-    cc_link.arg("-no-pie").arg(&obj_path).arg(&runtime_o).arg("-o").arg(&bin_path);
+    cc_link.arg("-no-pie");
+    for obj in &object_files {
+        cc_link.arg(obj);
+    }
+    cc_link.arg("-o").arg(&bin_path);
     if config.use_asan {
         cc_link.arg("-fsanitize=address");
     }
@@ -304,5 +335,10 @@ pub(crate) fn compile_and_run_asan(src: &str) -> Result<String, String> {
 /// E2E test compiled with UndefinedBehaviorSanitizer and run directly.
 pub(crate) fn compile_and_run_ubsan(src: &str) -> Result<String, String> {
     compile_and_run_with_config(src, &E2EConfig { use_ubsan: true, ..Default::default() })
+}
+
+/// E2E codegen test with an extra C source file linked in.
+pub(crate) fn compile_and_run_with_csrc(src: &str, extra_c: &str) -> Result<String, String> {
+    compile_and_run_with_config(src, &E2EConfig { extra_c_src: Some(extra_c.to_string()), ..Default::default() })
 }
 

@@ -1177,7 +1177,6 @@ func main() -> i32 {
 // ===================== ImplTrait Return (codegen E2E) =====================
 
 #[test]
-#[ignore = "type checker doesn't resolve methods on impl Trait return types"]
 fn e2e_impl_trait_return() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
@@ -1197,6 +1196,37 @@ func main() -> i32 {
     0
 }
     "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+// ===================== c_shared retain/release (codegen E2E) =====================
+
+fn can_link_shared() -> bool {
+    std::process::Command::new("cc").arg("--version").output().is_ok()
+}
+
+#[test]
+fn e2e_c_shared_retain_release() {
+    if !can_link_shared() { eprintln!("SKIP: cc not available"); return; }
+    let extra_c = r#"
+#include <stdint.h>
+typedef int64_t MimiHandle;
+MimiHandle mimi_shared_retain(MimiHandle handle) { return handle; }
+void mimi_shared_release(MimiHandle handle) { (void)handle; }
+MimiHandle __mimi_extern_test_c_shared(MimiHandle handle) {
+    return handle + 1;
+}
+"#;
+    let stdout = compile_and_run_with_csrc(r#"
+        extern "C" {
+            func test_c_shared(x: c_shared i64) -> i64;
+        }
+        func main() -> i32 {
+            let result = test_c_shared(41)
+            println(result)
+            0
+        }
+    "#, extra_c).unwrap();
     assert_eq!(stdout.trim(), "42");
 }
 

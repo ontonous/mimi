@@ -266,6 +266,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names.insert(name.clone(), obj_type);
                                     }
                                 }
+                            } else if let Expr::Ident(func_name) = callee.as_ref() {
+                                if let Some(fdef) = self.func_defs.get(func_name) {
+                                    if let Some(ret_ty) = &fdef.ret {
+                                        match ret_ty {
+                                            Type::ImplTrait(traits) => {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    format!("impl {}", traits.join(" + ")),
+                                                );
+                                            }
+                                            Type::Name(tn, _) => {
+                                                self.var_type_names.insert(name.clone(), tn.clone());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

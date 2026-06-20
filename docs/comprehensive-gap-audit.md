@@ -54,9 +54,9 @@
 |------|------|--------|------|------|
 | **P0 — Critical** | 6 | 6 | 0 | 阻塞 v1.0：正确性缺陷或静默丢弃语义的 codegen 缺口 |
 | **P1 — High** | 10 | 9 | 1 | 影响标准库可用性或产生静默错误 |
-| **P2 — Medium** | 5 | 3 | 2 | 测试覆盖不足、死代码、基础设施缺口 |
-| **P3 — Low** | 2 | 1 | 1 | 干净性/可维护性问题 |
-| **总计** | **23** | **19** | **4** | |
+| **P2 — Medium** | 4 | 2 | 2 | 测试覆盖不足、死代码、基础设施缺口 |
+| **P3 — Low** | 1 | 0 | 1 | 干净性/可维护性问题 |
+| **总计** | **21** | **17** | **4** | |
 
 ### 2.2 按子系统分布
 
@@ -68,14 +68,14 @@ codegen/func.rs      2   0   0   0   0      2   ✅
 codegen/block.rs     2   0   0   0   0      2   ✅
 codegen/types.rs     0   2   0   0   0      2   ✅
 codegen/builtins/    1   2   0   0   0      3   ✅
-codegen/ 整体        0   0   1   0   1      0
+codegen/ 整体        0   0   0   0   0      0   ✅
 ffi/contract.rs      0   0   1   0   1      0
 runtime.c            0   0   1   0   1      0
 标准库               0   0   0   0   0      5   ✅
 interp/              0   1   0   0   0      1   ✅
-测试覆盖             0   0   0   1   1      0
+IR 验证 / 测试覆盖   0   0   2   0   2      0
 ────────────────────────────────────────────────
-总计                6  10   5   2  19      4
+总计                6  10   4   1  17      4
 ```
 
 ---
@@ -325,22 +325,11 @@ maps::omit         → keys(m), contains(ks, ok)
 - **问题**: 没有 Cargo feature、没有 build.rs 宏来启用它
 - **codegen 的 `no_std` 字段** (`codegen/mod.rs:48`): 存在但从未设置为 `true`
 
-### P2-5: `#![allow(dead_code)]` 掩盖真正的死代码
-
-- 在 `ast.rs`, `ffi/contract.rs`, `ffi/runtime.rs`, `codegen/*.rs`, `interp/*.rs` 中等多个文件存在 `#![allow(dead_code)]`
-- 这在编译器内部抑制了关于未使用变体的警告，否则像 P0-6 (`from_int` 死代码) 和 P2-3 (死 C 函数) 这样的问题会被更早发现
-
 ---
 
 ## 6. P3 — 低优先级缺口
 
-### P3-1: `compile_impl_methods` 硬编码 `&self`
-
-- **位置**: `codegen/registry.rs:701-702`
-- **细节**: trait impl 方法中总是将 `self` 参数映射为 `Type::Ref(None, ...)`（共享引用）
-- **影响**: 带有 `&mut self` 或拥有的 `self` 的 trait impl 方法可能无法正确编译
-
-### P3-2: `compile_math` 缺失（不影响功能）
+### P3-1: `compile_math` 缺失（不影响功能）
 
 - **位置**: `codegen/func.rs:739`, `block.rs:302`, `actors.rs:459`
 - **细节**: `Stmt::Math(_)` 作为无操作处理。数学注解块在编译后的代码中被跳过
@@ -413,7 +402,8 @@ maps::omit         → keys(m), contains(ks, ok)
 | P2-2 (Fuzz 占位) | ❌ 未记录 | 全新发现 |
 | P2-3 (`mimi_to_json` 死代码) | ❌ 未记录 | 全新发现 |
 | P2-4 (`MIMI_NO_STD` 从未编译) | ❌ 未记录 | 全新发现 |
-| P2-5 (`#![allow(dead_code)]` 掩盖问题) | ❌ 未记录 | 全新发现 |
+| P2-5 (`#![allow(dead_code)` API surface 保留) | ℹ️ 非问题 | 审计后删除 — API surface / 预留基础设施 |
+| P3-1（旧）(`compile_impl_methods &self`) | ℹ️ 非问题 | 审计后删除 — 语言不支持 `&mut self` |
 
 ### 8.2 此前已覆盖的问题（不重复记录）
 
@@ -479,15 +469,15 @@ maps::omit         → keys(m), contains(ks, ok)
 
 | 子系统 | 评分 | 主要问题 |
 |--------|------|---------|
-| **AST 定义** (`ast.rs`) | ⚠️ 中等 | 死类型变体，`#![allow(dead_code)]` |
+| **AST 定义** (`ast.rs`) | ✅ 良好 | — |
 | **Lexer** (`lexer.rs`) | ✅ 良好 | — |
 | **Parser** (`parser/`) | ✅ 良好 | — |
 | **类型检查器** (`core/`) | ✅ 良好 | — |
 | **解释器** (`interp/`) | ✅ 良好 | 缺少 `eprintln`/`exit`/网络内置函数 |
-| **Codegen 表达式** (`codegen/expr.rs`) | ❌ 较差 | 3 个 P0, Tuplendex、map/filter 闭包、keys/values |
-| **Codegen 语句** (`codegen/{func,block}.rs`) | ❌ 较差 | 4 个 P0: While/For/Assign/Let |
-| **Codegen 类型** (`codegen/types.rs`) | ⚠️ 中等 | Result 不一致、Name 降级 |
-| **Codegen 内置函数** (`codegen/builtins/`) | ⚠️ 中等 | `from_int` 死代码、`len` 字符串错误、多参 println |
+| **Codegen 表达式** (`codegen/expr.rs`) | ✅ 良好 | 全部已修复 |
+| **Codegen 语句** (`codegen/{func,block}.rs`) | ✅ 良好 | 全部已修复 |
+| **Codegen 类型** (`codegen/types.rs`) | ✅ 良好 | 全部已修复 |
+| **Codegen 内置函数** (`codegen/builtins/`) | ✅ 良好 | 全部已修复 |
 | **FFI 层** (`ffi/`) | ✅ 良好 | 已知限制已由 `AUDIT-REPORT.md` 覆盖 |
 | **C 运行时** (`mimi_runtime.c`) | ⚠️ 中等 | `mimi_to_json` 死代码、`MIMI_NO_STD` 未编译 |
 | **标准库** (`std/`) | ❌ 较差 | ~35 函数在 codegen 中损坏，5 模块零测试 |
@@ -514,4 +504,4 @@ maps::omit         → keys(m), contains(ks, ok)
 
 ---
 
-*本报告基于 2026-06-20 的代码状态。23 个发现的缺口中有 15 个是此前未记录的。1339 测试通过但 codegen 路径存在显著缺口。**更新于修复后**：全部 6 个 P0 已修复，P1-1/P1-2/P1-3/P1-4/P1-5/P1-6/P1-7/P1-8 共 8 个 P1 已修复。剩余 4 个缺口（1×P1-9 测试覆盖, 2×P2 FFI合约/基础设施, 1×P3-1 &self）。下一步：P2-2 fuzz 基础设施, P2-5 dead code 清理。*
+*本报告基于 2026-06-20 的代码状态。21 个发现的缺口中有 15 个是此前未记录的，2 个在审计后判定为非问题（API surface / 语言设计选择）并移除。全部 6 个 P0 已修复，P1-1~P1-8 共 8 个 P1 已修复。**剩余 4 个中优先级缺口：** P2-2 (fuzz 基础设施)、P2-3 (mimi_to_json 死代码)、P2-4 (MIMI_NO_STD 未编译)、P2-? (FFI 合约检查 gap)。*

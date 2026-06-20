@@ -62,16 +62,59 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// For a function returning `impl Trait`, extract the concrete return type
+    /// from the function body (e.g., a record literal's type annotation).
+    fn concrete_return_type_for_impl_trait(body: &[Stmt]) -> Option<String> {
+        let last = body.last()?;
+        match last {
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => match expr {
+                Expr::Record { ty, .. } => ty.clone(),
+                Expr::Call(callee, _) => {
+                    if let Expr::Ident(fname) = callee.as_ref() {
+                        // We can't look up func_defs here (static context),
+                        // so return None; caller must handle this case
+                        None
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            Stmt::If { cond: _, then_, else_ } => {
+                let then_ty = Self::concrete_return_type_for_impl_trait(then_);
+                if then_ty.is_some() {
+                    then_ty
+                } else {
+                    else_.as_ref()
+                        .and_then(|el| Self::concrete_return_type_for_impl_trait(el))
+                }
+            }
+            Stmt::Block(block) => Self::concrete_return_type_for_impl_trait(block),
+            _ => None,
+        }
+    }
+
     pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Delegate async funcs to compile_async_func
         if func.is_async {
             return self.compile_async_func(func);
         }
-        let ret_type = match &func.ret {
-            Some(ty) => types::mimi_type_to_llvm(self.context, ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
-            None => BasicTypeEnum::IntType(self.context.i64_type()),
+
+        // For impl Trait return types, determine the concrete type from the body
+        // so the function's LLVM signature uses the right type.
+        let effective_ret_override = if let Some(Type::ImplTrait(_)) = &func.ret {
+            Self::concrete_return_type_for_impl_trait(&func.body)
+                .and_then(|tn| self.type_llvm.get(&tn).cloned())
+        } else {
+            None
         };
+
+        let ret_type = effective_ret_override.or_else(|| {
+            match &func.ret {
+                Some(ty) => types::mimi_type_to_llvm(self.context, ty),
+                None => None,
+            }
+        }).unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
 
         let mut param_types = Vec::new();
         for param in &func.params {
@@ -294,6 +337,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let obj_type = self.infer_object_type(obj, &vars);
                                     if obj_type == "Result" || obj_type == "Option" {
                                         self.var_type_names.insert(name.clone(), obj_type);
+                                    }
+                                }
+                            } else if let Expr::Ident(func_name) = callee.as_ref() {
+                                if let Some(fdef) = self.func_defs.get(func_name) {
+                                    if let Some(ret_ty) = &fdef.ret {
+                                        match ret_ty {
+                                            Type::ImplTrait(traits) => {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    format!("impl {}", traits.join(" + ")),
+                                                );
+                                            }
+                                            Type::Name(tn, _) => {
+                                                self.var_type_names.insert(name.clone(), tn.clone());
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                             }
