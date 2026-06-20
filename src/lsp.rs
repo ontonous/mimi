@@ -203,8 +203,13 @@ impl LspServer {
                     .get("textDocument")?
                     .get("uri")?
                     .as_str()?;
+                let (line, character) = msg.get("params")
+                    .and_then(|p| p.get("position"))
+                    .map(|pos| (pos.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize,
+                                pos.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize))
+                    .unwrap_or((0, 0));
                 let text = self.documents.get(uri)?;
-                let items = self.compute_completion(text);
+                let items = self.compute_completion(text, line, character);
                 Some(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -909,9 +914,184 @@ impl LspServer {
         None
     }
 
-    pub fn compute_completion(&self, text: &str) -> Vec<serde_json::Value> {
-        let mut items = Vec::new();
+    /// Determine completion context from cursor position
+    fn completion_context(text: &str, line: usize, character: usize) -> &'static str {
+        let lines: Vec<&str> = text.lines().collect();
+        let current_line = match lines.get(line) {
+            Some(l) => l,
+            None => return "top",
+        };
+        let before_cursor: String = current_line.chars().take(character).collect();
+        let trimmed = before_cursor.trim();
 
+        // After `.` — method completion
+        if trimmed.ends_with('.') {
+            return "dot";
+        }
+        // After `::` — qualified path completion
+        if trimmed.ends_with("::") {
+            return "path";
+        }
+        // After `:` (but not `::`) — type annotation
+        if trimmed.ends_with(':') {
+            return "type";
+        }
+        // After `use` — module name
+        if trimmed.starts_with("use") || before_cursor.trim().starts_with("use ") {
+            return "module";
+        }
+        // After `impl` — trait/type name
+        if trimmed.starts_with("impl") || trimmed.starts_with("impl ") {
+            return "impl";
+        }
+        // After `extern` — ABI string or block
+        if trimmed.starts_with("extern") && !trimmed.starts_with("extern ") {
+            return "extern";
+        }
+        // Start of expression or after opening brace/paren
+        "top"
+    }
+
+    pub fn compute_completion(&self, text: &str, line: usize, character: usize) -> Vec<serde_json::Value> {
+        let mut items = Vec::new();
+        let context = Self::completion_context(text, line, character);
+
+        match context {
+            "dot" => {
+                // Method completions after `.`
+                let methods = vec![
+                    ("to_string", "to_string() -> string"),
+                    ("len", "len() -> i64"),
+                    ("trim", "trim() -> string"),
+                    ("to_upper", "to_upper() -> string"),
+                    ("to_lower", "to_lower() -> string"),
+                    ("repeat", "repeat(n: i64) -> string"),
+                    ("replace", "replace(from: string, to: string) -> string"),
+                    ("char_at", "char_at(i: i64) -> string"),
+                    ("substring", "substring(start: i64, len: i64) -> string"),
+                    ("split", "split(sep: string) -> list"),
+                    ("contains", "contains(elem) -> bool"),
+                    ("push", "push(item) -> list"),
+                    ("pop", "pop() -> item"),
+                    ("sort", "sort() -> list"),
+                    ("reverse", "reverse() -> list"),
+                    ("keys", "keys() -> list"),
+                    ("values", "values() -> list"),
+                    ("has_key", "has_key(key) -> bool"),
+                ];
+                for (name, sig) in methods {
+                    items.push(serde_json::json!({
+                        "label": name,
+                        "kind": 2, // Method
+                        "detail": sig,
+                        "insertText": format!("{}(${{1}})", name),
+                        "insertTextFormat": 2,
+                    }));
+                }
+                // Add trait methods and actor methods from AST
+                if let Some(file) = self.parse_with_recovery(text) {
+                    for item in &file.items {
+                        match item {
+                            Item::Trait(t) => {
+                                for m in &t.methods {
+                                    let params: Vec<String> = m.params.iter()
+                                        .map(|p| format!("{}: {}", p.name, Self::type_display(&p.ty)))
+                                        .collect();
+                                    let ret = m.ret.as_ref().map(|r| format!(" -> {}", Self::type_display(r))).unwrap_or_default();
+                                    items.push(serde_json::json!({
+                                        "label": m.name,
+                                        "kind": 2, // Method
+                                        "detail": format!("fn {}({}){}", m.name, params.join(", "), ret),
+                                        "insertText": format!("{}(${{1}})", m.name),
+                                        "insertTextFormat": 2,
+                                    }));
+                                }
+                            }
+                            Item::Actor(a) => {
+                                for m in &a.methods {
+                                    items.push(serde_json::json!({
+                                        "label": m.name,
+                                        "kind": 2, // Method
+                                        "detail": format!("actor method {}", m.name),
+                                        "insertText": format!("{}(${{1}})", m.name),
+                                        "insertTextFormat": 2,
+                                    }));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                return items;
+            }
+            "type" => {
+                // Type completions after `:`
+                let type_keywords = vec!["i32", "i64", "f64", "bool", "string", "unit"];
+                for t in type_keywords {
+                    items.push(serde_json::json!({
+                        "label": t,
+                        "kind": 22, // TypeParameter
+                        "detail": format!("type {}", t),
+                    }));
+                }
+                // Also add user-defined types from AST
+                if let Some(file) = self.parse_with_recovery(text) {
+                    for item in &file.items {
+                        if let Item::Type(t) = item {
+                            items.push(serde_json::json!({
+                                "label": t.name.clone(),
+                                "kind": 22, // TypeParameter
+                                "detail": format!("type {}", t.name),
+                            }));
+                        }
+                    }
+                }
+                return items;
+            }
+            "module" => {
+                // Module name completions after `use`
+                if let Some(file) = self.parse_with_recovery(text) {
+                    for item in &file.items {
+                        if let Item::Module(m) = item {
+                            items.push(serde_json::json!({
+                                "label": m.name.clone(),
+                                "kind": 1, // Module
+                                "detail": format!("module {}", m.name),
+                            }));
+                        }
+                    }
+                }
+                return items;
+            }
+            "impl" => {
+                // Trait/type name completions
+                if let Some(file) = self.parse_with_recovery(text) {
+                    for item in &file.items {
+                        match item {
+                            Item::Trait(t) => {
+                                items.push(serde_json::json!({
+                                    "label": t.name.clone(),
+                                    "kind": 11, // Interface
+                                    "detail": format!("trait {}", t.name),
+                                }));
+                            }
+                            Item::Type(t) => {
+                                items.push(serde_json::json!({
+                                    "label": t.name.clone(),
+                                    "kind": 22, // TypeParameter
+                                    "detail": format!("type {}", t.name),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                return items;
+            }
+            _ => {} // Fall through to default "top" context
+        }
+
+        // Default "top" context: show everything
         // Keywords
         let keywords = vec![
             "func", "type", "flow", "module", "if", "else", "while", "for",
@@ -929,13 +1109,13 @@ impl LspServer {
             }));
         }
 
-        // Try to parse and extract function names
+        // User-defined functions, types, modules, traits, actors from AST
         if let Some(file) = self.parse_with_recovery(text) {
                 for item in &file.items {
                     match item {
                         Item::Func(f) => {
                             items.push(serde_json::json!({
-                                "label": f.name,
+                                "label": f.name.clone(),
                                 "kind": 3, // Function
                                 "detail": format!("func {}(...)", f.name),
                                 "insertText": format!("{}(${{1}})", f.name),
@@ -944,14 +1124,14 @@ impl LspServer {
                         }
                         Item::Type(t) => {
                             items.push(serde_json::json!({
-                                "label": t.name,
+                                "label": t.name.clone(),
                                 "kind": 22, // TypeParameter
                                 "detail": format!("type {}", t.name),
                             }));
                         }
                         Item::Module(m) => {
                             items.push(serde_json::json!({
-                                "label": m.name,
+                                "label": m.name.clone(),
                                 "kind": 1, // Module
                                 "detail": format!("module {}", m.name),
                             }));
@@ -959,7 +1139,7 @@ impl LspServer {
                         Item::Trait(t) => {
                             let method_names: Vec<String> = t.methods.iter().map(|m| m.name.clone()).collect();
                             items.push(serde_json::json!({
-                                "label": t.name,
+                                "label": t.name.clone(),
                                 "kind": 11, // Interface
                                 "detail": format!("trait {} {{ {} }}", t.name, method_names.join(", ")),
                             }));
@@ -967,7 +1147,7 @@ impl LspServer {
                         Item::Actor(a) => {
                             let method_names: Vec<String> = a.methods.iter().map(|m| m.name.clone()).collect();
                             items.push(serde_json::json!({
-                                "label": a.name,
+                                "label": a.name.clone(),
                                 "kind": 23, // Struct (closest match)
                                 "detail": format!("actor {} {{ {} }}", a.name, method_names.join(", ")),
                             }));
@@ -984,7 +1164,7 @@ impl LspServer {
                 }
         }
 
-        // Builtins (updated with v5.0 additions)
+        // Builtins
         let builtins = vec![
             "println", "print", "assert", "assert_eq", "assert_ne", "len", "push",
             "pop", "range", "sqrt", "abs", "min", "max", "to_string",
@@ -992,7 +1172,6 @@ impl LspServer {
             "zip", "enumerate", "sum", "contains", "input",
             "type_name", "type_fields", "type_variants", "type_info",
             "ast_dump", "ast_eval",
-            // v5.0 additions
             "pow", "floor", "ceil", "round", "random", "pi",
             "read_file", "write_file", "file_exists",
             "to_int", "to_float",

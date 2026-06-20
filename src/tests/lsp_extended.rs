@@ -145,7 +145,7 @@ fn document_symbols_empty() {
 fn completion_new_builtins() {
     let server = LspServer::new();
     let text = "func main() { }";
-    let items = server.compute_completion(text);
+    let items = server.compute_completion(text, 0, 0);
     let labels: Vec<&str> = items.iter()
         .map(|i| i.get("label").unwrap().as_str().unwrap())
         .collect();

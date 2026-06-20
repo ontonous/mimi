@@ -207,7 +207,7 @@ fn lsp_completion_keywords() {
     use crate::lsp::LspServer;
     let server = LspServer::new();
     let text = "";
-    let items = server.compute_completion(text);
+    let items = server.compute_completion(text, 0, 0);
     let labels: Vec<&str> = items.iter()
         .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
         .collect();
@@ -230,7 +230,7 @@ func main() -> i32 {
     my_function()
 }
 "#;
-    let items = server.compute_completion(text);
+    let items = server.compute_completion(text, 0, 0);
     let labels: Vec<&str> = items.iter()
         .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
         .collect();
@@ -244,7 +244,7 @@ fn lsp_completion_builtins() {
     use crate::lsp::LspServer;
     let server = LspServer::new();
     let text = "";
-    let items = server.compute_completion(text);
+    let items = server.compute_completion(text, 0, 0);
     let labels: Vec<&str> = items.iter()
         .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
         .collect();
