@@ -301,6 +301,53 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// G5b: Clone a shared reference: retain the heap pointer and register
+    /// `new_name` as a new shared variable pointing to the same allocation.
+    pub(super) fn compile_shared_ref_copy(
+        &mut self,
+        new_name: &str,
+        src_name: &str,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
+        let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let &(src_alloca, val_ty) = vars.get(src_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("shared source '{}' not found", src_name)))?;
+        let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+
+        // 1. Load the T* heap pointer from the source's alloca
+        let heap_ptr_typed = self.builder.build_load(
+            BasicTypeEnum::PointerType(ptr_ty), src_alloca,
+            &format!("{}_shared_load", new_name),
+        ).map_err(|e| CompileError::LlvmError(format!("shared load error: {}", e)))?.into_pointer_value();
+
+        // 2. Cast to i8* and call mimi_rc_retain
+        let heap_i8 = self.builder.build_pointer_cast(
+            heap_ptr_typed, i8_ptr_ty,
+            &format!("{}_shared_i8", new_name),
+        ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
+        let retain_fn = self.module.get_function("mimi_rc_retain")
+            .ok_or_else(|| CompileError::LlvmError("mimi_rc_retain not declared".to_string()))?;
+        self.builder.build_call(retain_fn, &[
+            inkwell::values::BasicMetadataValueEnum::PointerValue(heap_i8),
+        ], &format!("{}_retain", new_name))
+            .map_err(|e| CompileError::LlvmError(format!("retain error: {}", e)))?;
+
+        // 3. Create a new alloca for the new name and store the heap pointer
+        let new_alloca = self.builder.build_alloca(ptr_ty, new_name)
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        self.builder.build_store(new_alloca, heap_ptr_typed)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // 4. Register the i8* pointer for release on scope exit
+        self.register_shared_var(heap_i8);
+
+        // 5. Track as shared
+        self.shared_var_names.insert(new_name.to_string());
+        vars.insert(new_name.to_string(), (new_alloca, val_ty));
+
+        Ok(())
+    }
+
     pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
         Target::initialize_native(&InitializationConfig::default())
             .map_err(|e| format!("failed to initialize target: {}", e))?;

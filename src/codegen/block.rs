@@ -124,6 +124,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         vars.insert(name, (fat_alloca, fat_ty));
                         continue;
                     }
+                    // Shared ref copy: let v = shared_var
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Ident(src_name) = init {
+                            if self.shared_var_names.contains(src_name.as_str()) {
+                                self.compile_shared_ref_copy(name, src_name, vars)?;
+                                self.var_type_names.insert(name.clone(), src_name.clone());
+                                continue;
+                            }
+                        }
+                    }
                     // Non-dyn Trait: compile init and bind via recursive pattern matching
                     let mut val = self.compile_expr(init, vars)?;
                     if let Some(decl_ty) = ty {

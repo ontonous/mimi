@@ -1339,18 +1339,29 @@ fn e2e_valgrind_recursion() {
 }
 
 #[test]
+fn e2e_shared_var_copy() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            shared x = 42;
+            let v = x;  // shared ref copy (retain)
+            println(v)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
 fn e2e_valgrind_shared_weak_lifecycle() {
     // Placeholder: shared/weak valgrind test.
-    // Codegen currently treats SharedLet as a plain `let` (no Arc/Rc),
-    // so shared/weak semantics (refcounting, upgrade) are not compiled.
-    // Once codegen implements reference counting, this test should:
+    // Codegen now implements shared ref counting (mimi_rc_retain on copy),
+    // but weak references are not yet compiled.
+    // Once weak refs are implemented in codegen, this test should:
     //   1. Create a shared value and weak ref
     //   2. Drop the shared value (scope exit)
     //   3. Verify weak.upgrade() returns None
     //   4. Valgrind should detect no leaks (cycle-free case)
-    //
-    // For now, this test validates basic compilation of shared syntax
-    // and that valgrind doesn't report false positives on stack variables.
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     if !can_valgrind() { eprintln!("SKIP: valgrind not available"); return; }
     let stdout = compile_and_run_valgrind(r#"

@@ -244,6 +244,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(());
                 }
                 Stmt::Let { pat, init: Some(init), ty, .. } => {
+                    // Shared ref copy: let v = shared_var
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Ident(src_name) = init {
+                            if self.shared_var_names.contains(src_name.as_str()) {
+                                self.compile_shared_ref_copy(name, src_name, &mut vars)?;
+                                self.var_type_names.insert(name.clone(), src_name.clone());
+                                continue;
+                            }
+                        }
+                    }
                     let mut val = self.compile_expr(init, &vars)?;
                     if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
