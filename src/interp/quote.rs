@@ -140,7 +140,7 @@ impl<'a> Interpreter<'a> {
                 let mut result = Vec::new();
                 for item in items {
                     self.push_scope();
-                    self.bind(var, item.clone());
+                    self.bind(var, item.clone())?;
                     let include = if let Some(g) = guard {
                         let cond = self.eval_expr(g)?;
                         is_truthy(&cond)
@@ -364,7 +364,7 @@ impl<'a> Interpreter<'a> {
             }
             QuotedAst::Let { name, value } => {
                 let v = self.eval_quoted_ast(value)?;
-                self.bind(name, v.clone());
+                self.bind(name, v.clone())?;
                 Ok(v)
             }
             QuotedAst::ExprStmt(e) => self.eval_quoted_ast(e),
@@ -419,7 +419,7 @@ impl<'a> Interpreter<'a> {
                     other => return Err(format!("cannot iterate over {}", other)),
                 };
                 for item in list {
-                    self.bind(var, item);
+                    self.bind(var, item)?;
                     if self.early_return.is_some() { break; }
                     self.eval_quoted_ast(body)?;
                     if self.early_return.is_some() { break; }
@@ -472,7 +472,7 @@ impl<'a> Interpreter<'a> {
                         _ => return Err(format!("weak_local requires a local_shared value, got {}", v)),
                     },
                 };
-                self.bind(name, shared_val);
+                self.bind(name, shared_val)?;
                 Ok(Value::Unit)
             }
             QuotedAst::OnFailure(_body) => {
@@ -511,10 +511,10 @@ impl<'a> Interpreter<'a> {
                         }
                         self.push_scope();
                         for (n, v) in &captured {
-                            self.bind(n, v.clone());
+                            self.bind(n, v.clone())?;
                         }
                         for (p, a) in params.iter().zip(arg_vals) {
-                            self.bind(&p.name, a);
+                            self.bind(&p.name, a)?;
                         }
                         let result = self.eval_block(&body);
                         self.pop_scope();

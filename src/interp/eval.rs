@@ -113,9 +113,9 @@ impl<'a> Interpreter<'a> {
                 if let Some(bindings) = self.match_pattern(pat, &final_value) {
                     for (name, val) in bindings {
                         if *mut_ {
-                            self.bind_mut(&name, val);
+                            self.bind_mut(&name, val)?;
                         } else {
-                            self.bind(&name, val);
+                            self.bind(&name, val)?;
                         }
                     }
                 } else {
@@ -206,7 +206,7 @@ impl<'a> Interpreter<'a> {
                     other => return Err(format!("cannot iterate over {}", other)),
                 };
                 for item in list {
-                    self.bind(var, item);
+                    self.bind(var, item)?;
                     if self.early_return.is_some() { break; }
                     self.eval_block(body)?;
                     if self.early_return.is_some() { break; }
@@ -522,7 +522,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 };
-                self.bind(name, shared_val);
+                self.bind(name, shared_val)?;
             }
             Stmt::OnFailure(block) => {
                 // Register compensation action to the current scope level
@@ -578,7 +578,7 @@ impl<'a> Interpreter<'a> {
                             };
                             if let Some(bindings) = self.match_pattern(pat, &v) {
                                 for (name, val) in bindings {
-                                    self.bind(&name, val);
+                                    self.bind(&name, val)?;
                                 }
                             }
                         }
@@ -730,11 +730,11 @@ impl<'a> Interpreter<'a> {
                                 self.push_scope();
                                 // Restore captured environment
                                 for (name, val) in &captured {
-                                    self.bind(name, val.clone());
+                                    self.bind(name, val.clone())?;
                                 }
                                 // Bind parameters
                                 for (p, a) in params.iter().zip(vals) {
-                                    self.bind(&p.name, a);
+                                    self.bind(&p.name, a)?;
                                 }
                                 let result = self.eval_block(&body);
                                 self.pop_scope();
@@ -784,7 +784,7 @@ impl<'a> Interpreter<'a> {
                 let mut result = Vec::new();
                 for item in items {
                     self.push_scope();
-                    self.bind(var, item.clone());
+                    self.bind(var, item.clone())?;
                     let include = if let Some(g) = guard {
                         let cond = self.eval_expr(g)?;
                         is_truthy(&cond)
@@ -821,7 +821,7 @@ impl<'a> Interpreter<'a> {
                     if let Some(bindings) = self.match_pattern(&arm.pat, &val) {
                         self.push_scope();
                         for (name, v) in bindings {
-                            self.bind(&name, v);
+                            self.bind(&name, v)?;
                         }
                         if let Some(guard) = &arm.guard {
                             let g = self.eval_expr(guard)?;

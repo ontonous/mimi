@@ -3566,9 +3566,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let bool_ty = self.context.bool_type();
                 let i64_ty = self.context.i64_type();
                 let disc = bool_ty.const_int(0, false);
-                // Convert the error value to i64 (for pointer types: ptrtoint)
+                // Convert the error value to i64 (sign-extend ints, ptrtoint pointers)
                 let err_val: BasicValueEnum = match val {
-                    BasicValueEnum::IntValue(iv) => iv.into(),
+                    BasicValueEnum::IntValue(iv) => {
+                        let bit_width = iv.get_type().get_bit_width();
+                        if bit_width < 64 {
+                            self.builder.build_int_s_extend(iv, i64_ty, "err_sext")
+                                .map_err(|e| format!("int sign extend error: {}", e))?
+                                .into()
+                        } else if bit_width > 64 {
+                            self.builder.build_int_truncate(iv, i64_ty, "err_trunc")
+                                .map_err(|e| format!("int truncate error: {}", e))?
+                                .into()
+                        } else {
+                            iv.into()
+                        }
+                    }
                     BasicValueEnum::PointerValue(pv) => {
                         self.builder.build_ptr_to_int(pv, i64_ty, "err_to_i64")
                             .map_err(|e| format!("ptrtoint error: {}", e))?

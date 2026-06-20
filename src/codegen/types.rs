@@ -85,9 +85,9 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner_llvm], false)))
         }
         Type::Result(ok, err) => {
-            // Result<T, E> represented as {i1, T, i64} — discriminant + ok payload + err payload (as i64)
-            // The error type E is always stored as i64 regardless of its actual type,
-            // so the struct layout is consistent across all Result<T,E> variants.
+            // Result<T, E> represented as {i1, T, i64} — discriminant + ok payload + err payload (as i64).
+            // The error field uses i64 to keep the struct layout consistent across all E types.
+            // Integer values are sign-extended from their native width; pointer values use ptrtoint.
             let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());

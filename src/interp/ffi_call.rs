@@ -37,11 +37,12 @@ static CALLBACK_GLOBAL_STORE: std::sync::LazyLock<Mutex<HashMap<i64, (Value, boo
 
 /// Holds borrow guards alive during a synchronous FFI C call.
 /// Stores the concrete guard type so it can be held across 'static boundaries.
+/// RefRead/RefWrite hold the Arc alongside the guard to keep the data alive.
 enum FfiGuard {
     Read(std::sync::RwLockReadGuard<'static, Value>),
     Write(std::sync::RwLockWriteGuard<'static, Value>),
-    RefRead(std::sync::RwLockReadGuard<'static, Value>),
-    RefWrite(std::sync::RwLockWriteGuard<'static, Value>),
+    RefRead(Arc<RwLock<Value>>, std::sync::RwLockReadGuard<'static, Value>),
+    RefWrite(Arc<RwLock<Value>>, std::sync::RwLockWriteGuard<'static, Value>),
     /// A libffi closure (dynamic C-compatible function pointer) that must
     /// remain alive for the duration of the C call, plus its boxed userdata.
     CallbackClosure {
@@ -574,12 +575,10 @@ impl<'a> Interpreter<'a> {
                 Value::Ref(rc) => {
                     let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                     let ptr = &*guard as *const Value as *const () as i64;
-                    // SAFETY: (F5) The `rc` is owned by `call_extern`'s arg iterator
-                    // and lives for the function scope. The `ffi_guards` Vec holds the
-                    // guard alive for the same duration. The unsafe transmute-to-'static
-                    // is sound because the underlying `Arc<RwLock<Value>>` behind `rc`
-                    // outlives the C call.
-                    ffi_guards.push(FfiGuard::RefRead(unsafe {
+                    // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
+                    // the guard in `FfiGuard::RefRead`, so the `Arc` keeps the data alive
+                    // for the entire duration of the C call.
+                    ffi_guards.push(FfiGuard::RefRead(Arc::clone(rc), unsafe {
                         std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                     }));
                     Ok(ptr)
@@ -622,10 +621,9 @@ impl<'a> Interpreter<'a> {
                 Value::RefMut(rc) => {
                     let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
-                    // SAFETY: (F5) Same reasoning as the Ref path above: the
-                    // `Arc<RwLock<Value>>` behind `rc` is kept alive by the arg
-                    // iterator in `call_extern`, which outlives the C call.
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe {
+                    // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
+                    // the guard in `FfiGuard::RefWrite`, so the `Arc` keeps the data alive.
+                    ffi_guards.push(FfiGuard::RefWrite(Arc::clone(rc), unsafe {
                         std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                     }));
                     Ok(ptr)
@@ -696,9 +694,9 @@ impl<'a> Interpreter<'a> {
                 Value::Ref(rc) => {
                     let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                     let ptr = &*guard as *const Value as *const () as i64;
-                    // SAFETY: (F5) Same as RawPtr Ref path — rc is alive for the
-                    // duration of call_extern, outliving the C call.
-                    ffi_guards.push(FfiGuard::RefRead(unsafe {
+                    // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
+                    // the guard in `FfiGuard::RefRead`, so the `Arc` keeps the data alive.
+                    ffi_guards.push(FfiGuard::RefRead(Arc::clone(rc), unsafe {
                         std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                     }));
                     Ok(ptr)
@@ -743,8 +741,9 @@ impl<'a> Interpreter<'a> {
                 Value::RefMut(rc) => {
                     let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
-                    // SAFETY: (F5) Same as RawPtrMut RefMut path.
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe {
+                    // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
+                    // the guard in `FfiGuard::RefWrite`, so the `Arc` keeps the data alive.
+                    ffi_guards.push(FfiGuard::RefWrite(Arc::clone(rc), unsafe {
                         std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                     }));
                     Ok(ptr)
@@ -775,10 +774,10 @@ impl<'a> Interpreter<'a> {
                 }
                 self.push_scope();
                 for (n, v) in captured {
-                    self.bind(n, v.clone());
+                    self.bind(n, v.clone())?;
                 }
                 for (param, arg) in params.iter().zip(args) {
-                    self.bind(&param.name, arg);
+                    self.bind(&param.name, arg)?;
                 }
                 let result = self.eval_block(body).map_err(Errno::from)?;
                 self.pop_scope();

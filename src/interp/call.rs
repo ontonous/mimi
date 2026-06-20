@@ -28,7 +28,7 @@ impl<'a> Interpreter<'a> {
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(args) {
             old_snapshots.insert(p.name.clone(), a.clone());
-            self.bind(&p.name, a);
+            self.bind(&p.name, a)?;
         }
 
         // Extract and check requires conditions
@@ -54,10 +54,10 @@ impl<'a> Interpreter<'a> {
         if self.verify_contracts {
             if let Ok(Some(ref rv)) = result {
                 self.push_scope();
-                self.bind("result", rv.clone());
+                self.bind("result", rv.clone())?;
                 // Bind old snapshots for old(x) access
                 for (name, val) in &old_snapshots {
-                    self.bind(&format!("old_{}", name), val.clone());
+                    self.bind(&format!("old_{}", name), val.clone())?;
                 }
                 let ensures_ok = (|| {
                     for stmt in &func.body {
@@ -103,10 +103,10 @@ impl<'a> Interpreter<'a> {
                     }
                     self.push_scope();
                     for (n, val) in &captured {
-                        self.bind(n, val.clone());
+                        self.bind(n, val.clone())?;
                     }
                     for (p, a) in params.iter().zip(args) {
-                        self.bind(&p.name, a);
+                        self.bind(&p.name, a)?;
                     }
                     let result = self.eval_block(&body);
                     self.pop_scope();
@@ -287,7 +287,7 @@ impl<'a> Interpreter<'a> {
             let mut interp = Interpreter::new(&file_clone);
             interp.push_scope();
             for (p, a) in func_clone.params.iter().zip(args_clone) {
-                interp.bind(&p.name, a);
+                interp.bind(&p.name, a).expect("scope was just pushed");
             }
             let block_result = interp.eval_block(&func_clone.body).map(|v| v.unwrap_or(Value::Unit));
             let result = interp.early_return.take()
@@ -383,7 +383,7 @@ impl<'a> Interpreter<'a> {
                         // For actor methods, we need to call with self bound to this actor
                         self.push_scope();
                         // Bind 'self' to the actor handle itself (for self.field access via RwLock)
-                        self.bind("self", obj.clone());
+                        self.bind("self", obj.clone())?;
 
                         let result = self.call_func(func, args);
 
@@ -402,11 +402,11 @@ impl<'a> Interpreter<'a> {
                                 let func = func.clone();
                                 // Call the trait method with self = the concrete value
                                 self.push_scope();
-                                self.bind("self", *data.clone());
+                                self.bind("self", *data.clone())?;
                                 // If the concrete value is a record, bind its fields too
                                 if let Value::Record(_, fields) = data.as_ref() {
                                     for (field_name, field_value) in fields {
-                                        self.bind(field_name, field_value.clone());
+                                        self.bind(field_name, field_value.clone())?;
                                     }
                                 }
                                 let result = self.call_func(&func, args);
@@ -450,10 +450,10 @@ impl<'a> Interpreter<'a> {
                                 let fields = fields.clone();
                                 // Found trait method - call it with self = the record
                                 self.push_scope();
-                                self.bind("self", obj.clone());
+                                self.bind("self", obj.clone())?;
                                 // Bind record fields to scope
                                 for (field_name, field_value) in &fields {
-                                    self.bind(field_name, field_value.clone());
+                                    self.bind(field_name, field_value.clone())?;
                                 }
                                 let result = self.call_func(&func, args);
                                 self.pop_scope();
@@ -481,7 +481,7 @@ impl<'a> Interpreter<'a> {
                         if let Some(func) = methods.iter().find(|f| f.name == method) {
                             let func = func.clone();
                             self.push_scope();
-                            self.bind("self", obj.clone());
+                            self.bind("self", obj.clone())?;
                             let result = self.call_func(&func, args);
                             self.pop_scope();
                             return result;
@@ -607,7 +607,7 @@ impl<'a> Interpreter<'a> {
                         if let Some(func) = methods.iter().find(|f| f.name == method) {
                             let func = func.clone();
                             self.push_scope();
-                            self.bind("self", obj.clone());
+                            self.bind("self", obj.clone())?;
                             let result = self.call_func(&func, args);
                             self.pop_scope();
                             return result;
@@ -722,10 +722,10 @@ impl<'a> Interpreter<'a> {
                 }
                 self.push_scope();
                 for (n, v) in captured {
-                    self.bind(n, v.clone());
+                    self.bind(n, v.clone())?;
                 }
                 for (param, arg) in params.iter().zip(args) {
-                    self.bind(&param.name, arg);
+                    self.bind(&param.name, arg)?;
                 }
                 let result = self.eval_block(body)?;
                 self.pop_scope();

@@ -58,12 +58,21 @@ impl LspServer {
             let mut newline = [0u8; 1];
             let _ = io::stdin().read(&mut newline);
 
-            // Parse and handle
+            // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(response) = self.handle_message(&msg) {
-                    let resp_str = serde_json::to_string(&response).unwrap_or_default();
-                    print!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str);
-                    io::stdout().flush().ok();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.handle_message(&msg)
+                }));
+                match result {
+                    Ok(Some(response)) => {
+                        let resp_str = serde_json::to_string(&response).unwrap_or_default();
+                        print!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str);
+                        io::stdout().flush().ok();
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        eprintln!("[lsp] handler panicked for method {:?}, continuing", msg.get("method").and_then(|v| v.as_str()));
+                    }
                 }
             }
         }

@@ -156,7 +156,9 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    const MAX_RECURSION_DEPTH: usize = 4096;
+    // Default Rust thread stack is 2MB; each interpreter frame is ~2KB.
+    // 768 frames × 2KB = 1.5MB, leaving ~0.5MB headroom.
+    const MAX_RECURSION_DEPTH: usize = 768;
 
     fn with_depth_check<F, T>(&mut self, f: F) -> Result<T, String>
     where
@@ -677,17 +679,20 @@ impl<'a> Interpreter<'a> {
         InterpError::with_op(msg, op).with_call_stack(self.call_stack.clone())
     }
 
-    fn bind(&mut self, name: &str, value: Value) {
-        self.env.last_mut().expect("scope stack non-empty").insert(name.into(), value);
-        self.moved_vars.last_mut().expect("scope stack non-empty").insert(name.into(), false);
+    fn bind(&mut self, name: &str, value: Value) -> Result<(), String> {
+        let env = self.env.last_mut().ok_or("internal error: scope stack empty in bind")?;
+        env.insert(name.into(), value);
+        self.moved_vars.last_mut().ok_or("internal error: scope stack empty in bind")?.insert(name.into(), false);
         // Default to immutable unless explicitly marked as mutable
-        self.mut_vars.last_mut().expect("scope stack non-empty").entry(name.into()).or_insert(false);
+        self.mut_vars.last_mut().ok_or("internal error: scope stack empty in bind")?.entry(name.into()).or_insert(false);
+        Ok(())
     }
 
-    fn bind_mut(&mut self, name: &str, value: Value) {
-        self.env.last_mut().expect("scope stack non-empty").insert(name.into(), value);
-        self.moved_vars.last_mut().expect("scope stack non-empty").insert(name.into(), false);
-        self.mut_vars.last_mut().expect("scope stack non-empty").insert(name.into(), true);
+    fn bind_mut(&mut self, name: &str, value: Value) -> Result<(), String> {
+        self.env.last_mut().ok_or("internal error: scope stack empty in bind_mut")?.insert(name.into(), value);
+        self.moved_vars.last_mut().ok_or("internal error: scope stack empty in bind_mut")?.insert(name.into(), false);
+        self.mut_vars.last_mut().ok_or("internal error: scope stack empty in bind_mut")?.insert(name.into(), true);
+        Ok(())
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
