@@ -1652,31 +1652,56 @@ fn e2e_continue_inside_if() {
 
 // ===================== G4: ? operator E2E =====================
 
-// Known limitation: compile_try_expr hardcodes {i1, i64} struct layout
-// but Mimi enum tags are i32, causing GEP offset mismatch and segfault (SIGSEGV)
-// when ? operator is used in compiled mode with non-trivial Result types.
-// Documented as #[ignore] regression test; remove #[ignore] once G4 is fixed.
-#[ignore]
 #[test]
-fn e2e_try_operator_segfault_regression() {
+fn e2e_try_operator_variable() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    // compile_try_expr creates {i1, i64} struct but Result<i64,i64> uses {i32,...} tag.
-    // Any use of ? on Result<i64,_> in compiled mode will segfault.
-    // Un-ignore this test once G4 (i32 tag layout) is fixed in compile_try_expr.
-    let _stdout = compile_and_run(r##"
+    // ? operator on a variable
+    let stdout = compile_and_run(r#"
         func safe_div(a: i64, b: i64) -> Result<i64, i64> {
-            if b == 0 { Err(0) } else { Ok(a / b) }
+            if b == 0 { Err(-1) } else { Ok(a / b) }
         }
-
-        func compute() -> i64 {
-            safe_div(10, 2)
-        }
-
         func main() -> i32 {
-            println(compute())
+            let r = safe_div(10, 2)
+            let x = r?
+            println(x)
             0
         }
-    "##).unwrap();
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn e2e_try_operator_direct_call() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // ? operator on a direct function call
+    let stdout = compile_and_run(r#"
+        func safe_div(a: i64, b: i64) -> Result<i64, i64> {
+            if b == 0 { Err(-1) } else { Ok(a / b) }
+        }
+        func main() -> i32 {
+            let x = safe_div(10, 2)?
+            println(x)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn e2e_try_operator_option() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // ? operator on Option type
+    let stdout = compile_and_run(r#"
+        func safe_div(a: i64, b: i64) -> Option<i64> {
+            if b == 0 { Some(0) } else { Some(a / b) }
+        }
+        func main() -> i32 {
+            let x = safe_div(10, 2)?
+            println(x)
+            0
+        }
+    "#).unwrap();
+    assert_eq!(stdout.trim(), "5");
 }
 
 // ===================== TupleIndex (codegen E2E) =====================

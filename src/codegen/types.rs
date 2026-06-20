@@ -18,7 +18,8 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             "Result" if args.len() == 2 => {
                 let ok = mimi_type_to_llvm(ctx, &args[0])?;
                 let disc = BasicTypeEnum::IntType(ctx.bool_type());
-                Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok], false)))
+                let err = BasicTypeEnum::IntType(ctx.i64_type());
+                Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok, err], false)))
             }
             "Option" if args.len() == 1 => {
                 let inner = mimi_type_to_llvm(ctx, &args[0])?;
@@ -84,10 +85,12 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner_llvm], false)))
         }
         Type::Result(ok, err) => {
-            // Result<T, E> represented as {i1, T, E} — discriminant + ok payload + err payload
+            // Result<T, E> represented as {i1, T, i64} — discriminant + ok payload + err payload (as i64)
+            // The error type E is always stored as i64 regardless of its actual type,
+            // so the struct layout is consistent across all Result<T,E> variants.
             let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
-            let err_llvm = mimi_type_to_llvm(ctx, err).unwrap_or_else(|| BasicTypeEnum::IntType(ctx.i64_type()));
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
+            let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());
             Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, ok_llvm, err_llvm], false)))
         }
         Type::Func(_args, _ret) => {
