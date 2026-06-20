@@ -1610,6 +1610,121 @@ void* mimi_list_deserialize(const char* json, int64_t* out_len) {
     return mimi_json_deserialize(json, out_len, 0);
 }
 
+// F7: Tuple serialization for codegen FFI — serialize heterogeneous tuple to JSON array.
+// values: array of i64 (one per element, bitcast to i64).
+// count: number of elements.
+// elem_types: array of i64 tags, one per element (0=int, 1=float, 2=string).
+// Returns malloc'd char* JSON array. Caller must free.
+char* mimi_tuple_serialize(int64_t* values, int64_t count, int64_t* elem_types) {
+    if (!values || count <= 0) {
+        char* empty = (char*)malloc(3);
+        if (!empty) return NULL;
+        empty[0] = '['; empty[1] = ']'; empty[2] = '\0';
+        return empty;
+    }
+    size_t buf_size = (size_t)count * 64 + 16;
+    char* buf = (char*)malloc(buf_size);
+    if (!buf) return NULL;
+    char* p = buf;
+    *p++ = '[';
+    for (int64_t i = 0; i < count; i++) {
+        if (i > 0) *p++ = ',';
+        int64_t raw = values[i];
+        int64_t tag = elem_types ? elem_types[i] : 0;
+        if (tag == 1) {
+            double val;
+            memcpy(&val, &raw, sizeof(val));
+            int nd = sprintf(p, "%g", val);
+            p += nd;
+        } else if (tag == 2) {
+            char* s = (char*)raw;
+            *p++ = '"';
+            if (s) {
+                while (*s) {
+                    if (*s == '"' || *s == '\\') *p++ = '\\';
+                    *p++ = *s++;
+                }
+            }
+            *p++ = '"';
+        } else {
+            char tmp[24];
+            int nd = 0;
+            int64_t val = raw;
+            if (val < 0) { tmp[nd++] = '-'; val = -val; }
+            if (val == 0) {
+                tmp[nd++] = '0';
+            } else {
+                char rev[24];
+                int nr = 0;
+                while (val > 0) { rev[nr++] = (char)('0' + (val % 10)); val /= 10; }
+                for (int j = nr - 1; j >= 0; j--) tmp[nd++] = rev[j];
+            }
+            for (int j = 0; j < nd; j++) *p++ = tmp[j];
+        }
+    }
+    *p++ = ']';
+    *p = '\0';
+    return buf;
+}
+
+// F7: Tuple deserialization for codegen FFI — parse JSON array back to i64 values.
+// json: JSON array string (e.g. "[1,2.5,\"hello\"]").
+// count: number of elements expected.
+// elem_types: array of i64 tags, one per element (0=int, 1=float, 2=string).
+// out_values: pre-allocated array of count i64s (caller provides buffer).
+// Returns the number of elements actually parsed, or -1 on error.
+// String elements produce heap-allocated C strings stored as pointers in out_values;
+// caller must free them using libc::free for each string element.
+int64_t mimi_tuple_deserialize(const char* json, int64_t count, int64_t* elem_types, int64_t* out_values) {
+    if (!json || !out_values || count <= 0) return -1;
+    const char* p = json;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '[') return -1;
+    p++;
+    int64_t idx = 0;
+    while (*p && idx < count) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') { p++; if (*p == '\0') break; }
+        if (*p == ']') break;
+        int64_t tag = elem_types ? elem_types[idx] : 0;
+        if (tag == 1) {
+            // Float
+            char* end = NULL;
+            double fval = strtod(p, &end);
+            if (end != p) {
+                int64_t bits;
+                memcpy(&bits, &fval, sizeof(bits));
+                out_values[idx++] = bits;
+                p = end;
+            } else {
+                out_values[idx++] = 0; p++;
+            }
+        } else if (tag == 2) {
+            // String
+            if (*p == '"') p++;
+            const char* start = p;
+            while (*p && *p != '"') { if (*p == '\\') p++; p++; }
+            int64_t slen = p - start;
+            char* s = (char*)malloc(slen + 1);
+            if (s) {
+                strncpy(s, start, slen);
+                s[slen] = '\0';
+                out_values[idx++] = (int64_t)(intptr_t)s;
+            } else {
+                out_values[idx++] = 0;
+            }
+            if (*p == '"') p++;
+        } else {
+            // Int
+            int neg = 0;
+            if (*p == '-') { neg = 1; p++; }
+            int64_t val = 0;
+            while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+            out_values[idx++] = neg ? -val : val;
+        }
+    }
+    return idx;
+}
+
 // G8: Segmentation fault — for fork isolation testing
 void __mimi_extern_test_segfault(void) {
     volatile int* p = NULL;

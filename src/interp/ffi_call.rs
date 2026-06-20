@@ -26,6 +26,15 @@ struct FfiCallbackCtx {
     entries: HashMap<i64, (Value, bool, Vec<bool>)>,
 }
 
+/// F3: Global fallback store for asynchronous/off-thread callbacks.
+/// When C stores a callback function pointer and invokes it after the
+/// synchronous FFI call returns, the thread-local context has been cleared.
+/// This global store keeps closures alive so the trampoline can still find
+/// them. Entries persist until explicitly deregistered via
+/// `mimi_callback_deregister` or until process exit.
+static CALLBACK_GLOBAL_STORE: std::sync::LazyLock<Mutex<HashMap<i64, (Value, bool, Vec<bool>)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Holds borrow guards alive during a synchronous FFI C call.
 /// Stores the concrete guard type so it can be held across 'static boundaries.
 enum FfiGuard {
@@ -76,6 +85,19 @@ fn callback_free_callback(ptr: *mut std::ffi::c_void) {
     }
 }
 
+/// F3: C-ABI function to deregister an async callback and free its resources.
+/// Should be called by C code when the stored function pointer is no longer
+/// needed (e.g., when unregistering an event handler).
+/// Safe to call from any thread.
+#[no_mangle]
+pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
+    CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner()).remove(&callback_id);
+    CALLBACK_TABLE.remove(callback_id);
+    FFI_CALLBACK_CTX.with(|c| {
+        c.borrow_mut().entries.remove(&callback_id);
+    });
+}
+
 // F8: C callback trampoline invoked by a libffi closure.
 // Reads the Mimi closure from the thread-local context by callback_id,
 // converts C args to Mimi Values, calls the closure, and writes the result.
@@ -87,13 +109,24 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     userdata: &i64,
 ) {
     let callback_id = *userdata;
+    // F3: Fast path — check thread-local context first (synchronous callbacks).
+    // If not found, fall back to the global store (async/off-thread callbacks).
     let entry = FFI_CALLBACK_CTX.with(|c| {
         let ctx = c.borrow();
         ctx.entries.get(&callback_id).cloned()
     });
-    let Some((closure, ret_is_float, arg_free_mask)) = entry else {
-        *result = 0;
-        return;
+    let (closure, ret_is_float, arg_free_mask) = match entry {
+        Some(e) => e,
+        None => {
+            let global = CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner());
+            match global.get(&callback_id).cloned() {
+                Some(e) => e,
+                None => {
+                    *result = 0;
+                    return;
+                }
+            }
+        }
     };
 
     // Extract C arguments from raw void pointers.
@@ -157,17 +190,11 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     }
 }
 
-/// Extend a RwLockReadGuard's lifetime to 'static.
-/// SAFETY: Caller must ensure the underlying RwLock outlives this guard.
-unsafe fn extend_guard_read<'a>(g: std::sync::RwLockReadGuard<'a, Value>) -> std::sync::RwLockReadGuard<'static, Value> {
-    std::mem::transmute(g)
-}
-
-/// Extend a RwLockWriteGuard's lifetime to 'static.
-/// SAFETY: Caller must ensure the underlying RwLock outlives this guard.
-unsafe fn extend_guard_write<'a>(g: std::sync::RwLockWriteGuard<'a, Value>) -> std::sync::RwLockWriteGuard<'static, Value> {
-    std::mem::transmute(g)
-}
+// F5: Removed unsafe extend_guard_read/extend_guard_write transmute helpers.
+// Use `SharedHandle::borrow_static()` / `SharedHandle::borrow_mut_static()`
+// instead — these are defined on the handle and use a single encapsulated
+// transmute that is sound because the underlying Arc<RwLock<Value>> lives
+// in the static SHARED_TABLE for the process lifetime.
 
 
 
@@ -349,17 +376,18 @@ impl<'a> Interpreter<'a> {
                 self.call_ffi_direct(&cif, code_ptr, &ffi_args, &contract.ret)
             };
 
-            // F8: Clear thread-local callback context
+            // F8: Clear thread-local callback context after the synchronous call.
+            // F3: Do NOT remove from CALLBACK_TABLE or CALLBACK_GLOBAL_STORE — those
+            // keep the closure alive for async/off-thread callbacks. C code that
+            // stores the function pointer can invoke it later via the global fallback.
+            // Entries are implicitly cleaned up when the Mimi process exits, or can
+            // be explicitly deregistered via mimi_callback_deregister (C ABI).
             if has_callbacks {
                 FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
                     ctx.interp = std::ptr::null();
                     ctx.entries.clear();
                 });
-                // F6: Remove callback entries from global CALLBACK_TABLE
-                for id in &callback_ids {
-                    CALLBACK_TABLE.remove(*id);
-                }
             }
 
             call_result?
@@ -521,9 +549,9 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = SHARED_TABLE.get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = handle.borrow_static();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(unsafe { extend_guard_read(guard) }));
+                            ffi_guards.push(FfiGuard::Read(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr dedup".to_string()))
@@ -534,9 +562,9 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = SHARED_TABLE.get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = handle.borrow_static();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(unsafe { extend_guard_read(guard) }));
+                            ffi_guards.push(FfiGuard::Read(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for raw pointer".to_string()))
@@ -546,7 +574,14 @@ impl<'a> Interpreter<'a> {
                 Value::Ref(rc) => {
                     let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                     let ptr = &*guard as *const Value as *const () as i64;
-                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_guard_read(guard) }));
+                    // SAFETY: (F5) The `rc` is owned by `call_extern`'s arg iterator
+                    // and lives for the function scope. The `ffi_guards` Vec holds the
+                    // guard alive for the same duration. The unsafe transmute-to-'static
+                    // is sound because the underlying `Arc<RwLock<Value>>` behind `rc`
+                    // outlives the C call.
+                    ffi_guards.push(FfiGuard::RefRead(unsafe {
+                        std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
+                    }));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -562,9 +597,9 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = SHARED_TABLE.get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = handle.borrow_mut_static();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(unsafe { extend_guard_write(guard) }));
+                            ffi_guards.push(FfiGuard::Write(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr mut dedup".to_string()))
@@ -575,9 +610,9 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = SHARED_TABLE.get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = handle.borrow_mut_static();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(unsafe { extend_guard_write(guard) }));
+                            ffi_guards.push(FfiGuard::Write(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for mutable raw pointer".to_string()))
@@ -587,7 +622,12 @@ impl<'a> Interpreter<'a> {
                 Value::RefMut(rc) => {
                     let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_guard_write(guard) }));
+                    // SAFETY: (F5) Same reasoning as the Ref path above: the
+                    // `Arc<RwLock<Value>>` behind `rc` is kept alive by the arg
+                    // iterator in `call_extern`, which outlives the C call.
+                    ffi_guards.push(FfiGuard::RefWrite(unsafe {
+                        std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
+                    }));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -631,9 +671,9 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = SHARED_TABLE.get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = handle.borrow_static();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(unsafe { extend_guard_read(guard) }));
+                            ffi_guards.push(FfiGuard::Read(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow dedup".to_string()))
@@ -644,9 +684,9 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = SHARED_TABLE.get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = handle.borrow_static();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(unsafe { extend_guard_read(guard) }));
+                            ffi_guards.push(FfiGuard::Read(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for c_borrow".to_string()))
@@ -656,7 +696,11 @@ impl<'a> Interpreter<'a> {
                 Value::Ref(rc) => {
                     let guard = rc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                     let ptr = &*guard as *const Value as *const () as i64;
-                    ffi_guards.push(FfiGuard::RefRead(unsafe { extend_guard_read(guard) }));
+                    // SAFETY: (F5) Same as RawPtr Ref path — rc is alive for the
+                    // duration of call_extern, outliving the C call.
+                    ffi_guards.push(FfiGuard::RefRead(unsafe {
+                        std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
+                    }));
                     Ok(ptr)
                 }
                 Value::Int(n) => {
@@ -674,9 +718,9 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = SHARED_TABLE.get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = handle.borrow_mut_static();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(unsafe { extend_guard_write(guard) }));
+                            ffi_guards.push(FfiGuard::Write(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow_mut dedup".to_string()))
@@ -687,9 +731,9 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = SHARED_TABLE.get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = handle.borrow_mut_static();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(unsafe { extend_guard_write(guard) }));
+                            ffi_guards.push(FfiGuard::Write(guard));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for c_borrow_mut".to_string()))
@@ -699,7 +743,10 @@ impl<'a> Interpreter<'a> {
                 Value::RefMut(rc) => {
                     let mut guard = rc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
-                    ffi_guards.push(FfiGuard::RefWrite(unsafe { extend_guard_write(guard) }));
+                    // SAFETY: (F5) Same as RawPtrMut RefMut path.
+                    ffi_guards.push(FfiGuard::RefWrite(unsafe {
+                        std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
+                    }));
                     Ok(ptr)
                 }
                 Value::Int(n) => {
@@ -788,9 +835,9 @@ impl<'a> Interpreter<'a> {
                 );
                 callback_ids.push(cb_id);
 
-                // Store the closure in the thread-local callback context
-                // F6: Build arg_free_mask from param_types — string/RawString/CBuffer
-                // args are C-allocated and must be freed after the callback returns.
+                // F3: Store the closure in BOTH the thread-local context (fast path
+                // for synchronous callbacks) and the global store (fallback for async/
+                // off-thread callbacks where TLS has been cleared).
                 let arg_free_mask: Vec<bool> = param_types
                     .iter()
                     .map(|pt| matches!(pt, Type::Name(n, _) if n == "string")
@@ -799,8 +846,10 @@ impl<'a> Interpreter<'a> {
                     .collect();
                 FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
-                    ctx.entries.insert(cb_id, (closure, ret_is_float, arg_free_mask));
+                    ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
                 });
+                CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner())
+                    .insert(cb_id, (closure, ret_is_float, arg_free_mask));
 
                 // Create a libffi Closure that generates a C-compatible function pointer
                 // The userdata (callback_id) must outlive the closure.
@@ -860,9 +909,18 @@ impl<'a> Interpreter<'a> {
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
-                    // Note: borrowed string - the C side retains ownership.
-                    // If the C function allocated this string, it will leak.
-                    // Use StringOwned contract variant for C-allocated strings.
+                    // F6: Warn once per process about the String leak pitfall.
+                    // The warning text is always visible in the source at the
+                    // extern declaration site; this runtime reminder helps users
+                    // who don't read the doc comment.
+                    static STRING_LEAK_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !STRING_LEAK_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!(
+                            "[mimi] FFI WARNING: extern function returned 'String' (borrowed). \
+                             If C allocated this string, it WILL LEAK. Use 'StringOwned' \
+                             for C-allocated strings that Mimi should free."
+                        );
+                    }
                     Ok(Value::String(c_str.to_string_lossy().into_owned()))
                 }
             }
@@ -1113,8 +1171,41 @@ impl<'a> Interpreter<'a> {
 
         // PARENT
         unsafe { libc::close(pipe_fds[1]); }
+
+        // F4: poll waitpid with WNOHANG + timeout so a hung C function does not
+        // permanently block the Mimi process.
+        let ffi_timeout_ms = std::env::var("MIMI_FFI_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30_000);
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(ffi_timeout_ms))
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(30));
+
         let mut status: i32 = 0;
-        unsafe { libc::waitpid(pid, &mut status, 0); }
+        loop {
+            let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if ret == pid {
+                break; // child exited
+            }
+            if ret == -1 {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::close(pipe_fds[0]); }
+                return Err(format!("FFI safety: waitpid error: {}", err));
+            }
+            if std::time::Instant::now() >= deadline {
+                // Timeout — kill the child forcefully
+                unsafe { libc::kill(pid, libc::SIGKILL); }
+                // Reap the zombie
+                unsafe { libc::waitpid(pid, &mut status, 0); }
+                unsafe { libc::close(pipe_fds[0]); }
+                return Err(format!(
+                    "FFI safety: C function timed out after {}ms",
+                    ffi_timeout_ms,
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
 
         if unsafe { libc::WIFSIGNALED(status) } {
             let sig = unsafe { libc::WTERMSIG(status) };

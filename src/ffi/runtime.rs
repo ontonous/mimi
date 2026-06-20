@@ -141,6 +141,27 @@ impl SharedHandle {
         self.inner.write().unwrap()
     }
 
+    /// F5: Returns a read guard with `'static` lifetime instead of borrowing
+    /// from `&self`.  Safe because the underlying `RwLock<Value>` is behind an
+    /// `Arc` that lives in the static `SHARED_TABLE`, so the guard does not
+    /// actually borrow from `self` — it borrows from the heap-allocated `Arc`
+    /// which has process lifetime.  This avoids unsafe transmute-to-`'static`
+    /// at every call site.
+    pub fn borrow_static(&self) -> RwLockReadGuard<'static, Value> {
+        let guard: RwLockReadGuard<'_, Value> = self.inner.read().unwrap();
+        // SAFETY: `self.inner` is `Arc<RwLock<Value>>` stored in the static
+        // `SHARED_TABLE`.  The `Arc` keeps the `RwLock` alive indefinitely,
+        // so the guard's true lifetime is `'static`, not the `&self` borrow.
+        unsafe { std::mem::transmute::<RwLockReadGuard<'_, Value>, RwLockReadGuard<'static, Value>>(guard) }
+    }
+
+    /// F5: Returns a write guard with `'static` lifetime.  Same safety
+    /// reasoning as `borrow_static`.
+    pub fn borrow_mut_static(&self) -> RwLockWriteGuard<'static, Value> {
+        let guard: RwLockWriteGuard<'_, Value> = self.inner.write().unwrap();
+        unsafe { std::mem::transmute::<RwLockWriteGuard<'_, Value>, RwLockWriteGuard<'static, Value>>(guard) }
+    }
+
     /// Retain: increment the C-side strong reference count.
     pub fn retain(&self) {
         self.strong.fetch_add(1, Ordering::Relaxed);

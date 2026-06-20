@@ -238,6 +238,26 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ], false),
         Some(inkwell::module::Linkage::External));
 
+    // F7: Tuple FFI serialization — serialize heterogeneous tuple to JSON string.
+    // mimi_tuple_serialize(values: *const i64, count: i64, elem_types: *const i64) -> i8*
+    module.add_function("mimi_tuple_serialize",
+        i8_ptr.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // F7: Tuple FFI deserialization — parse JSON array back to i64 values.
+    // mimi_tuple_deserialize(json: i8*, count: i64, elem_types: *const i64, out_values: *mut i64) -> i64
+    module.add_function("mimi_tuple_deserialize",
+        i64.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::IntType(i64),
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+
     // Thread pool for parasteps (replaces raw pthread_create)
     // mimi_pool_submit(fn_ptr: i8*, arg: i8*) -> void
     module.add_function("mimi_pool_submit",
