@@ -1,13 +1,26 @@
 //! # Mimi Fuzz Test Suite
 //!
-//! Rust-level fuzzing: 验证解释器与编译器的行为一致性，
-//! 以及穷尽性匹配检查等完备性验证。
+//! Fuzzing infrastructure:
+//! - **Property-based** fuzzing via `proptest` (random program generation)
+//! - **Target-specific** harnesses for parser, typechecker, interpreter, codegen
+//! - **Corpus** of seed inputs in `corpus/` directory
+//!
+//! Run all fuzz targets:   `cargo test fuzz:: -- --nocapture`
+//! Run with proptest:      `PROPTEST_CASES=1000 cargo test fuzz_`
+//! Run a specific target:  `cargo test fuzz_parser_no_panic`
+
+pub(crate) mod harness;
+pub(crate) mod target_parser;
+pub(crate) mod target_typechecker;
+pub(crate) mod target_interpreter;
+pub(crate) mod target_codegen;
+pub(crate) mod corpus;
 
 use crate::interp;
 use crate::{core, lexer, parser};
 
 // ==============================
-// 穷尽性检查测试
+// Exhaustive match checking
 // ==============================
 
 #[test]
@@ -119,7 +132,7 @@ func main() -> i32 {
 }
 
 // ==============================
-// 双路径一致性测试 (需要 cc)
+// Dual-path consistency tests (require cc)
 // ==============================
 
 #[test]
@@ -181,7 +194,7 @@ fn test_dual_path_match_literal() {
 }
 
 // ==============================
-// 线性能力检查测试
+// Capability declaration tests
 // ==============================
 
 #[test]
@@ -194,7 +207,7 @@ func main() -> i32 { 42 }
 }
 
 // ==============================
-// FFI 合约验证测试 (不崩溃即可)
+// FFI contract verification (no-crash)
 // ==============================
 
 #[test]
@@ -214,145 +227,3 @@ func main() -> i32 { process(5) }
 
 // Helper wrappers
 use crate::tests::{check_source, compile_and_run};
-
-// ==============================
-// Fuzz: Edge case inputs
-// ==============================
-
-#[test]
-fn test_fuzz_empty_string() {
-    let val = super::run_source(r#"
-        func main() -> i32 { len("") }
-    "#);
-    assert_eq!(val, interp::Value::Int(0));
-}
-
-#[test]
-fn test_fuzz_large_integer() {
-    let val = super::run_source(r#"
-        func main() -> i64 { 9223372036854775807 }
-    "#);
-    assert_eq!(val, interp::Value::Int(9223372036854775807));
-}
-
-#[test]
-fn test_fuzz_negative_zero() {
-    let val = super::run_source(r#"
-        func main() -> i32 { -0 }
-    "#);
-    assert_eq!(val, interp::Value::Int(0));
-}
-
-#[test]
-fn test_fuzz_deeply_nested_if() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let x = 5
-            if x > 0 {
-                if x > 2 {
-                    if x > 4 {
-                        100
-                    } else {
-                        50
-                    }
-                } else {
-                    25
-                }
-            } else {
-                0
-            }
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(100));
-}
-
-#[test]
-fn test_fuzz_empty_list() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let xs: List<i32> = []
-            len(xs)
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(0));
-}
-
-#[test]
-fn test_fuzz_single_element_list() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let xs = [42]
-            xs[0]
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(42));
-}
-
-#[test]
-fn test_fuzz_nested_lists() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let xs = [[1, 2], [3, 4]]
-            xs[1][0]
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(3));
-}
-
-#[test]
-fn test_fuzz_string_concat_empty() {
-    let val = super::run_source(r#"
-        func main() -> string { "" + "" }
-    "#);
-    assert_eq!(val, interp::Value::String("".to_string()));
-}
-
-#[test]
-fn test_fuzz_bool_conversion() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let t = true
-            let f = false
-            let a = if t { 1 } else { 0 }
-            let b = if f { 2 } else { 0 }
-            a + b
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(1));
-}
-
-#[test]
-fn test_fuzz_while_zero_iterations() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let mut sum = 0
-            let mut i = 10
-            while i < 5 { sum = sum + i; i = i + 1 }
-            sum
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(0));
-}
-
-#[test]
-fn test_fuzz_recursive_factorial_zero() {
-    let val = super::run_source(r#"
-        func factorial(n: i32) -> i32 {
-            if n <= 1 { 1 } else { n * factorial(n - 1) }
-        }
-        func main() -> i32 { factorial(0) }
-    "#);
-    assert_eq!(val, interp::Value::Int(1));
-}
-
-#[test]
-fn test_fuzz_tuple_of_tuples() {
-    let val = super::run_source(r#"
-        func main() -> i32 {
-            let t = ((1, 2), (3, 4))
-            let inner = t.0
-            inner.1
-        }
-    "#);
-    assert_eq!(val, interp::Value::Int(2));
-}
