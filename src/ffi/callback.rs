@@ -106,6 +106,9 @@ pub unsafe extern "C" fn qsort_trampoline(
     b: *const std::ffi::c_void,
     userdata: *mut std::ffi::c_void,
 ) -> i32 {
+    if userdata.is_null() {
+        return 0;
+    }
     let a_val = (a as usize) as i64;
     let b_val = (b as usize) as i64;
     let callback_id = *(userdata as *const i64);

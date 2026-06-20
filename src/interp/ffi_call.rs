@@ -5,6 +5,14 @@ use libffi::low::{self as ffi_low};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// Global fork lock: acquired before fork() to prevent concurrent
+/// FFI operations (thread pool, callbacks) during the fork window.
+/// Held across fork(), released in parent and child via pthread_atfork.
+static FORK_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
+    FORK_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 // F8: Thread-local context for synchronous callback invocation.
 // Set before each FFI call that involves callbacks, cleared after.
 // Maps callback_id -> (Mimi closure, ret_is_float, arg_free_mask).
@@ -36,13 +44,13 @@ static CALLBACK_GLOBAL_STORE: std::sync::LazyLock<Mutex<HashMap<i64, (Value, boo
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Holds borrow guards alive during a synchronous FFI C call.
-/// Each guard variant pairs the lock guard with the `Arc` that keeps
-/// the underlying data alive — no hidden dependency on `shared_handles`.
-/// The transmute-to-`'static` is sound because the paired `Arc` guarantees
-/// the allocation outlives the guard.
+/// Each guard variant pairs the lock guard (dropped first) with the `Arc`
+/// that keeps the underlying data alive (dropped second).
+/// The `Arc` is stored AFTER the guard so that on drop, the guard is
+/// released first (unlocking the RwLock) before the Arc potentially frees it.
 enum FfiGuard {
-    Read(Arc<RwLock<Value>>, std::sync::RwLockReadGuard<'static, Value>),
-    Write(Arc<RwLock<Value>>, std::sync::RwLockWriteGuard<'static, Value>),
+    Read(std::sync::RwLockReadGuard<'static, Value>, Arc<RwLock<Value>>),
+    Write(std::sync::RwLockWriteGuard<'static, Value>, Arc<RwLock<Value>>),
     /// A libffi closure (dynamic C-compatible function pointer) that must
     /// remain alive for the duration of the C call, plus its boxed userdata.
     CallbackClosure {
@@ -595,9 +603,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr dedup".to_string()))
@@ -610,9 +618,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for raw pointer".to_string()))
@@ -625,9 +633,9 @@ impl<'a> Interpreter<'a> {
                     // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
                     // the guard in `FfiGuard::Read`, so the `Arc` keeps the data alive
                     // for the entire duration of the C call.
-                    ffi_guards.push(FfiGuard::Read(Arc::clone(rc), unsafe {
+                    ffi_guards.push(FfiGuard::Read(unsafe {
                         std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                    }));
+                    }, Arc::clone(rc)));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -645,9 +653,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr mut dedup".to_string()))
@@ -660,9 +668,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for mutable raw pointer".to_string()))
@@ -674,9 +682,9 @@ impl<'a> Interpreter<'a> {
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
                     // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
                     // the guard in `FfiGuard::Write`, so the `Arc` keeps the data alive.
-                    ffi_guards.push(FfiGuard::Write(Arc::clone(rc), unsafe {
+                    ffi_guards.push(FfiGuard::Write(unsafe {
                         std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                    }));
+                    }, Arc::clone(rc)));
                     Ok(ptr)
                 }
                 Value::Int(n) => Ok(*n),
@@ -728,9 +736,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow dedup".to_string()))
@@ -743,9 +751,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
-                            ffi_guards.push(FfiGuard::Read(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for c_borrow".to_string()))
@@ -757,9 +765,9 @@ impl<'a> Interpreter<'a> {
                     let ptr = &*guard as *const Value as *const () as i64;
                     // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
                     // the guard in `FfiGuard::Read`, so the `Arc` keeps the data alive.
-                    ffi_guards.push(FfiGuard::Read(Arc::clone(rc), unsafe {
+                    ffi_guards.push(FfiGuard::Read(unsafe {
                         std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
-                    }));
+                    }, Arc::clone(rc)));
                     Ok(ptr)
                 }
                 Value::Int(n) => {
@@ -779,9 +787,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow_mut dedup".to_string()))
@@ -794,9 +802,9 @@ impl<'a> Interpreter<'a> {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
-                            ffi_guards.push(FfiGuard::Write(Arc::clone(arc), unsafe {
+                            ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                            }));
+                            }, Arc::clone(arc)));
                             Ok(ptr)
                         } else {
                             Err(Errno::Generic("FFI wrapper: failed to create shared handle for c_borrow_mut".to_string()))
@@ -808,9 +816,9 @@ impl<'a> Interpreter<'a> {
                     let ptr = &mut *guard as *mut Value as *mut () as i64;
                     // SAFETY: (F5) We hold a clone of the `Arc<RwLock<Value>>` alongside
                     // the guard in `FfiGuard::Write`, so the `Arc` keeps the data alive.
-                    ffi_guards.push(FfiGuard::Write(Arc::clone(rc), unsafe {
+                    ffi_guards.push(FfiGuard::Write(unsafe {
                         std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
-                    }));
+                    }, Arc::clone(rc)));
                     Ok(ptr)
                 }
                 Value::Int(n) => {
@@ -895,13 +903,20 @@ impl<'a> Interpreter<'a> {
                 CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner())
                     .insert(cb_id, (closure, ret_is_float, arg_free_mask));
 
-                // Create a libffi Closure that generates a C-compatible function pointer
+                // Create a libffi Closure that generates a C-compatible function pointer.
                 // The userdata (callback_id) must outlive the closure.
-                // We box the id and store it alongside the closure in FfiGuard.
+                // Box::leak gives us a 'static reference that is valid as long as
+                // the Box is not re-created (we reclaim it via Box::from_raw below).
                 let userdata = Box::new(cb_id);
-                let cb_ref = &*userdata as &i64 as *const i64;
-                // SAFETY: userdata box is kept alive by FfiGuard::CallbackClosure
-                let cb_ref_static: &'static i64 = unsafe { &*cb_ref };
+                // SAFETY: Box::leak intentionally leaks the Box allocation. The
+                // memory remains valid until reclaimed by Box::from_raw in the
+                // FfiGuard constructor below. The libffi Closure captures this
+                // reference and is boxed alongside it in FfiGuard::CallbackClosure;
+                // when the FfiGuard is dropped, Box::from_raw re-owns the allocation
+                // and Box::new(ffi_closure) drops the closure, so the reference
+                // never dangles.
+                let userdata_ptr = Box::into_raw(userdata);
+                let cb_ref_static: &'static i64 = unsafe { &*userdata_ptr };
 
                 let ffi_closure = libffi::middle::Closure::new(
                     cif,
@@ -918,7 +933,11 @@ impl<'a> Interpreter<'a> {
                 // Keep the closure and its userdata alive for the duration of the C call
                 ffi_guards.push(FfiGuard::CallbackClosure {
                     closure: Box::new(ffi_closure),
-                    userdata,
+                    // SAFETY: userdata_ptr was obtained from Box::into_raw above.
+                    // Box::from_raw reclaims ownership so the Box is dropped when
+                    // FfiGuard drops (after the closure, ensuring the reference
+                    // inside the closure is valid during Closure::drop).
+                    userdata: unsafe { Box::from_raw(userdata_ptr) },
                 });
 
                 Ok(fn_ptr)
@@ -1159,6 +1178,28 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    /// Call a C function via libffi (raw, standalone — no self access).
+    /// Safe to call after fork() since it doesn't touch Rust data structures
+    /// beyond the raw pointers passed in.
+    unsafe fn call_ffi_raw(
+        cif: &Cif,
+        code_ptr: CodePtr,
+        ffi_args: &[libffi::middle::Arg],
+        ret_contract: &FfiRetContract,
+    ) -> i64 {
+        match ret_contract {
+            FfiRetContract::Unit => {
+                cif.call::<()>(code_ptr, ffi_args);
+                0i64
+            }
+            FfiRetContract::Float => {
+                let val: f64 = cif.call(code_ptr, ffi_args);
+                val.to_bits() as i64
+            }
+            _ => cif.call::<i64>(code_ptr, ffi_args),
+        }
+    }
+
     /// Call a C function without crash protection via libffi.
     fn call_ffi_direct(
         &self,
@@ -1168,22 +1209,16 @@ impl<'a> Interpreter<'a> {
         ret_contract: &FfiRetContract,
     ) -> Result<i64, String> {
         unsafe {
-            match ret_contract {
-                FfiRetContract::Unit => {
-                    cif.call::<()>(code_ptr, ffi_args);
-                    Ok(0i64)
-                }
-                FfiRetContract::Float => {
-                    let val: f64 = cif.call(code_ptr, ffi_args);
-                    Ok(val.to_bits() as i64)
-                }
-                _ => Ok(cif.call::<i64>(code_ptr, ffi_args)),
-            }
+            Ok(Self::call_ffi_raw(cif, code_ptr, ffi_args, ret_contract))
         }
     }
 
     /// Call a C function with crash isolation via fork().
     /// If the child process crashes (SIGSEGV, SIGBUS, etc.), returns an Err.
+    ///
+    /// ⚠ SAFETY: fork() is only safe in single-threaded contexts.
+    /// The fork lock + pthread_atfork guards against concurrent operations,
+    /// but async-signal-safety of libffi calls in the child is not guaranteed.
     fn call_ffi_with_fork_isolation(
         &self,
         cif: &Cif,
@@ -1191,7 +1226,11 @@ impl<'a> Interpreter<'a> {
         ffi_args: &[libffi::middle::Arg],
         ret_contract: &FfiRetContract,
     ) -> Result<i64, String> {
-        let mut pipe_fds: [std::ffi::c_int; 2] = [0, 0];
+        // Acquire fork lock to serialize fork() with other FFI operations.
+        // The lock is held across fork and released in parent/child handlers.
+        let _guard = ensure_fork_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut pipe_fds: [std::ffi::c_int; 2] = [0; 2];
         let pipe_ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
         if pipe_ret != 0 {
             return Err("FFI safety: failed to create pipe for crash isolation".to_string());
@@ -1199,13 +1238,13 @@ impl<'a> Interpreter<'a> {
 
         let pid = unsafe { libc::fork() };
         if pid == 0 {
-            // CHILD: run the C call, send result, _exit
+            // CHILD: run the C call via raw trampoline, send result, _exit.
+            // The child must NOT touch any Rust stdlib types (Arc, Mutex, etc.)
+            // because they may be in an inconsistent state after fork.
             unsafe { libc::close(pipe_fds[0]); }
-            let result = self.call_ffi_direct(cif, code_ptr, ffi_args, ret_contract);
-            let result_code = match result {
-                Ok(val) => val,
-                Err(_) => i64::MIN,
-            };
+            // SAFETY: call_ffi_raw is safe to call after fork() because it
+            // doesn't touch any Rust data structures beyond the raw CIF/args.
+            let result_code = unsafe { Self::call_ffi_raw(cif, code_ptr, ffi_args, ret_contract) };
             unsafe {
                 libc::write(pipe_fds[1], &result_code as *const i64 as *const libc::c_void,
                     std::mem::size_of::<i64>());

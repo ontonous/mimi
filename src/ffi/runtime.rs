@@ -554,26 +554,12 @@ static MIMI_POOL: LazyLock<Option<MimiThreadPool>> = LazyLock::new(|| {
 /// - `arg` is valid for the duration of the task
 /// - The function pointed to by `fn_ptr` is safe to call from another thread
 #[no_mangle]
-pub unsafe extern "C" fn mimi_pool_submit(fn_ptr: *const u8, arg: *mut u8) {
-    if fn_ptr.is_null() {
-        return;
-    }
-    // Reject misaligned pointers - function pointers should be at least word-aligned
-    if fn_ptr as usize % std::mem::align_of::<usize>() != 0 {
-        return;
-    }
-    // Verify size compatibility: *const u8 and function pointers are pointer-sized
-    debug_assert_eq!(
-        std::mem::size_of::<*const u8>(),
-        std::mem::size_of::<extern "C" fn(*mut u8) -> *mut u8>(),
-        "function pointer and data pointer must have same size"
-    );
+pub unsafe extern "C" fn mimi_pool_submit(
+    fn_ptr: extern "C" fn(*mut u8) -> *mut u8,
+    arg: *mut u8,
+) {
     if let Some(pool) = MIMI_POOL.as_ref() {
-        // SAFETY: The caller guarantees fn_ptr is a valid function pointer with
-        // signature extern "C" fn(*mut u8) -> *mut u8, arg is valid for the
-        // duration of the task, alignment is verified above, and sizes are asserted equal.
-        let func: extern "C" fn(*mut u8) -> *mut u8 = std::mem::transmute_copy(&fn_ptr);
-        pool.submit_raw(func, arg);
+        pool.submit_raw(fn_ptr, arg);
     }
 }
 
