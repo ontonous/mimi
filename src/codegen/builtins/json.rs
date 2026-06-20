@@ -1,5 +1,6 @@
 use super::CodeGenerator;
 use crate::error::MimiResult;
+use super::super::CallSiteValueExt;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -21,7 +22,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "json_malloc")
                     .map_err(|e| format!("malloc error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 self.register_heap_alloc(buf);
@@ -134,7 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(raw_ptr),
                 ], "is_valid_json_call")
                     .map_err(|e| format!("is_valid_json error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_is_valid_json returned void")?
                     .into_int_value();
                 // mimi_is_valid_json returns i32 — extend to Mimi bool (i1)
@@ -157,7 +158,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(raw_ptr),
                 ], "from_json_call")
                     .map_err(|e| format!("from_json error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_from_json returned void")?
                     .into_pointer_value();
                 // Return the raw C string pointer directly (matches how string literals work in codegen)
@@ -179,7 +180,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ], "json_get_string_call")
                     .map_err(|e| format!("json_get_string error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("json_get_string returned void")?
                     .into_pointer_value();
                 Ok(result.into())
@@ -221,7 +222,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(index),
                 ], "json_get_element_call")
                     .map_err(|e| format!("json_get_element error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("json_get_element returned void")?
                     .into_pointer_value();
                 Ok(result.into())

@@ -1,5 +1,7 @@
 use super::CodeGenerator;
+use super::super::call_try_basic_value;
 use crate::error::MimiResult;
+use super::super::CallSiteValueExt;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -74,7 +76,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| "codegen: mimi_getenv not declared".to_string())?;
                 let call = self.builder.build_call(getenv_fn, &args, "getenv_call")
                     .map_err(|e| format!("getenv error: {}", e))?;
-                let ptr = match call.try_as_basic_value().left() {
+                let ptr = match call_try_basic_value(&call) {
                     Some(BasicValueEnum::PointerValue(pv)) => pv,
                     _ => return Err("getenv should return a pointer".into()),
                 };
@@ -116,7 +118,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(ptr),
                 ], "getenv_strlen")
                     .map_err(|e| format!("strlen error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 self.builder.build_store(ptr_gep, ptr)

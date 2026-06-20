@@ -1,5 +1,6 @@
 use super::CodeGenerator;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use super::super::CallSiteValueExt;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::IntPredicate;
 use crate::error::{CompileError, MimiResult};
@@ -197,7 +198,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(r),
                         ], "strcmp_call")
                             .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("strcmp returned void")?;
                         let zero = self.context.i32_type().const_int(0, false);
                         self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "streq")
@@ -260,7 +261,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(r),
                         ], "strcmp_call")
                             .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("strcmp returned void")?;
                         let zero = self.context.i32_type().const_int(0, false);
                         self.builder.build_int_compare(inkwell::IntPredicate::NE, cmp_result.into_int_value(), zero, "strne")
@@ -325,7 +326,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::FloatValue(diff),
                         ], "fabs_call")
                             .map_err(|e| CompileError::LlvmError(format!("fabs error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("fabs returned void")?
                             .into_float_value();
                         let eps = self.context.f64_type().const_float(1e-6);
@@ -374,7 +375,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(buf_size),
                 ], "input_malloc")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 self.register_heap_alloc(buf);
@@ -412,7 +413,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(buf),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?;
                 // Build string struct { i8*, i64 }
                 let string_ty = self.context.struct_type(&[
@@ -458,7 +459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(i32_ty.const_int(0, false)),
                 ], "access_call")
                     .map_err(|e| CompileError::LlvmError(format!("access error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("access returned void")?;
                 let zero = i32_ty.const_int(0, false);
                 let cmp = self.builder.build_int_compare(
@@ -500,7 +501,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(mode_str.as_pointer_value()),
                 ], "fopen_call")
                     .map_err(|e| CompileError::LlvmError(format!("fopen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("fopen returned void")?
                     .into_pointer_value();
                 // fseek(file, 0, SEEK_END)
@@ -521,7 +522,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(i32_ty.const_int(2, false)), // SEEK_END
                 ], "fseek_call")
                     .map_err(|e| CompileError::LlvmError(format!("fseek error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("fseek returned void")?
                     .into_int_value();
                 // fseek returns 0 on success, non-zero on failure; guard against negative ftell result
@@ -544,7 +545,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(file),
                 ], "ftell_call")
                     .map_err(|e| CompileError::LlvmError(format!("ftell error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("ftell returned void")?
                     .into_int_value();
                 // If fseek failed, clamp file_size to 0 to avoid negative malloc size
@@ -588,7 +589,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "read_malloc")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 self.register_heap_alloc(buf);
@@ -685,7 +686,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(mode_str.as_pointer_value()),
                 ], "fopen_call")
                     .map_err(|e| CompileError::LlvmError(format!("fopen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("fopen returned void")?
                     .into_pointer_value();
                 // strlen(content) for length
@@ -695,7 +696,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(content_ptr),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?;
                 // fwrite(content, 1, len, file)
                 let fwrite_fn = self.module.get_function("fwrite")

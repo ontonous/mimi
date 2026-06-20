@@ -1,6 +1,7 @@
 #![allow(dead_code, deprecated)]
 
 use crate::ast::*;
+use crate::codegen::CallSiteValueExt;
 use crate::codegen::types;
 use inkwell::ThreadLocalMode;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
@@ -8,6 +9,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
+use crate::codegen::call_try_basic_value;
 
 use super::{CallbackThunkEntry, CodeGenerator};
 use super::VarEntry;
@@ -255,7 +257,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             mimi_fn_ty, fn_ptr_typed, &call_args, "cb_call",
         ).map_err(|e| CompileError::LlvmError(format!("thunk callback call: {}", e)))?;
         if thunk_fn_type.get_return_type().is_some() {
-            let ret_val = cb_call.try_as_basic_value().left()
+            let ret_val = call_try_basic_value(&cb_call)
                 .ok_or_else(|| CompileError::LlvmError("thunk call returned void but expected value".to_string()))?;
             self.builder.build_return(Some(&ret_val))
                 .map_err(|e| CompileError::LlvmError(format!("thunk return: {}", e)))?;
@@ -453,7 +455,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(cap_name_ptr),
                         ], &format!("cap_check_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("cap_check error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or_else(|| CompileError::LlvmError("cap_check returned void".to_string()))?
                             .into_int_value();
                         // If cap_check returns false (0), abort
@@ -567,7 +569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(elem_tag_iv),
                         ], &format!("json_ser_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("json serialize error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or_else(|| CompileError::LlvmError("json serialize returned void".to_string()))?
                             .into_pointer_value();
                         json_strings.push(json_val);
@@ -695,7 +697,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(tys_alloca),
                         ], &format!("tuple_ser_{}", i))
                             .map_err(|e| CompileError::LlvmError(format!("tuple serialize: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or_else(|| CompileError::LlvmError("tuple serialize returned void".to_string()))?
                             .into_pointer_value();
                         json_strings.push(json_val);
@@ -709,6 +711,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicValueEnum::StructValue(v) => BasicMetadataValueEnum::StructValue(v),
                             BasicValueEnum::ArrayValue(v) => BasicMetadataValueEnum::ArrayValue(v),
                             BasicValueEnum::VectorValue(v) => BasicMetadataValueEnum::VectorValue(v),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                         });
                     }
                 }
@@ -753,7 +756,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Phase 5: Check ensures contract after C call
             if self.verify_contracts {
                 if let Some(ens_expr) = &ef.ensures {
-                    let ret_val = call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
+                    let ret_val = call_try_basic_value(&call).ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
                     let mut contract_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
                     for (i, p) in ef.params.iter().enumerate() {
                         let param = wrapper_fn.get_nth_param(i as u32)
@@ -783,7 +786,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
             }) || is_tuple_return;
             if needs_json_deserialize {
-                let ret = call.try_as_basic_value().left()
+                let ret = call_try_basic_value(&call)
                     .ok_or_else(|| CompileError::LlvmError("extern call returned void".to_string()))?;
                 let json_pv = match ret {
                     BasicValueEnum::PointerValue(pv) => pv,
@@ -932,7 +935,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(ret_tag_iv),
                     ], "json_deser")
                         .map_err(|e| CompileError::LlvmError(format!("json deserialize error: {}", e)))?
-                        .try_as_basic_value().left()
+                        .try_as_basic_value_opt()
                         .ok_or_else(|| CompileError::LlvmError("json deserialize returned void".to_string()))?
                         .into_pointer_value();
                     let len_val = self.builder.build_load(self.context.i64_type(), out_len_alloca, "list_len")
@@ -957,7 +960,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                 }
             } else if wrapper_fn_type.get_return_type().is_some() {
-                let ret = call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
+                let ret = call_try_basic_value(&call).ok_or_else(|| CompileError::LlvmError("extern wrapper call did not return a value".to_string()))?;
                 self.builder.build_return(Some(&ret))
                     .map_err(|e| CompileError::LlvmError(format!("failed to build extern wrapper return: {}", e)))?;
             } else {

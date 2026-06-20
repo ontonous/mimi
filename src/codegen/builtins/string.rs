@@ -1,5 +1,6 @@
 use super::CodeGenerator;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use super::super::CallSiteValueExt;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use crate::error::{CompileError, MimiResult};
 
@@ -21,7 +22,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(alloc_size),
                         ], "malloc_call")
                             .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("malloc returned void")?
                             .into_pointer_value();
                         let fmt_global = self.builder.build_global_string_ptr("%ld", "int_fmt")
@@ -46,7 +47,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(alloc_size),
                         ], "malloc_call")
                             .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("malloc returned void")?
                             .into_pointer_value();
                         let fmt_global = self.builder.build_global_string_ptr("%f", "float_fmt")
@@ -88,7 +89,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(2, false)),
                 ], "char_malloc")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // gep str_ptr + index (indexing into string struct { ptr, len })
@@ -180,7 +181,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(sub_ptr),
                 ], "strstr_call")
                     .map_err(|e| CompileError::LlvmError(format!("strstr error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strstr returned void")?;
                 let cmp = self.builder.build_is_not_null(result.into_pointer_value(), "found")
                     .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
@@ -212,7 +213,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(prefix_ptr),
                 ], "prefix_len")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let strncmp_fn = self.module.get_function("strncmp")
@@ -230,7 +231,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(prefix_len),
                 ], "strncmp_call")
                     .map_err(|e| CompileError::LlvmError(format!("strncmp error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strncmp returned void")?;
                 let zero = self.context.i32_type().const_int(0, false);
                 let eq = self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "starts_with")
@@ -264,14 +265,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(s_ptr),
                 ], "s_len")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let suffix_len = self.builder.build_call(strlen_fn, &[
                     BasicMetadataValueEnum::PointerValue(suffix_ptr),
                 ], "suffix_len")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 // If suffix_len > s_len, return false
@@ -306,7 +307,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(suffix_len),
                 ], "strncmp_call")
                     .map_err(|e| CompileError::LlvmError(format!("strncmp error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strncmp returned void")?;
                 let zero = self.context.i32_type().const_int(0, false);
                 let eq = self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "ends_with")
@@ -446,7 +447,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(sub_ptr),
                 ], "strstr_call")
                     .map_err(|e| CompileError::LlvmError(format!("strstr error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strstr returned void")?
                     .into_pointer_value();
                 // found - s = index
@@ -483,7 +484,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(s_ptr),
                 ], "s_len")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 // total = s_len * n + 1 (null)
@@ -499,7 +500,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // memcpy loop (simplified: one copy + multiple memcpy)
@@ -598,7 +599,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(s_ptr),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let zero = i64_ty.const_int(0, false);
@@ -711,7 +712,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // Safety: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
@@ -770,7 +771,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(s_ptr),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let alloc_size = self.builder.build_int_add(s_len, i64_ty.const_int(1, false), "alloc_size")
@@ -781,7 +782,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // Copy s to buf first, then transform
@@ -877,7 +878,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(s_ptr),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let alloc_size = self.builder.build_int_add(s_len, i64_ty.const_int(1, false), "alloc_size")
@@ -888,7 +889,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let memcpy_fn = self.module.get_function("memcpy")
@@ -993,7 +994,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // src = s + start
@@ -1056,7 +1057,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(delim_ptr),
                 ], "str_split_call")
                     .map_err(|e| CompileError::LlvmError(format!("str_split error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_str_split returned void")?
                     .into_pointer_value();
                 // MimiList* is {i64 len, const char** data} — same layout as our list struct
@@ -1122,7 +1123,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(sep_ptr),
                 ], "str_join_call")
                     .map_err(|e| CompileError::LlvmError(format!("str_join error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_str_join returned void")?;
                 Ok(result)
 
@@ -1153,7 +1154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(to_ptr),
                 ], "str_replace_call")
                     .map_err(|e| CompileError::LlvmError(format!("str_replace error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_str_replace returned void")?;
                 Ok(result)
 
@@ -1199,7 +1200,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(raw_ptr),
                 ], "strlen_call")
                     .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?;
                 self.builder.build_store(len_gep, str_len)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

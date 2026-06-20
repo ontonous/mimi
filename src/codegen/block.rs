@@ -1,6 +1,8 @@
 #![allow(dead_code, deprecated)]
 
 use crate::ast::*;
+use crate::codegen::CallSiteValueExt;
+use crate::codegen::call_try_basic_value;
 use crate::codegen::types;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
@@ -350,7 +352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         let call = self.builder.build_call(fn_val, &[], "saved_stack")
             .map_err(|e| CompileError::LlvmError(format!("stacksave: {}", e)))?;
-        let val = call.try_as_basic_value().left()
+        let val = call_try_basic_value(&call)
             .ok_or_else(|| CompileError::LlvmError("stacksave returned void".to_string()))?;
         match val {
             BasicValueEnum::PointerValue(ptr) => Ok(ptr),

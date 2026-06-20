@@ -1,5 +1,7 @@
 use super::CodeGenerator;
+use super::super::call_try_basic_value;
 use crate::error::MimiResult;
+use super::super::CallSiteValueExt;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -13,7 +15,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("mimi_map_new not declared")?;
                 let result = self.builder.build_call(func, &[], "map_new_call")
                     .map_err(|e| format!("map_new error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_map_new returned void")?)
 
     }
@@ -33,7 +35,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(map_handle),
                 ], "map_size_call")
                     .map_err(|e| format!("map_size error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_map_size returned void")?)
 
     }
@@ -58,7 +60,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ], "has_key_call")
                     .map_err(|e| format!("has_key error: {}", e))?;
-                let int_val = result.try_as_basic_value().left()
+                let int_val = call_try_basic_value(&result)
                     .ok_or("mimi_map_has_key returned void".to_string())?
                     .into_int_value();
                 let const_val = int_val.get_zero_extended_constant().unwrap_or(0);
@@ -86,7 +88,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ], "map_get_call")
                     .map_err(|e| format!("map_get error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_map_get returned void".to_string())?
                     .into_int_value();
                 let has_key_func = self.module.get_function("mimi_map_has_key")
@@ -96,7 +98,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ], "has_key_check")
                     .map_err(|e| format!("has_key error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_map_has_key returned void".to_string())?
                     .into_int_value();
                 let i64_ty = self.context.i64_type();
@@ -212,14 +214,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "map_from_list_keys_malloc")
                     .map_err(|e| format!("malloc error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let values_data = self.builder.build_call(malloc_fn, &[
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "map_from_list_values_malloc")
                     .map_err(|e| format!("malloc error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let keys_ptr = self.builder.build_bit_cast(keys_data,
@@ -298,7 +300,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(values_data),
                 ], "free_values")
                     .map_err(|e| format!("free values error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_map_from_list returned void")?)
 
     }
@@ -318,7 +320,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(map_handle),
         ], "map_keys_call")
             .map_err(|e| format!("map_keys error: {}", e))?;
-        Ok(result.try_as_basic_value().left()
+        Ok(call_try_basic_value(&result)
             .ok_or("mimi_map_keys returned void")?)
     }
 
@@ -337,7 +339,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(map_handle),
         ], "map_values_call")
             .map_err(|e| format!("map_values error: {}", e))?;
-        Ok(result.try_as_basic_value().left()
+        Ok(call_try_basic_value(&result)
             .ok_or("mimi_map_values returned void")?)
     }
 

@@ -1,5 +1,6 @@
 use super::CodeGenerator;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use super::super::CallSiteValueExt;
 use crate::error::{CompileError, MimiResult};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -44,7 +45,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
@@ -128,7 +129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::PointerValue(pv),
                             ], "strlen")
                                 .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                                .try_as_basic_value().left()
+                                .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?;
                             Ok(len)
                         } else {
@@ -197,7 +198,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(new_alloc_size),
                 ], "realloc_result")
                     .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("realloc returned void")?
                     .into_pointer_value();
 
@@ -327,7 +328,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(new_alloc_size),
                 ], "realloc_result")
                     .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("realloc returned void")?
                     .into_pointer_value();
                 self.builder.build_store(data_gep, realloc_result)
@@ -551,7 +552,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let new_data_i64 = self.builder.build_bit_cast(new_data,
@@ -706,7 +707,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "malloc_call")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let new_data_i64 = self.builder.build_bit_cast(new_data,
@@ -993,7 +994,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "enum_malloc")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let result_data_i64 = self.builder.build_bit_cast(result_data,
@@ -1116,7 +1117,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(alloc_size),
                 ], "zip_malloc")
                     .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let result_data_i64 = self.builder.build_bit_cast(result_data,

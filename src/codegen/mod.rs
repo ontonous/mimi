@@ -17,10 +17,35 @@ use inkwell::module::Module;
 use inkwell::builder::Builder;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, ValueKind};
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Extract a BasicValueEnum from a ValueKind (inkwell 0.9+).
+/// Variant names changed from 0.5: BasicValueEnum -> Basic, InstructionValue -> Instruction.
+pub(crate) fn extract_basic_value<'ctx>(vk: ValueKind<'ctx>) -> Option<BasicValueEnum<'ctx>> {
+    match vk {
+        ValueKind::Basic(bv) => Some(bv),
+        ValueKind::Instruction(_) => None,
+    }
+}
+
+/// Try to get a BasicValueEnum from a CallSiteValue.
+pub(crate) fn call_try_basic_value<'ctx>(call: &CallSiteValue<'ctx>) -> Option<BasicValueEnum<'ctx>> {
+    extract_basic_value(call.try_as_basic_value())
+}
+
+/// Extension trait for CallSiteValue to extract BasicValueEnum.
+pub(crate) trait CallSiteValueExt<'ctx> {
+    fn try_as_basic_value_opt(&self) -> Option<BasicValueEnum<'ctx>>;
+}
+
+impl<'ctx> CallSiteValueExt<'ctx> for CallSiteValue<'ctx> {
+    fn try_as_basic_value_opt(&self) -> Option<BasicValueEnum<'ctx>> {
+        extract_basic_value(self.try_as_basic_value())
+    }
+}
 
 /// Generated callback thunk for a closure→C function pointer conversion.
 /// G1b: Each thunk reads fn_ptr and env_ptr from its globals at call time.
@@ -110,7 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn expect_basic_value(&self, call: &inkwell::values::CallSiteValue<'ctx>, name: &str) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        call.try_as_basic_value().left().ok_or_else(|| CompileError::LlvmError(format!("expected basic value from {}", name)))
+        call_try_basic_value(call).ok_or_else(|| CompileError::LlvmError(format!("expected basic value from {}", name)))
     }
 
     fn current_fn_ret_type(&self) -> BasicTypeEnum<'ctx> {
@@ -335,8 +360,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             inkwell::values::BasicMetadataValueEnum::IntValue(ty_size),
         ], &format!("{}_rc_alloc", name))
             .map_err(|e| CompileError::LlvmError(format!("rc_alloc error: {}", e)))?
-            .try_as_basic_value()
-            .left()
+            .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc returned void".to_string()))?;
 
         let heap_raw_ptr = heap_raw.into_pointer_value();

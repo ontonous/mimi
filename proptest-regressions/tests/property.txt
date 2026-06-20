@@ -8,3 +8,5 @@ cc d78e1ba8d1556df2584c5aa303a98697114ddad37b7b8b2eff2ccd832462374a # shrinks to
 cc 2e2c20179a82f972178c4cf1643f97218126dcfef4da6588e327442522eda223 # shrinks to sizes = [0]
 cc 2e97e9f4f89e9929abc4b519ba7affede19a79eeda1c174261ded95d3c292d46 # shrinks to n = 1
 cc 95d8d78a4c58f28657e1550eddee25c437bed083806987287dce8bcc882cd96e # shrinks to src = "a"
+cc fb7b1ab5ad66db7a8dce691e11195b35b243c5bc5e0cb14bbfea071e9a26f2f8 # shrinks to t = Infer
+cc 8ea1cb2165d88738044947df6492c8a50e44c9e587d677e281c2d5f658a69f35 # shrinks to t = Name("unknown", [])

@@ -131,7 +131,8 @@ pub fn basic_to_metadata<'ctx>(ctx: &'ctx Context, ty: BasicTypeEnum<'ctx>) -> B
         BasicTypeEnum::PointerType(t) => BasicMetadataTypeEnum::PointerType(t),
         BasicTypeEnum::StructType(t) => BasicMetadataTypeEnum::StructType(t),
         BasicTypeEnum::ArrayType(t) => BasicMetadataTypeEnum::ArrayType(t),
-        _ => BasicMetadataTypeEnum::IntType(ctx.i64_type()),
+        BasicTypeEnum::VectorType(t) => BasicMetadataTypeEnum::IntType(ctx.i64_type()),
+        BasicTypeEnum::ScalableVectorType(_) => BasicMetadataTypeEnum::IntType(ctx.i64_type()),
     }
 }
 

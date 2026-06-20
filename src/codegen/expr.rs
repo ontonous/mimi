@@ -1,4 +1,6 @@
 use crate::ast::*;
+use crate::codegen::call_try_basic_value;
+use crate::codegen::CallSiteValueExt;
 use crate::codegen::types;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
@@ -96,7 +98,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(name_ptr),
                 ], &format!("cap_register_{}", name))
                     .map_err(|e| format!("cap_register error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_cap_register returned void")?;
                 Ok(handle)
             } else {
@@ -158,7 +160,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(payload.into_int_value()),
                     ], "fn_call"
                 ).map_err(|e| format!("indirect call error: {}", e))?;
-                Ok(call.try_as_basic_value().left().unwrap_or(
+                Ok(call_try_basic_value(&call).unwrap_or(
                     BasicValueEnum::IntValue(i64_ty.const_int(0, false))
                 ))
             }
@@ -169,7 +171,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(payload.into_int_value()),
                         ], "fn_call")
                             .map_err(|e| format!("call error: {}", e))?;
-                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                        return Ok(call_try_basic_value(&call).unwrap_or(
                             BasicValueEnum::IntValue(i64_ty.const_int(0, false))
                         ));
                     }
@@ -198,7 +200,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(payload.into_int_value()),
                     ], "fn_call"
                 ).map_err(|e| format!("indirect call error: {}", e))?;
-                Ok(call.try_as_basic_value().left().unwrap_or(
+                Ok(call_try_basic_value(&call).unwrap_or(
                     BasicValueEnum::IntValue(i64_ty.const_int(0, false))
                 ))
             }
@@ -243,6 +245,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         inkwell::types::BasicTypeEnum::ArrayType(_) => "array",
                         inkwell::types::BasicTypeEnum::StructType(_) => "struct",
                         inkwell::types::BasicTypeEnum::VectorType(_) => "vector",
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(_) => "scalable_vector",
                     };
                     Err(format!("negation requires numeric type, got {}", ty_desc))
                 }
@@ -259,6 +262,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         inkwell::types::BasicTypeEnum::ArrayType(_) => "array",
                         inkwell::types::BasicTypeEnum::StructType(_) => "struct",
                         inkwell::types::BasicTypeEnum::VectorType(_) => "vector",
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(_) => "scalable_vector",
                     };
                     Err(format!("'not' requires bool, got {}", ty_desc))
                 }
@@ -294,6 +298,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         inkwell::types::BasicTypeEnum::ArrayType(_) => "array",
                         inkwell::types::BasicTypeEnum::StructType(_) => "struct",
                         inkwell::types::BasicTypeEnum::VectorType(_) => "vector",
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(_) => "scalable_vector",
                     };
                     Err(format!("dereference requires pointer type, got {}", ty_desc))
                 }
@@ -414,7 +419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         BasicMetadataValueEnum::IntValue(alloc_size),
                                     ], "values_malloc")
                                         .map_err(|e| format!("malloc error: {}", e))?
-                                        .try_as_basic_value().left()
+                                        .try_as_basic_value_opt()
                                         .ok_or("malloc returned void")?
                                         .into_pointer_value();
                                     let values_data_i64 = self.builder.build_bit_cast(values_data,
@@ -530,7 +535,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(alloc_size),
                         ], "out_malloc")
                             .map_err(|e| format!("malloc error: {}", e))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("malloc returned void")?
                             .into_pointer_value();
                         let out_i64 = self.builder.build_bit_cast(out_ptr,
@@ -572,7 +577,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(elem.into_int_value()),
                         ], "fn_call")
                             .map_err(|e| format!("call error: {}", e))?;
-                        let result = fn_call.try_as_basic_value().left()
+                        let result = call_try_basic_value(&fn_call)
                             .ok_or("function returned void")?;
                         if is_map {
                             // For map: store result to output array
@@ -705,7 +710,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(elem.into_int_value()),
                         ], "reduce_call")
                             .map_err(|e| format!("call error: {}", e))?
-                            .try_as_basic_value().left()
+                            .try_as_basic_value_opt()
                             .ok_or("function returned void")?;
                         self.builder.build_store(acc_alloca, fn_result)
                             .map_err(|e| format!("store error: {}", e))?;
@@ -752,6 +757,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             BasicValueEnum::StructValue(sv) => BasicMetadataTypeEnum::StructType(sv.get_type()),
                                             BasicValueEnum::ArrayValue(av) => BasicMetadataTypeEnum::ArrayType(av.get_type()),
                                             BasicValueEnum::VectorValue(vv) => BasicMetadataTypeEnum::VectorType(vv.get_type()),
+                                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataTypeEnum::IntType(self.context.i64_type()),
                                         });
                                     }
                                     let ret_type = self.context.i64_type();
@@ -770,12 +776,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                                             BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                                             BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                                         });
                                     }
                                     let call = self.builder.build_indirect_call(
                                         indirect_fn_type, fn_ptr_typed, &call_args, "closure_call",
                                     ).map_err(|e| format!("closure call error: {}", e))?;
-                                    return Ok(call.try_as_basic_value().left().unwrap_or(
+                                    return Ok(call_try_basic_value(&call).unwrap_or(
                                         self.context.i64_type().const_int(0, false).into()
                                     ));
                                 }
@@ -815,10 +822,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                         BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                         BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                     }).collect();
                     let call = self.builder.build_call(function, &metadata_args, "method_call")
                         .map_err(|e| format!("method call error: {}", e))?;
-                    return Ok(call.try_as_basic_value().left().unwrap_or(
+                    return Ok(call_try_basic_value(&call).unwrap_or(
                         self.context.i64_type().const_int(0, false).into()
                     ));
                 }
@@ -837,7 +845,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(spawn_fn) = self.module.get_function(&spawn_name) {
                         let call = self.builder.build_call(spawn_fn, &[], "actor_spawn")
                             .map_err(|e| format!("spawn call error: {}", e))?;
-                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                        return Ok(call_try_basic_value(&call).unwrap_or(
                             self.context.i64_type().const_int(0, false).into()
                         ));
                     }
@@ -862,10 +870,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                                     BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                                     BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                                 }).collect();
                                 let call = self.builder.build_call(function, &metadata_args, "trait_call")
                                     .map_err(|e| format!("trait method call error: {}", e))?;
-                                return Ok(call.try_as_basic_value().left().unwrap_or(
+                                return Ok(call_try_basic_value(&call).unwrap_or(
                                     self.context.i64_type().const_int(0, false).into()
                                 ));
                             }
@@ -963,11 +972,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                                         BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                                         BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                                     }).collect();
                                     let call = self.builder.build_indirect_call(
                                         fn_type, fn_ptr_cast, &metadata_args, "dyn_call"
                                     ).map_err(|e| format!("dyn indirect call error: {}", e))?;
-                                    return Ok(call.try_as_basic_value().left().unwrap_or(
+                                    return Ok(call_try_basic_value(&call).unwrap_or(
                                         self.context.i64_type().const_int(0, false).into()
                                     ));
                                 }
@@ -998,10 +1008,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                                             BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                                             BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                                         }).collect();
                                         let call = self.builder.build_call(function, &metadata_args, "impl_trait_call")
                                             .map_err(|e| format!("impl trait call error: {}", e))?;
-                                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                                        return Ok(call_try_basic_value(&call).unwrap_or(
                                             self.context.i64_type().const_int(0, false).into()
                                         ));
                                     }
@@ -1027,10 +1038,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                             BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                             BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
                         }).collect();
                         let call = self.builder.build_call(function, &metadata_args, "enum_ctor")
                             .map_err(|e| format!("enum ctor call error: {}", e))?;
-                        return Ok(call.try_as_basic_value().left().unwrap_or(
+                        return Ok(call_try_basic_value(&call).unwrap_or(
                             self.context.i64_type().const_int(0, false).into()
                         ));
                     }
@@ -1758,7 +1770,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::IntValue(err_payload.into_int_value()),
                             ], "map_err_call"
                         ).map_err(|e| format!("indirect call error: {}", e))?;
-                        let mapped = call.try_as_basic_value().left()
+                        let mapped = call_try_basic_value(&call)
                             .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false)));
                         self.builder.build_store(result_alloca, mapped)
                             .map_err(|e| format!("store error: {}", e))?;
@@ -1788,7 +1800,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::IntValue(err_payload.into_int_value()),
                             ], "map_err_call"
                         ).map_err(|e| format!("indirect call error: {}", e))?;
-                        let mapped = call.try_as_basic_value().left()
+                        let mapped = call_try_basic_value(&call)
                             .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false)));
                         self.builder.build_store(result_alloca, mapped)
                             .map_err(|e| format!("store error: {}", e))?;
@@ -1823,7 +1835,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(alloc_size),
         ], "malloc_call")
             .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value().left()
+            .try_as_basic_value_opt()
             .ok_or("malloc returned void")?
             .into_pointer_value();
         let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
@@ -1986,8 +1998,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(byte_size),
         ], "malloc_result")
             .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value()
-            .left()
+            .try_as_basic_value_opt()
             .ok_or("malloc returned void")?;
         let result_storage_ptr = if let BasicValueEnum::PointerValue(pv) = result_storage {
             pv
@@ -2004,6 +2015,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::StructType(t) => t.ptr_type(inkwell::AddressSpace::default()),
             BasicTypeEnum::ArrayType(t) => t.ptr_type(inkwell::AddressSpace::default()),
             BasicTypeEnum::VectorType(t) => t.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::ScalableVectorType(t) => t.ptr_type(inkwell::AddressSpace::default()),
         };
         let result_typed_ptr = self.builder.build_pointer_cast(
             result_storage_ptr,
@@ -2653,7 +2665,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicMetadataValueEnum::IntValue(env_byte_size),
             ], "env_heap")
                 .map_err(|e| format!("malloc error: {}", e))?
-                .try_as_basic_value().left()
+                .try_as_basic_value_opt()
                 .ok_or("malloc returned void")?
                 .into_pointer_value();
             // NOTE: not registered in heap_allocs — closure env must outlive
@@ -2737,7 +2749,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(alloc_size),
         ], "comp_malloc")
             .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value().left()
+            .try_as_basic_value_opt()
             .ok_or("malloc returned void")?.into_pointer_value();
         let out_i64 = self.builder.build_bit_cast(out_ptr,
             i64_ty.ptr_type(inkwell::AddressSpace::default()), "out_i64")
@@ -3062,7 +3074,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(buf_size),
         ], "fstr_buf")
             .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value().left()
+            .try_as_basic_value_opt()
             .ok_or("malloc returned void")?
             .into_pointer_value();
         self.register_heap_alloc(buf);
@@ -3098,7 +3110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::PointerValue(buf),
                             ], "fstr_strlen")
                                 .map_err(|e| format!("strlen error: {}", e))?
-                                .try_as_basic_value().left()
+                                .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
@@ -3123,7 +3135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::PointerValue(buf),
                             ], "fstr_strlen")
                                 .map_err(|e| format!("strlen error: {}", e))?
-                                .try_as_basic_value().left()
+                                .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
@@ -3235,8 +3247,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(r),
                     ], "strcmp_call")
                         .map_err(|e| format!("strcmp error: {}", e))?
-                        .try_as_basic_value()
-                        .left()
+                        .try_as_basic_value_opt()
                         .ok_or_else(|| "strcmp returned void".to_string())?;
                     let cmp = result.into_int_value();
                     let zero = self.context.i32_type().const_int(0, false);
@@ -3258,8 +3269,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(r),
                     ], "strcmp_call")
                         .map_err(|e| format!("strcmp error: {}", e))?
-                        .try_as_basic_value()
-                        .left()
+                        .try_as_basic_value_opt()
                         .ok_or_else(|| "strcmp returned void".to_string())?;
                     let cmp = result.into_int_value();
                     let zero = self.context.i32_type().const_int(0, false);
@@ -3347,7 +3357,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(exp),
                     ], "pow_i64_call")
                         .map_err(|e| format!("pow error: {}", e))?
-                        .try_as_basic_value().left()
+                        .try_as_basic_value_opt()
                         .ok_or("pow returned void")?
                         .into())
                 }
@@ -3359,7 +3369,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::FloatValue(r),
                     ], "pow_f64")
                         .map_err(|e| format!("pow error: {}", e))?
-                        .try_as_basic_value().left()
+                        .try_as_basic_value_opt()
                         .ok_or("pow returned void")?
                         .into())
                 }
@@ -3483,6 +3493,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                 BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                 BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
             }
         }).collect();
 
@@ -3644,7 +3655,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(function) = self.module.get_function(name) {
             let call = self.builder.build_call(function, &metadata_args, "call")
                 .map_err(|e| format!("call error: {}", e))?;
-            Ok(call.try_as_basic_value().left().unwrap_or(
+            Ok(call_try_basic_value(&call).unwrap_or(
                 self.context.i64_type().const_int(0, false).into()
             ))
         } else {
@@ -3653,7 +3664,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(function) = self.module.get_function(&mangled) {
                 let call = self.builder.build_call(function, &metadata_args, "call")
                     .map_err(|e| format!("call error: {}", e))?;
-                Ok(call.try_as_basic_value().left().unwrap_or(
+                Ok(call_try_basic_value(&call).unwrap_or(
                     self.context.i64_type().const_int(0, false).into()
                 ))
             } else {
@@ -3682,13 +3693,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                 BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                 BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                            BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
             }
         }).collect();
 
         if let Some(function) = self.module.get_function(mangled) {
             let call = self.builder.build_call(function, &metadata_args, "call")
                 .map_err(|e| format!("call error: {}", e))?;
-            Ok(call.try_as_basic_value().left().unwrap_or(
+            Ok(call_try_basic_value(&call).unwrap_or(
                 self.context.i64_type().const_int(0, false).into()
             ))
         } else {

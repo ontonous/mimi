@@ -1,5 +1,7 @@
 use super::CodeGenerator;
+use super::super::call_try_basic_value;
 use crate::error::MimiResult;
+use super::super::CallSiteValueExt;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -21,7 +23,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(protocol),
                 ], "socket_call")
                     .map_err(|e| format!("socket error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_socket returned void")?)
 
     }
@@ -42,7 +44,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(port),
                 ], "connect_call")
                     .map_err(|e| format!("connect error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_connect returned void")?)
 
     }
@@ -61,7 +63,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(port),
                 ], "bind_call")
                     .map_err(|e| format!("bind error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_bind returned void")?)
 
     }
@@ -80,7 +82,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(backlog),
                 ], "listen_call")
                     .map_err(|e| format!("listen error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_listen returned void")?)
 
     }
@@ -97,7 +99,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(fd),
                 ], "accept_call")
                     .map_err(|e| format!("accept error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_accept returned void")?)
 
     }
@@ -116,7 +118,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(data_ptr),
                 ], "send_strlen")
                     .map_err(|e| format!("strlen error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?
                     .into_int_value();
                 let func = self.module.get_function("mimi_send")
@@ -127,7 +129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(data_len),
                 ], "send_call")
                     .map_err(|e| format!("send error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_send returned void")?)
 
     }
@@ -151,7 +153,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(out_len_alloca),
                 ], "recv_call")
                     .map_err(|e| format!("recv error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_recv returned void")?
                     .into_pointer_value();
                 // NEW-2: register returned malloc'd buffer for scope-exit free
@@ -191,7 +193,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(fd),
                 ], "close_call")
                     .map_err(|e| format!("close error: {}", e))?;
-                Ok(result.try_as_basic_value().left()
+                Ok(call_try_basic_value(&result)
                     .ok_or("mimi_close returned void")?)
 
     }
@@ -208,7 +210,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(url_ptr),
                 ], "http_get_call")
                     .map_err(|e| format!("http_get error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_http_get returned void")?
                     .into_pointer_value();
                 // NEW-2: register returned malloc'd buffer for scope-exit free
@@ -233,7 +235,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(result),
                 ], "http_strlen")
                     .map_err(|e| format!("strlen error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?;
                 self.builder.build_store(len_gep, str_len)
                     .map_err(|e| format!("store error: {}", e))?;
@@ -255,7 +257,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(body_ptr),
                 ], "http_post_call")
                     .map_err(|e| format!("http_post error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("mimi_http_post returned void")?
                     .into_pointer_value();
                 // NEW-2: register returned malloc'd buffer for scope-exit free
@@ -280,7 +282,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(result),
                 ], "http_strlen")
                     .map_err(|e| format!("strlen error: {}", e))?
-                    .try_as_basic_value().left()
+                    .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?;
                 self.builder.build_store(len_gep, str_len)
                     .map_err(|e| format!("store error: {}", e))?;
