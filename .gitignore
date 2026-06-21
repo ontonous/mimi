@@ -16,3 +16,6 @@ build/
 
 # Golden test diff artifacts
 **/golden/*.diff.ir
+
+# Transient null rlib produced by LLVM/no_std experiments
+libnull.rlib
