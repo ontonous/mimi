@@ -92,12 +92,19 @@ func main() -> i32 {
 // T601: Z3 形式化验证
 // ============================================================
 
+fn z3_available() -> bool {
+    crate::verifier::is_z3_available()
+}
+
 fn verify_source(source: &str) -> Vec<crate::verifier::VerificationResult> {
     crate::verifier::verify_source(source).unwrap()
 }
 
-#[allow(dead_code)]
 fn assert_verified(source: &str) {
+    if !z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
     let results = verify_source(source);
     for r in &results {
         assert_eq!(r.status, crate::verifier::VerifStatus::Verified, "{}: {}", r.func_name, r.message);
@@ -105,6 +112,10 @@ fn assert_verified(source: &str) {
 }
 
 fn assert_failed(source: &str) {
+    if !z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
     let results = verify_source(source);
     assert!(results.iter().any(|r| r.status == crate::verifier::VerifStatus::Failed),
         "expected at least one Failed result, got: {:?}", results.iter().map(|r| (&r.func_name, &r.status)).collect::<Vec<_>>());

@@ -1231,8 +1231,59 @@ fn format_stmt(stmt: &Stmt) -> String {
 pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let tokens = crate::lexer::Lexer::new(source).tokenize()?;
     let file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
-    let mut verifier = Verifier::new()?;
+    let mut verifier = match Verifier::new() {
+        Ok(v) => v,
+        Err(_) => return Ok(mock_verify_file(&file)),
+    };
     Ok(verifier.verify_file(&file))
+}
+
+/// Check whether the Z3 solver is available at runtime.
+pub fn is_z3_available() -> bool {
+    Verifier::new().is_ok()
+}
+
+/// Return Unknown for all functions when Z3 is not available.
+fn mock_verify_file(file: &File) -> Vec<VerificationResult> {
+    let mut results = Vec::new();
+    mock_verify_items(&file.items, &mut results);
+    results
+}
+
+fn mock_verify_items(items: &[Item], results: &mut Vec<VerificationResult>) {
+    for item in items {
+        match item {
+            Item::Func(f) => {
+                if !f.body.is_empty() {
+                    let has_contracts = f.body.iter().any(|s| matches!(s, Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::MmsBlock { .. }));
+                    results.push(VerificationResult {
+                        func_name: f.name.clone(),
+                        status: VerifStatus::Unknown,
+                        message: if has_contracts { "Z3 solver not available" } else { "no contracts" }.into(),
+                        diagnostic: None,
+                        duration_us: 0,
+                        constraint_count: 0,
+                    });
+                }
+            }
+            Item::Module(m) => mock_verify_items(&m.items, results),
+            Item::ExternBlock(block) => {
+                for func in &block.funcs {
+                    if func.requires.is_some() || func.ensures.is_some() {
+                        results.push(VerificationResult {
+                            func_name: format!("extern {}", func.name),
+                            status: VerifStatus::Unknown,
+                            message: "Z3 solver not available".into(),
+                            diagnostic: None,
+                            duration_us: 0,
+                            constraint_count: 0,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
@@ -1394,8 +1445,18 @@ fn parse_contract_expr(text: &str) -> Result<Expr, String> {
 mod tests {
     use super::*;
 
+    macro_rules! require_z3 {
+        () => {
+            if !crate::verifier::is_z3_available() {
+                eprintln!("    └─ skipped (Z3 not available)");
+                return;
+            }
+        };
+    }
+
     #[test]
     fn verify_simple_pass() {
+        require_z3!();
         let src = r#"
 func identity(x: i32) -> i32 {
     requires: true
@@ -1410,6 +1471,7 @@ func identity(x: i32) -> i32 {
 
     #[test]
     fn verify_body_satisfies_ensures() {
+        require_z3!();
         let src = r#"
 func double(x: i32) -> i32 {
     requires: x >= 0
@@ -1425,6 +1487,7 @@ func double(x: i32) -> i32 {
 
     #[test]
     fn verify_body_violates_ensures() {
+        require_z3!();
         let src = r#"
 func wrong(x: i32) -> i32 {
     requires: x >= 0
@@ -1457,6 +1520,7 @@ func add_one(x: i32) -> i32 {
 
     #[test]
     fn verify_strong_postcondition_fails() {
+        require_z3!();
         let src = r#"
 func abs(x: i32) -> i32 {
     requires: x > 0
@@ -1472,6 +1536,7 @@ func abs(x: i32) -> i32 {
 
     #[test]
     fn verify_counterexample_extracted() {
+        require_z3!();
         let src = r#"
 func abs(x: i32) -> i32 {
     requires: true
@@ -1489,6 +1554,7 @@ func abs(x: i32) -> i32 {
 
     #[test]
     fn verify_unsatisfiable_requires() {
+        require_z3!();
         let src = r#"
 func impossible(x: i32) -> i32 {
     requires: x > 0 && x < 0
@@ -1505,6 +1571,7 @@ func impossible(x: i32) -> i32 {
 
     #[test]
     fn verify_old_snapshot() {
+        require_z3!();
         let src = r#"
 func noop(x: i32) -> i32 {
     requires: x > 0
@@ -1520,6 +1587,7 @@ func noop(x: i32) -> i32 {
 
     #[test]
     fn verify_old_snapshot_fails() {
+        require_z3!();
         let src = r#"
 func mutate(x: i32) -> i32 {
     requires: x > 0
@@ -1549,6 +1617,7 @@ func mutate(x: i32) -> i32 {
 
     #[test]
     fn verify_extern_ensures_consistent() {
+        require_z3!();
         let src = r#"
 extern "C" {
     func must_be_positive(x: i64) -> i64
@@ -1566,6 +1635,7 @@ func main() -> i64 { 0 }
 
     #[test]
     fn verify_extern_requires_ensures_consistent() {
+        require_z3!();
         let src = r#"
 extern "C" {
     func process(x: i64) -> i64
@@ -1584,6 +1654,7 @@ func main() -> i64 { 0 }
 
     #[test]
     fn verify_extern_unsatisfiable_requires() {
+        require_z3!();
         let src = r#"
 extern "C" {
     func impossible(x: i64) -> i64
@@ -1637,6 +1708,7 @@ func main() -> i64 {
 
     #[test]
     fn verify_if_else_body_all_paths_verified() {
+        require_z3!();
         let src = r#"
 func abs(x: i32) -> i32 {
     requires: true
@@ -1652,6 +1724,7 @@ func abs(x: i32) -> i32 {
 
     #[test]
     fn verify_if_else_body_violation_detected() {
+        require_z3!();
         let src = r#"
 func bad_abs(x: i32) -> i32 {
     requires: true
@@ -1667,6 +1740,7 @@ func bad_abs(x: i32) -> i32 {
 
     #[test]
     fn verify_nested_if_else_body() {
+        require_z3!();
         let src = r#"
 func sign(x: i32) -> i32 {
     requires: true
@@ -1682,6 +1756,7 @@ func sign(x: i32) -> i32 {
 
     #[test]
     fn verify_if_else_body_with_requires() {
+        require_z3!();
         let src = r#"
 func add_or_mul(x: i32, y: i32) -> i32 {
     requires: x >= 0 && y >= 0
@@ -1699,6 +1774,7 @@ func add_or_mul(x: i32, y: i32) -> i32 {
 
     #[test]
     fn verify_f64_ensures() {
+        require_z3!();
         let src = r#"
 func positive(x: f64) -> f64 {
     requires: x > 0.0
@@ -1714,6 +1790,7 @@ func positive(x: f64) -> f64 {
 
     #[test]
     fn verify_f64_ensures_violation() {
+        require_z3!();
         let src = r#"
 func negate(x: f64) -> f64 {
     requires: x > 0.0
