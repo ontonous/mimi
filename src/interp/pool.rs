@@ -15,7 +15,9 @@ impl ThreadPool {
         for _ in 0..size {
             let receiver = Arc::clone(&receiver);
             let worker = thread::spawn(move || loop {
-                let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                let task = receiver.lock()
+                    .expect("interp pool receiver lock poisoned")
+                    .recv();
                 match task {
                     Ok(task) => task(),
                     Err(_) => break,

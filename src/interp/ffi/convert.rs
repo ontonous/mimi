@@ -1,7 +1,11 @@
 use super::super::*;
 use super::helpers::{FfiGuard, FfiSharedGuard};
 use crate::ast::*;
-use crate::ffi::{FfiArgContract, FfiRetContract, CAP_TABLE, SHARED_TABLE, Errno};
+use crate::ffi::{
+    cap_table_consume, cap_table_register,
+    shared_table_create, shared_table_get,
+    FfiArgContract, FfiRetContract, Errno,
+};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
@@ -71,13 +75,13 @@ impl<'a> Interpreter<'a> {
                     match mode {
                         CapMode::Move => {
                             // Register as a consumed cap (move semantics)
-                            let cap_id = CAP_TABLE.register(&cap_name);
-                            CAP_TABLE.consume(cap_id, &cap_name);
+                            let cap_id = cap_table_register(&cap_name);
+                            cap_table_consume(cap_id, &cap_name);
                             Ok(cap_id)
                         }
                         CapMode::Borrow => {
                             // Register as a non-consumed cap (borrow semantics)
-                            Ok(CAP_TABLE.register(&cap_name))
+                            Ok(cap_table_register(&cap_name))
                         }
                     }
                 }
@@ -108,7 +112,7 @@ impl<'a> Interpreter<'a> {
                 Value::Shared(arc) => {
                     let arc_ptr = Arc::as_ptr(arc) as *const ();
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
-                        if let Some(handle) = SHARED_TABLE.get(existing_id) {
+                        if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
@@ -120,10 +124,10 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr dedup".to_string()))
                         }
                     } else {
-                        let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                        let handle_id = shared_table_create(Arc::clone(arc));
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
-                        if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
@@ -158,7 +162,7 @@ impl<'a> Interpreter<'a> {
                 Value::Shared(arc) => {
                     let arc_ptr = Arc::as_ptr(arc) as *const ();
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
-                        if let Some(handle) = SHARED_TABLE.get(existing_id) {
+                        if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
@@ -170,10 +174,10 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr mut dedup".to_string()))
                         }
                     } else {
-                        let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                        let handle_id = shared_table_create(Arc::clone(arc));
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
-                        if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
@@ -209,7 +213,7 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         Ok(existing_id)
                     } else {
-                        let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                        let handle_id = shared_table_create(Arc::clone(arc));
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         Ok(handle_id)
@@ -222,7 +226,7 @@ impl<'a> Interpreter<'a> {
                     let handle_id = {
                         let value = rc.0.borrow().clone();
                         let arc = Arc::new(RwLock::new(value));
-                        SHARED_TABLE.create(arc)
+                        shared_table_create(arc)
                     };
                     shared_guard.register(handle_id);
                     Ok(handle_id)
@@ -241,7 +245,7 @@ impl<'a> Interpreter<'a> {
                 Value::Shared(arc) => {
                     let arc_ptr = Arc::as_ptr(arc) as *const ();
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
-                        if let Some(handle) = SHARED_TABLE.get(existing_id) {
+                        if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
@@ -253,10 +257,10 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow dedup".to_string()))
                         }
                     } else {
-                        let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                        let handle_id = shared_table_create(Arc::clone(arc));
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
-                        if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
                             let guard = handle.borrow();
                             let ptr = &*guard as *const Value as *const () as i64;
@@ -292,7 +296,7 @@ impl<'a> Interpreter<'a> {
                 Value::Shared(arc) => {
                     let arc_ptr = Arc::as_ptr(arc) as *const ();
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
-                        if let Some(handle) = SHARED_TABLE.get(existing_id) {
+                        if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
@@ -304,10 +308,10 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow_mut dedup".to_string()))
                         }
                     } else {
-                        let handle_id = SHARED_TABLE.create(Arc::clone(arc));
+                        let handle_id = shared_table_create(Arc::clone(arc));
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
-                        if let Some(handle) = SHARED_TABLE.get(handle_id) {
+                        if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
                             let mut guard = handle.borrow_mut();
                             let ptr = &mut *guard as *mut Value as *mut () as i64;

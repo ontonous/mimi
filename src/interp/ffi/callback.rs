@@ -1,12 +1,11 @@
 use super::super::*;
 use super::helpers::{compute_arg_free_mask, FfiGuard};
 use crate::ast::*;
-use crate::ffi::{CALLBACK_TABLE, Errno};
+use crate::ffi::{callback_table_register, callback_table_remove, Errno};
 use libffi::low::{self as ffi_low};
 use libffi::middle::{Cif, Type as FfiType};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 // F8: Thread-local context for synchronous callback invocation.
 // Set before each FFI call that involves callbacks, cleared after.
@@ -29,14 +28,15 @@ pub(in crate::interp) struct FfiCallbackCtx {
     pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>)>,
 }
 
-/// F3: Global fallback store for asynchronous/off-thread callbacks.
-/// When C stores a callback function pointer and invokes it after the
-/// synchronous FFI call returns, the thread-local context has been cleared.
-/// This global store keeps closures alive so the trampoline can still find
-/// them. Entries persist until explicitly deregistered via
-/// `mimi_callback_deregister` or until process exit.
-static CALLBACK_GLOBAL_STORE: std::sync::LazyLock<Mutex<HashMap<i64, (Value, bool, Vec<bool>)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+thread_local! {
+    /// F3: Per-thread fallback store for callbacks.
+    /// When C stores a callback function pointer and invokes it after the
+    /// synchronous FFI call returns, the thread-local context has been cleared.
+    /// This thread-local store keeps closures alive so the trampoline can still
+    /// find them. Entries persist until explicitly deregistered via
+    /// `mimi_callback_deregister` or until thread exit.
+    static CALLBACK_GLOBAL_STORE: RefCell<HashMap<i64, (Value, bool, Vec<bool>)>> = RefCell::new(HashMap::new());
+}
 
 /// F3: C-ABI function to deregister an async callback and free its resources.
 /// Should be called by C code when the stored function pointer is no longer
@@ -44,8 +44,8 @@ static CALLBACK_GLOBAL_STORE: std::sync::LazyLock<Mutex<HashMap<i64, (Value, boo
 /// Safe to call from any thread.
 #[no_mangle]
 pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
-    CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner()).remove(&callback_id);
-    CALLBACK_TABLE.remove(callback_id);
+    CALLBACK_GLOBAL_STORE.with(|store| store.borrow_mut().remove(&callback_id));
+    callback_table_remove(callback_id);
     FFI_CALLBACK_CTX.with(|c| {
         c.borrow_mut().entries.remove(&callback_id);
     });
@@ -71,8 +71,8 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     let (closure, ret_is_float, arg_free_mask) = match entry {
         Some(e) => e,
         None => {
-            let global = CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner());
-            match global.get(&callback_id).cloned() {
+            let entry = CALLBACK_GLOBAL_STORE.with(|store| store.borrow().get(&callback_id).cloned());
+            match entry {
                 Some(e) => e,
                 None => {
                     *result = 0;
@@ -204,7 +204,7 @@ impl<'a> Interpreter<'a> {
 
                 // Register with CALLBACK_TABLE so the trampoline can find it
                 // Use a dummy invoker (the real invocation is via thread-local ctx)
-                let cb_id = CALLBACK_TABLE.register(
+                let cb_id = callback_table_register(
                     Some(Box::new(|_id: i64, _args: &[i64]| -> i64 { 0 })),
                 );
                 callback_ids.push(cb_id);
@@ -217,8 +217,9 @@ impl<'a> Interpreter<'a> {
                     let mut ctx = c.borrow_mut();
                     ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
                 });
-                CALLBACK_GLOBAL_STORE.lock().unwrap_or_else(|e| e.into_inner())
-                    .insert(cb_id, (closure, ret_is_float, arg_free_mask));
+                CALLBACK_GLOBAL_STORE.with(|store| {
+                    store.borrow_mut().insert(cb_id, (closure, ret_is_float, arg_free_mask));
+                });
 
                 // Create a libffi Closure that generates a C-compatible function pointer.
                 // The userdata (callback_id) must outlive the closure.

@@ -62,7 +62,8 @@ impl<'a> Interpreter<'a> {
     ) -> Result<i64, String> {
         // Acquire fork lock to serialize fork() with other FFI operations.
         // The lock is held across fork and released in parent/child handlers.
-        let _guard = ensure_fork_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ensure_fork_lock().lock()
+            .expect("FFI fork lock poisoned");
 
         let mut pipe_fds: [std::ffi::c_int; 2] = [0; 2];
         let pipe_ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };

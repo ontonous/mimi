@@ -19,16 +19,14 @@ pub(in crate::interp) enum FfiGuard {
 }
 
 /// RAII guard that tracks shared handles created during an FFI call and
-/// releases them from SHARED_TABLE on drop (all exit paths).
+/// releases them from the per-thread SHARED_TABLE on drop (all exit paths).
 pub(in crate::interp) struct FfiSharedGuard {
-    table: &'static crate::ffi::runtime::SharedHandleTable,
     handles: Vec<i64>,
 }
 
 impl FfiSharedGuard {
     pub(in crate::interp) fn new() -> Self {
         Self {
-            table: &crate::ffi::runtime::SHARED_TABLE,
             handles: Vec::new(),
         }
     }
@@ -40,9 +38,11 @@ impl FfiSharedGuard {
 
 impl Drop for FfiSharedGuard {
     fn drop(&mut self) {
-        for id in &self.handles {
-            let _ = self.table.release(*id);
-        }
+        crate::ffi::runtime::with_shared_table(|table| {
+            for id in &self.handles {
+                let _ = table.release(*id);
+            }
+        });
     }
 }
 

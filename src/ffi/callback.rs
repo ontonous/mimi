@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 /// A registered callback with its C-compatible invoker.
 pub struct CallbackHandle {
@@ -26,7 +26,7 @@ unsafe impl Send for CallbackHandle {}
 // SAFETY: userdata is only accessed from C code that respects the protocol.
 unsafe impl Sync for CallbackHandle {}
 
-/// Global table of callback handles
+/// Per-thread table of callback handles.
 pub struct CallbackTable {
     next_id: AtomicI64,
     handles: Mutex<HashMap<i64, Arc<CallbackHandle>>>,
@@ -52,20 +52,23 @@ impl CallbackTable {
             ref_count: Arc::new(AtomicI64::new(1)),
             invoker,
         });
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock()
+            .expect("CALLBACK_TABLE handles lock poisoned");
         handles.insert(id, handle);
         id
     }
 
     /// Get a callback handle by ID
     pub fn get(&self, id: i64) -> Option<Arc<CallbackHandle>> {
-        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let handles = self.handles.lock()
+            .expect("CALLBACK_TABLE handles lock poisoned");
         handles.get(&id).cloned()
     }
 
     /// Remove a callback handle
     pub fn remove(&self, id: i64) -> bool {
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock()
+            .expect("CALLBACK_TABLE handles lock poisoned");
         handles.remove(&id).is_some()
     }
 }
@@ -76,12 +79,36 @@ impl Default for CallbackTable {
     }
 }
 
-/// Global callback table — tracks registered Mimi closures available to C code.
-///
-/// Thread-safe: `next_id` is `AtomicI64`, `handles` is `Mutex<HashMap>`.
-pub static CALLBACK_TABLE: LazyLock<CallbackTable> = LazyLock::new(CallbackTable::new);
+thread_local! {
+    /// Per-thread callback table — tracks registered Mimi closures available to C code.
+    ///
+    /// Using a thread-local table avoids cross-test or cross-invocation pollution
+    /// of callback state. Callbacks registered on one thread are only visible to
+    /// C code invoked on that same thread.
+    static CALLBACK_TABLE: CallbackTable = CallbackTable::new();
+}
 
+/// Execute a closure with a reference to the current thread's callback table.
+pub fn with_callback_table<R, F: FnOnce(&CallbackTable) -> R>(f: F) -> R {
+    CALLBACK_TABLE.with(f)
+}
 
+/// Register a callback in the current thread's callback table.
+pub fn callback_table_register(
+    invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
+) -> i64 {
+    CALLBACK_TABLE.with(|table| table.register(invoker))
+}
+
+/// Get a callback handle from the current thread's callback table.
+pub fn callback_table_get(id: i64) -> Option<Arc<CallbackHandle>> {
+    CALLBACK_TABLE.with(|table| table.get(id))
+}
+
+/// Remove a callback handle from the current thread's callback table.
+pub fn callback_table_remove(id: i64) -> bool {
+    CALLBACK_TABLE.with(|table| table.remove(id))
+}
 
 /// Standard trampoline: 2 args + userdata pattern.
 /// C calls this with (callback_id, arg1, arg2, userdata).
@@ -91,14 +118,14 @@ pub unsafe extern "C" fn callback_trampoline(
     arg2: i64,
     userdata: *mut std::ffi::c_void,
 ) -> i64 {
-    if let Some(handle) = CALLBACK_TABLE.get(callback_id) {
-        if let Some(ref invoker) = handle.invoker {
-            return invoker(callback_id, &[arg1, arg2, (userdata as usize) as i64]);
+    CALLBACK_TABLE.with(|table| {
+        if let Some(handle) = table.get(callback_id) {
+            if let Some(ref invoker) = handle.invoker {
+                return invoker(callback_id, &[arg1, arg2, (userdata as usize) as i64]);
+            }
         }
         -1
-    } else {
-        -1
-    }
+    })
 }
 
 /// qsort-style trampoline: compares two elements via userdata callback ID.
@@ -116,12 +143,14 @@ pub unsafe extern "C" fn qsort_trampoline(
     let a_val = (a as usize) as i64;
     let b_val = (b as usize) as i64;
     let callback_id = *(userdata as *const i64);
-    if let Some(handle) = CALLBACK_TABLE.get(callback_id) {
-        if let Some(ref invoker) = handle.invoker {
-            return invoker(callback_id, &[a_val, b_val]) as i32;
+    CALLBACK_TABLE.with(|table| {
+        if let Some(handle) = table.get(callback_id) {
+            if let Some(ref invoker) = handle.invoker {
+                return invoker(callback_id, &[a_val, b_val]) as i32;
+            }
         }
-    }
-    0
+        0
+    })
 }
 
 #[cfg(test)]
@@ -130,23 +159,27 @@ mod tests {
 
     #[test]
     fn test_callback_registration() {
-        let id = CALLBACK_TABLE.register(
-            Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args.iter().sum() })),
-        );
-        assert!(id > 0);
-        assert!(CALLBACK_TABLE.get(id).is_some());
-        assert!(CALLBACK_TABLE.remove(id));
-        assert!(CALLBACK_TABLE.get(id).is_none());
+        CALLBACK_TABLE.with(|table| {
+            let id = table.register(
+                Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args.iter().sum() })),
+            );
+            assert!(id > 0);
+            assert!(table.get(id).is_some());
+            assert!(table.remove(id));
+            assert!(table.get(id).is_none());
+        });
     }
 
     #[test]
     fn test_callback_invocation() {
-        let id = CALLBACK_TABLE.register(
-            Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args[0] + args[1] })),
-        );
-        // SAFETY: callback_trampoline is a safe-to-call extern "C" function; id is a valid registered callback ID and args are simple integers.
-        let result = unsafe { callback_trampoline(id, 3, 4, std::ptr::null_mut()) };
-        assert_eq!(result, 7);
-        CALLBACK_TABLE.remove(id);
+        CALLBACK_TABLE.with(|table| {
+            let id = table.register(
+                Some(Box::new(|_id: i64, args: &[i64]| -> i64 { args[0] + args[1] })),
+            );
+            // SAFETY: callback_trampoline is a safe-to-call extern "C" function; id is a valid registered callback ID and args are simple integers.
+            let result = unsafe { callback_trampoline(id, 3, 4, std::ptr::null_mut()) };
+            assert_eq!(result, 7);
+            table.remove(id);
+        });
     }
 }

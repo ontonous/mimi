@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::cell::RefCell;
 use std::sync::{Arc, LazyLock, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::interp::Value;
@@ -48,7 +49,8 @@ impl CapTable {
     /// Register a new capability and return its unique ID.
     pub fn register(&self, name: &str) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock()
+            .expect("CAP_TABLE entries lock poisoned");
         entries.insert(id, CapEntry {
             name: name.to_string(),
             consumed: false,
@@ -59,7 +61,8 @@ impl CapTable {
     /// Check whether the cap with the given ID exists, matches the name, and
     /// has not been consumed.  Does NOT consume the cap.
     pub fn check(&self, id: i64, name: &str) -> bool {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = self.entries.lock()
+            .expect("CAP_TABLE entries lock poisoned");
         match entries.get(&id) {
             Some(entry) => !entry.consumed && entry.name == name,
             None => false,
@@ -70,7 +73,8 @@ impl CapTable {
     /// the name, and was not already consumed.  After this call the cap is
     /// marked as consumed and cannot be used again.
     pub fn consume(&self, id: i64, name: &str) -> bool {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock()
+            .expect("CAP_TABLE entries lock poisoned");
         match entries.get_mut(&id) {
             Some(entry) if !entry.consumed && entry.name == name => {
                 entry.consumed = true;
@@ -82,7 +86,8 @@ impl CapTable {
 
     /// Remove a consumed cap from the table (cleanup).
     pub fn remove(&self, id: i64) -> bool {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock()
+            .expect("CAP_TABLE entries lock poisoned");
         entries.remove(&id).is_some()
     }
 }
@@ -93,10 +98,19 @@ impl Default for CapTable {
     }
 }
 
-/// Global capability table — tracks linear/affine cap values across FFI calls.
-///
-/// Thread-safe: `next_id` is `AtomicI64`, `entries` is `Mutex<HashMap>`.
-pub static CAP_TABLE: LazyLock<CapTable> = LazyLock::new(CapTable::new);
+thread_local! {
+    /// Per-thread capability table — tracks linear/affine cap values across FFI calls.
+    ///
+    /// Using a thread-local table isolates cap state per Mimi invocation/test
+    /// thread. Caps registered on one thread are only visible to C code invoked
+    /// on that same thread.
+    static CAP_TABLE: CapTable = CapTable::new();
+}
+
+/// Execute a closure with the current thread's capability table.
+pub fn with_cap_table<R, F: FnOnce(&CapTable) -> R>(f: F) -> R {
+    CAP_TABLE.with(f)
+}
 
 // ---------------------------------------------------------------------------
 // SharedHandleTable
@@ -124,25 +138,29 @@ impl SharedHandle {
     /// Execute a closure with a read-only reference to the inner value.
     /// Safe, scoped access — prefer this over raw pointer APIs.
     pub fn with_value<R>(&self, f: impl FnOnce(&Value) -> R) -> R {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.read()
+            .expect("SharedHandle inner read lock poisoned");
         f(&*guard)
     }
 
     /// Execute a closure with a mutable reference to the inner value.
     /// Safe, scoped access — prefer this over raw pointer APIs.
     pub fn with_value_mut<R>(&self, f: impl FnOnce(&mut Value) -> R) -> R {
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.write()
+            .expect("SharedHandle inner write lock poisoned");
         f(&mut *guard)
     }
 
     /// Get a read guard for the inner value.
     pub fn borrow(&self) -> RwLockReadGuard<'_, Value> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner())
+        self.inner.read()
+            .expect("SharedHandle inner read lock poisoned")
     }
 
     /// Get a write guard for the inner value.
     pub fn borrow_mut(&self) -> RwLockWriteGuard<'_, Value> {
-        self.inner.write().unwrap_or_else(|e| e.into_inner())
+        self.inner.write()
+            .expect("SharedHandle inner write lock poisoned")
     }
 
     /// Retain: increment the C-side strong reference count.
@@ -169,7 +187,7 @@ impl SharedHandle {
 
 impl Drop for SharedHandle {
     fn drop(&mut self) {
-        let _ = SHARED_TABLE.remove(self.id);
+        let _ = with_shared_table(|table| table.remove(self.id));
     }
 }
 
@@ -192,14 +210,16 @@ impl SharedHandleTable {
     pub fn create(&self, inner: Arc<RwLock<Value>>) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(SharedHandle::new(id, inner));
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock()
+            .expect("SHARED_TABLE handles lock poisoned");
         handles.insert(id, handle);
         id
     }
 
     /// Get a reference to the handle by ID.
     pub fn get(&self, id: i64) -> Option<Arc<SharedHandle>> {
-        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let handles = self.handles.lock()
+            .expect("SHARED_TABLE handles lock poisoned");
         handles.get(&id).cloned()
     }
 
@@ -217,12 +237,14 @@ impl SharedHandleTable {
     /// removes the handle from the table and returns `true`.
     pub fn release(&self, id: i64) -> bool {
         let handle = {
-            let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+            let handles = self.handles.lock()
+                .expect("SHARED_TABLE handles lock poisoned");
             handles.get(&id).cloned()
         };
         if let Some(handle) = handle {
             if handle.release() {
-                let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+                let mut handles = self.handles.lock()
+                    .expect("SHARED_TABLE handles lock poisoned");
                 handles.remove(&id);
                 return true;
             }
@@ -232,13 +254,15 @@ impl SharedHandleTable {
 
     /// Remove a handle from the table unconditionally (cleanup).
     pub fn remove(&self, id: i64) -> bool {
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock()
+            .expect("SHARED_TABLE handles lock poisoned");
         handles.remove(&id).is_some()
     }
 
     /// Get the number of active handles (for diagnostics).
     pub fn len(&self) -> usize {
-        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let handles = self.handles.lock()
+            .expect("SHARED_TABLE handles lock poisoned");
         handles.len()
     }
 }
@@ -249,10 +273,49 @@ impl Default for SharedHandleTable {
     }
 }
 
-/// Global shared handle table — tracks reference-counted values across FFI calls.
-///
-/// Thread-safe: `next_id` is `AtomicI64`, `handles` is `Mutex<HashMap>`.
-pub static SHARED_TABLE: LazyLock<SharedHandleTable> = LazyLock::new(SharedHandleTable::new);
+thread_local! {
+    /// Per-thread shared handle table — tracks reference-counted values across FFI calls.
+    ///
+    /// Using a thread-local table isolates shared-handle state per Mimi
+    /// invocation/test thread. Handles created on one thread are only visible to
+    /// C code invoked on that same thread.
+    static SHARED_TABLE: SharedHandleTable = SharedHandleTable::new();
+}
+
+/// Execute a closure with the current thread's shared handle table.
+pub fn with_shared_table<R, F: FnOnce(&SharedHandleTable) -> R>(f: F) -> R {
+    SHARED_TABLE.with(f)
+}
+
+/// Convenience wrappers for the per-thread shared handle table.
+pub fn shared_table_create(inner: Arc<RwLock<Value>>) -> i64 {
+    SHARED_TABLE.with(|table| table.create(inner))
+}
+
+pub fn shared_table_get(id: i64) -> Option<Arc<SharedHandle>> {
+    SHARED_TABLE.with(|table| table.get(id))
+}
+
+pub fn shared_table_retain(id: i64) -> bool {
+    SHARED_TABLE.with(|table| table.retain(id))
+}
+
+pub fn shared_table_release(id: i64) -> bool {
+    SHARED_TABLE.with(|table| table.release(id))
+}
+
+/// Convenience wrappers for the per-thread capability table.
+pub fn cap_table_register(name: &str) -> i64 {
+    CAP_TABLE.with(|table| table.register(name))
+}
+
+pub fn cap_table_check(id: i64, name: &str) -> bool {
+    CAP_TABLE.with(|table| table.check(id, name))
+}
+
+pub fn cap_table_consume(id: i64, name: &str) -> bool {
+    CAP_TABLE.with(|table| table.consume(id, name))
+}
 
 // ---------------------------------------------------------------------------
 // C ABI functions (callable from generated code and interpreter)
@@ -261,14 +324,14 @@ pub static SHARED_TABLE: LazyLock<SharedHandleTable> = LazyLock::new(SharedHandl
 /// Retain a shared handle.  Returns the handle ID (same as input).
 #[no_mangle]
 pub extern "C" fn mimi_shared_retain(handle: i64) -> i64 {
-    SHARED_TABLE.retain(handle);
+    SHARED_TABLE.with(|table| { table.retain(handle); });
     handle
 }
 
 /// Release a shared handle.
 #[no_mangle]
 pub extern "C" fn mimi_shared_release(handle: i64) {
-    SHARED_TABLE.release(handle);
+    SHARED_TABLE.with(|table| { table.release(handle); });
 }
 
 /// Read the inner value of a shared handle and return a heap-allocated copy.
@@ -277,7 +340,7 @@ pub extern "C" fn mimi_shared_release(handle: i64) {
 /// Returns null if the handle is invalid.
 #[no_mangle]
 pub extern "C" fn mimi_shared_get_ptr(handle: i64) -> *const Value {
-    let h = match SHARED_TABLE.get(handle) {
+    let h = match SHARED_TABLE.with(|table| table.get(handle)) {
         Some(h) => h,
         None => return std::ptr::null(),
     };
@@ -308,7 +371,7 @@ pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> boo
     let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .unwrap_or("");
-    CAP_TABLE.check(cap, name_str)
+    CAP_TABLE.with(|table| table.check(cap, name_str))
 }
 
 /// Consume a capability.  Returns true if the cap was valid and consumed.
@@ -321,7 +384,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
     let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .unwrap_or("");
-    CAP_TABLE.consume(cap, name_str)
+    CAP_TABLE.with(|table| table.consume(cap, name_str))
 }
 
 /// Free a raw string that was obtained via `string.into_raw()`.
@@ -352,7 +415,7 @@ pub extern "C" fn mimi_string_as_c_str(mimi_string: *const Value) -> *const std:
                     Ok(c_str) => {
                         let ptr = c_str.as_ptr();
                         // Register for cleanup — caller must call mimi_string_as_c_str_free
-                        PENDING_C_STRINGS.lock().unwrap_or_else(|e| e.into_inner()).push(c_str);
+                        PENDING_C_STRINGS.with(|pending| pending.borrow_mut().push(c_str));
                         ptr
                     }
                     Err(_) => {
@@ -375,17 +438,19 @@ pub extern "C" fn mimi_string_as_c_str_free(c_str: *const std::ffi::c_char) {
     if c_str.is_null() {
         return;
     }
-    let mut pending = PENDING_C_STRINGS.lock().unwrap_or_else(|e| e.into_inner());
-    pending.retain(|cs| cs.as_ptr() != c_str);
+    PENDING_C_STRINGS.with(|pending| {
+        pending.borrow_mut().retain(|cs| cs.as_ptr() != c_str);
+    });
 }
 
-/// Global registry of CStrings allocated by `mimi_string_as_c_str`.
-/// Each call to `mimi_string_as_c_str` pushes a new `CString` here to
-/// keep the pointer alive.  Callers MUST call `mimi_string_as_c_str_free`
-/// to release the entry.  Entries that are never freed will leak until
-/// process exit (OS reclaims the memory).
-static PENDING_C_STRINGS: std::sync::LazyLock<Mutex<Vec<std::ffi::CString>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+thread_local! {
+    /// Per-thread registry of CStrings allocated by `mimi_string_as_c_str`.
+    /// Each call to `mimi_string_as_c_str` pushes a new `CString` here to
+    /// keep the pointer alive.  Callers MUST call `mimi_string_as_c_str_free`
+    /// to release the entry.  Entries that are never freed will leak until
+    /// thread exit.
+    static PENDING_C_STRINGS: RefCell<Vec<std::ffi::CString>> = RefCell::new(Vec::new());
+}
 
 /// Convert a Mimi string to a raw C string (transfer ownership to C).
 /// The caller is responsible for calling `mimi_string_free_raw` on the result.
@@ -479,12 +544,15 @@ impl MimiThreadPool {
         for _ in 0..size {
             let receiver = std::sync::Arc::clone(&receiver);
             let worker = thread::spawn(move || loop {
-                let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                let task = receiver.lock()
+                    .expect("MIMI_POOL receiver lock poisoned")
+                    .recv();
                 match task {
                     Ok(task) => {
                         let _ = (task.func)(task.arg);
                         // Decrement pending count and notify waiters
-                        let mut count = task.pending.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut count = task.pending.lock()
+                            .expect("MIMI_POOL pending counter lock poisoned");
                         *count -= 1;
                         if *count == 0 {
                             task.completion.notify_all();
@@ -500,7 +568,8 @@ impl MimiThreadPool {
     }
 
     pub fn submit_raw(&self, func: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
-        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock()
+            .expect("MIMI_POOL pending counter lock poisoned");
         *count += 1;
         if let Some(ref sender) = self.sender {
             let _ = sender.send(RawTask {
@@ -538,7 +607,8 @@ impl MimiThreadPool {
             (data.func)(data.arg);
             std::ptr::null_mut()
         }
-        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock()
+            .expect("MIMI_POOL pending counter lock poisoned");
         *count += 1;
         if let Some(ref sender) = self.sender {
             let _ = sender.send(RawTask {
@@ -552,9 +622,11 @@ impl MimiThreadPool {
 
     /// Wait until all submitted tasks have completed.
     pub fn join_all(&self) {
-        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock()
+            .expect("MIMI_POOL pending counter lock poisoned");
         while *count > 0 {
-            count = self.completion.wait(count).unwrap_or_else(|e| e.into_inner());
+            count = self.completion.wait(count)
+                .expect("MIMI_POOL completion condvar lock poisoned");
         }
     }
 }
