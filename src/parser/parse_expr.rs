@@ -643,6 +643,27 @@ impl Parser {
         }
         Ok(fields)
     }
+
+    fn parse_quote_block(&mut self) -> Result<Block, ParseError> {
+        let mut stmts = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof) {
+                break;
+            }
+            if self.at(&TokenKind::DollarParen) {
+                self.advance();
+                let inner = self.parse_expr(0)?;
+                self.expect(TokenKind::RParen, "`)`")?;
+                stmts.push(Stmt::Expr(Expr::QuoteInterpolate(Box::new(inner))));
+            } else {
+                stmts.push(self.parse_stmt()?);
+            }
+        }
+        self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(stmts)
+    }
 }
 
 /// Check if a token kind is a keyword that can be used as an identifier in expression context.

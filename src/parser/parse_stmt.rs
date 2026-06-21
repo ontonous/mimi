@@ -441,4 +441,135 @@ impl Parser {
         }
         Ok(parts)
     }
+
+    pub(crate) fn parse_brace_block(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_with_terminator(TokenKind::RBrace, "`}`")
+    }
+
+    pub(crate) fn parse_indent_block(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_with_terminator(TokenKind::Dedent, "dedent")
+    }
+
+    fn parse_block_with_terminator(&mut self, terminator: TokenKind, label: &str) -> Result<Block, ParseError> {
+        // In recovery mode, catch statement errors and continue
+        if self.recovery_mode {
+            return self.parse_block_with_recovery(terminator, label);
+        }
+        let mut stmts = Vec::new();
+        self.skip_newlines();
+        while !self.at(&terminator) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&terminator) || self.at(&TokenKind::Eof) {
+                break;
+            }
+            if self.at(&TokenKind::Requires) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                self.expect(TokenKind::Colon, "`:`")?;
+                let expr = self.parse_expr(0)?;
+                stmts.push(Stmt::Requires(expr, span));
+                continue;
+            }
+            if self.at(&TokenKind::Ensures) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                self.expect(TokenKind::Colon, "`:`")?;
+                let expr = self.parse_expr(0)?;
+                stmts.push(Stmt::Ensures(expr, span));
+                continue;
+            }
+            if self.at(&TokenKind::Math) {
+                self.advance();
+                self.expect(TokenKind::Colon, "`:`")?;
+                self.skip_newlines();
+                self.expect(TokenKind::LBrace, "`{` for math block")?;
+                let mut exprs = Vec::new();
+                self.skip_newlines();
+                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    exprs.push(self.parse_expr(0)?);
+                    self.match_semi();
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RBrace, "`}`")?;
+                stmts.push(Stmt::Math(exprs));
+                continue;
+            }
+            if self.at(&TokenKind::Desc) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                stmts.push(Stmt::Desc(s, span));
+                continue;
+            }
+            if self.at(&TokenKind::Rule) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                stmts.push(Stmt::Desc(format!("rule: {}", s), span));
+                continue;
+            }
+            stmts.push(self.parse_stmt()?);
+        }
+        self.expect(terminator, label)?;
+        Ok(stmts)
+    }
+
+    /// Parse a block with error recovery: catches statement errors and continues.
+    /// Always returns Ok with partial results; errors are collected internally.
+    fn parse_block_with_recovery(&mut self, terminator: TokenKind, label: &str) -> Result<Block, ParseError> {
+        let mut stmts = Vec::new();
+        self.skip_newlines();
+        while !self.at(&terminator) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&terminator) || self.at(&TokenKind::Eof) {
+                break;
+            }
+            if self.at(&TokenKind::Requires) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                if self.expect(TokenKind::Colon, "`:`").is_ok() {
+                    if let Ok(expr) = self.parse_expr(0) {
+                        stmts.push(Stmt::Requires(expr, span));
+                    }
+                }
+                continue;
+            }
+            if self.at(&TokenKind::Ensures) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                if self.expect(TokenKind::Colon, "`:`").is_ok() {
+                    if let Ok(expr) = self.parse_expr(0) {
+                        stmts.push(Stmt::Ensures(expr, span));
+                    }
+                }
+                continue;
+            }
+            if self.at(&TokenKind::Desc) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                if let Ok(s) = self.expect_string() {
+                    stmts.push(Stmt::Desc(s, span));
+                }
+                continue;
+            }
+            if self.at(&TokenKind::Rule) {
+                let span = Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                if let Ok(s) = self.expect_string() {
+                    stmts.push(Stmt::Desc(format!("rule: {}", s), span));
+                }
+                continue;
+            }
+            match self.parse_stmt() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(_) => {
+                    self.advance();
+                }
+            }
+        }
+        let _ = self.expect(terminator, label);
+        Ok(stmts)
+    }
 }
