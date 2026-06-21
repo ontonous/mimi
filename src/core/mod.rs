@@ -1923,7 +1923,7 @@ pub fn fmt_type(t: &Type) -> String {
         Type::RefMut(lt, inner) => {
             if let Some(l) = lt { format!("&'{} mut {}", l, fmt_type(inner)) } else { format!("&mut {}", fmt_type(inner)) }
         }
-        Type::Option(inner) => format!("{}?", fmt_type(inner)),
+        Type::Option(inner) => format!("Option<{}>", fmt_type(inner)),
         Type::Result(ok, err) => format!("Result<{}, {}>", fmt_type(ok), fmt_type(err)),
         Type::Tuple(elems) => format!("({})", elems.iter().map(fmt_type).collect::<Vec<_>>().join(", ")),
         Type::Func(args, ret) => format!(
