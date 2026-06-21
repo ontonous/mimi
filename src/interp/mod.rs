@@ -21,7 +21,7 @@ pub type InterpResult<T> = std::result::Result<T, InterpError>;
 use crate::ast::*;
 use crate::ffi::FfiContract;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use closure_utils::collect_free_vars;
 
