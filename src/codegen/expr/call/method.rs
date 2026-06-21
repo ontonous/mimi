@@ -1,8 +1,9 @@
 use crate::ast::*;
-use crate::codegen::{call_try_basic_value, CodeGenerator, VarEntry};
+use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::IntPredicate;
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -17,8 +18,56 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Method call: obj.method(args)
         // Determine the type of the object to find the actor/trait name
         let obj_type = self.infer_object_type(obj, vars);
+
+        // 0. Special case: weak<T>.upgrade() -> Option<T*>
+        if method_name == "upgrade" && (obj_type.starts_with("weak ") || obj_type.starts_with("weak_local ")) {
+            if let Expr::Ident(name) = obj {
+                let &(alloca, val_ty) = vars.get(name)
+                    .ok_or_else(|| CompileError::LlvmError(format!("weak variable '{}' not found", name)))?;
+                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+                let heap_ptr = self.builder.build_load(
+                    BasicTypeEnum::PointerType(ptr_ty), alloca, "weak_heap_ptr"
+                ).map_err(|e| CompileError::LlvmError(format!("weak heap ptr load: {}", e)))?.into_pointer_value();
+                let heap_i8 = self.builder.build_pointer_cast(heap_ptr, i8_ptr, "weak_heap_i8")
+                    .map_err(|e| CompileError::LlvmError(format!("weak cast: {}", e)))?;
+                let upgrade_fn = self.module.get_function("mimi_rc_upgrade")
+                    .ok_or_else(|| CompileError::LlvmError("mimi_rc_upgrade not declared".to_string()))?;
+                let upgraded = self.builder.build_call(upgrade_fn, &[
+                    BasicMetadataValueEnum::PointerValue(heap_i8),
+                ], "weak_upgrade")
+                    .map_err(|e| CompileError::LlvmError(format!("upgrade call: {}", e)))?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("mimi_rc_upgrade returned void".to_string()))?
+                    .into_pointer_value();
+                // Build Option<T*> as { i1 disc, i64 payload }
+                let option_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(self.context.bool_type()),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let option_alloca = self.builder.build_alloca(option_ty, "upgrade_opt")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                let disc_gep = self.builder.build_struct_gep(option_ty, option_alloca, 0, "disc_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                let payload_gep = self.builder.build_struct_gep(option_ty, option_alloca, 1, "payload_gep")
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                let is_some = self.builder.build_int_compare(
+                    IntPredicate::NE, upgraded, i8_ptr.const_null(), "is_some"
+                ).map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))?;
+                self.builder.build_store(disc_gep, is_some)
+                    .map_err(|e| CompileError::LlvmError(format!("store disc: {}", e)))?;
+                let payload = self.builder.build_ptr_to_int(upgraded, self.context.i64_type(), "upgrade_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?;
+                self.builder.build_store(payload_gep, payload)
+                    .map_err(|e| CompileError::LlvmError(format!("store payload: {}", e)))?;
+                let result = self.builder.build_load(option_ty, option_alloca, "upgrade_opt_val")
+                    .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
+                return Ok(result);
+            }
+        }
+
         let actor_method = format!("{}__{}__method", obj_type, method_name);
-        
+
         // 1. Try actor method dispatch
         if let Some(function) = self.module.get_function(&actor_method) {
             let mut obj_val = self.compile_expr(obj, vars)?;

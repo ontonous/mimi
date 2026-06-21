@@ -1431,26 +1431,52 @@ fn e2e_shared_write_through_copy() {
 }
 
 #[test]
+fn e2e_weak_upgrade_some() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            shared x = 42;
+            weak w: weak i32 = x;
+            let upgraded: Option<i32> = w.upgrade();
+            println(if upgraded.is_some() { 1 } else { 0 });
+            0
+        }
+    "#).expect("src/tests/codegen_e2e.rs:e2e_weak_upgrade_some unwrap failed");
+    assert_eq!(stdout.trim(), "1", "weak.upgrade() should return Some while shared is alive");
+}
+
+#[test]
+fn e2e_weak_local_upgrade_some() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            local_shared x = 42;
+            weak_local w: weak_local i32 = x;
+            let upgraded: Option<i32> = w.upgrade();
+            println(if upgraded.is_some() { 1 } else { 0 });
+            0
+        }
+    "#).expect("src/tests/codegen_e2e.rs:e2e_weak_local_upgrade_some unwrap failed");
+    assert_eq!(stdout.trim(), "1", "weak_local.upgrade() should return Some while local_shared is alive");
+}
+
+#[test]
 fn e2e_valgrind_shared_weak_lifecycle() {
-    // Placeholder: shared/weak valgrind test.
-    // Codegen now implements shared ref counting (mimi_rc_retain on copy),
-    // but weak references are not yet compiled.
-    // Once weak refs are implemented in codegen, this test should:
-    //   1. Create a shared value and weak ref
-    //   2. Drop the shared value (scope exit)
-    //   3. Verify weak.upgrade() returns None
-    //   4. Valgrind should detect no leaks (cycle-free case)
+    // Weak references are now compiled with retain/release accounting.
+    // This test verifies that a weak ref can be upgraded while the shared
+    // value is still alive and that both are cleaned up without leaks.
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     if !can_valgrind() { eprintln!("SKIP: valgrind not available"); return; }
     let stdout = compile_and_run_valgrind(r#"
         func main() -> i32 {
             shared x = 42;
-            let v = x;  // copy of shared (currently just a stack copy)
-            println(v)
+            weak w: weak i32 = x;
+            let upgraded: Option<i32> = w.upgrade();
+            if upgraded.is_none() { return 2 }
             0
         }
-    "#).expect("src/tests/codegen_e2e.rs:1452 unwrap failed");
-    assert_eq!(stdout.trim(), "42");
+    "#).expect("src/tests/codegen_e2e.rs:e2e_valgrind_shared_weak_lifecycle unwrap failed");
+    assert_eq!(stdout.trim(), "0");
 }
 
 // ===================== Network Module (P2-5) =====================

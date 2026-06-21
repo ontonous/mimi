@@ -174,10 +174,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Push a new shared variable scope
     pub(super) fn push_shared_scope(&mut self) {
         self.shared_release_vars.push(Vec::new());
+        self.weak_release_vars.push(Vec::new());
     }
 
     /// Pop the current shared variable scope and emit release calls for all
-    /// shared variables declared in it.
+    /// shared and weak variables declared in it.
     pub(super) fn pop_shared_scope(&mut self) -> MimiResult<()> {
         if let Some(scope) = self.shared_release_vars.pop() {
             if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
@@ -189,10 +190,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+        if let Some(scope) = self.weak_release_vars.pop() {
+            if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
+                for heap_ptr in &scope {
+                    self.builder.build_call(release_fn, &[
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(*heap_ptr),
+                    ], "weak_release")
+                        .map_err(|e| CompileError::LlvmError(format!("weak release error: {}", e)))?;
+                }
+            }
+        }
         Ok(())
     }
 
-    /// Release all remaining shared variables at function exit
+    /// Release all remaining shared and weak variables at function exit
     pub(super) fn release_all_shared(&mut self) -> MimiResult<()> {
         let all_release: Vec<inkwell::values::PointerValue<'ctx>> = self.shared_release_vars
             .iter()
@@ -207,14 +218,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("shared release error: {}", e)))?;
             }
         }
+        let all_weak: Vec<inkwell::values::PointerValue<'ctx>> = self.weak_release_vars
+            .iter()
+            .flat_map(|scope| scope.iter())
+            .copied()
+            .collect();
+        if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
+            for heap_ptr in all_weak {
+                self.builder.build_call(release_fn, &[
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(heap_ptr),
+                ], "weak_release")
+                    .map_err(|e| CompileError::LlvmError(format!("weak release error: {}", e)))?;
+            }
+        }
         self.shared_release_vars.clear();
         self.shared_release_vars.push(Vec::new());
+        self.weak_release_vars.clear();
+        self.weak_release_vars.push(Vec::new());
         Ok(())
     }
 
     /// Register a shared variable's heap pointer for release on scope exit
     pub(super) fn register_shared_var(&mut self, heap_ptr: inkwell::values::PointerValue<'ctx>) {
         if let Some(scope) = self.shared_release_vars.last_mut() {
+            scope.push(heap_ptr);
+        }
+    }
+
+    /// Register a weak variable's heap pointer for weak_release on scope exit
+    pub(super) fn register_weak_var(&mut self, heap_ptr: inkwell::values::PointerValue<'ctx>) {
+        if let Some(scope) = self.weak_release_vars.last_mut() {
             scope.push(heap_ptr);
         }
     }

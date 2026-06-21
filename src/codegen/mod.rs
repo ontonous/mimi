@@ -79,6 +79,8 @@ pub struct CodeGenerator<'ctx> {
     comp_scope_stack: Vec<usize>,
     /// Stack of shared variable heap pointers that need release on scope exit.
     shared_release_vars: Vec<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// Stack of weak reference heap pointers that need weak_release on scope exit.
+    weak_release_vars: Vec<Vec<inkwell::values::PointerValue<'ctx>>>,
     /// Names of variables declared with `shared let` (for special access handling).
     shared_var_names: std::collections::HashSet<String>,
     /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
@@ -123,7 +125,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, shared: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new(), extern_param_types: HashMap::new(), callback_thunk_counter: 0, callback_thunks: HashMap::new(), spawn_result_types: HashMap::new(), pending_spawn_type: None, record_type_names: std::collections::HashSet::new(), repr_c_record_names: std::collections::HashSet::new(), tuple_type_stack: Vec::new(), pending_len_is_string: false }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, shared: false, verify_contracts: true, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], weak_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new(), extern_param_types: HashMap::new(), callback_thunk_counter: 0, callback_thunks: HashMap::new(), spawn_result_types: HashMap::new(), pending_spawn_type: None, record_type_names: std::collections::HashSet::new(), repr_c_record_names: std::collections::HashSet::new(), tuple_type_stack: Vec::new(), pending_len_is_string: false }
     }
 
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
@@ -310,7 +312,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         match kind {
             crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
                 // Weak reference: init must be an existing shared variable.
-                // Store the heap pointer without calling mimi_rc_retain.
                 if let Expr::Ident(src_name) = init {
                     let &(src_alloca, val_ty) = vars.get(src_name)
                         .ok_or_else(|| CompileError::LlvmError(
@@ -320,13 +321,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicTypeEnum::PointerType(ptr_ty), src_alloca,
                         &format!("{}_weak_load", name),
                     ).map_err(|e| CompileError::LlvmError(format!("weak load: {}", e)))?.into_pointer_value();
+
+                    // Increment the weak refcount on the heap allocation.
+                    let heap_i8 = self.builder.build_pointer_cast(
+                        heap_ptr_typed, i8_ptr, &format!("{}_weak_i8", name))
+                        .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
+                    let weak_retain_fn = self.module.get_function("mimi_rc_weak_retain")
+                        .ok_or_else(|| CompileError::LlvmError("mimi_rc_weak_retain not declared".to_string()))?;
+                    self.builder.build_call(weak_retain_fn, &[
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(heap_i8),
+                    ], &format!("{}_weak_retain", name))
+                        .map_err(|e| CompileError::LlvmError(format!("weak retain error: {}", e)))?;
+
                     let new_alloca = self.builder.build_alloca(ptr_ty, name)
                         .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
                     self.builder.build_store(new_alloca, heap_ptr_typed)
                         .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                     vars.insert(name.clone(), (new_alloca, val_ty));
                     self.shared_var_names.insert(name.clone());
-                    // Weak refs are NOT registered for release (no strong ref held)
+                    // Register the weak pointer so it is released when the weak ref goes out of scope.
+                    self.register_weak_var(heap_i8);
                     return Ok(());
                 }
                 return Err(CompileError::LlvmError(

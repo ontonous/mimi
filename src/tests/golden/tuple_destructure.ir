@@ -71,6 +71,12 @@ declare void @mimi_rc_retain(ptr)
 
 declare void @mimi_rc_release(ptr)
 
+declare void @mimi_rc_weak_retain(ptr)
+
+declare void @mimi_rc_weak_release(ptr)
+
+declare ptr @mimi_rc_upgrade(ptr)
+
 declare i32 @mimi_cap_check(i64, ptr)
 
 declare i64 @mimi_cap_register(ptr)

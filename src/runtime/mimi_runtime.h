@@ -124,13 +124,19 @@ void mimi_runtime_abort(const char* msg);
 void mimi_runtime_set_error_handler(void (*handler)(const char*));
 
 /* Refcounted heap allocation for shared values.
-   mimi_rc_alloc(size) allocates sizeof(MimiRcHeader) + size bytes,
-   initializes refcount to 1, and returns a pointer to the user data.
-   mimi_rc_retain(ptr) increments the refcount.
-   mimi_rc_release(ptr) decrements the refcount; frees when it reaches 0. */
+   Layout: [ strong_count | weak_count | user data ... ]
+   mimi_rc_alloc(size) initializes strong=1, weak=0.
+   mimi_rc_retain/release manage the strong refcount.
+   mimi_rc_weak_retain/release manage the weak refcount.
+   The allocation is freed only when both strong and weak reach 0.
+   mimi_rc_upgrade(ptr) returns ptr (and increments strong) if the object is
+   still alive, or NULL if the strong refcount has already reached 0. */
 void* mimi_rc_alloc(int64_t size);
 void mimi_rc_retain(void* ptr);
 void mimi_rc_release(void* ptr);
+void mimi_rc_weak_retain(void* ptr);
+void mimi_rc_weak_release(void* ptr);
+void* mimi_rc_upgrade(void* ptr);
 
 /* Integer power: __mimi_pow_i64(base, exp) -> base^exp (i64).
    Returns 0 on overflow (use safe_arith::checked_pow semantics). */

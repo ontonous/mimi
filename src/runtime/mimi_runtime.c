@@ -224,23 +224,46 @@ void mimi_try_exit(int64_t payload) {
 }
 
 /* MIMI_NO_STD stub: refcounted allocation uses bump allocator (no atomics) */
+typedef struct { int64_t strong; int64_t weak; } MimiRcHeader;
+
 void* mimi_rc_alloc(int64_t size) {
-    size_t total = sizeof(int64_t) + (size_t)size;
-    int64_t* hdr = (int64_t*)malloc(total);
+    size_t total = sizeof(MimiRcHeader) + (size_t)size;
+    MimiRcHeader* hdr = (MimiRcHeader*)malloc(total);
     if (!hdr) return (void*)0;
-    *hdr = 1;  /* refcount = 1 */
+    hdr->strong = 1;
+    hdr->weak = 0;
     return (void*)(hdr + 1);
 }
 void mimi_rc_retain(void* ptr) {
     if (!ptr) return;
-    int64_t* hdr = (int64_t*)ptr - 1;
-    (*hdr)++;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    hdr->strong++;
 }
 void mimi_rc_release(void* ptr) {
     if (!ptr) return;
-    int64_t* hdr = (int64_t*)ptr - 1;
-    (*hdr)--;
-    if (*hdr <= 0) free(hdr);
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    hdr->strong--;
+    if (hdr->strong <= 0 && hdr->weak <= 0) free(hdr);
+}
+void mimi_rc_weak_retain(void* ptr) {
+    if (!ptr) return;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    hdr->weak++;
+}
+void mimi_rc_weak_release(void* ptr) {
+    if (!ptr) return;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    hdr->weak--;
+    if (hdr->strong <= 0 && hdr->weak <= 0) free(hdr);
+}
+void* mimi_rc_upgrade(void* ptr) {
+    if (!ptr) return (void*)0;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    if (hdr->strong > 0) {
+        hdr->strong++;
+        return ptr;
+    }
+    return (void*)0;
 }
 
 #else /* !MIMI_NO_STD — normal libc build */
@@ -254,29 +277,58 @@ void mimi_rc_release(void* ptr) {
 #include <stdatomic.h>
 
 /* Reference-counted heap allocation.
-   Layout: [ int64_t refcount | user data ... ]
+   Layout: [ strong_count | weak_count | user data ... ]
    Returns pointer to user data (right after the refcount header). */
+typedef struct { atomic_int_least64_t strong; atomic_int_least64_t weak; } MimiRcHeader;
+
 void* mimi_rc_alloc(int64_t size) {
-    size_t total = sizeof(atomic_int_least64_t) + (size_t)size;
-    atomic_int_least64_t* hdr = (atomic_int_least64_t*)malloc(total);
+    size_t total = sizeof(MimiRcHeader) + (size_t)size;
+    MimiRcHeader* hdr = (MimiRcHeader*)malloc(total);
     if (!hdr) return (void*)0;
-    atomic_init(hdr, 1);
+    atomic_init(&hdr->strong, 1);
+    atomic_init(&hdr->weak, 0);
     return (void*)(hdr + 1);
 }
 
 void mimi_rc_retain(void* ptr) {
     if (!ptr) return;
-    atomic_int_least64_t* hdr = (atomic_int_least64_t*)ptr - 1;
-    atomic_fetch_add(hdr, 1);
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    atomic_fetch_add(&hdr->strong, 1);
 }
 
 void mimi_rc_release(void* ptr) {
     if (!ptr) return;
-    atomic_int_least64_t* hdr = (atomic_int_least64_t*)ptr - 1;
-    int64_t prev = atomic_fetch_sub(hdr, 1);
-    if (prev <= 1) {
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    atomic_fetch_sub(&hdr->strong, 1);
+    if (atomic_load(&hdr->strong) <= 0 && atomic_load(&hdr->weak) <= 0) {
         free(hdr);
     }
+}
+
+void mimi_rc_weak_retain(void* ptr) {
+    if (!ptr) return;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    atomic_fetch_add(&hdr->weak, 1);
+}
+
+void mimi_rc_weak_release(void* ptr) {
+    if (!ptr) return;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    atomic_fetch_sub(&hdr->weak, 1);
+    if (atomic_load(&hdr->strong) <= 0 && atomic_load(&hdr->weak) <= 0) {
+        free(hdr);
+    }
+}
+
+void* mimi_rc_upgrade(void* ptr) {
+    if (!ptr) return (void*)0;
+    MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
+    int64_t s;
+    do {
+        s = atomic_load(&hdr->strong);
+        if (s == 0) return (void*)0;
+    } while (!atomic_compare_exchange_weak(&hdr->strong, &s, s + 1));
+    return ptr;
 }
 
 #define INITIAL_CAPACITY 16
