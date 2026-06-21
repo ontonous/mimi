@@ -202,6 +202,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             Vec::new()
         };
 
+        // Snapshot parameters for old() in ensures contracts.
+        // At function entry, copy each parameter to an old-snapshot alloca so that
+        // old(x) in postconditions reads the entry-time value, not the current value.
+        self.old_snapshots.clear();
+        if !self.ensures_stmts.is_empty() {
+            let snap_vars: Vec<(String, inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)> = vars.iter()
+                .map(|(name, &(alloca, ty))| (name.clone(), alloca, ty))
+                .collect();
+            for (name, alloca, ty) in snap_vars {
+                let old_alloca = self.builder.build_alloca(ty, &format!("{}_old", name))
+                    .map_err(|e| CompileError::LlvmError(format!("old snapshot alloca: {}", e)))?;
+                let val = self.builder.build_load(ty, alloca, &format!("{}_snap", name))
+                    .map_err(|e| CompileError::LlvmError(format!("old snapshot load: {}", e)))?;
+                self.builder.build_store(old_alloca, val)
+                    .map_err(|e| CompileError::LlvmError(format!("old snapshot store: {}", e)))?;
+                self.old_snapshots.insert(name, (old_alloca, ty));
+            }
+        }
+
         // Compile requires contracts as runtime asserts when verify_contracts is enabled
         if self.verify_contracts {
             for stmt in &func.body {

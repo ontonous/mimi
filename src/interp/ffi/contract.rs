@@ -42,17 +42,11 @@ impl<'a> Interpreter<'a> {
         if let Some(requires_expr) = &contract.requires {
             let result = self.eval_expr(requires_expr);
             match result {
-                Ok(Value::Bool(true)) => { /* precondition holds */ }
-                Ok(Value::Bool(false)) => {
+                Ok(val) if is_truthy(&val) => { /* precondition holds */ }
+                Ok(_) => {
                     return Err(Errno::Generic(format!(
                         "FFI contract violation: precondition of '{}' failed",
                         extern_func.name
-                    )));
-                }
-                Ok(other) => {
-                    return Err(Errno::Generic(format!(
-                        "FFI contract error: precondition of '{}' must evaluate to bool, got {}",
-                        extern_func.name, other
                     )));
                 }
                 Err(e) => {
@@ -80,17 +74,11 @@ impl<'a> Interpreter<'a> {
             let eval_result = self.eval_expr(ensures_expr);
             self.pop_scope();
             match eval_result {
-                Ok(Value::Bool(true)) => { /* postcondition holds */ }
-                Ok(Value::Bool(false)) => {
+                Ok(val) if is_truthy(&val) => { /* postcondition holds */ }
+                Ok(_) => {
                     return Err(Errno::Generic(format!(
                         "FFI contract violation: postcondition of '{}' failed",
                         extern_func.name
-                    )));
-                }
-                Ok(other) => {
-                    return Err(Errno::Generic(format!(
-                        "FFI contract error: postcondition of '{}' must evaluate to bool, got {}",
-                        extern_func.name, other
                     )));
                 }
                 Err(e) => {

@@ -94,9 +94,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         inner: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // old(expr): snapshot value at function entry
-        // For codegen, old() is transparent — just compile the inner expression
-        self.compile_expr(inner, vars)
+        // old(expr): snapshot value at function entry.
+        // Merge old snapshots into the vars map so variable references within
+        // old() resolve to the entry-time alloca, not the current value.
+        if self.old_snapshots.is_empty() {
+            self.compile_expr(inner, vars)
+        } else {
+            let mut old_vars = vars.clone();
+            for (name, entry) in &self.old_snapshots {
+                old_vars.insert(name.clone(), *entry);
+            }
+            self.compile_expr(inner, &old_vars)
+        }
     }
 
     #[allow(clippy::only_used_in_recursion)]
