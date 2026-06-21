@@ -74,7 +74,9 @@ impl Default for CallbackTable {
     }
 }
 
-/// Global callback table instance
+/// Global callback table — tracks registered Mimi closures available to C code.
+///
+/// Thread-safe: `next_id` is `AtomicI64`, `handles` is `Mutex<HashMap>`.
 pub static CALLBACK_TABLE: LazyLock<CallbackTable> = LazyLock::new(CallbackTable::new);
 
 

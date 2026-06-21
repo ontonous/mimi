@@ -1052,7 +1052,19 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    let results = verifier::verify_source(&source)?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let merged_file = if !file.imports.is_empty() {
+        let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+        let mut loader = loader::ModuleLoader::new(base_dir);
+        loader.load_main(&path)?;
+        loader.merge_all()?
+    } else {
+        file
+    };
+
+    let results = verifier::verify_file(&merged_file)?;
     if results.is_empty() {
         println!("No contracts to verify in {}", path.display());
     } else {

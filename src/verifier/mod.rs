@@ -1289,6 +1289,15 @@ pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     Ok(verifier.verify_file(&file))
 }
 
+/// Verify contracts in a parsed file (supports pre-merged imports).
+pub fn verify_file(file: &File) -> Result<Vec<VerificationResult>, String> {
+    let mut verifier = match Verifier::new() {
+        Ok(v) => v,
+        Err(_) => return Ok(mock_verify_file(file)),
+    };
+    Ok(verifier.verify_file(file))
+}
+
 /// Parse source and verify extern call sites using Z3.
 pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let tokens = crate::lexer::Lexer::new(source).tokenize()?;

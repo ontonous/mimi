@@ -91,7 +91,9 @@ impl Default for CapTable {
     }
 }
 
-/// Global cap table instance.
+/// Global capability table — tracks linear/affine cap values across FFI calls.
+///
+/// Thread-safe: `next_id` is `AtomicI64`, `entries` is `Mutex<HashMap>`.
 pub static CAP_TABLE: LazyLock<CapTable> = LazyLock::new(CapTable::new);
 
 // ---------------------------------------------------------------------------
@@ -245,7 +247,9 @@ impl Default for SharedHandleTable {
     }
 }
 
-/// Global shared handle table instance.
+/// Global shared handle table — tracks reference-counted values across FFI calls.
+///
+/// Thread-safe: `next_id` is `AtomicI64`, `handles` is `Mutex<HashMap>`.
 pub static SHARED_TABLE: LazyLock<SharedHandleTable> = LazyLock::new(SharedHandleTable::new);
 
 // ---------------------------------------------------------------------------
