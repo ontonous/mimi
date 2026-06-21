@@ -1003,13 +1003,13 @@ impl<'a> Checker<'a> {
                             let inner = self.infer_expr(&args[0], scopes);
                             return Type::Option(Box::new(inner));
                         }
-                        return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                        return Type::Option(Box::new(Type::Name("_".into(), vec![])));
                     }
                     "None" => {
                         if args.len() != 0 {
                             self.emit_code(crate::diagnostic::codes::E0242, "None expects 0 arguments");
                         }
-                        return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                        return Type::Option(Box::new(Type::Name("_".into(), vec![])));
                     }
                     "Ok" => {
                         if args.len() != 1 {
@@ -1018,12 +1018,12 @@ impl<'a> Checker<'a> {
                             let inner = self.infer_expr(&args[0], scopes);
                             return Type::Result(
                                 Box::new(inner),
-                                Box::new(Type::Name("unknown".into(), vec![])),
+                                Box::new(Type::Name("_".into(), vec![])),
                             );
                         }
                         return Type::Result(
-                            Box::new(Type::Name("unknown".into(), vec![])),
-                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new(Type::Name("_".into(), vec![])),
+                            Box::new(Type::Name("_".into(), vec![])),
                         );
                     }
                     "Err" => {
@@ -1032,13 +1032,13 @@ impl<'a> Checker<'a> {
                         } else {
                             let inner = self.infer_expr(&args[0], scopes);
                             return Type::Result(
-                                Box::new(Type::Name("unknown".into(), vec![])),
+                                Box::new(Type::Name("_".into(), vec![])),
                                 Box::new(inner),
                             );
                         }
                         return Type::Result(
-                            Box::new(Type::Name("unknown".into(), vec![])),
-                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new(Type::Name("_".into(), vec![])),
+                            Box::new(Type::Name("_".into(), vec![])),
                         );
                     }
                     _ => {}

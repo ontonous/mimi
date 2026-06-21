@@ -171,17 +171,18 @@ dual_assert_contract_ok(program)
 
 | 修复 Commit | 审计发现 | L1 双后端测试 | L2 类型检查测试 |
 |------------|----------|--------------|----------------|
-| `6459fdb` | match guard SIGSEGV / 枚举布局 | `dual_gap_match_guard_*` (已忽略), `dual_gap_enum_match_payload` (已忽略), `dual_gap_enum_bool_variant` (已忽略) | — |
-| `6459fdb` | tuple/array 元素级匹配 | `dual_gap_match_tuple_*` (已忽略) | — |
-| `b08855a` | 枚举序号确定性（排序变体名） | `dual_gap_enum_reorder_stable` (已忽略) | — |
+| `6459fdb` | match guard SIGSEGV / 枚举布局 | `dual_gap_match_guard_*` ✅, `dual_gap_enum_match_payload` ✅, `dual_gap_enum_bool_variant` ✅ | — |
+| `6459fdb` | tuple/array 元素级匹配 | `dual_gap_match_tuple_*` ✅ | — |
+| `b08855a` | 枚举序号确定性（排序变体名） | `dual_gap_enum_reorder_stable` ✅ | — |
 | `2f1477f` | `old()` 在 codegen 中快照 | `dual_contract_ensures_old_dual` ✅, `dual_contract_old_tautology` ✅ | — |
 | `eedf8be` | comptime 隔离（错误信息） | — | `adv_comptime_block_error_message` ✅, `adv_comptime_func_call_error_message` ✅, `adv_quote_block_error_message` ✅, `adv_quote_interpolate_error_message` ✅ |
-| `4cf48e9` | push 变异语义 | `dual_gap_push_mut_content` (已忽略) | — |
+| `4cf48e9` | push 变异语义 | `dual_gap_push_mut_content` ✅ | — |
 | `5d9add0` | 内置函数统一（25 个） | `builtin_registry.rs` (已存在) | — |
 | `4f7e760` | `fmt_type` Option 格式一致 | — | `fmt_type_option_consistent_with_same_type` ✅, `fmt_type_option_nested` ✅, `fmt_type_result_contains_option` ✅ |
 | `e895f82` | 数值类型提升 `is_numeric_coercion` | — | `typecheck_numeric_coercion_i32_to_i64_let` ✅, `typecheck_numeric_coercion_i32_to_i64_arg` ✅, `typecheck_numeric_coercion_i32_to_f64` ✅ |
 | `e895f82` | ensures `result` 绑定 | — | `typecheck_ensures_result_binding` ✅ |
 | `10802d7` | NaN 排序语义 | (跳过: 无 `nan()` 内建) | — |
+| 本次修复 | match guard / tuple / enum / contains 回归 | `dual_match_guard_mixed_literal`, `dual_match_tuple_bind_vars`, `dual_enum_custom_mixed_variants`, `dual_contains_false`, `dual_contains_empty`, `dual_push_mut_read_back` ✅ | — |
 
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
@@ -191,12 +192,15 @@ dual_assert_contract_ok(program)
 
 | 差距 | 影响 | 测试 | 根本原因 |
 |------|------|------|---------|
-| match guard SIGSEGV | 所有带 guard 的 match 在代码生成时崩溃 | `dual_gap_match_guard_*` | `compile_match_expr` 中 LLVM IR 分支目标/phi 节点问题 |
-| tuple 模式匹配 | match tuple 表达式失败 | `dual_gap_match_tuple_*` | `StructValue` 被误判为枚举结构体 |
-| 单元枚举变体构造函数 | `Yes`, `No`, `Pending` 等未注册 | `dual_gap_enum_*` | codegen 中未注册无负载变体 |
-| 枚举负载匹配 | 标签序号错误（bool→i32 vs i32→i64） | `dual_gap_enum_match_payload` | 解释器和 codegen 标签编码不一致 |
-| push 就地变异 | `push()` 可能不就地修改列表 | `dual_gap_push_mut_content` | 列表变异 ABI |
-| contains SIGSEGV | `contains()` 内建在 codegen 中崩溃 | `dual_gap_builtin_contains_true` | 列表迭代 C 运行时问题 |
+| 嵌套 enum 作为 payload | 外层 enum 的 payload 字段为单一 `i64`，无法完整保存内层 enum 的 `{i32, i64}` 结构 | `codegen_match_nested`（仅验证 IR 生成） | `register_type_def` 对 payload 类型统一使用 `i64` |
+
+以下差距已在本轮 IDD 修复中关闭：
+
+- match guard SIGSEGV
+- tuple 模式匹配
+- 单元/负载枚举变体构造函数与匹配
+- `push()` 就地变异
+- `contains()` SIGSEGV
 
 CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增功能的 L1 测试不可跳过；和代码一起提交。
 
@@ -206,7 +210,7 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 
 ```
 1.  cargo test                          # 所有测试（1,700+ 个）
-2.  cargo test dual_                    # 双后端等价性（L1，95 个启用）
+2.  cargo test dual_                    # 双后端等价性（L1，112 个启用）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
 5.  cargo test ffi_                     # FFI 契约等价性

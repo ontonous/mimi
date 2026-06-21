@@ -26,6 +26,11 @@ impl<'a> Checker<'a> {
                 return ret.clone();
             }
         }
+
+        // Built-in bare None constructor
+        if name == "None" {
+            return Type::Option(Box::new(Type::Infer));
+        }
         // Check if it's a type name (actor/record or enum)
         if let Some(tdef) = self.types.get(name) {
             if matches!(tdef.kind, TypeDefKind::Record(_) | TypeDefKind::Enum(_) | TypeDefKind::Union(_)) {

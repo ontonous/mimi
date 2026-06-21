@@ -124,14 +124,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let ret_type = effective_ret_override.or_else(|| {
             match &func.ret {
-                Some(ty) => types::mimi_type_to_llvm(self.context, ty),
+                Some(ty) => self.llvm_type_for(ty),
                 None => None,
             }
         }).unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
 
         let mut param_types = Vec::new();
         for param in &func.params {
-            if let Some(ty) = types::mimi_type_to_llvm(self.context, &param.ty) {
+            if let Some(ty) = self.llvm_type_for(&param.ty) {
                 param_types.push(ty);
             }
         }
@@ -168,7 +168,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         for (i, param) in func.params.iter().enumerate() {
-            if let Some(ty) = types::mimi_type_to_llvm(self.context, &param.ty) {
+            if let Some(ty) = self.llvm_type_for(&param.ty) {
                 let alloca = self.builder.build_alloca(ty, &param.name)
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                 self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::LlvmError(format!("param index {} out of range for function '{}' with {} params", i, func.name, function.count_params())))?)
@@ -639,7 +639,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             match &func.ret {
                 Some(ty) => {
                     let resolved = self.resolve_type(ty);
-                    types::mimi_type_to_llvm(self.context, &resolved)
+                    self.llvm_type_for(&resolved)
                 }
                 None => None,
             }
@@ -648,7 +648,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut param_types = Vec::new();
         for param in &func.params {
             let resolved = self.resolve_type(&param.ty);
-            if let Some(ty) = types::mimi_type_to_llvm(self.context, &resolved) {
+            if let Some(ty) = self.llvm_type_for(&resolved) {
                 param_types.push(ty);
             }
         }
@@ -675,7 +675,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         for (i, param) in func.params.iter().enumerate() {
             let resolved = self.resolve_type(&param.ty);
-            if let Some(ty) = types::mimi_type_to_llvm(self.context, &resolved) {
+            if let Some(ty) = self.llvm_type_for(&resolved) {
                 let alloca = self.builder.build_alloca(ty, &param.name)
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                 self.builder.build_store(alloca, function.get_nth_param(i as u32).ok_or_else(|| CompileError::LlvmError("param index matches".to_string()))?)

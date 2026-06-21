@@ -249,6 +249,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Resolve a Mimi type to its LLVM representation, preferring registered
+    /// type definitions (records, enums, actors) over the built-in name mapping.
+    pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
+        if let crate::ast::Type::Name(name, _) = ty {
+            if let Some(llvm) = self.type_llvm.get(name) {
+                return Some(*llvm);
+            }
+        }
+        crate::codegen::types::mimi_type_to_llvm(self.context, ty)
+    }
+
     /// G2: Find the ordinal index of an enum variant name across all registered types.
     pub(super) fn find_variant_ordinal(&self, name: &str) -> Result<u64, CompileError> {
         for td in self.type_defs.values() {
@@ -262,9 +273,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+        // Built-in Result/Option variants (not present in type_defs).
+        match name {
+            "Ok" | "Some" => return Ok(1),
+            "Err" | "None" => return Ok(0),
+            _ => {}
+        }
         Err(CompileError::Generic(format!(
             "enum variant '{}' not found in any registered enum type definition", name
         )))
+    }
+
+    /// G2: Find the owning type name and ordinal of an enum variant name.
+    /// Returns `None` if `name` is not a variant in any registered enum type.
+    pub(super) fn find_variant_owner(&self, name: &str) -> Option<(String, u64)> {
+        for td in self.type_defs.values() {
+            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+                sorted.sort_by_key(|v| &v.name);
+                for (i, v) in sorted.iter().enumerate() {
+                    if v.name == name {
+                        return Some((td.name.clone(), i as u64));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Compute the size in bytes of an LLVM type using a portable layout.

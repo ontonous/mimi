@@ -351,13 +351,6 @@ pub(crate) fn compile_and_run_with_csrc(src: &str, extra_c: &str) -> Result<Stri
     compile_and_run_with_config(src, &E2EConfig { extra_c_src: Some(extra_c.to_string()), ..Default::default() })
 }
 
-/// Run a program through both backends, asserting neither crashes.
-/// Useful when the Mimi source uses assert_eq/assert internally.
-pub(crate) fn dual_assert_ok(src: &str) {
-    run_source(src);
-    compile_and_run(src).expect("codegen failed");
-}
-
 /// Run a Mimi source with contracts enabled through both backends,
 /// asserting both succeed. Does NOT compare stdout (contracts may
 /// produce different diagnostic output between backends).

@@ -919,20 +919,8 @@ fn dual_contract_old_tautology() {
 // When a gap is closed, remove #[ignore] and run: cargo test dual_gap_
 // ───────────────────────────────────────────────────────────────
 
-macro_rules! dual_gap_assert {
-    ($name:expr, $src:expr, $expected:expr) => {
-        #[test]
-        #[ignore = concat!("codegen gap: ", $name)]
-        fn gap_test() {
-            if !can_link() { return; }
-            dual_assert!($src, $expected);
-        }
-    };
-}
-
 // 24a. Match guard crashes codegen with SIGSEGV (6459fdb: LLVM IR branch target issue)
 #[test]
-#[ignore = "codegen gap: match guard LLVM IR generates SIGSEGV (branch target / phi issue in compile_match_expr)"]
 fn dual_gap_match_guard_basic() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -949,7 +937,6 @@ fn dual_gap_match_guard_basic() {
 }
 
 #[test]
-#[ignore = "codegen gap: same SIGSEGV as dual_gap_match_guard_basic"]
 fn dual_gap_match_guard_fallback() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -966,7 +953,6 @@ fn dual_gap_match_guard_fallback() {
 }
 
 #[test]
-#[ignore = "codegen gap: same SIGSEGV as dual_gap_match_guard_basic"]
 fn dual_gap_match_guard_all_fail() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -985,7 +971,6 @@ fn dual_gap_match_guard_all_fail() {
 
 // 24b. Tuple patterns treated as enum structs (6459fdb: compile_match_expr GEP logic)
 #[test]
-#[ignore = "codegen gap: tuple StructValue conflated with enum struct in compile_match_expr, GEP fails"]
 fn dual_gap_match_tuple_elements() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1002,7 +987,6 @@ fn dual_gap_match_tuple_elements() {
 }
 
 #[test]
-#[ignore = "codegen gap: same GEP issue as dual_gap_match_tuple_elements"]
 fn dual_gap_match_tuple_wildcard() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1020,7 +1004,6 @@ fn dual_gap_match_tuple_wildcard() {
 
 // 24c. Enum ordinal determinism (b08855a) — unit variants not constructible in codegen
 #[test]
-#[ignore = "codegen gap: unit enum variant constructors not registered (Pending, Inactive, etc.)"]
 fn dual_gap_enum_reorder_stable() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1038,7 +1021,6 @@ fn dual_gap_enum_reorder_stable() {
 
 // 24d. Enum match with payload — codegen produces wrong ordinal (tag mismatch)
 #[test]
-#[ignore = "codegen gap: enum tag ordinal mismatch between interpreter (bool->i32) and codegen"]
 fn dual_gap_enum_match_payload() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1054,7 +1036,6 @@ fn dual_gap_enum_match_payload() {
 }
 
 #[test]
-#[ignore = "codegen gap: unit enum variant None not constructible in codegen"]
 fn dual_gap_enum_match_none() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1071,7 +1052,6 @@ fn dual_gap_enum_match_none() {
 
 // 24e. Push mutation semantics (4cf48e9) — push() mutating list in codegen
 #[test]
-#[ignore = "codegen gap: push() may not mutate list content in place in codegen"]
 fn dual_gap_push_mut_content() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1085,7 +1065,6 @@ fn dual_gap_push_mut_content() {
 
 // 24f. Contains builtin (5d9add0) — codegen SIGSEGV
 #[test]
-#[ignore = "codegen gap: contains() builtin causes SIGSEGV in generated code"]
 fn dual_gap_builtin_contains_true() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1098,7 +1077,6 @@ fn dual_gap_builtin_contains_true() {
 
 // 24g. Enum bool layout (6459fdb) — bool tag vs i32 tag in codegen
 #[test]
-#[ignore = "codegen gap: unit enum variant constructors not registered (Yes, No)"]
 fn dual_gap_enum_bool_variant() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1111,4 +1089,95 @@ fn dual_gap_enum_bool_variant() {
         }
         func main() -> i32 { println(is_yes(Yes)); 0 }
     "#, "1");
+}
+
+// ─── 25.  Regression tests for closed codegen gaps ───────────
+
+#[test]
+fn dual_match_guard_mixed_literal() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x = 7
+            let r = match x {
+                1 => 10
+                2 if x > 5 => 20
+                3 => 30
+                _ => 99
+            }
+            println(r); 0
+        }
+    "#, "99");
+}
+
+#[test]
+fn dual_match_tuple_bind_vars() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let t = (3, 4)
+            let r = match t {
+                (a, b) => a + b
+            }
+            println(r); 0
+        }
+    "#, "7");
+}
+
+#[test]
+fn dual_enum_custom_mixed_variants() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        type Status { Active(i32) Inactive Pending }
+        func describe(s: Status) -> i32 {
+            match s {
+                Active(v) => v
+                Inactive => -1
+                Pending => 0
+            }
+        }
+        func main() -> i32 {
+            println(describe(Active(42)));
+            println(describe(Inactive));
+            println(describe(Pending));
+            0
+        }
+    "#, "42\n-1\n0");
+}
+
+#[test]
+fn dual_contains_false() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let r = if contains([1, 2, 3], 5) { 1 } else { 0 }
+            println(r); 0
+        }
+    "#, "0");
+}
+
+#[test]
+fn dual_contains_empty() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let r = if contains([], 1) { 1 } else { 0 }
+            println(r); 0
+        }
+    "#, "0");
+}
+
+#[test]
+fn dual_push_mut_read_back() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let mut xs = [7]
+            push(xs, 8)
+            println(len(xs))
+            println(xs[0])
+            println(xs[1])
+            0
+        }
+    "#, "2\n7\n8");
 }

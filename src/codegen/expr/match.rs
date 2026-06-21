@@ -11,64 +11,117 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         arm: &MatchArm,
         scrutinee_val: BasicValueEnum<'ctx>,
-        scrutinee_iv: inkwell::values::IntValue<'ctx>,
+        scrutinee_iv: Option<inkwell::values::IntValue<'ctx>>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<HashMap<String, VarEntry<'ctx>>, CompileError> {
         let mut local_vars = vars.clone();
         // Bind variables from pattern
         match &arm.pat {
             Pattern::Variable(name) => {
-                let alloca = self.builder.build_alloca(
-                    BasicTypeEnum::IntType(self.context.i64_type()),
-                    name,
-                ).map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder.build_store(alloca, scrutinee_iv)
+                // Uppercase identifiers that name enum variants are treated as
+                // unit constructor patterns, not variable bindings.
+                if self.find_variant_ordinal(name).is_ok() {
+                    return Ok(local_vars);
+                }
+                let (val, ty) = if let Some(iv) = scrutinee_iv {
+                    (iv.into(), BasicTypeEnum::IntType(iv.get_type()))
+                } else {
+                    match scrutinee_val {
+                        BasicValueEnum::IntValue(iv) => (iv.into(), BasicTypeEnum::IntType(iv.get_type())),
+                        _ => {
+                            // For non-integer scrutinees bind the value directly.
+                            let ty = scrutinee_val.get_type();
+                            (scrutinee_val, ty)
+                        }
+                    }
+                };
+                let alloca = self.builder.build_alloca(ty, name)
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder.build_store(alloca, val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                local_vars.insert(name.clone(), (alloca, BasicTypeEnum::IntType(self.context.i64_type())));
+                local_vars.insert(name.clone(), (alloca, ty));
             }
             Pattern::Constructor(_, inner_patterns) => {
-                // For constructor patterns, bind inner variables
-                // For now, assume single inner variable
+                // For constructor patterns, bind inner variables from the payload field.
+                // All enum-like representations in this codegen put the tag at index 0
+                // and the first payload field at index 1.
+                let (payload, payload_ty) = match scrutinee_val {
+                    BasicValueEnum::StructValue(sv) => {
+                        let payload = self.builder.build_extract_value(sv, 1, "payload")
+                            .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+                        let ty = sv.get_type()
+                            .get_field_type_at_index(1)
+                            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                        (payload, ty)
+                    }
+                    BasicValueEnum::PointerValue(pv) => {
+                        // Enum values stored as pointers use the common {i32 tag, i64 payload}
+                        // layout produced by register_type_def.
+                        let enum_ty = self.context.struct_type(&[
+                            BasicTypeEnum::IntType(self.context.i32_type()),
+                            BasicTypeEnum::IntType(self.context.i64_type()),
+                        ], false);
+                        let loaded = self.builder.build_load(enum_ty, pv, "enum_loaded")
+                            .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
+                        let sv = match loaded {
+                            BasicValueEnum::StructValue(sv) => sv,
+                            _ => return Err("constructor pattern: expected struct from pointer".into()),
+                        };
+                        let payload = self.builder.build_extract_value(sv, 1, "payload")
+                            .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+                        (payload, BasicTypeEnum::IntType(self.context.i64_type()))
+                    }
+                    BasicValueEnum::IntValue(iv) => {
+                        // Legacy/compact representation: some enum values are passed as a
+                        // single integer (e.g. nested enum payloads). Bind the payload to the
+                        // integer itself so that nested pattern matches still compile.
+                        (iv.into(), BasicTypeEnum::IntType(iv.get_type()))
+                    }
+                    _ => return Err("constructor pattern requires enum struct value".into()),
+                };
                 for inner_pat in inner_patterns {
                     if let Pattern::Variable(name) = inner_pat {
-                        let alloca = self.builder.build_alloca(
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            name,
-                        ).map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                        self.builder.build_store(alloca, scrutinee_iv)
+                        let alloca = self.builder.build_alloca(payload_ty, name)
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        self.builder.build_store(alloca, payload)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        local_vars.insert(name.clone(), (alloca, BasicTypeEnum::IntType(self.context.i64_type())));
+                        local_vars.insert(name.clone(), (alloca, payload_ty));
                     }
                 }
             }
             Pattern::Tuple(inner_pats) => {
-                // For tuple patterns, bind inner variables by loading from struct
+                // For tuple patterns, bind inner variables by loading from struct.
+                // Use the tuple type stack to obtain the real element types.
+                let struct_ty = *self.tuple_type_stack.last()
+                    .ok_or_else(|| CompileError::LlvmError("tuple_type_stack empty for tuple pattern bind".to_string()))?;
+                let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
                 let scrutinee_ptr = match scrutinee_val {
                     BasicValueEnum::PointerValue(pv) => pv,
+                    BasicValueEnum::StructValue(sv) => {
+                        let alloca = self.builder.build_alloca(struct_ty, "tuple_alloca")
+                            .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                        self.builder.build_store(alloca, sv)
+                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                        alloca
+                    }
                     _ => return Ok(local_vars),
                 };
-                // Determine tuple element types from the struct
-                let _elem_count = inner_pats.len();
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
+                        let elem_ty = struct_ty.get_field_type_at_index(j as u32)
+                            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
                         let gep = self.builder.build_struct_gep(
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            scrutinee_ptr,
-                            j as u32,
+                            struct_ty_enum, scrutinee_ptr, j as u32,
                             &format!("tuple_{}", j),
                         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let val = self.builder.build_load(
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            gep,
-                            &format!("tup_{}", j),
+                            elem_ty, gep, &format!("tup_{}", j),
                         ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                        let alloca = self.builder.build_alloca(
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            name,
-                        ).map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        let alloca = self.builder.build_alloca(elem_ty, name)
+                            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(alloca, val)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        local_vars.insert(name.clone(), (alloca, BasicTypeEnum::IntType(self.context.i64_type())));
+                        local_vars.insert(name.clone(), (alloca, elem_ty));
                     }
                 }
             }
@@ -174,17 +227,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         inner_pats: &[Pattern],
     ) -> Result<Option<inkwell::values::IntValue<'ctx>>, CompileError> {
         let i64_ty = self.context.i64_type();
-        let tuple_ptr = match scrutinee {
-            BasicValueEnum::PointerValue(pv) => pv,
-            BasicValueEnum::StructValue(sv) => {
-                let alloca = self.builder.build_alloca(sv.get_type(), "tuple_alloca")
+        // Normalize to a struct value so we can use the real struct type for GEPs.
+        let (tuple_ptr, struct_ty) = match scrutinee {
+            BasicValueEnum::PointerValue(pv) => {
+                let struct_ty = *self.tuple_type_stack.last()
+                    .ok_or_else(|| CompileError::LlvmError("tuple_type_stack empty for tuple pattern".to_string()))?;
+                let loaded = self.builder.build_load(struct_ty, pv, "tuple_pat_loaded")
+                    .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
+                let sv = match loaded {
+                    BasicValueEnum::StructValue(sv) => sv,
+                    _ => return Err("tuple pattern: expected struct from pointer".into()),
+                };
+                let alloca = self.builder.build_alloca(struct_ty, "tuple_alloca")
                     .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
                 self.builder.build_store(alloca, sv)
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                alloca
+                (alloca, struct_ty)
+            }
+            BasicValueEnum::StructValue(sv) => {
+                let struct_ty = sv.get_type();
+                let alloca = self.builder.build_alloca(struct_ty, "tuple_alloca")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                self.builder.build_store(alloca, sv)
+                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                (alloca, struct_ty)
             }
             _ => return Err("tuple pattern requires struct value".into()),
         };
+        let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
         let mut agg: Option<inkwell::values::IntValue<'ctx>> = None;
         for (j, pat) in inner_pats.iter().enumerate() {
             let lit_val = match pat {
@@ -198,11 +268,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             if let Some(expected) = lit_val {
                 let elem_ptr = self.builder.build_struct_gep(
-                    BasicTypeEnum::IntType(i64_ty), tuple_ptr, j as u32,
+                    struct_ty_enum, tuple_ptr, j as u32,
                     &format!("tup_el{}", j),
                 ).map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                let elem_ty = struct_ty.get_field_type_at_index(j as u32)
+                    .unwrap_or(BasicTypeEnum::IntType(i64_ty));
                 let elem_val = self.builder.build_load(
-                    BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("tup_v{}", j),
+                    elem_ty, elem_ptr, &format!("tup_v{}", j),
                 ).map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?
                     .into_int_value();
                 let eq = self.builder.build_int_compare(
@@ -296,28 +368,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let scrutinee_val = self.compile_expr(scrutinee, vars)?;
-        let scrutinee_iv = match scrutinee_val {
-            BasicValueEnum::IntValue(iv) => iv,
+        // Only integer/enum matches need a tag value. Tuple/array/slice matches
+        // work directly on the scrutinee value, so avoid extracting a tag from
+        // a pointer that may actually point to a tuple/list struct.
+        let needs_tag = arms.iter().any(|arm| {
+            matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_))
+        });
+        let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = match scrutinee_val {
+            BasicValueEnum::IntValue(iv) => Some(iv),
             BasicValueEnum::StructValue(sv) => {
                 let tag = self.builder.build_extract_value(sv, 0, "enum_tag")
                     .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
                     .into_int_value();
-                self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
-                    .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?
+                Some(self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
+                    .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?)
             }
-            BasicValueEnum::PointerValue(pv) => {
-                let i32_ty = self.context.i32_type();
-                let struct_ptr = self.builder.build_struct_gep(
-                    BasicTypeEnum::IntType(i32_ty), pv, 0, "tag_gep",
+            BasicValueEnum::PointerValue(pv) if needs_tag => {
+                // Enum pointers use the common {i32 tag, i64 payload} layout.
+                let enum_ty = self.context.struct_type(&[
+                    BasicTypeEnum::IntType(self.context.i32_type()),
+                    BasicTypeEnum::IntType(self.context.i64_type()),
+                ], false);
+                let tag_gep = self.builder.build_struct_gep(
+                    BasicTypeEnum::StructType(enum_ty), pv, 0, "tag_gep",
                 ).map_err(|e| CompileError::LlvmError(format!("tag gep: {}", e)))?;
                 let tag = self.builder.build_load(
-                    BasicTypeEnum::IntType(i32_ty), struct_ptr, "tag_load",
+                    BasicTypeEnum::IntType(self.context.i32_type()), tag_gep, "tag_load",
                 ).map_err(|e| CompileError::LlvmError(format!("tag load: {}", e)))?
                     .into_int_value();
-                self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
-                    .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?
+                Some(self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
+                    .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?)
             }
-            _ => return Err("match scrutinee must be integer or enum struct".into()),
+            _ => None,
         };
 
         let function = self.current_function().ok_or_else(|| "codegen: no current function for match".to_string())?;
@@ -338,16 +420,44 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             match &arm.pat {
                 Pattern::Wildcard | Pattern::Variable(_) => {
-                    // Always matches - jump to arm body
                     self.builder.position_at_end(else_bb);
-                    self.builder.build_unconditional_branch(arm_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    // Create a fresh else_bb so the after-loop code doesn't
-                    // double-terminate the block we just wrote to.
-                    else_bb = self.context.append_basic_block(function, &format!("wccont{}", i));
+                    // If the variable name is actually an enum variant, treat it as a
+                    // unit constructor pattern and compare the tag.
+                    let is_variant = if let Pattern::Variable(name) = &arm.pat {
+                        self.find_variant_ordinal(name).is_ok()
+                    } else {
+                        false
+                    };
+                    if is_variant {
+                        let scrutinee_iv = scrutinee_iv.ok_or_else(|| CompileError::LlvmError(
+                            "constructor match arm requires an enum scrutinee".to_string()))?;
+                        let ordinal = self.find_variant_ordinal(
+                            if let Pattern::Variable(name) = &arm.pat { name } else { "" }
+                        ).map_err(|e| CompileError::LlvmError(format!("match arm variant lookup: {}", e)))?;
+                        let tag_val = self.context.i64_type().const_int(ordinal, false);
+                        let cmp = self.builder.build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            scrutinee_iv,
+                            tag_val,
+                            "cmp",
+                        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+                        let next_bb = self.context.append_basic_block(function, &format!("next{}", i));
+                        self.builder.build_conditional_branch(cmp, arm_bb, next_bb)
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+                        else_bb = next_bb;
+                    } else {
+                        // Always matches - jump to arm body
+                        self.builder.build_unconditional_branch(arm_bb)
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+                        // Create a fresh else_bb so the after-loop code doesn't
+                        // double-terminate the block we just wrote to.
+                        else_bb = self.context.append_basic_block(function, &format!("wccont{}", i));
+                    }
                 }
                 Pattern::Literal(lit) => {
                     self.builder.position_at_end(else_bb);
+                    let scrutinee_iv = scrutinee_iv.ok_or_else(|| CompileError::LlvmError(
+                        "literal match arm requires an integer or enum scrutinee".to_string()))?;
                     let lit_val = match lit {
                         Lit::Int(n) => self.context.i64_type().const_int(*n as u64, true),
                         Lit::Bool(b) => self.context.bool_type().const_int(*b as u64, false),
@@ -371,6 +481,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Pattern::Constructor(name, _) => {
                     // Constructor pattern: compare tag using ordinal index
                     self.builder.position_at_end(else_bb);
+                    let scrutinee_iv = scrutinee_iv.ok_or_else(|| CompileError::LlvmError(
+                        "constructor match arm requires an enum scrutinee".to_string()))?;
                     // Look up the variant ordinal index from type definitions
                     let ordinal = self.find_variant_ordinal(name)
                         .map_err(|e| CompileError::LlvmError(format!("match arm variant lookup: {}", e)))?;
@@ -444,10 +556,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let guard_val = self.compile_expr(guard, &local_vars)?;
                     let guard_bool = match guard_val {
                         BasicValueEnum::IntValue(iv) => {
+                            let zero = iv.get_type().const_int(0, false);
                             self.builder.build_int_compare(
                                 inkwell::IntPredicate::NE,
                                 iv,
-                                self.context.i64_type().const_int(0, false),
+                                zero,
                                 "guard_cmp",
                             ).map_err(|e| CompileError::LlvmError(format!("guard cmp: {}", e)))?
                         }

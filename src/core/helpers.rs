@@ -153,6 +153,12 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
 }
 
 pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
+    // Internal inference placeholder "_" (e.g. bare `None`, `Ok`, `Err`) is
+    // compatible with any concrete type so that contextual annotations can
+    // resolve it. It is never produced by user-facing type annotations.
+    if matches!(a, Type::Name(n, _) if n == "_") || matches!(b, Type::Name(n, _) if n == "_") {
+        return true;
+    }
     // Only treat 'unknown' as matching if BOTH sides are unknown.
     // Single-sided unknown would mask cascade errors — let the
     // real type propagate so subsequent checks detect mismatches.

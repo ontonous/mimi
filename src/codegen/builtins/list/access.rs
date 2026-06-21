@@ -96,9 +96,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     _ => return Err(CompileError::TypeMismatch("contains: element comparison only supports i64 for now".to_string())),
                 };
-                self.builder.build_conditional_branch(eq, found_bb, loop_bb)
+                let inc_bb = self.context.append_basic_block(function, "contains_inc");
+                self.builder.build_conditional_branch(eq, found_bb, inc_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 // Next iteration
+                self.builder.position_at_end(inc_bb);
                 let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "next")
                     .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
                 self.builder.build_store(idx_alloca, next)

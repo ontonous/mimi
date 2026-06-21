@@ -86,6 +86,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_call(name, args, vars)
             }
             Expr::Field(obj, method_name) => {
+                // Namespaced enum constructor: TypeName::Variant(args)
+                if let Expr::Ident(type_name) = obj.as_ref() {
+                    let is_builtin_enum = type_name == "Result" || type_name == "Option";
+                    let is_custom_enum = self.type_defs.get(type_name)
+                        .map(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
+                        .unwrap_or(false);
+                    if is_builtin_enum {
+                        // Result::Ok/Err or Option::Some/None
+                        return self.compile_call(method_name, args, vars);
+                    }
+                    if is_custom_enum {
+                        let ctor_name = format!("{}_{}", type_name, method_name);
+                        if let Some(function) = self.module.get_function(&ctor_name) {
+                            let mut compiled_args = Vec::new();
+                            for arg in args {
+                                compiled_args.push(self.compile_expr(arg, vars)?);
+                            }
+                            let metadata_args: Vec<_> = compiled_args.iter().map(|v| match v {
+                                BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                                BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                                BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                                BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                                BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+                                BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+                                BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
+                            }).collect();
+                            let call = self.builder.build_call(function, &metadata_args, "enum_ctor")
+                                .map_err(|e| CompileError::LlvmError(format!("enum ctor call error: {}", e)))?;
+                            return Ok(call_try_basic_value(&call).unwrap_or(
+                                self.context.i64_type().const_int(0, false).into()
+                            ));
+                        }
+                    }
+                }
                 self.compile_method_call(obj, method_name, args, vars)
             }
             _ => Err("only direct function calls and method calls supported in codegen".into()),
@@ -232,7 +266,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_builtin_call(name, &metadata_args).map_err(|e| CompileError::Generic(e.to_string()));
         }
 
-        // Handle built-in Option/Result constructors
+        // Route enum variant constructors to their registered TypeName_VariantName
+        // functions. These functions are emitted in register_type_def for every
+        // enum variant. This takes precedence over the built-in Option/Result
+        // constructors so that user-defined enums with variants named Some/None/Ok/Err
+        // use the custom layout.
+        if let Some((type_name, _ordinal)) = self.find_variant_owner(name) {
+            let ctor_name = format!("{}_{}", type_name, name);
+            if let Some(function) = self.module.get_function(&ctor_name) {
+                let call = self.builder.build_call(function, &metadata_args, "call")
+                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                return Ok(call_try_basic_value(&call).unwrap_or(
+                    self.context.i64_type().const_int(0, false).into()
+                ));
+            }
+            return Err(format!("enum constructor '{}' not registered", ctor_name).into());
+        }
+
+        // Built-in Option/Result constructors (only used when no custom enum owns the name).
         match name {
             "Ok" | "Some" | "Err" | "None" => return self.compile_constructor(name, compiled_args),
             _ => {}

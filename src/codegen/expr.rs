@@ -90,6 +90,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 Err(format!("cap literal '{}' requires mimi_cap_register runtime", name).into())
             }
+        } else if self.find_variant_owner(name).is_some() {
+            // Unit enum variant used as a value (e.g. `Yes` or `Pending`)
+            self.compile_call(name, &[], vars)
+        } else if name == "None" {
+            // Bare built-in None constructor (e.g. `let x: Option<i32> = None`)
+            self.compile_constructor("None", vec![])
         } else {
             Err(format!("undefined variable '{}'", name).into())
         }
