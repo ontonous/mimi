@@ -150,6 +150,9 @@ enum Command {
         /// Verify contracts: compile requires/ensures as runtime asserts
         #[arg(long)]
         verify_contracts: bool,
+        /// Verify extern call sites satisfy preconditions (Z3)
+        #[arg(long)]
+        verify_ffi: bool,
         /// Build as shared library (.so) instead of executable
         #[arg(long)]
         shared: bool,
@@ -250,7 +253,7 @@ fn main() {
         Command::Fmt { files, check } => fmt_files(&files, check),
         Command::Lint { files } => lint_files(&files),
         Command::Verify { path } => verify(path.as_deref()),
-        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts, shared } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts, shared),
+        Command::Build { path, output, emit_ir, strict, no_std, verify_contracts, verify_ffi, shared } => build(path.as_deref(), output.as_deref(), emit_ir, strict, no_std, verify_contracts, verify_ffi, shared),
         Command::EmitCHeaders { path, output } => emit_c_headers(path.as_deref(), output.as_deref()),
         Command::EmitPyBindings { path, output, mimi_lib } => emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
         Command::Promote { path, output } => promote(&path, output.as_deref()),
@@ -1097,7 +1100,7 @@ fn verify(path: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, shared: bool) -> Result<(), String> {
+fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, verify_ffi: bool, shared: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -1129,6 +1132,35 @@ fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool
             }
         }
         return Err("type checking failed".into());
+    }
+
+    if verify_ffi {
+        match verifier::Verifier::with_timeout(5000) {
+            Ok(mut v) => {
+                let ffi_results = v.verify_ffi_call_sites(&merged_file);
+                for res in &ffi_results {
+                    match res.status {
+                        verifier::VerifStatus::Failed => {
+                            eprintln!("⚠  FFI violation: {} — {}", res.func_name, res.message);
+                            if let Some(diag) = &res.diagnostic {
+                                let formatted = format_diagnostic(diag, None, &path.display().to_string());
+                                eprint!("{}", formatted);
+                            }
+                        }
+                        verifier::VerifStatus::Unknown => {
+                            eprintln!("ℹ  {} — {}", res.func_name, res.message);
+                        }
+                        verifier::VerifStatus::Verified => {}
+                    }
+                }
+                if ffi_results.iter().any(|r| r.status == verifier::VerifStatus::Failed) {
+                    return Err("FFI contract verification failed".into());
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠  Skipping FFI verification: {}", e);
+            }
+        }
     }
 
     let context = inkwell::context::Context::create();

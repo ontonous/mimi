@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::contracts;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::{SatResult, Solver};
@@ -37,11 +37,12 @@ pub struct Counterexample {
 struct Z3VarMap {
     int_vars: HashMap<String, Z3Int>,
     real_vars: HashMap<String, Z3Real>,
+    string_nonempty: HashMap<String, Z3Bool>,
 }
 
 impl Z3VarMap {
     fn new() -> Self {
-        Self { int_vars: HashMap::new(), real_vars: HashMap::new() }
+        Self { int_vars: HashMap::new(), real_vars: HashMap::new(), string_nonempty: HashMap::new() }
     }
 
     fn insert_int(&mut self, name: impl Into<String>, var: Z3Int) {
@@ -52,6 +53,10 @@ impl Z3VarMap {
         self.real_vars.insert(name.into(), var);
     }
 
+    fn insert_string_nonempty(&mut self, name: impl Into<String>, var: Z3Bool) {
+        self.string_nonempty.insert(name.into(), var);
+    }
+
     #[inline]
     fn get_int(&self, name: &str) -> Option<&Z3Int> {
         self.int_vars.get(name)
@@ -60,6 +65,11 @@ impl Z3VarMap {
     #[inline]
     fn get_real(&self, name: &str) -> Option<&Z3Real> {
         self.real_vars.get(name)
+    }
+
+    #[inline]
+    fn get_string_nonempty(&self, name: &str) -> Option<&Z3Bool> {
+        self.string_nonempty.get(name)
     }
 
     #[inline]
@@ -299,6 +309,9 @@ impl Verifier {
         for p in &func.params {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                vars.insert_string_nonempty(p.name.as_str(), Z3Bool::new_const(format!("{}_ne", p.name)));
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -317,6 +330,9 @@ impl Verifier {
             let old_name = old_names[i].as_str();
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
                 vars.insert_real(old_name, Z3Real::new_const(old_name));
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+                vars.insert_int(old_name, Z3Int::new_const(old_name));
+                vars.insert_string_nonempty(old_name, Z3Bool::new_const(format!("{}_ne", old_name)));
             } else {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
             }
@@ -1004,6 +1020,18 @@ impl Verifier {
                 None
             }
             Expr::Binary(op, lhs, rhs) => {
+                // Check string emptiness comparison before int/real
+                if is_string_empty_cmp(lhs, rhs, op) {
+                    let (name, empty_op) = extract_string_empty_cmp(lhs, rhs, op);
+                    if let Some(ne) = vars.get_string_nonempty(&name) {
+                        match empty_op {
+                            BinOp::NeCmp => return Some(ne.clone()),
+                            BinOp::EqCmp => return Some(ne.not()),
+                            _ => {}
+                        }
+                    }
+                }
+
                 let use_real = self.is_real_expr(lhs, vars) || self.is_real_expr(rhs, vars);
 
                 match op {
@@ -1115,6 +1143,262 @@ impl Verifier {
             _ => false,
         }
     }
+
+    /// Verify that all extern call sites in the file satisfy the extern's `requires` clause.
+    pub fn verify_ffi_call_sites(&mut self, file: &File) -> Vec<VerificationResult> {
+        let mut results = Vec::new();
+        let mut externs: HashMap<String, ExternFunc> = HashMap::new();
+        Self::collect_externs(&file.items, &mut externs);
+        let extern_names: HashSet<String> = externs.keys().cloned().collect();
+
+        for item in &file.items {
+            if let Item::Func(func) = item {
+                if func.body.is_empty() {
+                    continue;
+                }
+                let calls = Self::find_extern_calls_in_func(func, &extern_names);
+                if calls.is_empty() {
+                    continue;
+                }
+                self.solver.reset();
+                let vars = self.setup_ffi_func_vars(func);
+                self.assert_func_requires(func, &vars);
+
+                for (extern_name, args) in &calls {
+                    if let Some(extern_func) = externs.get(extern_name.as_str()) {
+                        let result = self.check_extern_call(
+                            &func.name, extern_func, args, &vars,
+                        );
+                        results.push(result);
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Collect extern function definitions into a lookup map.
+    fn collect_externs(items: &[Item], externs: &mut HashMap<String, ExternFunc>) {
+        for item in items {
+            match item {
+                Item::ExternBlock(block) => {
+                    for func in &block.funcs {
+                        externs.insert(func.name.clone(), func.clone());
+                    }
+                }
+                Item::Module(m) => Self::collect_externs(&m.items, externs),
+                _ => {}
+            }
+        }
+    }
+
+    /// Find all extern function call sites in a function body.
+    fn find_extern_calls_in_func(func: &FuncDef, extern_names: &HashSet<String>) -> Vec<(String, Vec<Expr>)> {
+        let mut calls = Vec::new();
+        Self::find_extern_calls_in_block(&func.body, extern_names, &mut calls);
+        calls
+    }
+
+    fn find_extern_calls_in_block(
+        block: &[Stmt], extern_names: &HashSet<String>, calls: &mut Vec<(String, Vec<Expr>)>,
+    ) {
+        for stmt in block {
+            match stmt {
+                Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                    Self::find_extern_calls_in_expr(e, extern_names, calls);
+                }
+                Stmt::If { then_, else_, .. } => {
+                    Self::find_extern_calls_in_block(then_, extern_names, calls);
+                    if let Some(else_block) = else_ {
+                        Self::find_extern_calls_in_block(else_block, extern_names, calls);
+                    }
+                }
+                Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                    Self::find_extern_calls_in_block(body, extern_names, calls);
+                }
+                Stmt::Block(inner) | Stmt::Arena(inner) | Stmt::Unsafe(inner) | Stmt::Parasteps(inner) => {
+                    Self::find_extern_calls_in_block(inner, extern_names, calls);
+                }
+                Stmt::Let { init: Some(init), .. } | Stmt::Assign { value: init, .. } => {
+                    Self::find_extern_calls_in_expr(init, extern_names, calls);
+                }
+                Stmt::SharedLet { init, .. } => {
+                    Self::find_extern_calls_in_expr(init, extern_names, calls);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn find_extern_calls_in_expr(
+        expr: &Expr, extern_names: &HashSet<String>, calls: &mut Vec<(String, Vec<Expr>)>,
+    ) {
+        match expr {
+            Expr::Call(callee, args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if extern_names.contains(name.as_str()) {
+                        calls.push((name.clone(), args.clone()));
+                        return;
+                    }
+                }
+                // Recurse into args regardless of whether this is an extern call or not
+                for arg in args {
+                    Self::find_extern_calls_in_expr(arg, extern_names, calls);
+                }
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                Self::find_extern_calls_in_expr(lhs, extern_names, calls);
+                Self::find_extern_calls_in_expr(rhs, extern_names, calls);
+            }
+            Expr::Unary(_, inner) => {
+                Self::find_extern_calls_in_expr(inner, extern_names, calls);
+            }
+            Expr::If { cond, then_, else_ } => {
+                Self::find_extern_calls_in_expr(cond, extern_names, calls);
+                Self::find_extern_calls_in_block(then_, extern_names, calls);
+                if let Some(else_block) = else_ {
+                    Self::find_extern_calls_in_block(else_block, extern_names, calls);
+                }
+            }
+            Expr::Field(inner, _)
+            | Expr::Index(inner, _)
+            | Expr::Try(inner)
+            | Expr::Spawn(inner)
+            | Expr::Await(inner)
+            | Expr::Old(inner) => {
+                Self::find_extern_calls_in_expr(inner, extern_names, calls);
+            }
+            Expr::Tuple(items) | Expr::List(items) => {
+                for item in items {
+                    Self::find_extern_calls_in_expr(item, extern_names, calls);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Set up Z3 variables for a function (int, real, string).
+    fn setup_ffi_func_vars(&mut self, func: &FuncDef) -> Z3VarMap {
+        let mut vars = Z3VarMap::new();
+        for p in &func.params {
+            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                vars.insert_string_nonempty(p.name.as_str(), Z3Bool::new_const(format!("{}_ne", p.name)));
+            } else {
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+            }
+        }
+        vars
+    }
+
+    /// Assert function requires into the Z3 solver.
+    fn assert_func_requires(&mut self, func: &FuncDef, vars: &Z3VarMap) {
+        for stmt in &func.body {
+            if let Stmt::Requires(expr, _) = stmt {
+                if let Some(z3_bool) = self.expr_to_z3_bool(expr, vars) {
+                    self.solver.assert(&z3_bool);
+                }
+            }
+        }
+    }
+
+    /// Check that an extern call satisfies the extern's requires clause.
+    fn check_extern_call(
+        &mut self, caller_name: &str, extern_func: &ExternFunc, args: &[Expr], vars: &Z3VarMap,
+    ) -> VerificationResult {
+        let start = Instant::now();
+        let func_name = format!("{} calls {}", caller_name, extern_func.name);
+
+        let requires = match &extern_func.requires {
+            Some(r) => r,
+            None => {
+                return VerificationResult {
+                    func_name,
+                    status: VerifStatus::Verified,
+                    message: "extern has no precondition".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count: 0,
+                };
+            }
+        };
+
+        let substituted = substitute_args(requires, &extern_func.params, args);
+
+        let z3_requires = match self.expr_to_z3_bool(&substituted, vars) {
+            Some(z) => z,
+            None => {
+                return VerificationResult {
+                    func_name,
+                    status: VerifStatus::Unknown,
+                    message: "could not encode precondition in Z3".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count: 1,
+                };
+            }
+        };
+
+        self.solver.push();
+        self.solver.assert(&z3_requires.not());
+        let constraint_count = 1;
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())) {
+            Ok(SatResult::Unsat) => {
+                self.solver.pop(1);
+                VerificationResult {
+                    func_name,
+                    status: VerifStatus::Verified,
+                    message: "precondition always satisfied".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                }
+            }
+            Ok(SatResult::Sat) => {
+                self.solver.pop(1);
+                let diag = Diagnostic::error(
+                    format!(
+                        "call to extern '{}' may violate precondition: {:?}",
+                        extern_func.name, requires,
+                    ),
+                    Span::single(0, 0),
+                );
+                VerificationResult {
+                    func_name,
+                    status: VerifStatus::Failed,
+                    message: "precondition may be violated".into(),
+                    diagnostic: Some(diag),
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                }
+            }
+            Ok(SatResult::Unknown) => {
+                self.solver.pop(1);
+                VerificationResult {
+                    func_name,
+                    status: VerifStatus::Unknown,
+                    message: "precondition satisfiability unknown".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                }
+            }
+            Err(_) => {
+                self.solver.pop(1);
+                VerificationResult {
+                    func_name,
+                    status: VerifStatus::Unknown,
+                    message: "verification timed out or crashed".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                }
+            }
+        }
+    }
 }
 
 /// Extract the final value-producing expression from a block.
@@ -1129,6 +1413,116 @@ fn block_tail_expr(block: &[Stmt]) -> Option<Expr> {
         }
     }
     None
+}
+
+/// Check if a comparison is between a string ident and an empty string literal.
+fn is_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> bool {
+    matches!(op, BinOp::EqCmp | BinOp::NeCmp)
+    && match (lhs, rhs) {
+        (Expr::Ident(_), Expr::Literal(Lit::String(s)))
+        | (Expr::Literal(Lit::String(s)), Expr::Ident(_)) => s.is_empty(),
+        _ => false,
+    }
+}
+
+/// Extract the string ident name from a string emptiness comparison.
+/// Assumes `is_string_empty_cmp` returned `true`.
+fn extract_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> (String, BinOp) {
+    match (lhs, rhs) {
+        (Expr::Ident(name), Expr::Literal(Lit::String(_))) => (name.clone(), *op),
+        (Expr::Literal(Lit::String(_)), Expr::Ident(name)) => (name.clone(), *op),
+        _ => unreachable!(),
+    }
+}
+
+/// Substitute extern function parameter identifiers with caller argument expressions.
+fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
+    if params.len() != args.len() {
+        return expr.clone();
+    }
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(idx) = params.iter().position(|p| p.name == *name) {
+                if idx < args.len() {
+                    return args[idx].clone();
+                }
+            }
+            Expr::Ident(name.clone())
+        }
+        Expr::Binary(op, lhs, rhs) => {
+            Expr::Binary(
+                *op,
+                Box::new(substitute_args(lhs, params, args)),
+                Box::new(substitute_args(rhs, params, args)),
+            )
+        }
+        Expr::Unary(op, inner) => {
+            Expr::Unary(*op, Box::new(substitute_args(inner, params, args)))
+        }
+        Expr::Call(callee, callee_args) => {
+            Expr::Call(
+                Box::new(substitute_args(callee, params, args)),
+                callee_args.iter().map(|a| substitute_args(a, params, args)).collect(),
+            )
+        }
+        Expr::Field(inner, name) => {
+            Expr::Field(Box::new(substitute_args(inner, params, args)), name.clone())
+        }
+        Expr::Index(target, index) => {
+            Expr::Index(
+                Box::new(substitute_args(target, params, args)),
+                Box::new(substitute_args(index, params, args)),
+            )
+        }
+        Expr::If { cond, then_, else_ } => {
+            Expr::If {
+                cond: Box::new(substitute_args(cond, params, args)),
+                then_: then_.iter().map(|s| substitute_args_in_stmt(s, params, args)).collect(),
+                else_: else_.as_ref().map(|b| b.iter().map(|s| substitute_args_in_stmt(s, params, args)).collect()),
+            }
+        }
+        Expr::Old(inner) => {
+            Expr::Old(Box::new(substitute_args(inner, params, args)))
+        }
+        Expr::Tuple(items) => {
+            Expr::Tuple(items.iter().map(|i| substitute_args(i, params, args)).collect())
+        }
+        Expr::List(items) => {
+            Expr::List(items.iter().map(|i| substitute_args(i, params, args)).collect())
+        }
+        Expr::Literal(_) => expr.clone(),
+        _ => expr.clone(),
+    }
+}
+
+fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -> Stmt {
+    match stmt {
+        Stmt::Expr(e) => Stmt::Expr(substitute_args(e, params, args)),
+        Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| substitute_args(e, params, args))),
+        Stmt::Let { pat, ty, init, mut_, ref_ } => {
+            Stmt::Let {
+                pat: pat.clone(),
+                ty: ty.clone(),
+                init: init.as_ref().map(|e| substitute_args(e, params, args)),
+                mut_: *mut_,
+                ref_: *ref_,
+            }
+        }
+        Stmt::If { cond, then_, else_ } => {
+            Stmt::If {
+                cond: substitute_args(cond, params, args),
+                then_: then_.iter().map(|s| substitute_args_in_stmt(s, params, args)).collect(),
+                else_: else_.as_ref().map(|b| b.iter().map(|s| substitute_args_in_stmt(s, params, args)).collect()),
+            }
+        }
+        Stmt::Assign { target, value } => {
+            Stmt::Assign {
+                target: substitute_args(target, params, args),
+                value: substitute_args(value, params, args),
+            }
+        }
+        _ => stmt.clone(),
+    }
 }
 
 /// Extract the return/tail expression from a function body, handling if-else branching.
@@ -1236,6 +1630,17 @@ pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
         Err(_) => return Ok(mock_verify_file(&file)),
     };
     Ok(verifier.verify_file(&file))
+}
+
+/// Parse source and verify extern call sites using Z3.
+pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String> {
+    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+    let file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    let mut verifier = match Verifier::new() {
+        Ok(v) => v,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(verifier.verify_ffi_call_sites(&file))
 }
 
 /// Check whether the Z3 solver is available at runtime.
@@ -1804,5 +2209,126 @@ func negate(x: f64) -> f64 {
             "negate should fail: result = -x violates ensures result > 0.0");
         let diag = results[0].diagnostic.as_ref().unwrap();
         assert!(diag.message.contains("result"), "should include result in narrative");
+    }
+
+    // --- FFI call-site verification ---
+
+    #[test]
+    fn verify_ffi_no_requires() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func get_value() -> i64;
+}
+func caller() -> i64 {
+    get_value()
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert!(results.iter().all(|r| r.status == VerifStatus::Verified),
+            "no-requires extern should be Verified: {:?}", results);
+    }
+
+    #[test]
+    fn verify_ffi_requires_always_satisfied() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func read(fd: i64, buf: i64, size: i64) -> i64;
+}
+func caller(fd: i64, buf: i64, size: i64) -> i64 {
+    requires: fd >= 0 && size > 0
+    read(fd, buf, size)
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "requires fd >= 0 && size > 0 should satisfy read's preconditions: {}", results[0].message);
+    }
+
+    #[test]
+    fn verify_ffi_requires_violated() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func read(fd: i64, buf: i64, size: i64) -> i64
+        requires: fd >= 0 && size > 0;
+}
+func bad_caller(size: i64) -> i64 {
+    read(-1, 0, size)
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Failed,
+            "read(-1, 0, size) should fail: fd is negative");
+    }
+
+    #[test]
+    fn verify_ffi_string_empty_violation() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func strlen(s: string) -> i64
+        requires: s != "";
+}
+func caller(s: string) -> i64 {
+    strlen(s)
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Failed,
+            "strlen(s) without guard should fail: s could be empty");
+    }
+
+    #[test]
+    fn verify_ffi_string_empty_protected() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func strlen(s: string) -> i64
+        requires: s != "";
+}
+func caller(s: string) -> i64 {
+    requires: s != ""
+    strlen(s)
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "strlen(s) with guard should be Verified: {}", results[0].message);
+    }
+
+    #[test]
+    fn verify_ffi_multiple_externs() {
+        require_z3!();
+        let src = r#"
+extern "C" {
+    func read(fd: i64, buf: i64, size: i64) -> i64
+        requires: fd >= 0;
+    func write(fd: i64, buf: i64, size: i64) -> i64
+        requires: fd >= 0;
+}
+func ok_caller(fd: i64) -> i64 {
+    requires: fd >= 0
+    read(fd, 0, 1) + write(fd, 0, 1)
+}
+func bad_caller(fd: i64) -> i64 {
+    read(fd, 0, 1) + write(fd, 0, 1)
+}
+"#;
+        let results = verify_ffi_source(src).unwrap();
+        assert_eq!(results.len(), 4);
+        let ok_results: Vec<_> = results.iter().filter(|r| r.func_name.starts_with("ok_caller")).collect();
+        assert_eq!(ok_results.len(), 2);
+        assert!(ok_results.iter().all(|r| r.status == VerifStatus::Verified),
+            "ok_caller should pass: {:?}", ok_results);
+        let bad_results: Vec<_> = results.iter().filter(|r| r.func_name.starts_with("bad_caller")).collect();
+        assert_eq!(bad_results.len(), 2);
+        assert!(bad_results.iter().any(|r| r.status == VerifStatus::Failed),
+            "bad_caller should have at least one failure: {:?}", bad_results);
     }
 }
