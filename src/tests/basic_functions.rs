@@ -131,6 +131,54 @@ func main() -> i32 {
 }
 
 #[test]
+fn typecheck_i32_coercion_to_i64_param() {
+    let src = r#"
+func double(x: i64) -> i64 { x * 2 }
+func main() -> i64 {
+    double(21)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn typecheck_i64_return_and_arith() {
+    let src = r#"
+func identity(x: i64) -> i64 { x }
+func main() -> i64 {
+    identity(41)
+}
+"#;
+    assert!(check_source(src).is_ok());
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(41));
+}
+
+#[test]
+fn interp_deeply_nested_if_else() {
+    let src = r#"
+func main() -> i32 {
+    if true { if true { if true { if true { if true { 42 } else { 0 } } else { 0 } } else { 0 } } else { 0 } } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn typecheck_f64_min_edge() {
+    let src = r#"
+func main() -> f64 {
+    0.000001
+}
+"#;
+    assert!(check_source(src).is_ok());
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Float(0.000001));
+}
+
+#[test]
 fn interp_nested_function_calls() {
     let src = r#"
 func double(x: i32) -> i32 { x * 2 }

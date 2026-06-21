@@ -169,6 +169,40 @@ func main() -> string {
 }
 
 #[test]
+fn ensures_result_binding_in_type_check() {
+    let src = r#"
+func inc(x: i32) -> i32 {
+    ensures: result == x + 1
+    x + 1
+}
+
+func main() -> i32 {
+    inc(41)
+}
+"#;
+    assert!(check_source(src).is_ok(), "ensures with `result` should type-check");
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn ensures_result_with_old_binding() {
+    let src = r#"
+func add_to(x: i32, y: i32) -> i32 {
+    ensures: result == old(x) + y
+    x + y
+}
+
+func main() -> i32 {
+    add_to(40, 2)
+}
+"#;
+    assert!(check_source(src).is_ok(), "ensures with `result` and `old()` should type-check");
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
 fn old_with_multiple_returns() {
     let src = r#"
 func abs(x: i32) -> i32 {
