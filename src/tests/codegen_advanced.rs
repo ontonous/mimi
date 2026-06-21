@@ -488,3 +488,77 @@ fn adv_comptime_produces_error() {
     let result = codegen.compile_file(&file);
     assert!(result.is_err(), "comptime should produce error in codegen");
 }
+
+#[test]
+fn adv_comptime_block_error_message() {
+    // eedf8be: comptime blocks get a specific error message mentioning how to fix
+    let src = r#"
+        func main() -> i64 {
+            let x = comptime { 1 + 2 }
+            0
+        }
+    "#;
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    assert!(err.contains("comptime"),
+        "comptime error should mention 'comptime', got: {}", err);
+    assert!(err.contains("mimi run"),
+        "comptime error should suggest 'mimi run', got: {}", err);
+}
+
+#[test]
+fn adv_comptime_func_call_error_message() {
+    // eedf8be: calling a comptime function from runtime produces a specific error
+    let src = r#"
+        comptime func get_magic() -> i64 { 42 }
+        func main() -> i64 { get_magic() }
+    "#;
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    assert!(err.contains("comptime function"),
+        "comptime call error should mention 'comptime function', got: {}", err);
+    assert!(err.contains("compile-time only"),
+        "comptime call error should say 'compile-time only', got: {}", err);
+}
+
+#[test]
+fn adv_quote_block_error_message() {
+    // eedf8be: quote blocks get specific error message
+    let src = r#"
+        func main() -> i64 {
+            let ast = quote! { 42 };
+            0
+        }
+    "#;
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    assert!(err.contains("quote"),
+        "quote error should mention 'quote', got: {}", err);
+}
+
+#[test]
+fn adv_quote_interpolate_error_message() {
+    // eedf8be: ${} inside quote! {} — the outer Quote error fires first
+    // (QuoteInterpolate error is a safety net; in practice Quote always wraps it)
+    let src = r#"
+        func main() -> i64 {
+            let x = 10;
+            let ast = quote! { $(x + 1) };
+            0
+        }
+    "#;
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    assert!(err.contains("quote"),
+        "quote error should mention 'quote', got: {}", err);
+    assert!(err.contains("mimi run"),
+        "quote error should suggest 'mimi run', got: {}", err);
+}

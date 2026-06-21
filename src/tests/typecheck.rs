@@ -249,3 +249,88 @@ func main() -> i32 {
     let result = check_source(src);
     assert!(result.is_err(), "Should reject function missing return");
 }
+
+#[test]
+fn fmt_type_option_consistent_with_same_type() {
+    // 4f7e760: fmt_type must produce same format as same_type uses internally
+    // Option<T> should be "Option<T>", not "T?"
+    let t = crate::ast::Type::Option(Box::new(crate::ast::Type::Name("i32".into(), vec![])));
+    let formatted = crate::core::fmt_type(&t);
+    assert_eq!(formatted, "Option<i32>",
+        "Option type must format as `Option<T>`, got: {}", formatted);
+}
+
+#[test]
+fn fmt_type_option_nested() {
+    // Consistency check for nested Option<Option<T>>
+    let inner = crate::ast::Type::Name("i32".into(), vec![]);
+    let t = crate::ast::Type::Option(Box::new(crate::ast::Type::Option(Box::new(inner))));
+    let formatted = crate::core::fmt_type(&t);
+    assert_eq!(formatted, "Option<Option<i32>>",
+        "Nested Option type must format as `Option<Option<T>>`, got: {}", formatted);
+}
+
+#[test]
+fn fmt_type_result_contains_option() {
+    // Verify Option<T> inside Result<_, _> also uses canonical format
+    let opt_i32 = crate::ast::Type::Option(Box::new(crate::ast::Type::Name("i32".into(), vec![])));
+    let t = crate::ast::Type::Result(
+        Box::new(opt_i32),
+        Box::new(crate::ast::Type::Name("string".into(), vec![])),
+    );
+    let formatted = crate::core::fmt_type(&t);
+    assert_eq!(formatted, "Result<Option<i32>, string>",
+        "Result<Option<i32>> must use canonical Option format, got: {}", formatted);
+}
+
+#[test]
+fn typecheck_numeric_coercion_i32_to_i64_let() {
+    // e895f82: is_numeric_coercion allows i32 literal → i64 declared type
+    let src = r#"
+        func main() -> i64 {
+            let x: i64 = 42
+            x
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32→i64 coercion in let should be accepted, got: {:?}", result.err());
+}
+
+#[test]
+fn typecheck_numeric_coercion_i32_to_i64_arg() {
+    // e895f82: is_numeric_coercion allows i32 literal → i64 parameter
+    // Use identity function to avoid mixed-type arithmetic (i64 * i32 is not auto-coerced)
+    let src = r#"
+        func identity(x: i64) -> i64 { x }
+        func main() -> i64 { identity(21) }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32→i64 coercion in func arg should be accepted, got: {:?}", result.err());
+}
+
+#[test]
+fn typecheck_numeric_coercion_i32_to_f64() {
+    // e895f82: is_numeric_coercion allows i32 literal → f64 declared type
+    let src = r#"
+        func main() -> f64 {
+            let x: f64 = 3
+            x
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32→f64 coercion should be accepted, got: {:?}", result.err());
+}
+
+#[test]
+fn typecheck_ensures_result_binding() {
+    // e895f82: ensures can reference `result` via injected scope
+    let src = r#"
+        func double(x: i32) -> i32 {
+            ensures: result == x * 2
+            x * 2
+        }
+        func main() -> i32 { double(5) }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "ensures with `result` should type-check, got: {:?}", result.err());
+}
