@@ -92,7 +92,7 @@ fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str
     let mut rule_pos = String::new();
     for stmt in block {
         match stmt {
-            Stmt::Desc(text) if text.starts_with("rule:") => {
+            Stmt::Desc(text, _) if text.starts_with("rule:") => {
                 // Rule must be followed by requires/ensures or a block that contains them.
                 // For now, flag any consecutive rules without intervening contract.
                 if last_was_rule {
@@ -400,7 +400,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Math(exprs) => { for e in exprs { Self::collect_uses_in_expr(e, uses); } }
             Stmt::Alloc { body, .. } => { for s in body { Self::collect_uses_in_stmt(s, uses); } }
-            Stmt::MmsBlock { .. } | Stmt::Ellipsis | Stmt::Desc(_) => {}
+            Stmt::MmsBlock { .. } | Stmt::Ellipsis | Stmt::Desc(..) => {}
         }
     }
 
@@ -667,7 +667,7 @@ impl<'a> Checker<'a> {
                     self.funcs.insert(method.name.clone(), (params, ret));
                 }
             }
-            Item::Rule(_) | Item::Desc(_) | Item::Cap(_) => {}
+            Item::Rule(..) | Item::Desc(..) | Item::Cap(_) => {}
             Item::Trait(trait_def) => {
                 let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits.insert(trait_def.name.clone(), method_names.clone());
@@ -915,7 +915,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Type(_) | Item::Cap(_) => {}
-            Item::Rule(_) | Item::Desc(_) => {}
+            Item::Rule(..) | Item::Desc(..) => {}
             Item::Trait(trait_def) => {
                 // Check that all trait method types are well-formed
                 let generic_names: Vec<String> = trait_def.generics.iter().map(|g| g.name.clone()).collect();

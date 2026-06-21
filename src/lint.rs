@@ -31,23 +31,21 @@ impl Linter {
                 Item::Func(f) => {
                     self.lint_func(f, source, &mut diagnostics);
                 }
-                Item::Desc(_text) => {
+                Item::Desc(_, span) => {
                     if !is_followed_by_impl(&file.items, idx) {
-                        // TODO: Item::Desc lacks a pos field; add one to propagate real span
                         diagnostics.push(Diagnostic::warning_code(
                             W001,
                             format!("standalone `desc` has no associated implementation"),
-                            Span::single(0, 0),
+                            *span,
                         ));
                     }
                 }
-                Item::Rule(_text) => {
+                Item::Rule(_, span) => {
                     if !is_followed_by_impl(&file.items, idx) {
-                        // TODO: Item::Rule lacks a pos field; add one to propagate real span
                         diagnostics.push(Diagnostic::warning_code(
                             W001,
                             format!("standalone `rule` has no associated implementation"),
-                            Span::single(0, 0),
+                            *span,
                         ));
                     }
                 }

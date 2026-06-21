@@ -378,7 +378,7 @@ impl<'a> Interpreter<'a> {
                     _ => return Err(InterpError::new("assignment target must be a variable")),
                 }
             }
-            Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
             Stmt::Math(exprs) => {
                 // Math block: evaluate constant expressions at compile time
                 for expr in exprs {
@@ -1202,7 +1202,6 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::new(format!("integer overflow in division: {} / {}", a, b)))
                         .map(Value::Int)
                 }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
                 _ => Err(InterpError::new(format!("cannot apply '/' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::Mod => match (&left, &right) {

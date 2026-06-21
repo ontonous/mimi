@@ -883,14 +883,18 @@ impl Verifier {
     fn expr_to_z3_bool(&self, expr: &Expr, vars: &Z3VarMap) -> Option<Z3Bool> {
         match expr {
             Expr::Literal(Lit::Bool(b)) => Some(Z3Bool::from_bool(*b)),
+            Expr::Ident(name) => {
+                if let Some(v) = vars.get_int(name) {
+                    Some(v.ne(&Z3Int::from_i64(0)))
+                } else {
+                    None
+                }
+            }
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);
-                    if vars.is_real(&old_name) {
-                        return None;
-                    }
                     if let Some(v) = vars.get_int(&old_name) {
-                        return Some(v.eq(&Z3Int::from_i64(0)).not());
+                        return Some(v.ne(&Z3Int::from_i64(0)));
                     }
                 }
                 None
@@ -1011,7 +1015,7 @@ fn extract_body_return(block: &Block) -> Option<Expr> {
         match stmt {
             Stmt::Expr(expr) => return Some(expr.clone()),
             Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_)
-            | Stmt::Desc(_) | Stmt::MmsBlock { .. } => continue,
+            | Stmt::Desc(..) | Stmt::MmsBlock { .. } => continue,
             _ => break,
         }
     }

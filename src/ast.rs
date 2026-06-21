@@ -50,8 +50,8 @@ pub enum Item {
     Trait(TraitDef),
     Impl(ImplDef),
     ExternBlock(ExternBlock),
-    Rule(String),
-    Desc(String),
+    Rule(String, Span),
+    Desc(String, Span),
 }
 
 #[derive(Debug, Clone)]
@@ -289,7 +289,7 @@ pub enum Stmt {
         body: Block,
     },
     Block(Block),
-    Desc(String),
+    Desc(String, Span),
     Requires(Expr, Span),
     Ensures(Expr, Span),
     Math(Vec<Expr>),

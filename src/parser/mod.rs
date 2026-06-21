@@ -481,16 +481,18 @@ impl Parser {
                 Ok(Item::ExternBlock(self.parse_extern_block()?))
             }
             TokenKind::Rule => {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                Ok(Item::Rule(s))
+                Ok(Item::Rule(s, span))
             }
             TokenKind::Desc => {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                Ok(Item::Desc(s))
+                Ok(Item::Desc(s, span))
             }
             _ => {
                 let tok = self.peek();
@@ -1020,17 +1022,19 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Desc) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                stmts.push(Stmt::Desc(s));
+                stmts.push(Stmt::Desc(s, span));
                 continue;
             }
             if self.at(&TokenKind::Rule) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                stmts.push(Stmt::Desc(format!("rule: {}", s)));
+                stmts.push(Stmt::Desc(format!("rule: {}", s), span));
                 continue;
             }
             stmts.push(self.parse_stmt()?);
@@ -1070,16 +1074,18 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Desc) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 if let Ok(s) = self.expect_string() {
-                    stmts.push(Stmt::Desc(s));
+                    stmts.push(Stmt::Desc(s, span));
                 }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
+                let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 if let Ok(s) = self.expect_string() {
-                    stmts.push(Stmt::Desc(format!("rule: {}", s)));
+                    stmts.push(Stmt::Desc(format!("rule: {}", s), span));
                 }
                 continue;
             }

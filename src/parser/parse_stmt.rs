@@ -37,10 +37,11 @@ impl Parser {
                 Ok(Stmt::Block(self.parse_block()?))
             }
             TokenKind::Desc => {
+                let span = crate::span::Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                Ok(Stmt::Desc(s))
+                Ok(Stmt::Desc(s, span))
             }
             TokenKind::Ellipsis => {
                 self.advance();

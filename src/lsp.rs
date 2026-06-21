@@ -1,6 +1,6 @@
 use crate::{core, lexer, parser, fmt};
 use crate::ast::{Item, Expr, Stmt, FuncDef, TypeDef, TypeDefKind, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -9,15 +9,36 @@ const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
 /// LSP server for Mimi language
 pub struct LspServer {
     pub(crate) documents: HashMap<String, String>,
+    access_order: VecDeque<String>,
     workspace_root: Option<PathBuf>,
 }
+
+const MAX_DOCUMENTS: usize = 256;
 
 impl LspServer {
     pub fn new() -> Self {
         LspServer {
             documents: HashMap::new(),
+            access_order: VecDeque::new(),
             workspace_root: None,
         }
+    }
+
+    fn cache_put(&mut self, uri: String, text: String) {
+        if self.documents.contains_key(&uri) {
+            self.access_order.retain(|k| *k != uri);
+        } else if self.documents.len() >= MAX_DOCUMENTS {
+            if let Some(lru) = self.access_order.pop_front() {
+                self.documents.remove(&lru);
+            }
+        }
+        self.access_order.push_back(uri.clone());
+        self.documents.insert(uri, text);
+    }
+
+    fn cache_remove(&mut self, uri: &str) {
+        self.access_order.retain(|k| k != uri);
+        self.documents.remove(uri);
     }
 
     /// Run the LSP server (stdin/stdout JSON-RPC)
@@ -158,12 +179,7 @@ impl LspServer {
                     .get("textDocument")?
                     .get("text")?
                     .as_str()?;
-                self.documents.insert(uri.to_string(), text.to_string());
-                if self.documents.len() > 256 {
-                    if let Some(oldest_key) = self.documents.keys().next().cloned() {
-                        self.documents.remove(&oldest_key);
-                    }
-                }
+                self.cache_put(uri.to_string(), text.to_string());
                 // Publish diagnostics
                 let diagnostics = self.compute_diagnostics(text);
                 Some(serde_json::json!({
@@ -186,12 +202,7 @@ impl LspServer {
                     .first()?
                     .get("text")?
                     .as_str()?;
-                self.documents.insert(uri.to_string(), text.to_string());
-                if self.documents.len() > 256 {
-                    if let Some(oldest_key) = self.documents.keys().next().cloned() {
-                        self.documents.remove(&oldest_key);
-                    }
-                }
+                self.cache_put(uri.to_string(), text.to_string());
                 let diagnostics = self.compute_diagnostics(text);
                 Some(serde_json::json!({
                     "jsonrpc": "2.0",
@@ -207,7 +218,7 @@ impl LspServer {
                     .get("textDocument")?
                     .get("uri")?
                     .as_str()?;
-                self.documents.remove(uri);
+                self.cache_remove(uri);
                 None
             }
             "textDocument/didSave" => {

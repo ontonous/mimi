@@ -360,7 +360,13 @@ impl<'a> Interpreter<'a> {
                 sorted.sort_by(|a, b| {
                     match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float(x), Value::Float(y)) => {
+                            x.partial_cmp(y).unwrap_or_else(|| {
+                                if x.is_nan() && !y.is_nan() { std::cmp::Ordering::Greater }
+                                else if !x.is_nan() && y.is_nan() { std::cmp::Ordering::Less }
+                                else { std::cmp::Ordering::Equal }
+                            })
+                        },
                         (Value::String(x), Value::String(y)) => x.cmp(y),
                         _ => std::cmp::Ordering::Equal,
                     }

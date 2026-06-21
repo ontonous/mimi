@@ -1238,7 +1238,7 @@ fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
 
     for item in &file.items {
         if let Item::Func(f) = item {
-            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
+            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
             if has_intent && !f.commitment.is_locked() {
                 return Err(format!(
                     "function '{}' has uncommitted intent (no $ suffix on desc/rule); add '$' to lock before promoting",
@@ -1288,7 +1288,7 @@ fn doc(path: &Path, format: &str) -> Result<(), String> {
                         println!();
                         // Extract desc from body
                         for stmt in &f.body {
-                            if let crate::ast::Stmt::Desc(desc) = stmt {
+                            if let crate::ast::Stmt::Desc(desc, _) = stmt {
                                 println!("{}", desc);
                                 println!();
                             }

@@ -482,7 +482,7 @@ impl<'a> Checker<'a> {
             Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) => {
                 self.infer_expr(expr, scopes);
             }
-            Stmt::Desc(_) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(..) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
         }
     }
 }

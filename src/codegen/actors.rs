@@ -395,7 +395,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::SharedLet { kind, name, ty, init } => {
                     self.compile_shared_let_stmt(&kind, name, &ty, init, &mut vars)?;
                 }
-                Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
+                Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) => {}
                 Stmt::Block(block) => {
                     self.compile_block(block, &mut vars)?;
                 }

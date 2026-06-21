@@ -96,7 +96,7 @@ impl<'a> Interpreter<'a> {
                     body: Box::new(self.quote_block(body)?),
                 }))
             }
-            Stmt::Desc(_) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => Ok(None),
+            Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => Ok(None),
         }
     }
 
@@ -291,7 +291,11 @@ impl<'a> Interpreter<'a> {
                             (Value::Int(a), Value::Int(b)) => crate::safe_arith::checked_add(*a, *b)
                                 .ok_or_else(|| InterpError::new(format!("integer overflow in addition: {} + {}", a, b)))
                                 .map(Value::Int),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                let r = a + b;
+                                if r.is_nan() { Err(InterpError::new(format!("NaN from {} + {}", a, b))) }
+                                else { Ok(Value::Float(r)) }
+                            }
                             (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
                             _ => Err(InterpError::new(format!("unsupported + for {} and {}", lv, rv))),
                         }
@@ -301,7 +305,11 @@ impl<'a> Interpreter<'a> {
                             (Value::Int(a), Value::Int(b)) => crate::safe_arith::checked_sub(*a, *b)
                                 .ok_or_else(|| InterpError::new(format!("integer overflow in subtraction: {} - {}", a, b)))
                                 .map(Value::Int),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                let r = a - b;
+                                if r.is_nan() { Err(InterpError::new(format!("NaN from {} - {}", a, b))) }
+                                else { Ok(Value::Float(r)) }
+                            }
                             _ => Err(InterpError::new(format!("unsupported - for {} and {}", lv, rv))),
                         }
                     }
@@ -310,7 +318,11 @@ impl<'a> Interpreter<'a> {
                             (Value::Int(a), Value::Int(b)) => crate::safe_arith::checked_mul(*a, *b)
                                 .ok_or_else(|| InterpError::new(format!("integer overflow in multiplication: {} * {}", a, b)))
                                 .map(Value::Int),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                let r = a * b;
+                                if r.is_nan() { Err(InterpError::new(format!("NaN from {} * {}", a, b))) }
+                                else { Ok(Value::Float(r)) }
+                            }
                             _ => Err(InterpError::new(format!("unsupported * for {} and {}", lv, rv))),
                         }
                     }
@@ -319,7 +331,13 @@ impl<'a> Interpreter<'a> {
                             (Value::Int(a), Value::Int(b)) => crate::safe_arith::checked_div(*a, *b)
                                 .ok_or_else(|| InterpError::new(format!("integer overflow or division by zero: {} / {}", a, b)))
                                 .map(Value::Int),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                if *b == 0.0 { return Err(InterpError::new("division by zero")); }
+                                let r = a / b;
+                                if r.is_nan() { Err(InterpError::new(format!("NaN from {} / {}", a, b))) }
+                                else if r.is_infinite() { Err(InterpError::new(format!("infinity from {} / {}", a, b))) }
+                                else { Ok(Value::Float(r)) }
+                            }
                             _ => Err(InterpError::new(format!("unsupported / for {} and {}", lv, rv))),
                         }
                     }
@@ -328,15 +346,53 @@ impl<'a> Interpreter<'a> {
                     BinOp::Lt => {
                         match (&lv, &rv) {
                             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                if a.is_nan() || b.is_nan() {
+                                    Err(InterpError::new(format!("cannot compare NaN with float: {} < {}", a, b)))
+                                } else {
+                                    Ok(Value::Bool(a < b))
+                                }
+                            }
                             _ => Err(InterpError::new(format!("unsupported < for {} and {}", lv, rv))),
                         }
                     }
                     BinOp::Gt => {
                         match (&lv, &rv) {
                             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
-                            (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                if a.is_nan() || b.is_nan() {
+                                    Err(InterpError::new(format!("cannot compare NaN with float: {} > {}", a, b)))
+                                } else {
+                                    Ok(Value::Bool(a > b))
+                                }
+                            }
                             _ => Err(InterpError::new(format!("unsupported > for {} and {}", lv, rv))),
+                        }
+                    }
+                    BinOp::Le => {
+                        match (&lv, &rv) {
+                            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                if a.is_nan() || b.is_nan() {
+                                    Err(InterpError::new(format!("cannot compare NaN with float: {} <= {}", a, b)))
+                                } else {
+                                    Ok(Value::Bool(a <= b))
+                                }
+                            }
+                            _ => Err(InterpError::new(format!("unsupported <= for {} and {}", lv, rv))),
+                        }
+                    }
+                    BinOp::Ge => {
+                        match (&lv, &rv) {
+                            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
+                            (Value::Float(a), Value::Float(b)) => {
+                                if a.is_nan() || b.is_nan() {
+                                    Err(InterpError::new(format!("cannot compare NaN with float: {} >= {}", a, b)))
+                                } else {
+                                    Ok(Value::Bool(a >= b))
+                                }
+                            }
+                            _ => Err(InterpError::new(format!("unsupported >= for {} and {}", lv, rv))),
                         }
                     }
                     _ => Err(InterpError::new("unsupported binary op in quoted AST")),

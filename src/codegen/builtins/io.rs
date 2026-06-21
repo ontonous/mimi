@@ -55,8 +55,18 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<(BasicMetadataValueEnum<'ctx>, String)> {
         match arg {
             BasicMetadataValueEnum::StructValue(sv) => {
-                let num_fields = sv.get_type().get_field_types().len();
-                if num_fields >= 2 {
+                let fields = sv.get_type().get_field_types();
+                let num_fields = fields.len();
+                // Detect Mimi string struct: {i8*, i64}
+                if num_fields == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_)) {
+                    let ptr = self.builder.build_extract_value(*sv, 0, "str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?;
+                    match ptr {
+                        BasicValueEnum::PointerValue(pv) =>
+                            Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string())),
+                        _ => Ok((BasicMetadataValueEnum::StructValue(*sv), "%p".to_string())),
+                    }
+                } else if num_fields >= 2 {
                     let payload = self.builder.build_extract_value(*sv, 1, "payload")
                         .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
                     match payload {
@@ -204,7 +214,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "streq")
                             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
                     }
-                    _ => return Err(CompileError::TypeMismatch("assert_eq requires same types".to_string())),
+                    _ => {
+                        let l_ptr = self.extract_raw_str_ptr(&a).ok();
+                        let r_ptr = self.extract_raw_str_ptr(&b).ok();
+                        if let (Some(l), Some(r)) = (l_ptr, r_ptr) {
+                            let strcmp_fn = self.module.get_function("strcmp")
+                                .ok_or_else(|| "strcmp not declared".to_string())?;
+                            let cmp_result = self.builder.build_call(strcmp_fn, &[
+                                BasicMetadataValueEnum::PointerValue(l),
+                                BasicMetadataValueEnum::PointerValue(r),
+                            ], "strcmp_call")
+                                .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strcmp returned void")?;
+                            let zero = self.context.i32_type().const_int(0, false);
+                            self.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp_result.into_int_value(), zero, "streq")
+                                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        } else {
+                            return Err(CompileError::TypeMismatch("assert_eq requires same types".to_string()));
+                        }
+                    },
                 };
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for assert_eq".to_string())?;
                 let ok_bb = self.context.append_basic_block(function, "aeq_ok");
@@ -267,7 +296,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.build_int_compare(inkwell::IntPredicate::NE, cmp_result.into_int_value(), zero, "strne")
                             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
                     }
-                    _ => return Err(CompileError::TypeMismatch("assert_ne requires same types".to_string())),
+                    _ => {
+                        let l_ptr = self.extract_raw_str_ptr(&a).ok();
+                        let r_ptr = self.extract_raw_str_ptr(&b).ok();
+                        if let (Some(l), Some(r)) = (l_ptr, r_ptr) {
+                            let strcmp_fn = self.module.get_function("strcmp")
+                                .ok_or_else(|| "strcmp not declared".to_string())?;
+                            let cmp_result = self.builder.build_call(strcmp_fn, &[
+                                BasicMetadataValueEnum::PointerValue(l),
+                                BasicMetadataValueEnum::PointerValue(r),
+                            ], "strcmp_call")
+                                .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strcmp returned void")?;
+                            let zero = self.context.i32_type().const_int(0, false);
+                            self.builder.build_int_compare(inkwell::IntPredicate::NE, cmp_result.into_int_value(), zero, "strne")
+                                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        } else {
+                            return Err(CompileError::TypeMismatch("assert_ne requires same types".to_string()));
+                        }
+                    },
                 };
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for assert_ne".to_string())?;
                 let ok_bb = self.context.append_basic_block(function, "ane_ok");
@@ -439,10 +487,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err(CompileError::WrongArgCount("file_exists expects 1 argument".to_string())); }
-                let path_ptr = match args[0] {
-                    BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err(CompileError::TypeMismatch("file_exists expects a string".to_string())),
-                };
+                let path_ptr = self.extract_raw_str_ptr(&args[0])?;
                 // access(path, F_OK) where F_OK = 0
                 let i32_ty = self.context.i32_type();
                 let access_fn = self.module.get_function("access")
@@ -479,10 +524,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err(CompileError::WrongArgCount("read_file expects 1 argument".to_string())); }
-                let path_ptr = match args[0] {
-                    BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err(CompileError::TypeMismatch("read_file expects a string path".to_string())),
-                };
+                let path_ptr = self.extract_raw_str_ptr(&args[0])?;
                 let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                 // fopen(path, "r")
                 let mode_str = self.builder.build_global_string_ptr("r", "read_mode")
@@ -661,14 +703,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 2 { return Err(CompileError::WrongArgCount("write_file expects 2 arguments".to_string())); }
-                let path_ptr = match args[0] {
-                    BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err(CompileError::TypeMismatch("write_file: first arg must be string path".to_string())),
-                };
-                let content_ptr = match args[1] {
-                    BasicMetadataValueEnum::PointerValue(pv) => pv,
-                    _ => return Err(CompileError::TypeMismatch("write_file: second arg must be string content".to_string())),
-                };
+                let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+                let content_ptr = self.extract_raw_str_ptr(&args[1])?;
                 // fopen(path, "w")
                 let mode_str = self.builder.build_global_string_ptr("w", "write_mode")
                     .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
