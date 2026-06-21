@@ -278,7 +278,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.context.i64_type().const_int(0, false).into()
                 ))
             } else {
-                Err(format!("undefined function '{}' in codegen", name).into())
+                let msg = if self.comptime_func_names.contains(name) {
+                    format!("comptime function '{}' is compile-time only and cannot be called from runtime code", name)
+                } else {
+                    format!("undefined function '{}' in codegen", name)
+                };
+                Err(msg.into())
             }
         }
     }
@@ -313,7 +318,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.context.i64_type().const_int(0, false).into()
             ))
         } else {
-            Err(format!("undefined function '{}' in codegen", mangled).into())
+            let msg = if self.comptime_func_names.contains(mangled) {
+                format!("comptime function '{}' is compile-time only and cannot be called from runtime code", mangled)
+            } else {
+                format!("undefined function '{}' in codegen", mangled)
+            };
+            Err(msg.into())
         }
     }
     /// Find a FuncDef by name from the codegen's stored func_defs

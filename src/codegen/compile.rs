@@ -89,6 +89,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::Func(f) if !f.is_comptime => {
                     self.func_defs.insert(f.name.clone(), f.clone());
                 }
+                Item::Func(f) if f.is_comptime => {
+                    self.comptime_func_names.insert(f.name.clone());
+                }
                 Item::Cap(cap) => {
                     self.cap_type_names.insert(cap.name.clone());
                 }
@@ -135,6 +138,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(())
         })?;
+        // Warn about comptime functions — they are only evaluated at compile time
+        // (mimi run) and never appear in the compiled binary.
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                if f.is_comptime {
+                    eprintln!("warning: comptime function '{}' will not appear in the compiled binary (use `mimi run` to evaluate at compile time)", f.name);
+                }
+            }
+        }
         Ok(())
     }
 

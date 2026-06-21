@@ -40,8 +40,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::SliceExpr { target, start, end } => self.compile_slice_expr(target, start, end, vars),
             Expr::Lambda { params, ret, body } => self.compile_lambda_expr(params, ret, body, vars),
             Expr::Comprehension { expr: comp_expr, var, iter, guard } => self.compile_comprehension_expr(comp_expr, var, iter, guard, vars),
-            Expr::Quote(_) | Expr::QuoteInterpolate(_) | Expr::Comptime(_) => {
-                Err("quote/comptime expressions must be resolved before codegen".into())
+            Expr::Comptime(_) => {
+                Err("comptime { ... } block encountered in runtime function: compile-time evaluation must be resolved before codegen (use `mimi run` to evaluate compile-time code)".into())
+            }
+            Expr::Quote(_) => {
+                Err("quote { ... } expression encountered in runtime function: quoted AST construction must be resolved before codegen (use `mimi run` to evaluate quote expressions)".into())
+            }
+            Expr::QuoteInterpolate(_) => {
+                Err("${ ... } interpolation encountered in runtime function: interpolation must be resolved before codegen (use `mimi run` to evaluate interpolated expressions)".into())
             }
             #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
