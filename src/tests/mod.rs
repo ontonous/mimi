@@ -79,6 +79,9 @@ pub(crate) mod codegen_golden;
 // === Fuzz test modules ===
 pub(crate) mod fuzz;
 
+// === Dual-backend equivalence tests ===
+pub(crate) mod dual_backend;
+
 // === Benchmark modules ===
 pub(crate) mod benchmarks;
 
