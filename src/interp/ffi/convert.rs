@@ -114,8 +114,10 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = arc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                             let ptr = &*guard as *const Value as *const () as i64;
+                            // SAFETY: guard created from arc.read(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -129,8 +131,10 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = arc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                             let ptr = &*guard as *const Value as *const () as i64;
+                            // SAFETY: guard created from arc.read(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -164,8 +168,10 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = arc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
+                            // SAFETY: guard created from arc.write(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -179,8 +185,10 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = arc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
+                            // SAFETY: guard created from arc.write(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -247,8 +255,10 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = arc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                             let ptr = &*guard as *const Value as *const () as i64;
+                            // SAFETY: guard created from arc.read(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -262,8 +272,10 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let guard = handle.borrow();
+                            let guard = arc.read().map_err(|e| Errno::Generic(format!("read lock failed: {}", e)))?;
                             let ptr = &*guard as *const Value as *const () as i64;
+                            // SAFETY: guard created from arc.read(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Read(unsafe {
                                 std::mem::transmute::<std::sync::RwLockReadGuard<'_, Value>, std::sync::RwLockReadGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -298,8 +310,10 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         if let Some(handle) = shared_table_get(existing_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = arc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
+                            // SAFETY: guard created from arc.write(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));
@@ -313,8 +327,10 @@ impl<'a> Interpreter<'a> {
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
                             shared_handles.push(handle.clone());
-                            let mut guard = handle.borrow_mut();
+                            let mut guard = arc.write().map_err(|e| Errno::Generic(format!("write lock failed: {}", e)))?;
                             let ptr = &mut *guard as *mut Value as *mut () as i64;
+                            // SAFETY: guard created from arc.write(), same Arc stored in FfiGuard.
+                            // Guard is dropped before Arc (struct field order), so data stays alive.
                             ffi_guards.push(FfiGuard::Write(unsafe {
                                 std::mem::transmute::<std::sync::RwLockWriteGuard<'_, Value>, std::sync::RwLockWriteGuard<'static, Value>>(guard)
                             }, Arc::clone(arc)));

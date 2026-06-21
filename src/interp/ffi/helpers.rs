@@ -5,8 +5,16 @@ use std::sync::{Arc, RwLock};
 /// Holds borrow guards alive during a synchronous FFI C call.
 /// Each guard variant pairs the lock guard (dropped first) with the `Arc`
 /// that keeps the underlying data alive (dropped second).
+///
+/// # Safety invariant (field ordering)
 /// The `Arc` is stored AFTER the guard so that on drop, the guard is
 /// released first (unlocking the RwLock) before the Arc potentially frees it.
+/// Do NOT reorder these fields without auditing all transmute sites.
+///
+/// # Safety invariant (guard source)
+/// Guards are always created via `arc.read()`/`arc.write()` from the same
+/// `Arc<RwLock<Value>>` that is stored alongside them. This ensures the
+/// data referenced by the guard cannot be freed before the guard is dropped.
 pub(in crate::interp) enum FfiGuard {
     Read(std::sync::RwLockReadGuard<'static, Value>, Arc<RwLock<Value>>),
     Write(std::sync::RwLockWriteGuard<'static, Value>, Arc<RwLock<Value>>),
