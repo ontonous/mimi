@@ -31,6 +31,17 @@ func main() -> i32 {
 }
 
 #[test]
+fn commitment_strong_locked_question_question_parsing() {
+    use crate::ast::Commitment;
+    let src = "func$$?? add(a: i32, b: i32) -> i32 { a + b }";
+    let tokens = lexer::Lexer::new(src).tokenize()
+        .expect("src/tests/v1_2_commitment.rs: strong locked ?? tokenize failed");
+    let func_token = tokens.iter().find(|t| matches!(t.kind, crate::lexer::TokenKind::Func))
+        .expect("func token should exist");
+    assert_eq!(func_token.commitment, Commitment::StrongLockedQuestionQuestion);
+}
+
+#[test]
 fn debug_commitment_tokens() {
     use crate::ast::Commitment;
     let src = "func$ add(a: i32, b: i32) -> i32 {\n    a + b\n}";

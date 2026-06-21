@@ -180,6 +180,7 @@ pub struct Param {
 pub struct ModuleDef {
     pub name: String,
     pub commitment: Commitment,
+    pub imports: Vec<Import>,
     pub items: Vec<Item>,
 }
 

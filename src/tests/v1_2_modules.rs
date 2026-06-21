@@ -15,6 +15,29 @@ func main() -> i32 {
 }
 
 #[test]
+fn module_internal_use_parses() {
+    let src = r#"
+module Math {
+    use std::collections;
+
+    func answer() -> i32 {
+        42
+    }
+}
+
+func main() -> i32 {
+    Math.answer()
+}
+"#;
+    let file = parse(src);
+    let module = file.items.iter().find_map(|i| {
+        if let crate::ast::Item::Module(m) = i { Some(m) } else { None }
+    }).expect("Math module should be present");
+    assert_eq!(module.imports.len(), 1, "module should have one internal use");
+    assert_eq!(module.imports[0].path, vec!["std", "collections"]);
+}
+
+#[test]
 fn module_nested_types() {
     let src = r#"
 module Math {

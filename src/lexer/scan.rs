@@ -113,23 +113,27 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     match self.peek() {
                         Some('n') => {
-                            s.push_str("\\n");
+                            // Decode common escapes immediately so f-string literals
+                            // match the semantics of ordinary string literals.
+                            s.push('\n');
                             self.advance();
                         }
                         Some('t') => {
-                            s.push_str("\\t");
+                            s.push('\t');
                             self.advance();
                         }
                         Some('r') => {
-                            s.push_str("\\r");
+                            s.push('\r');
                             self.advance();
                         }
+                        // Keep backslash escapes that the parser needs to see in
+                        // order to distinguish escaped braces from interpolations.
                         Some('\\') => {
                             s.push_str("\\\\");
                             self.advance();
                         }
                         Some('"') => {
-                            s.push_str("\\\"");
+                            s.push('"');
                             self.advance();
                         }
                         Some('{') => {
@@ -329,45 +333,47 @@ impl<'a> super::Lexer<'a> {
     }
 
     pub(crate) fn scan_commitment(&mut self) -> Commitment {
-        if self.peek() == Some('$') {
-            self.advance();
-            if self.peek() == Some('$') {
+        match self.peek() {
+            Some('$') => {
                 self.advance();
-                if self.peek() == Some('?') {
-                    self.advance();
-                    if self.peek() == Some('?') {
+                match self.peek() {
+                    Some('$') => {
                         self.advance();
-                        Commitment::StrongLockedQuestionQuestion
-                    } else {
-                        Commitment::StrongLockedQuestion
+                        match self.peek() {
+                            Some('?') => {
+                                self.advance();
+                                if self.peek() == Some('?') {
+                                    self.advance();
+                                    Commitment::StrongLockedQuestionQuestion
+                                } else {
+                                    Commitment::StrongLockedQuestion
+                                }
+                            }
+                            _ => Commitment::StrongLocked,
+                        }
                     }
-                } else if self.peek() == Some('?') {
-                    self.advance();
-                    Commitment::StrongLockedQuestionQuestion // $$? + ? impossible; treat as $$??
-                } else {
-                    Commitment::StrongLocked
+                    Some('?') => {
+                        self.advance();
+                        if self.peek() == Some('?') {
+                            self.advance();
+                            Commitment::LockedQuestionQuestion
+                        } else {
+                            Commitment::LockedQuestion
+                        }
+                    }
+                    _ => Commitment::Locked,
                 }
-            } else if self.peek() == Some('?') {
+            }
+            Some('?') => {
                 self.advance();
                 if self.peek() == Some('?') {
                     self.advance();
-                    Commitment::LockedQuestionQuestion
+                    Commitment::QuestionQuestion
                 } else {
-                    Commitment::LockedQuestion
+                    Commitment::Question
                 }
-            } else {
-                Commitment::Locked
             }
-        } else if self.peek() == Some('?') {
-            self.advance();
-            if self.peek() == Some('?') {
-                self.advance();
-                Commitment::QuestionQuestion
-            } else {
-                Commitment::Question
-            }
-        } else {
-            Commitment::None
+            _ => Commitment::None,
         }
     }
 

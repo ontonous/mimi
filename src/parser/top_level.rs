@@ -450,10 +450,18 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect_block_start("module body")?;
+        // Module bodies may start with their own `use` imports.
+        let mut imports = Vec::new();
+        self.skip_newlines();
+        while self.at(&TokenKind::Use) {
+            imports.push(self.parse_import()?);
+            self.skip_newlines();
+        }
         let items = self.parse_item_block()?;
         Ok(ModuleDef {
             name,
             commitment,
+            imports,
             items,
         })
     }

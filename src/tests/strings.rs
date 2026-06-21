@@ -311,6 +311,20 @@ func main() -> string {
 }
 
 #[test]
+fn fstring_escape_consistency() {
+    let src = r#"
+func main() -> string {
+    let a = "line1\nline2\tend";
+    let b = f"line1\nline2\tend";
+    if a != b { return "mismatch" }
+    f"ok"
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("ok".to_string()));
+}
+
+#[test]
 fn fstring_boolean_interpolation() {
     let src = r#"
 func main() -> string {
