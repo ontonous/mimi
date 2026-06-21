@@ -139,6 +139,18 @@ impl InterpError {
     }
 }
 
+impl From<&InterpError> for Diagnostic {
+    fn from(e: &InterpError) -> Self {
+        e.to_diagnostic()
+    }
+}
+
+impl From<InterpError> for Diagnostic {
+    fn from(e: InterpError) -> Self {
+        e.to_diagnostic()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

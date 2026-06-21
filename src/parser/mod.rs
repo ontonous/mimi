@@ -47,6 +47,18 @@ impl From<ParseError> for String {
     }
 }
 
+impl From<&ParseError> for Diagnostic {
+    fn from(e: &ParseError) -> Self {
+        e.to_diagnostic()
+    }
+}
+
+impl From<ParseError> for Diagnostic {
+    fn from(e: ParseError) -> Self {
+        e.to_diagnostic()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseMode {
     Production,
