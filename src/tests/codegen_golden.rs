@@ -5,7 +5,7 @@ fn compile_to_ir(src: &str) -> String {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "golden_test");
-    codegen.compile_file(&file).unwrap();
+    codegen.compile_file(&file).expect("src/tests/codegen_golden.rs:8 unwrap failed");
     codegen.emit_ir()
 }
 
@@ -24,21 +24,21 @@ fn check_golden(name: &str, src: &str) {
     let path = golden_path(name);
 
     if std::env::var("UPDATE_GOLDEN").is_ok() {
-        std::fs::write(&path, &ir).unwrap();
+        std::fs::write(&path, &ir).expect("src/tests/codegen_golden.rs:27 unwrap failed");
         eprintln!("[golden] updated: {}", path.display());
         return;
     }
 
     if !path.exists() {
-        std::fs::write(&path, &ir).unwrap();
+        std::fs::write(&path, &ir).expect("src/tests/codegen_golden.rs:33 unwrap failed");
         eprintln!("[golden] created: {}", path.display());
         return;
     }
 
-    let expected = std::fs::read_to_string(&path).unwrap();
+    let expected = std::fs::read_to_string(&path).expect("src/tests/codegen_golden.rs:38 unwrap failed");
     if ir != expected {
         let diff_path = path.with_extension("diff.ir");
-        std::fs::write(&diff_path, &ir).unwrap();
+        std::fs::write(&diff_path, &ir).expect("src/tests/codegen_golden.rs:41 unwrap failed");
         panic!(
             "Golden IR mismatch for '{}'.\n  expected: {}\n  actual:   {}\n  (diff written to {})",
             name,

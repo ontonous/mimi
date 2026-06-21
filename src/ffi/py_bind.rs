@@ -451,7 +451,7 @@ mod tests {
         let funcs = sample_funcs();
         let type_defs = HashMap::new();
         let gen = PyBindGenerator::new(type_defs, "mimi_test");
-        let code = gen.generate(&funcs).unwrap();
+        let code = gen.generate(&funcs).expect("src/ffi/py_bind.rs:454 unwrap failed");
 
         assert!(code.contains("PYBIND11_MODULE"));
         assert!(code.contains("mimi_add"));
@@ -466,7 +466,7 @@ mod tests {
         let funcs = sample_funcs();
         let type_defs = HashMap::new();
         let gen = PyBindGenerator::new(type_defs, "test_mod");
-        let code = gen.generate(&funcs).unwrap();
+        let code = gen.generate(&funcs).expect("src/ffi/py_bind.rs:469 unwrap failed");
 
         assert!(code.contains("#include <pybind11/pybind11.h>"));
         assert!(code.contains("extern \"C\""));

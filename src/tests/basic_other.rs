@@ -214,7 +214,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "spawn of non-actor call should evaluate directly: {:?}", result.err());
-    assert_eq!(result.unwrap(), interp::Value::Int(42));
+    assert_eq!(result.expect("src/tests/basic_other.rs:217 unwrap failed"), interp::Value::Int(42));
 }
 
 #[test]
@@ -267,7 +267,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "? should propagate error as value, got: {:?}", result);
-    let val = result.unwrap();
+    let val = result.expect("src/tests/basic_other.rs:270 unwrap failed");
     match &val {
         interp::Value::Variant(name, _) if name == "Err" => {},
         other => panic!("Expected Err variant, got: {}", other),
@@ -300,7 +300,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "? should propagate error as value, got: {:?}", result);
-    let val = result.unwrap();
+    let val = result.expect("src/tests/basic_other.rs:303 unwrap failed");
     match &val {
         interp::Value::Variant(name, _) if name == "Err" => {},
         other => panic!("Expected Err variant, got: {}", other),
@@ -590,7 +590,7 @@ func main() -> i32 {
     ...
 }
 "#;
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/basic_other.rs:593 unwrap failed");
     let result = parser::Parser::new(tokens).parse_file();
     assert!(result.is_err());
     let err = result.unwrap_err();

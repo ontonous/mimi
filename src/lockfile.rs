@@ -121,7 +121,7 @@ mod tests {
 
         lf.add_package("foo", "2.0.0", None, None);
         assert_eq!(lf.package.len(), 1);
-        assert_eq!(lf.get_package("foo").unwrap().version, "2.0.0");
+        assert_eq!(lf.get_package("foo").expect("src/lockfile.rs:124 unwrap failed").version, "2.0.0");
 
         assert!(lf.remove_package("foo"));
         assert!(!lf.remove_package("foo"));

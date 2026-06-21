@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 fn temp_dir() -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("src/tests/cli_commands.rs:6 unwrap failed").as_nanos();
     let dir = std::env::temp_dir().join(format!("mimi_test_{}_{}", std::process::id(), nanos));
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("src/tests/cli_commands.rs:8 unwrap failed");
     dir
 }
 
@@ -13,7 +13,7 @@ fn temp_dir() -> PathBuf {
 fn promote_clean_file() {
     let dir = temp_dir();
     let src_path = dir.join("test.mms");
-    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { a + b }").expect("src/tests/cli_commands.rs:16 unwrap failed");
 
     let output_path = dir.join("test.mimi");
     let result = crate::main_promote(&src_path, Some(&output_path));
@@ -28,7 +28,7 @@ fn promote_clean_file() {
 fn promote_rejects_placeholders() {
     let dir = temp_dir();
     let src_path = dir.join("test.mms");
-    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { ... }").unwrap();
+    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { ... }").expect("src/tests/cli_commands.rs:31 unwrap failed");
 
     let result = crate::main_promote(&src_path, None);
     assert!(result.is_err(), "promote should fail with ...");
@@ -42,7 +42,7 @@ fn promote_rejects_placeholders() {
 fn promote_default_output() {
     let dir = temp_dir();
     let src_path = dir.join("test.mms");
-    fs::write(&src_path, "func main() { }").unwrap();
+    fs::write(&src_path, "func main() { }").expect("src/tests/cli_commands.rs:45 unwrap failed");
 
     let result = crate::main_promote(&src_path, None);
     assert!(result.is_ok(), "promote should succeed");
@@ -58,7 +58,7 @@ fn promote_default_output() {
 fn doc_markdown() {
     let dir = temp_dir();
     let src_path = dir.join("test.mimi");
-    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { a + b }\ntype Point { x: i32, y: i32 }").unwrap();
+    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { a + b }\ntype Point { x: i32, y: i32 }").expect("src/tests/cli_commands.rs:61 unwrap failed");
 
     let result = crate::main_doc(&src_path, "markdown");
     assert!(result.is_ok(), "doc should succeed: {:?}", result.err());
@@ -71,7 +71,7 @@ fn doc_markdown() {
 fn doc_empty_file() {
     let dir = temp_dir();
     let src_path = dir.join("empty.mimi");
-    fs::write(&src_path, "").unwrap();
+    fs::write(&src_path, "").expect("src/tests/cli_commands.rs:74 unwrap failed");
 
     let result = crate::main_doc(&src_path, "markdown");
     assert!(result.is_ok(), "doc should succeed on empty file");
@@ -84,7 +84,7 @@ fn doc_empty_file() {
 fn promote_file_with_type_def() {
     let dir = temp_dir();
     let src_path = dir.join("test.mms");
-    fs::write(&src_path, "type Point { x: i32, y: i32 }\nfunc main() { }").unwrap();
+    fs::write(&src_path, "type Point { x: i32, y: i32 }\nfunc main() { }").expect("src/tests/cli_commands.rs:87 unwrap failed");
 
     let result = crate::main_promote(&src_path, None);
     assert!(result.is_ok(), "promote should succeed with type def");
@@ -97,7 +97,7 @@ fn promote_file_with_type_def() {
 fn doc_markdown_with_type_and_func() {
     let dir = temp_dir();
     let src_path = dir.join("test.mimi");
-    fs::write(&src_path, "type Point { x: i32, y: i32 }\n\nfunc distance(p: Point) -> f64 { sqrt(p.x * p.x + p.y * p.y) }").unwrap();
+    fs::write(&src_path, "type Point { x: i32, y: i32 }\n\nfunc distance(p: Point) -> f64 { sqrt(p.x * p.x + p.y * p.y) }").expect("src/tests/cli_commands.rs:100 unwrap failed");
 
     let result = crate::main_doc(&src_path, "markdown");
     assert!(result.is_ok(), "doc should succeed with type and func");
@@ -110,7 +110,7 @@ fn doc_markdown_with_type_and_func() {
 fn doc_unsupported_format() {
     let dir = temp_dir();
     let src_path = dir.join("test.mimi");
-    fs::write(&src_path, "func main() { }").unwrap();
+    fs::write(&src_path, "func main() { }").expect("src/tests/cli_commands.rs:113 unwrap failed");
 
     let result = crate::main_doc(&src_path, "html");
     let _ = result;

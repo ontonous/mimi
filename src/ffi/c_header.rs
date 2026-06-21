@@ -393,7 +393,7 @@ mod tests {
             variadic: false,
         }];
 
-        let header = generate_c_header(&extern_funcs, HashMap::new()).unwrap();
+        let header = generate_c_header(&extern_funcs, HashMap::new()).expect("src/ffi/c_header.rs:396 unwrap failed");
         assert!(header.contains("int64_t add(int64_t a, int64_t b);"));
     }
 }

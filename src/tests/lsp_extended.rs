@@ -7,8 +7,8 @@ fn hover_function() {
     let text = "func add(a: i32, b: i32) -> i32 { a + b }";
     let result = server.compute_hover(text, 0, 5);
     assert!(result.is_some(), "should hover over 'add'");
-    let hover = result.unwrap();
-    let contents = hover.get("contents").unwrap().get("value").unwrap().as_str().unwrap();
+    let hover = result.expect("src/tests/lsp_extended.rs:10 unwrap failed");
+    let contents = hover.get("contents").expect("src/tests/lsp_extended.rs:11 unwrap failed").get("value").expect("src/tests/lsp_extended.rs:11 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:11 unwrap failed");
     assert!(contents.contains("add"), "hover should mention function name: {}", contents);
 }
 
@@ -18,8 +18,8 @@ fn hover_type() {
     let text = "type Point { x: i32, y: i32 }";
     let result = server.compute_hover(text, 0, 5);
     assert!(result.is_some(), "should hover over 'Point'");
-    let hover = result.unwrap();
-    let contents = hover.get("contents").unwrap().get("value").unwrap().as_str().unwrap();
+    let hover = result.expect("src/tests/lsp_extended.rs:21 unwrap failed");
+    let contents = hover.get("contents").expect("src/tests/lsp_extended.rs:22 unwrap failed").get("value").expect("src/tests/lsp_extended.rs:22 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:22 unwrap failed");
     assert!(contents.contains("Point"), "hover should mention type name: {}", contents);
 }
 
@@ -29,8 +29,8 @@ fn hover_module() {
     let text = "module Math { }";
     let result = server.compute_hover(text, 0, 7);
     assert!(result.is_some(), "should hover over 'Math'");
-    let hover = result.unwrap();
-    let contents = hover.get("contents").unwrap().get("value").unwrap().as_str().unwrap();
+    let hover = result.expect("src/tests/lsp_extended.rs:32 unwrap failed");
+    let contents = hover.get("contents").expect("src/tests/lsp_extended.rs:33 unwrap failed").get("value").expect("src/tests/lsp_extended.rs:33 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:33 unwrap failed");
     assert!(contents.contains("Math"), "hover should mention module name: {}", contents);
 }
 
@@ -40,8 +40,8 @@ fn hover_builtin() {
     let text = "func main() { println(42) }";
     let result = server.compute_hover(text, 0, 17);
     assert!(result.is_some(), "should hover over 'println'");
-    let hover = result.unwrap();
-    let contents = hover.get("contents").unwrap().get("value").unwrap().as_str().unwrap();
+    let hover = result.expect("src/tests/lsp_extended.rs:43 unwrap failed");
+    let contents = hover.get("contents").expect("src/tests/lsp_extended.rs:44 unwrap failed").get("value").expect("src/tests/lsp_extended.rs:44 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:44 unwrap failed");
     assert!(contents.contains("builtin"), "hover should mention builtin: {}", contents);
 }
 
@@ -60,8 +60,8 @@ fn definition_function() {
     // Line 1, character 16 is inside 'add'
     let result = server.compute_definition(text, 1, 16, "file:///test.mimi");
     assert!(result.is_some(), "should find definition of 'add'");
-    let def = result.unwrap();
-    let uri = def.get("uri").unwrap().as_str().unwrap();
+    let def = result.expect("src/tests/lsp_extended.rs:63 unwrap failed");
+    let uri = def.get("uri").expect("src/tests/lsp_extended.rs:64 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:64 unwrap failed");
     assert!(uri == "file:///test.mimi", "uri should match: {}", uri);
 }
 
@@ -106,7 +106,7 @@ fn document_symbols_functions() {
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.len() >= 2, "should have at least 2 symbols, got {}", symbols.len());
     let names: Vec<&str> = symbols.iter()
-        .map(|s| s.get("name").unwrap().as_str().unwrap())
+        .map(|s| s.get("name").expect("src/tests/lsp_extended.rs:109 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:109 unwrap failed"))
         .collect();
     assert!(names.contains(&"add"), "should contain 'add'");
     assert!(names.contains(&"main"), "should contain 'main'");
@@ -119,7 +119,7 @@ fn document_symbols_types() {
     let symbols = server.compute_document_symbols(text);
     assert!(symbols.len() >= 2, "should have at least 2 symbols");
     let names: Vec<&str> = symbols.iter()
-        .map(|s| s.get("name").unwrap().as_str().unwrap())
+        .map(|s| s.get("name").expect("src/tests/lsp_extended.rs:122 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:122 unwrap failed"))
         .collect();
     assert!(names.contains(&"Point"), "should contain 'Point'");
     assert!(names.contains(&"Color"), "should contain 'Color'");
@@ -147,7 +147,7 @@ fn completion_new_builtins() {
     let text = "func main() { }";
     let items = server.compute_completion(text, 0, 0);
     let labels: Vec<&str> = items.iter()
-        .map(|i| i.get("label").unwrap().as_str().unwrap())
+        .map(|i| i.get("label").expect("src/tests/lsp_extended.rs:150 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:150 unwrap failed"))
         .collect();
     // Check v5.0 builtins are present
     assert!(labels.contains(&"print"), "should contain 'print'");
@@ -177,8 +177,8 @@ fn hover_new_builtins() {
     let text = "func main() { pow(2, 10) }";
     let result = server.compute_hover(text, 0, 16);
     assert!(result.is_some(), "should hover over 'pow'");
-    let hover = result.unwrap();
-    let contents = hover.get("contents").unwrap().get("value").unwrap().as_str().unwrap();
+    let hover = result.expect("src/tests/lsp_extended.rs:180 unwrap failed");
+    let contents = hover.get("contents").expect("src/tests/lsp_extended.rs:181 unwrap failed").get("value").expect("src/tests/lsp_extended.rs:181 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:181 unwrap failed");
     assert!(contents.contains("builtin"), "hover should mention builtin: {}", contents);
 }
 
@@ -273,9 +273,9 @@ fn rename_function() {
     let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 { add(1, 2) }";
     let result = server.compute_rename(text, 0, 5, "file:///test.mimi", "sum");
     assert!(result.is_some(), "should rename 'add' to 'sum'");
-    let edit = result.unwrap();
-    let changes = edit.get("changes").unwrap();
-    let file_changes = changes.get("file:///test.mimi").unwrap().as_array().unwrap();
+    let edit = result.expect("src/tests/lsp_extended.rs:276 unwrap failed");
+    let changes = edit.get("changes").expect("src/tests/lsp_extended.rs:277 unwrap failed");
+    let file_changes = changes.get("file:///test.mimi").expect("src/tests/lsp_extended.rs:278 unwrap failed").as_array().expect("src/tests/lsp_extended.rs:278 unwrap failed");
     assert!(file_changes.len() >= 2, "should have at least 2 changes");
 }
 
@@ -309,8 +309,8 @@ fn signature_help_function() {
     // Position 18 is inside the add() call, after the comma
     let result = server.compute_signature_help(text, 1, 18);
     assert!(result.is_some(), "should show signature help for 'add'");
-    let sig = result.unwrap();
-    let signatures = sig.get("signatures").unwrap().as_array().unwrap();
+    let sig = result.expect("src/tests/lsp_extended.rs:312 unwrap failed");
+    let signatures = sig.get("signatures").expect("src/tests/lsp_extended.rs:313 unwrap failed").as_array().expect("src/tests/lsp_extended.rs:313 unwrap failed");
     assert!(!signatures.is_empty(), "should have at least one signature");
 }
 
@@ -399,7 +399,7 @@ fn document_symbols_with_modules() {
     let text = "module Math {\n    func add(a: i32, b: i32) -> i32 { a + b }\n}\nfunc main() { }";
     let symbols = server.compute_document_symbols(text);
     let names: Vec<&str> = symbols.iter()
-        .map(|s| s.get("name").unwrap().as_str().unwrap())
+        .map(|s| s.get("name").expect("src/tests/lsp_extended.rs:402 unwrap failed").as_str().expect("src/tests/lsp_extended.rs:402 unwrap failed"))
         .collect();
     assert!(names.contains(&"Math") || names.contains(&"main"), "should contain at least one symbol");
 }
@@ -562,8 +562,8 @@ fn code_action_handle_message_roundtrip() {
     });
     let response = server.handle_message(&msg);
     assert!(response.is_some(), "codeAction should return response");
-    let resp = response.unwrap();
-    let actions = resp["result"].as_array().unwrap();
+    let resp = response.expect("src/tests/lsp_extended.rs:565 unwrap failed");
+    let actions = resp["result"].as_array().expect("src/tests/lsp_extended.rs:566 unwrap failed");
     assert!(!actions.is_empty(), "should have code actions");
     let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
     assert!(titles.contains(&"Create variable `x`"), "roundtrip should produce create variable");
@@ -591,7 +591,7 @@ fn workspace_symbols_query_filter() {
         "func hello() { }\nfunc world() { }\ntype MyType = i64".to_string());
     let symbols = server.compute_workspace_symbols("hello");
     assert_eq!(symbols.len(), 1, "should find exactly 1 symbol matching 'hello'");
-    assert_eq!(symbols[0]["name"].as_str().unwrap(), "hello");
+    assert_eq!(symbols[0]["name"].as_str().expect("src/tests/lsp_extended.rs:594 unwrap failed"), "hello");
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn prepare_call_hierarchy_function() {
     let text = "func hello() -> i32 { 42 }";
     let items = server.compute_prepare_call_hierarchy(text, "file:///test.mimi", 0, 6);
     assert_eq!(items.len(), 1, "should find 1 call hierarchy item");
-    assert_eq!(items[0]["name"].as_str().unwrap(), "hello");
+    assert_eq!(items[0]["name"].as_str().expect("src/tests/lsp_extended.rs:650 unwrap failed"), "hello");
 }
 
 #[test]
@@ -671,7 +671,7 @@ fn incoming_calls_basic() {
     let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { helper() }";
     let calls = server.compute_incoming_calls(text, "file:///test.mimi", "helper");
     assert!(!calls.is_empty(), "helper should have incoming calls");
-    assert_eq!(calls[0]["from"]["name"].as_str().unwrap(), "main");
+    assert_eq!(calls[0]["from"]["name"].as_str().expect("src/tests/lsp_extended.rs:674 unwrap failed"), "main");
 }
 
 #[test]
@@ -688,7 +688,7 @@ fn outgoing_calls_basic() {
     let text = "func helper() -> i32 { 42 }\nfunc main() -> i32 { helper() }";
     let calls = server.compute_outgoing_calls(text, "file:///test.mimi", "main");
     assert!(!calls.is_empty(), "main should have outgoing calls");
-    assert_eq!(calls[0]["to"]["name"].as_str().unwrap(), "helper");
+    assert_eq!(calls[0]["to"]["name"].as_str().expect("src/tests/lsp_extended.rs:691 unwrap failed"), "helper");
 }
 
 #[test]

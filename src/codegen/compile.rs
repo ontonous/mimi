@@ -3,6 +3,7 @@ use crate::codegen::types;
 use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
+use crate::span::Span;
 
 use super::CodeGenerator;
 use inkwell::passes::PassBuilderOptions;
@@ -147,7 +148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         for item in &file.items {
             match item {
                 Item::Func(f) if !f.is_comptime && self.is_committed(&f.commitment) => {
-                    self.compile_func(f)?;
+                    self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
                 }
                 Item::Actor(actor) if self.is_committed(&actor.commitment) => {
                     self.compile_actor(actor)?;

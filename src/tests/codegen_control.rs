@@ -4,7 +4,7 @@ fn compile_to_ir(src: &str) -> String {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    codegen.compile_file(&file).unwrap();
+    codegen.compile_file(&file).expect("src/tests/codegen_control.rs:7 unwrap failed");
     codegen.emit_ir()
 }
 
@@ -1781,7 +1781,7 @@ fn e2e_hello_world() {
             println("hello from mimi")
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1784 unwrap failed");
     assert_eq!(stdout.trim(), "hello from mimi");
 }
 
@@ -1794,7 +1794,7 @@ fn e2e_arithmetic() {
             println(add(40, 2))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1797 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1813,7 +1813,7 @@ fn e2e_list_for_loop() {
             println(sum([1, 2, 3, 4, 5]))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1816 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -1830,7 +1830,7 @@ fn e2e_map_fn_ref() {
             }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1833 unwrap failed");
     assert_eq!(stdout.trim(), "2\n4\n6");
 }
 
@@ -1847,7 +1847,7 @@ fn e2e_filter_fn_ref() {
             }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1850 unwrap failed");
     assert_eq!(stdout.trim(), "2\n4");
 }
 
@@ -1862,7 +1862,7 @@ fn e2e_reduce_fn_ref() {
             println(total)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1865 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -1885,6 +1885,6 @@ fn codegen_fstring_with_interp() {
             println(f"x = {x}")
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_control.rs:1888 unwrap failed");
     assert_eq!(stdout.trim(), "x = 42");
 }

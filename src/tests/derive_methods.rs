@@ -16,7 +16,7 @@ func main() -> string {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "Debug derive should work: {:?}", result.err());
-    let s = match result.unwrap() {
+    let s = match result.expect("src/tests/derive_methods.rs:19 unwrap failed") {
         interp::Value::String(s) => s,
         other => panic!("expected string, got {:?}", other),
     };

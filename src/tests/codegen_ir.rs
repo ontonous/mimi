@@ -8,7 +8,7 @@ fn compile_to_ir(src: &str) -> String {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    codegen.compile_file(&file).unwrap();
+    codegen.compile_file(&file).expect("src/tests/codegen_ir.rs:11 unwrap failed");
     codegen.emit_ir()
 }
 

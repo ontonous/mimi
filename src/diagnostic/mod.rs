@@ -110,6 +110,12 @@ impl Diagnostic {
         self.code = Some(code.to_string());
         self
     }
+
+    /// Replace the primary span of this diagnostic.
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
 }
 
 impl std::fmt::Display for Diagnostic {

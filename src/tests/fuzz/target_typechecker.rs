@@ -18,8 +18,8 @@ proptest::proptest! {
 }
 
 fn parse_src(src: &str) -> crate::ast::File {
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    parser::Parser::new(tokens).parse_file().unwrap()
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/fuzz/target_typechecker.rs:21 unwrap failed");
+    parser::Parser::new(tokens).parse_file().expect("src/tests/fuzz/target_typechecker.rs:22 unwrap failed")
 }
 
 /// Edge-case typechecker regression tests.

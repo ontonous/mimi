@@ -352,7 +352,7 @@ let msg = prelude::type_of(42)          // "i32"
 
 // 数学函数
 use std::mymath
-let x = mymath::square(5)               // 25
+let x = prelude::sqr(5)                 // 25
 let y = mymath::factorial(5)            // 120
 let a = mymath::abs(-3)                 // 3
 
@@ -388,7 +388,7 @@ let slug = text::slugify("Hello World") // "hello-world"
 |------|------|----------|
 | `std::prelude` | 基础工具 | `identity`, `compose`, `pipe`, `tap`, `fail`, `clamp`, `lerp`, `type_of`, `repeat_action` |
 | `std::io` | I/O 操作 | `print_line`, `print_raw`, `print_err`, `input_line`, `input_int`, `input_float` |
-| `std::mymath` | 数学函数 | `square`, `cube`, `abs`, `factorial`, `fibonacci`, `gcd`, `lcm`, `random_int` |
+| `std::mymath` | 数学函数 | `abs`, `factorial`, `fibonacci`, `gcd`, `lcm`, `is_prime`, `mod_pow`, `random_int` |
 | `std::collections` | 集合操作 | `sum`, `map_list`, `filter_list`, `reduce_list`, `find`, `dedup`, `any`, `all`, `partition`, `group_by` |
 | `std::strings` | 字符串处理 | `contains`, `split`, `join`, `replace`, `trim`, `repeat`, `to_upper`, `to_lower`, `capitalize`, `title` |
 | `std::text` | 文本处理 | `slugify`, `wrap_text`, `camel_to_snake`, `is_blank`, `is_numeric` |

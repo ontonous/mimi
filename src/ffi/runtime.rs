@@ -397,7 +397,8 @@ pub extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut std::ffi
     if mimi_string.is_null() {
         return std::ptr::null_mut();
     }
-    // Safety: mimi_string is a non-null pointer to a valid heap-allocated Value (null-checked above); the mutable dereference is safe because this function takes ownership from the caller.
+    // SAFETY: `mimi_string` was null-checked above. The caller has transferred ownership of this
+    // pointer to us, so a single mutable dereference to read the owned Value is valid.
     unsafe {
         match &mut *mimi_string {
             Value::String(s) => {
@@ -429,7 +430,9 @@ pub extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *mut Val
     if c_str.is_null() {
         return std::ptr::null_mut();
     }
-    // Safety: c_str is a non-null pointer to a CString previously created via CString::into_raw (null-checked above); Box::into_raw transfers ownership to the C caller.
+    // SAFETY: `c_str` was null-checked above and must have been produced by `CString::into_raw`.
+    // Reconstructing the CString here takes ownership back from the caller; the caller must not use
+    // the pointer afterwards.
     unsafe {
         let c_str = std::ffi::CString::from_raw(c_str);
         let s = c_str.to_string_lossy().into_owned();

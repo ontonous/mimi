@@ -22,7 +22,7 @@ func identity(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:25 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified);
     }
@@ -37,7 +37,7 @@ func double(x: i32) -> i32 {
     x * 2
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:40 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "body `x * 2` should satisfy ensures `result == x * 2`: {}", results[0].message);
@@ -53,10 +53,10 @@ func wrong(x: i32) -> i32 {
     x * 3
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:56 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
-        let diag = results[0].diagnostic.as_ref().unwrap();
+        let diag = results[0].diagnostic.as_ref().expect("src/verifier/tests.rs:59 unwrap failed");
         assert!(diag.message.contains("result ="), "narrative should show result value: {}", diag.message);
     }
 
@@ -69,10 +69,10 @@ func add_one(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:72 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
-        let diag = results[0].diagnostic.as_ref().unwrap();
+        let diag = results[0].diagnostic.as_ref().expect("src/verifier/tests.rs:75 unwrap failed");
         assert!(diag.message.contains("result ="), "should show result value in narrative");
     }
 
@@ -86,7 +86,7 @@ func abs(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:89 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "x > 0 && result == x should satisfy result > 0");
@@ -102,11 +102,11 @@ func abs(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:105 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
         assert!(results[0].diagnostic.is_some());
-        let diag = results[0].diagnostic.as_ref().unwrap();
+        let diag = results[0].diagnostic.as_ref().expect("src/verifier/tests.rs:109 unwrap failed");
         assert!(diag.message.contains("result ="), "should show result in narrative");
     }
 
@@ -120,10 +120,10 @@ func impossible(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:123 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed);
-        let diag = results[0].diagnostic.as_ref().unwrap();
+        let diag = results[0].diagnostic.as_ref().expect("src/verifier/tests.rs:126 unwrap failed");
         assert!(diag.message.contains("unsatisfiable"));
     }
 
@@ -137,7 +137,7 @@ func noop(x: i32) -> i32 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:140 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "body returns x unchanged, ensures result == old(x) should hold: {}", results[0].message);
@@ -153,7 +153,7 @@ func mutate(x: i32) -> i32 {
     x + 1
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:156 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed,
             "body returns x+1, ensures result == old(x) should fail");
@@ -184,7 +184,7 @@ extern "C" {
 
 func main() -> i64 { 0 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:187 unwrap failed");
         let ext: Vec<_> = results.iter().filter(|r| r.func_name.contains("extern")).collect();
         assert_eq!(ext.len(), 1, "extern func should be verified");
         assert_eq!(ext[0].status, VerifStatus::Verified,
@@ -203,7 +203,7 @@ extern "C" {
 
 func main() -> i64 { 0 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:206 unwrap failed");
         let ext: Vec<_> = results.iter().filter(|r| r.func_name.contains("extern")).collect();
         assert_eq!(ext.len(), 1, "extern func should be verified");
         assert_eq!(ext[0].status, VerifStatus::Verified,
@@ -221,7 +221,7 @@ extern "C" {
 
 func main() -> i64 { 0 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:224 unwrap failed");
         let ext: Vec<_> = results.iter().filter(|r| r.func_name.contains("extern")).collect();
         assert_eq!(ext.len(), 1);
         assert_eq!(ext[0].status, VerifStatus::Failed,
@@ -238,7 +238,7 @@ extern "C" {
 
 func main() -> i64 { 0 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:241 unwrap failed");
         let ext: Vec<_> = results.iter().filter(|r| r.func_name.contains("extern")).collect();
         assert_eq!(ext.len(), 0, "extern func without contracts should be skipped");
     }
@@ -256,7 +256,7 @@ func main() -> i64 {
     0
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:259 unwrap failed");
         let func_names: Vec<&str> = results.iter().map(|r| r.func_name.as_str()).collect();
         assert!(func_names.contains(&"extern identity"), "extern identity should be in results: {:?}", func_names);
         assert!(func_names.contains(&"main"), "main should be in results: {:?}", func_names);
@@ -274,7 +274,7 @@ func abs(x: i32) -> i32 {
     if x >= 0 { x } else { -x }
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:277 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "abs with if/else should be verified: {}", results[0].message);
@@ -290,7 +290,7 @@ func bad_abs(x: i32) -> i32 {
     if x >= 0 { x } else { x - 1 }
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:293 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed,
             "bad_abs with if/else should fail (else branch x-1 can be negative)");
@@ -306,7 +306,7 @@ func sign(x: i32) -> i32 {
     if x > 0 { 1 } else { if x < 0 { -1 } else { 0 } }
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:309 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "nested if/else should be verified: {}", results[0].message);
@@ -322,7 +322,7 @@ func add_or_mul(x: i32, y: i32) -> i32 {
     if x > y { x + y } else { x * y }
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:325 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "add_or_mul with if/else should be verified: {}", results[0].message);
@@ -340,7 +340,7 @@ func positive(x: f64) -> f64 {
     x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:343 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "f64 ensures should be verified: {}", results[0].message);
@@ -356,11 +356,11 @@ func negate(x: f64) -> f64 {
     -x
 }
 "#;
-        let results = verify_source(src).unwrap();
+        let results = verify_source(src).expect("src/verifier/tests.rs:359 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed,
             "negate should fail: result = -x violates ensures result > 0.0");
-        let diag = results[0].diagnostic.as_ref().unwrap();
+        let diag = results[0].diagnostic.as_ref().expect("src/verifier/tests.rs:363 unwrap failed");
         assert!(diag.message.contains("result"), "should include result in narrative");
     }
 
@@ -377,7 +377,7 @@ func caller() -> i64 {
     get_value()
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:380 unwrap failed");
         assert!(results.iter().all(|r| r.status == VerifStatus::Verified),
             "no-requires extern should be Verified: {:?}", results);
     }
@@ -394,7 +394,7 @@ func caller(fd: i64, buf: i64, size: i64) -> i64 {
     read(fd, buf, size)
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:397 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "requires fd >= 0 && size > 0 should satisfy read's preconditions: {}", results[0].message);
@@ -412,7 +412,7 @@ func bad_caller(size: i64) -> i64 {
     read(-1, 0, size)
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:415 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed,
             "read(-1, 0, size) should fail: fd is negative");
@@ -430,7 +430,7 @@ func caller(s: string) -> i64 {
     strlen(s)
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:433 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Failed,
             "strlen(s) without guard should fail: s could be empty");
@@ -449,7 +449,7 @@ func caller(s: string) -> i64 {
     strlen(s)
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:452 unwrap failed");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, VerifStatus::Verified,
             "strlen(s) with guard should be Verified: {}", results[0].message);
@@ -473,7 +473,7 @@ func bad_caller(fd: i64) -> i64 {
     read(fd, 0, 1) + write(fd, 0, 1)
 }
 "#;
-        let results = verify_ffi_source(src).unwrap();
+        let results = verify_ffi_source(src).expect("src/verifier/tests.rs:476 unwrap failed");
         assert_eq!(results.len(), 4);
         let ok_results: Vec<_> = results.iter().filter(|r| r.func_name.starts_with("ok_caller")).collect();
         assert_eq!(ok_results.len(), 2);

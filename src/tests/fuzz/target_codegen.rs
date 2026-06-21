@@ -27,7 +27,7 @@ proptest::proptest! {
 #[ignore = "requires cc linker toolchain"]
 fn test_codegen_empty_main() {
     let src = "func main() -> i32 { 0 }";
-    let stdout = crate::tests::compile_and_run(src).unwrap();
+    let stdout = crate::tests::compile_and_run(src).expect("src/tests/fuzz/target_codegen.rs:30 unwrap failed");
     assert_eq!(stdout.trim(), "");
 }
 
@@ -41,7 +41,7 @@ fn test_codegen_large_return() {
             a + b
         }
     "#;
-    let stdout = crate::tests::compile_and_run(src).unwrap();
+    let stdout = crate::tests::compile_and_run(src).expect("src/tests/fuzz/target_codegen.rs:44 unwrap failed");
     assert_eq!(stdout.trim(), "");
 }
 
@@ -55,7 +55,7 @@ fn test_codegen_string_manip() {
             0
         }
     "#;
-    let stdout = crate::tests::compile_and_run(src).unwrap();
+    let stdout = crate::tests::compile_and_run(src).expect("src/tests/fuzz/target_codegen.rs:58 unwrap failed");
     assert_eq!(stdout.trim(), "11");
 }
 
@@ -63,8 +63,8 @@ fn test_codegen_string_manip() {
 #[test]
 fn test_codegen_ir_emission() {
     let src = "func main() -> i32 { 42 }";
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    let file = parser::Parser::new(tokens).parse_file().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/fuzz/target_codegen.rs:66 unwrap failed");
+    let file = parser::Parser::new(tokens).parse_file().expect("src/tests/fuzz/target_codegen.rs:67 unwrap failed");
     if core::check(&file).is_err() {
         return;
     }

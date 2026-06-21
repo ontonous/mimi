@@ -198,10 +198,10 @@ func main() -> i32 {
         if let crate::ast::Item::Func(f) = item {
             if f.name == "pay" { Some(f) } else { None }
         } else { None }
-    }).unwrap();
+    }).expect("src/tests/v1_2_misc_remaining.rs:201 unwrap failed");
     let mms_text = func.body.iter().find_map(|s| {
         if let crate::ast::Stmt::MmsBlock { content: t, .. } = s { Some(t.clone()) } else { None }
-    }).unwrap();
+    }).expect("src/tests/v1_2_misc_remaining.rs:204 unwrap failed");
     let contracts = crate::contracts::extract_contracts(&mms_text);
     assert_eq!(contracts.requires.len(), 1);
     assert_eq!(contracts.requires[0], "amount > 0");

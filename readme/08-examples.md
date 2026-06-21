@@ -469,11 +469,11 @@ func main() -> i32 {
 use std::mymath
 
 func main() -> i32 {
-    let x = mymath::square(5)       // 25
-    let y = mymath::cube(3)         // 27
-    let z = mymath::clamp(15, 0, 10)  // 10
-    let f = mymath::factorial(5)    // 120
-    let fib = mymath::fibonacci(10) // 55
+    let x = prelude::sqr(5)          // 25
+    let y = prelude::cube_int(3)     // 27
+    let z = prelude::clamp(15, 0, 10) // 10
+    let f = mymath::factorial(5)     // 120
+    let fib = mymath::fibonacci(10)  // 55
 
     println("Square:", x, "Factorial:", f)
     0

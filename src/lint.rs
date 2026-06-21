@@ -118,8 +118,8 @@ mod tests {
     use crate::parser::Parser;
 
     fn parse_source(src: &str) -> File {
-        let tokens = Lexer::new(src).tokenize().unwrap();
-        Parser::new(tokens).parse_file().unwrap()
+        let tokens = Lexer::new(src).tokenize().expect("src/lint.rs:121 unwrap failed");
+        Parser::new(tokens).parse_file().expect("src/lint.rs:122 unwrap failed")
     }
 
     #[test]

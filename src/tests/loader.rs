@@ -19,12 +19,12 @@ fn loader_load_single_file() {
 func main() -> i32 {
     42
 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:22 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&file_path);
     assert!(result.is_ok(), "loading single file should succeed: {:?}", result.err());
-    let loaded = result.unwrap();
+    let loaded = result.expect("src/tests/loader.rs:27 unwrap failed");
     assert_eq!(loaded.file.items.len(), 1);
     cleanup(&dir);
 }
@@ -46,7 +46,7 @@ fn loader_invalid_syntax() {
     let file_path = dir.join("bad.mimi");
     fs::write(&file_path, r#"
 func $$$ broken
-"#).unwrap();
+"#).expect("src/tests/loader.rs:49 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&file_path);
@@ -61,10 +61,10 @@ fn loader_merge_all() {
     let mod_path = dir.join("helper.mimi");
     fs::write(&main_path, r#"
 func main() -> i32 { 42 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:64 unwrap failed");
     fs::write(&mod_path, r#"
 func helper() -> i32 { 99 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:67 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let _ = loader.load_main(&main_path);
@@ -82,7 +82,7 @@ fn loader_import_resolution_failure() {
 use nonexistent;
 
 func main() -> i32 { 42 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:85 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&main_path);
@@ -96,7 +96,7 @@ fn loader_get_module() {
     let file_path = dir.join("mymod.mimi");
     fs::write(&file_path, r#"
 func hello() -> i32 { 1 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:99 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let _ = loader.load_main(&file_path);
@@ -109,7 +109,7 @@ func hello() -> i32 { 1 }
 fn loader_empty_file() {
     let dir = temp_dir("empty");
     let file_path = dir.join("empty.mimi");
-    fs::write(&file_path, r#""#).unwrap();
+    fs::write(&file_path, r#""#).expect("src/tests/loader.rs:112 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&file_path);
@@ -124,7 +124,7 @@ fn loader_file_with_only_comments() {
     fs::write(&file_path, r#"
 // This is a comment
 // Another comment
-"#).unwrap();
+"#).expect("src/tests/loader.rs:127 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&file_path);
@@ -139,8 +139,8 @@ fn loader_merge_with_empty() {
     let empty_path = dir.join("empty.mimi");
     fs::write(&main_path, r#"
 func main() -> i32 { 42 }
-"#).unwrap();
-    fs::write(&empty_path, r#""#).unwrap();
+"#).expect("src/tests/loader.rs:142 unwrap failed");
+    fs::write(&empty_path, r#""#).expect("src/tests/loader.rs:143 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let _ = loader.load_main(&main_path);
@@ -157,14 +157,14 @@ fn loader_resolve_import() {
     let main_path = dir.join("main.mimi");
     fs::write(&lib_path, r#"
 pub func helper() -> i32 { 99 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:160 unwrap failed");
     fs::write(&main_path, r#"
 use lib;
 
 func main() -> i32 {
     lib::helper()
 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:167 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&main_path);
@@ -181,7 +181,7 @@ fn loader_duplicate_key_no_panic() {
     fs::write(&path, r#"
 func f() -> i32 { 1 }
 func f() -> i32 { 2 }
-"#).unwrap();
+"#).expect("src/tests/loader.rs:184 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&path);

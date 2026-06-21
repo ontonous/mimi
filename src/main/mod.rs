@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 #[path = "../ast.rs"]
 mod ast;
 #[path = "../codegen/mod.rs"]

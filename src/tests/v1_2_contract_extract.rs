@@ -54,7 +54,7 @@ func main() -> i32 {
         } else { None }
     });
     assert!(func.is_some());
-    let has_mms = func.unwrap().body.iter().any(|s| matches!(s, crate::ast::Stmt::MmsBlock { .. }));
+    let has_mms = func.expect("src/tests/v1_2_contract_extract.rs:57 unwrap failed").body.iter().any(|s| matches!(s, crate::ast::Stmt::MmsBlock { .. }));
     assert!(has_mms, "mms block should be present in parsed function body");
 }
 
@@ -73,8 +73,8 @@ func main() -> i32 {
 }
 "#;
     // Parse, bind contracts, then check
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let mut file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("src/tests/v1_2_contract_extract.rs:76 unwrap failed");
+    let mut file = crate::parser::Parser::new(tokens).parse_file().expect("src/tests/v1_2_contract_extract.rs:77 unwrap failed");
     let contracts_map = extract_contracts_from_file(&file);
     contracts::bind_contracts(&mut file, contracts_map);
     // Should type-check successfully

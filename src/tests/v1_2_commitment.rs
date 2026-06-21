@@ -34,7 +34,7 @@ func main() -> i32 {
 fn debug_commitment_tokens() {
     use crate::ast::Commitment;
     let src = "func$ add(a: i32, b: i32) -> i32 {\n    a + b\n}";
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/v1_2_commitment.rs:37 unwrap failed");
     let has_commitment = tokens.iter().any(|t| t.commitment != Commitment::None);
     assert!(has_commitment, "func$ should produce commitment token");
 }

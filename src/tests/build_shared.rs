@@ -6,8 +6,8 @@ use crate::codegen;
 
 /// Parse and type-check a Mimi source string.
 fn parse_and_check(src: &str) -> crate::ast::File {
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    let file = parser::Parser::new(tokens).parse_file().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/build_shared.rs:9 unwrap failed");
+    let file = parser::Parser::new(tokens).parse_file().expect("src/tests/build_shared.rs:10 unwrap failed");
     let check = crate::core::check(&file);
     assert!(check.is_ok(), "type check failed: {:?}", check.err());
     file
@@ -18,14 +18,14 @@ fn compile_to_object(src: &str, module_name: &str, obj_path: &std::path::Path) {
     let file = parse_and_check(src);
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, module_name);
-    gen.compile_file(&file).unwrap();
-    gen.compile_to_object(obj_path).unwrap();
+    gen.compile_file(&file).expect("src/tests/build_shared.rs:21 unwrap failed");
+    gen.compile_to_object(obj_path).expect("src/tests/build_shared.rs:22 unwrap failed");
 }
 
 /// Link an object file + C runtime into a shared library.
 fn link_shared(obj_path: &std::path::Path, output_so: &std::path::Path, no_std: bool) {
     let runtime_c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
-    let tmp_dir = output_so.parent().unwrap();
+    let tmp_dir = output_so.parent().expect("src/tests/build_shared.rs:28 unwrap failed");
     let runtime_o = tmp_dir.join("mimi_runtime.o");
 
     let mut rt_cmd = std::process::Command::new("cc");
@@ -64,7 +64,7 @@ fn parse_exported_func() {
 fn build_shared_library() {
     let tmp = std::env::temp_dir().join(format!("mimi_build_shared_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::create_dir_all(&tmp).expect("src/tests/build_shared.rs:67 unwrap failed");
 
     let src = "extern \"C\" func add(a: i64, b: i64) -> i64 { a + b }";
     let obj_path = tmp.join("math.o");
@@ -79,7 +79,7 @@ fn build_shared_library() {
 fn build_shared_library_no_std() {
     let tmp = std::env::temp_dir().join(format!("mimi_build_shared_nostd_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::create_dir_all(&tmp).expect("src/tests/build_shared.rs:82 unwrap failed");
 
     let src = "extern \"C\" func double(x: i64) -> i64 { x + x }";
     let obj_path = tmp.join("double.o");
@@ -111,8 +111,8 @@ fn build_shared_library_no_std() {
 #[test]
 fn emit_py_bindings_with_mimi_lib() {
     let src = "extern \"C\" { func greet(name: string) }\nextern \"C\" func add(a: i64, b: i64) -> i64 { a + b }";
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    let file = parser::Parser::new(tokens).parse_file().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/build_shared.rs:114 unwrap failed");
+    let file = parser::Parser::new(tokens).parse_file().expect("src/tests/build_shared.rs:115 unwrap failed");
 
     let mut extern_funcs = Vec::new();
     let mut exported_funcs = Vec::new();
@@ -146,7 +146,7 @@ fn emit_py_bindings_with_mimi_lib() {
     }
 
     let bindings = crate::ffi::py_bind::PyBindGenerator::new(type_defs.clone(), "greeter")
-        .generate(&extern_funcs).unwrap();
+        .generate(&extern_funcs).expect("src/tests/build_shared.rs:149 unwrap failed");
     assert!(bindings.contains("PYBIND11_MODULE"));
     assert!(bindings.contains("add"));
     assert!(bindings.contains("greet"));

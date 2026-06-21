@@ -140,7 +140,7 @@ func main() -> i32 {
 fn test_dual_path_arithmetic() {
     let stdout = compile_and_run(r#"
         func main() -> i32 { println(42 + 58); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/fuzz/mod.rs:143 unwrap failed");
     assert_eq!(stdout.trim(), "100");
 }
 
@@ -152,7 +152,7 @@ fn test_dual_path_conditional() {
             let a = 27; let b = 22;
             println(if a > b { a - b } else { b - a }); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/fuzz/mod.rs:155 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -165,7 +165,7 @@ fn test_dual_path_loop_accumulate() {
             while i <= 5 { s = s + i; i = i + 1 }
             println(s); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/fuzz/mod.rs:168 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -177,7 +177,7 @@ fn test_dual_path_recursive() {
             if n <= 1 { n } else { fib(n-1) + fib(n-2) }
         }
         func main() -> i32 { println(fib(10)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/fuzz/mod.rs:180 unwrap failed");
     assert_eq!(stdout.trim(), "55");
 }
 
@@ -189,7 +189,7 @@ fn test_dual_path_match_literal() {
             let x = 2;
             println(match x { 0 => 100, 1 => 200, 2 => 300, _ => -1 }); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/fuzz/mod.rs:192 unwrap failed");
     assert_eq!(stdout.trim(), "300");
 }
 
@@ -218,8 +218,8 @@ extern "C" {
 }
 func main() -> i32 { process(5) }
 "#;
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    let file = parser::Parser::new(tokens).parse_file().unwrap();
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/fuzz/mod.rs:221 unwrap failed");
+    let file = parser::Parser::new(tokens).parse_file().expect("src/tests/fuzz/mod.rs:222 unwrap failed");
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_ffi = true;
     let _ = interp.run();

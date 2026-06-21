@@ -94,6 +94,11 @@ pub enum CompileError {
     // === Generic catch-all ===
     #[error("{0}")]
     Generic(String),
+
+    // === Source location wrapper ===
+    /// Wraps another error with a source span when the AST node carries one.
+    #[error("{error}")]
+    WithSpan { error: Box<CompileError>, span: Span },
 }
 
 impl CompileError {
@@ -132,14 +137,23 @@ impl CompileError {
             Self::ModByZero => E0238,
             Self::Io(_) => E0750,
             Self::Generic(_) => E0700,
+            Self::WithSpan { error, .. } => error.code(),
         }
     }
 
-    /// Convert to a Diagnostic with error code and message (no span — AST does not carry positions).
+    /// Attach a source span to this error.
+    pub fn at(self, span: Span) -> Self {
+        Self::WithSpan { error: Box::new(self), span }
+    }
+
+    /// Convert to a Diagnostic with error code and message.
+    /// Errors that carry a span will use it; otherwise a sentinel span is used.
     pub fn to_diagnostic(&self) -> Diagnostic {
         let code = self.code();
-        let msg = self.to_string();
-        Diagnostic::error_code(code, msg, Span::single(0, 0))
+        match self {
+            Self::WithSpan { error, span } => error.to_diagnostic().with_span(*span),
+            _ => Diagnostic::error_code(code, self.to_string(), Span::single(0, 0)),
+        }
     }
 }
 

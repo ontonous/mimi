@@ -24,7 +24,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "? should propagate error as value, got: {:?}", result);
-    let val = result.unwrap();
+    let val = result.expect("src/tests/error_handling.rs:27 unwrap failed");
     match &val {
         interp::Value::Variant(name, _) if name == "Err" => {},
         other => panic!("Expected Err variant, got: {}", other),
@@ -53,7 +53,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "? should propagate error as value, got: {:?}", result);
-    let val = result.unwrap();
+    let val = result.expect("src/tests/error_handling.rs:56 unwrap failed");
     match &val {
         interp::Value::Variant(name, _) if name == "Err" => {},
         other => panic!("Expected Err variant, got: {}", other),
@@ -167,7 +167,7 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert!(result.is_ok(), "? should propagate error as value through expr statement, got: {:?}", result);
-    let val = result.unwrap();
+    let val = result.expect("src/tests/error_handling.rs:170 unwrap failed");
     match &val {
         interp::Value::Variant(name, _) if name == "Err" => {},
         other => panic!("Expected Err variant, got: {}", other),

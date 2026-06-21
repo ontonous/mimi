@@ -13,7 +13,7 @@ fn can_link() -> bool {
 #[test]
 fn e2e_add() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(2 + 3); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(2 + 3); 0 }"#).expect("src/tests/codegen_e2e.rs:16 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -30,7 +30,7 @@ fn e2e_adt_record() {
             println(p.y)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:33 unwrap failed");
     assert_eq!(stdout.trim(), "3\n4");
 }
 
@@ -48,7 +48,7 @@ fn e2e_adt_enum_match() {
             println(classify(0))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:51 unwrap failed");
     assert_eq!(stdout.trim(), "1\n-1\n0");
 }
 
@@ -65,7 +65,7 @@ fn e2e_nested_match() {
             println(abs_val(-7))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:68 unwrap failed");
     assert_eq!(stdout.trim(), "42\n7");
 }
 
@@ -84,7 +84,7 @@ fn e2e_enum_ctor_data_variant() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:87 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -103,7 +103,7 @@ fn e2e_enum_ctor_use_in_match() {
             println(b)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:106 unwrap failed");
     assert_eq!(stdout.trim(), "100\n200");
 }
 
@@ -126,7 +126,7 @@ fn e2e_break_continue() {
             println(sum)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:129 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -142,7 +142,7 @@ fn e2e_recursive_function() {
             println(factorial(10))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:145 unwrap failed");
     assert_eq!(stdout.trim(), "120\n3628800");
 }
 
@@ -164,7 +164,7 @@ fn e2e_higher_order_func() {
             println(pick_and_apply(2, 5))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:167 unwrap failed");
     assert_eq!(stdout.trim(), "10\n15");
 }
 
@@ -177,7 +177,7 @@ fn e2e_closure_no_capture() {
             println(f(5))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:180 unwrap failed");
     assert_eq!(stdout.trim(), "6");
 }
 
@@ -192,7 +192,7 @@ fn e2e_closure_capture() {
             println(f(20))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:195 unwrap failed");
     assert_eq!(stdout.trim(), "15\n30");
 }
 
@@ -207,7 +207,7 @@ fn e2e_closure_multiple_capture() {
             println(f(10))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:210 unwrap failed");
     assert_eq!(stdout.trim(), "37");
 }
 
@@ -225,7 +225,7 @@ fn e2e_closure_extern_callback() {
             println(result)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:228 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -241,7 +241,7 @@ fn e2e_extern_float_identity() {
             println(test_float_identity(x))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:244 unwrap failed");
     let trimmed = stdout.trim().to_string();
     // Accept any output starting with "3.14" (the exact formatting may vary)
     assert!(trimmed.starts_with("3.14"), "expected '3.14...', got '{}'", trimmed);
@@ -260,7 +260,7 @@ fn e2e_on_failure_compensation() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:263 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -278,7 +278,7 @@ fn e2e_try_operator() {
             println(safe_div(10, 0))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:281 unwrap failed");
     assert_eq!(stdout.trim(), "5\n0");
 }
 
@@ -293,7 +293,7 @@ fn e2e_f64_println() {
             println(pi)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:296 unwrap failed");
     assert!(stdout.trim().starts_with("3.14159"));
 }
 
@@ -311,7 +311,7 @@ fn e2e_contract_requires_pass() {
             println(double(5))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:314 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -343,7 +343,7 @@ fn e2e_extern_ensures_pass() {
             println(test_positive(5))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:346 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -376,7 +376,7 @@ fn e2e_extern_strlen() {
             println(test_strlen("hello world"))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:379 unwrap failed");
     assert_eq!(stdout.trim(), "11");
 }
 
@@ -392,7 +392,7 @@ fn e2e_extern_nop() {
             println(42)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:395 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -407,7 +407,7 @@ fn e2e_extern_greet_raw() {
             println(test_greet(42))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:410 unwrap failed");
     assert_eq!(stdout.trim(), "Hello 42");
 }
 
@@ -422,7 +422,7 @@ fn e2e_extern_parse_int_raw_string() {
             println(test_parse_int("42"))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:425 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -437,7 +437,7 @@ fn e2e_extern_json_sum() {
             println(test_json_sum([1, 2, 3, 4, 5]))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:440 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -455,7 +455,7 @@ fn e2e_actor_spawn_and_method() {
             println(val);
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:458 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -474,7 +474,7 @@ fn e2e_arena_block_scope() {
             println(outer)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:477 unwrap failed");
     assert_eq!(stdout.trim(), "20\n10");
 }
 
@@ -494,7 +494,7 @@ fn e2e_async_spawn_basic() {
             println(result)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:497 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -509,7 +509,7 @@ fn e2e_json_to_json_int() {
             println(s)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:512 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -522,7 +522,7 @@ fn e2e_json_to_json_string() {
             println(s)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:525 unwrap failed");
     assert_eq!(stdout.trim(), "\"hello\"");
 }
 
@@ -535,7 +535,7 @@ fn e2e_json_to_json_bool() {
             println(s)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:538 unwrap failed");
     assert_eq!(stdout.trim(), "true");
 }
 
@@ -566,7 +566,7 @@ fn e2e_json_is_valid() {
             println(json_is_valid("invalid"))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:569 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0");
 }
 
@@ -580,7 +580,7 @@ fn e2e_json_from_json() {
             println(v)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:583 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -589,7 +589,7 @@ fn e2e_float_sub() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let x: f64 = 10.0; let y: f64 = 3.0; println(x - y); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:592 unwrap failed");
     assert_eq!(stdout.trim(), "7.000000");
 }
 
@@ -598,7 +598,7 @@ fn e2e_float_mul() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let x: f64 = 3.0; let y: f64 = 4.0; println(x * y); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:601 unwrap failed");
     assert_eq!(stdout.trim(), "12.000000");
 }
 
@@ -607,7 +607,7 @@ fn e2e_float_div() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let x: f64 = 10.0; let y: f64 = 4.0; println(x / y); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:610 unwrap failed");
     assert_eq!(stdout.trim(), "2.500000");
 }
 
@@ -624,7 +624,7 @@ fn e2e_float_comparison() {
             println(a >= b)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:627 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n1\n0");
 }
 
@@ -641,28 +641,28 @@ fn e2e_float_equality() {
             println(a != c)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:644 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n1");
 }
 
 #[test]
 fn e2e_mul() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(6 * 7); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(6 * 7); 0 }"#).expect("src/tests/codegen_e2e.rs:651 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
 #[test]
 fn e2e_div() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(12 / 4); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(12 / 4); 0 }"#).expect("src/tests/codegen_e2e.rs:658 unwrap failed");
     assert_eq!(stdout.trim(), "3");
 }
 
 #[test]
 fn e2e_complex_arithmetic() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(1 + 2 * 3 - 4 / 2); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(1 + 2 * 3 - 4 / 2); 0 }"#).expect("src/tests/codegen_e2e.rs:665 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -674,7 +674,7 @@ fn e2e_abs_function() {
     let stdout = compile_and_run(r#"
         func abs(x: i32) -> i32 { if x < 0 { -x } else { x } }
         func main() -> i32 { println(abs(-5)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:677 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -683,7 +683,7 @@ fn e2e_boolean_and_or() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let a = 1; let b = 0; println(a && b); println(a || b); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:686 unwrap failed");
     assert_eq!(stdout.trim(), "0\n1");
 }
 
@@ -695,7 +695,7 @@ fn e2e_chained_calls() {
     let stdout = compile_and_run(r#"
         func inc(x: i32) -> i32 { x + 1 }
         func main() -> i32 { println(inc(inc(inc(39)))); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:698 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -705,7 +705,7 @@ fn e2e_three_param_fn() {
     let stdout = compile_and_run(r#"
         func add3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
         func main() -> i32 { println(add3(10, 20, 12)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:708 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -714,21 +714,21 @@ fn e2e_three_param_fn() {
 #[test]
 fn e2e_builtin_abs() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(abs(-42)); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(abs(-42)); 0 }"#).expect("src/tests/codegen_e2e.rs:717 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
 #[test]
 fn e2e_builtin_min_max() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(min(10, 20)); println(max(10, 20)); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println(min(10, 20)); println(max(10, 20)); 0 }"#).expect("src/tests/codegen_e2e.rs:724 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20");
 }
 
 #[test]
 fn e2e_builtin_len() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { let xs = [1, 2, 3, 4, 5]; println(len(xs)); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { let xs = [1, 2, 3, 4, 5]; println(len(xs)); 0 }"#).expect("src/tests/codegen_e2e.rs:731 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -737,7 +737,7 @@ fn e2e_builtin_len() {
 #[test]
 fn e2e_mixed_print_types() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { println("hello"); println("world"); println(42); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { println("hello"); println("world"); println(42); 0 }"#).expect("src/tests/codegen_e2e.rs:740 unwrap failed");
     assert_eq!(stdout.trim(), "hello\nworld\n42");
 }
 
@@ -746,7 +746,7 @@ fn e2e_mixed_print_types() {
 #[test]
 fn e2e_fstring_with_var() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { let x = 42; println(f"x = {x}"); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { let x = 42; println(f"x = {x}"); 0 }"#).expect("src/tests/codegen_e2e.rs:749 unwrap failed");
     assert_eq!(stdout.trim(), "x = 42");
 }
 
@@ -755,7 +755,7 @@ fn e2e_fstring_two_vars() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let x = 42; let y = 100; println(f"x={x}, y={y}"); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:758 unwrap failed");
     assert_eq!(stdout.trim(), "x=42, y=100");
 }
 
@@ -772,7 +772,7 @@ fn e2e_int_equality() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { println(42 == 42); println(42 == 43); println(42 != 43); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:775 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n1");
 }
 
@@ -781,7 +781,7 @@ fn e2e_int_comparison() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { println(1 < 2); println(2 < 1); println(1 <= 1); println(2 >= 1); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:784 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n1\n1");
 }
 
@@ -790,7 +790,7 @@ fn e2e_int_comparison() {
 #[test]
 fn e2e_mutable_updates() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { let mut x = 1; x = x + 2; x = x * 3; println(x); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { let mut x = 1; x = x + 2; x = x * 3; println(x); 0 }"#).expect("src/tests/codegen_e2e.rs:793 unwrap failed");
     assert_eq!(stdout.trim(), "9");
 }
 
@@ -801,7 +801,7 @@ fn e2e_list_index() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let xs = [10, 20, 30, 40, 50]; println(xs[0]); println(xs[2]); println(xs[4]); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:804 unwrap failed");
     assert_eq!(stdout.trim(), "10\n30\n50");
 }
 
@@ -810,7 +810,7 @@ fn e2e_list_index() {
 #[test]
 fn e2e_type_alias() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"type MyInt = i32; func main() -> i32 { let x: MyInt = 42; println(x); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"type MyInt = i32; func main() -> i32 { let x: MyInt = 42; println(x); 0 }"#).expect("src/tests/codegen_e2e.rs:813 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -819,7 +819,7 @@ fn e2e_type_alias() {
 #[test]
 fn e2e_range_len() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    let stdout = compile_and_run(r#"func main() -> i32 { let r = range(0, 10); println(len(r)); 0 }"#).unwrap();
+    let stdout = compile_and_run(r#"func main() -> i32 { let r = range(0, 10); println(len(r)); 0 }"#).expect("src/tests/codegen_e2e.rs:822 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -830,7 +830,7 @@ fn e2e_fstring_expr() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"
         func main() -> i32 { let a = 3; let b = 4; println(f"{a} + {b} = {a + b}"); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:833 unwrap failed");
     assert_eq!(stdout.trim(), "3 + 4 = 7");
 }
 
@@ -844,7 +844,7 @@ fn e2e_for_range_basic() {
             for i in range(0, 3) { println(i) }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:847 unwrap failed");
     assert_eq!(stdout.trim(), "0\n1\n2");
 }
 
@@ -857,7 +857,7 @@ fn e2e_for_range_sum() {
             for i in range(1, 6) { total = total + i }
             println(total); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:860 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -869,7 +869,7 @@ fn e2e_for_list_print() {
             for x in [10, 20, 30] { println(x) }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:872 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20\n30");
 }
 
@@ -882,7 +882,7 @@ fn e2e_for_list_sum() {
             for x in [1, 2, 3, 4, 5] { total = total + x }
             println(total); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:885 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -897,7 +897,7 @@ fn e2e_if_true_branch() {
             if x > 10 { println(1) } else { println(0) }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:900 unwrap failed");
     assert_eq!(stdout.trim(), "1");
 }
 
@@ -910,7 +910,7 @@ fn e2e_if_false_branch() {
             if x > 10 { println(1) } else { println(0) }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:913 unwrap failed");
     assert_eq!(stdout.trim(), "0");
 }
 
@@ -923,7 +923,7 @@ fn e2e_if_no_else() {
             if x < 10 { x = x + 1 }
             println(x); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:926 unwrap failed");
     assert_eq!(stdout.trim(), "6");
 }
 
@@ -938,7 +938,7 @@ fn e2e_while_count_up() {
             while i < 5 { println(i); i = i + 1 }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:941 unwrap failed");
     assert_eq!(stdout.trim(), "0\n1\n2\n3\n4");
 }
 
@@ -951,7 +951,7 @@ fn e2e_while_sum() {
             while i <= 10 { sum = sum + i; i = i + 1 }
             println(sum); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:954 unwrap failed");
     assert_eq!(stdout.trim(), "55");
 }
 
@@ -964,7 +964,7 @@ fn e2e_product_loop() {
             while i <= 5 { p = p * i; i = i + 1 }
             println(p); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:967 unwrap failed");
     assert_eq!(stdout.trim(), "120");
 }
 
@@ -977,7 +977,7 @@ fn e2e_multi_function() {
         func square(x: i32) -> i32 { x * x }
         func cube(x: i32) -> i32 { x * x * x }
         func main() -> i32 { println(square(3)); println(cube(3)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:980 unwrap failed");
     assert_eq!(stdout.trim(), "9\n27");
 }
 
@@ -990,7 +990,7 @@ fn e2e_mixed_func_calls() {
         func add(a: i32, b: i32) -> i32 { a + b }
         func mul(a: i32, b: i32) -> i32 { a * b }
         func main() -> i32 { println(add(1, 2) + mul(3, 4)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:993 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -1005,7 +1005,7 @@ fn e2e_print_while_loop() {
             while i <= 3 { println(i); i = i + 1 }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1008 unwrap failed");
     assert_eq!(stdout.trim(), "1\n2\n3");
 }
 
@@ -1020,7 +1020,7 @@ fn e2e_parasteps_seq() {
             parasteps { t = t + 1; t = t + 2; t = t + 3 }
             println(t); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1023 unwrap failed");
     assert_eq!(stdout.trim(), "6");
 }
 
@@ -1035,7 +1035,7 @@ fn e2e_nested_if_else_statements() {
             if x > 0 { if x > 10 { result = 2 } else { result = 1 } }
             println(result); 0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1038 unwrap failed");
     assert_eq!(stdout.trim(), "1");
 }
 
@@ -1051,7 +1051,7 @@ fn e2e_factorial_while_iter() {
             result
         }
         func main() -> i32 { println(factorial(5)); 0 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1054 unwrap failed");
     assert_eq!(stdout.trim(), "120");
 }
 
@@ -1068,7 +1068,7 @@ fn e2e_str_split() {
             println(joined)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1071 unwrap failed");
     assert_eq!(stdout.trim(), "3\na+b+c");
 }
 
@@ -1082,7 +1082,7 @@ fn e2e_str_join() {
             println(result)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1085 unwrap failed");
     assert_eq!(stdout.trim(), "hello-world-foo");
 }
 
@@ -1095,7 +1095,7 @@ fn e2e_str_replace() {
             println(result)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1098 unwrap failed");
     assert_eq!(stdout.trim(), "hello mimi");
 }
 
@@ -1114,7 +1114,7 @@ fn e2e_push_pop() {
             println(len(xs))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1117 unwrap failed");
     assert_eq!(stdout.trim(), "4\n4\n3");
 }
 
@@ -1131,7 +1131,7 @@ fn e2e_push_pop_empty() {
             println(len(xs))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1134 unwrap failed");
     assert_eq!(stdout.trim(), "1\n10\n0");
 }
 
@@ -1147,7 +1147,7 @@ fn e2e_push_loop() {
             println(len(xs))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1150 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -1177,7 +1177,7 @@ func main() -> i32 {
     println(d.draw())
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1180 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1208,7 +1208,7 @@ func main() -> i32 {
     println(result)
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1211 unwrap failed");
     assert_eq!(stdout.trim(), "99");
 }
 
@@ -1233,7 +1233,7 @@ func main() -> i32 {
     println(d.draw())
     0
 }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1236 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1264,7 +1264,7 @@ MimiHandle __mimi_extern_test_c_shared(MimiHandle handle) {
             println(result)
             0
         }
-    "#, extra_c).unwrap();
+    "#, extra_c).expect("src/tests/codegen_e2e.rs:1267 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1297,7 +1297,7 @@ fn e2e_valgrind_string_ops() {
             println(t)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1300 unwrap failed");
     assert_eq!(stdout.trim(), "hello, world!\nhello, world! more");
 }
 
@@ -1317,7 +1317,7 @@ fn e2e_valgrind_list_ops() {
             println(sum)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1320 unwrap failed");
     assert_eq!(stdout.trim(), "1\n2\n3\n4\n5\n15");
 }
 
@@ -1334,7 +1334,7 @@ fn e2e_valgrind_recursion() {
             println(fib(10))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1337 unwrap failed");
     assert_eq!(stdout.trim(), "55");
 }
 
@@ -1348,7 +1348,7 @@ fn e2e_shared_var_copy() {
             println(v)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1351 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1362,7 +1362,7 @@ fn e2e_shared_var_assign() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1365 unwrap failed");
     assert_eq!(stdout.trim(), "100");
 }
 
@@ -1377,7 +1377,7 @@ fn e2e_shared_field_access() {
             println(p.y)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1380 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20");
 }
 
@@ -1393,7 +1393,7 @@ fn e2e_shared_field_assign() {
             println(p.y)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1396 unwrap failed");
     assert_eq!(stdout.trim(), "30\n20");
 }
 
@@ -1409,7 +1409,7 @@ fn e2e_shared_field_access_via_copy() {
             println(q.y)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1412 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20");
 }
 
@@ -1426,7 +1426,7 @@ fn e2e_shared_write_through_copy() {
             println(q.x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1429 unwrap failed");
     assert_eq!(stdout.trim(), "99\n99");
 }
 
@@ -1449,7 +1449,7 @@ fn e2e_valgrind_shared_weak_lifecycle() {
             println(v)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1452 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1468,8 +1468,8 @@ func main() -> i32 {
     if fd >= 0 { close_fd(fd) }
     0
 }
-"#).unwrap();
-    let fd: i32 = stdout.trim().parse().unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1471 unwrap failed");
+    let fd: i32 = stdout.trim().parse().expect("src/tests/codegen_e2e.rs:1472 unwrap failed");
     assert!(fd >= 0, "socket fd should be non-negative, got {}", fd);
 }
 
@@ -1512,7 +1512,7 @@ func main() -> i32 {
     }
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1515 unwrap failed");
     // Port 1 is typically not listening — connection should fail
     assert!(stdout.trim().contains("connection failed"),
         "expected connection failed, got: {}", stdout.trim());
@@ -1559,7 +1559,7 @@ func main() -> i32 {
     }
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1562 unwrap failed");
     assert_eq!(stdout.trim(), "listening");
 }
 
@@ -1599,7 +1599,7 @@ func main() -> i32 {
     }
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1602 unwrap failed");
     assert!(stdout.trim().contains("HTTP request failed"),
         "expected HTTP request failed, got: {}", stdout.trim());
 }
@@ -1640,7 +1640,7 @@ func main() -> i32 {
     }
     0
 }
-"#).unwrap();
+"#).expect("src/tests/codegen_e2e.rs:1643 unwrap failed");
     assert!(stdout.trim().contains("HTTP request failed"),
         "expected HTTP request failed, got: {}", stdout.trim());
 }
@@ -1665,7 +1665,7 @@ fn e2e_ubsan_arithmetic() {
             println(x - y)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1668 unwrap failed");
     assert_eq!(stdout.trim(), "5\n34");
 }
 
@@ -1679,7 +1679,7 @@ fn e2e_ubsan_string_ops() {
             println(s)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1682 unwrap failed");
     assert_eq!(stdout.trim(), "hello, world!");
 }
 
@@ -1697,7 +1697,7 @@ fn e2e_ubsan_list_ops() {
             println(sum)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1700 unwrap failed");
     assert_eq!(stdout.trim(), "15");
 }
 
@@ -1713,7 +1713,7 @@ fn e2e_asan_string_ops() {
             println(s)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1716 unwrap failed");
     assert_eq!(stdout.trim(), "hello, world!");
 }
 
@@ -1728,7 +1728,7 @@ fn e2e_asan_list_ops() {
             for x in xs { println(x) }
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1731 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20\n30");
 }
 
@@ -1752,7 +1752,7 @@ fn e2e_break_inside_if() {
             println(sum)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1755 unwrap failed");
     assert_eq!(stdout.trim(), "10");
 }
 
@@ -1773,7 +1773,7 @@ fn e2e_continue_inside_if() {
             println(sum)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1776 unwrap failed");
     assert_eq!(stdout.trim(), "18");
 }
 
@@ -1793,7 +1793,7 @@ fn e2e_try_operator_variable() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1796 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -1810,7 +1810,7 @@ fn e2e_try_operator_direct_call() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1813 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -1827,7 +1827,7 @@ fn e2e_try_operator_option() {
             println(x)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1830 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -1844,7 +1844,7 @@ fn e2e_tuple_index_basic() {
             println(t.2)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1847 unwrap failed");
     assert_eq!(stdout.trim(), "10\n20\n30");
 }
 
@@ -1862,7 +1862,7 @@ fn e2e_slice_basic() {
             println(s[2])
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1865 unwrap failed");
     assert_eq!(stdout.trim(), "3\n20\n40");
 }
 
@@ -1881,7 +1881,7 @@ fn e2e_result_is_ok_is_err() {
             println(e.is_err())
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1884 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n0\n1");
 }
 
@@ -1899,7 +1899,7 @@ fn e2e_option_is_some_is_none() {
             println(none.is_none())
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1902 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n0\n1");
 }
 
@@ -1914,7 +1914,7 @@ fn e2e_result_unwrap_or() {
             println(err.unwrap_or(99))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1917 unwrap failed");
     assert_eq!(stdout.trim(), "42\n99");
 }
 
@@ -1930,7 +1930,7 @@ fn e2e_option_unwrap_or() {
             println(none.unwrap_or(99))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1933 unwrap failed");
     assert_eq!(stdout.trim(), "42\n99");
 }
 
@@ -1950,7 +1950,7 @@ fn e2e_option_ok_or() {
             println(r2.is_err())
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1953 unwrap failed");
     assert_eq!(stdout.trim(), "1\n0\n0\n1");
 }
 
@@ -1966,7 +1966,7 @@ fn e2e_result_map() {
             println(mapped.unwrap_or(0))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1969 unwrap failed");
     assert_eq!(stdout.trim(), "42");
 }
 
@@ -1987,7 +1987,7 @@ fn e2e_result_and_then() {
             println(result2.unwrap_or(0))
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:1990 unwrap failed");
     assert_eq!(stdout.trim(), "42\n0");
 }
 
@@ -2001,7 +2001,7 @@ fn e2e_result_map_err() {
             println(result)
             0
         }
-    "#).unwrap();
+    "#).expect("src/tests/codegen_e2e.rs:2004 unwrap failed");
     assert_eq!(stdout.trim(), "1");
 }
 

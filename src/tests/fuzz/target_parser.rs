@@ -25,7 +25,7 @@ proptest::proptest! {
 /// Edge-case parser crash regression tests.
 #[test]
 fn test_parser_empty_input() {
-    let tokens = lexer::Lexer::new("").tokenize().unwrap();
+    let tokens = lexer::Lexer::new("").tokenize().expect("src/tests/fuzz/target_parser.rs:28 unwrap failed");
     let _ = parser::Parser::new(tokens).parse_file();
 }
 
@@ -38,14 +38,14 @@ fn test_parser_whitespace_only() {
 
 #[test]
 fn test_parser_only_comments() {
-    let tokens = lexer::Lexer::new("// just a comment\n// another\n").tokenize().unwrap();
+    let tokens = lexer::Lexer::new("// just a comment\n// another\n").tokenize().expect("src/tests/fuzz/target_parser.rs:41 unwrap failed");
     let _ = parser::Parser::new(tokens).parse_file();
 }
 
 #[test]
 fn test_parser_deeply_nested_braces() {
     let src = format!("{} main() -> i32 {{ 0 }}", "func ".to_string());
-    let tokens = lexer::Lexer::new(&src).tokenize().unwrap();
+    let tokens = lexer::Lexer::new(&src).tokenize().expect("src/tests/fuzz/target_parser.rs:48 unwrap failed");
     let _ = parser::Parser::new(tokens).parse_file();
 }
 
@@ -62,7 +62,7 @@ fn test_parser_unicode_identifiers() {
 #[test]
 fn test_parser_extremely_long_line() {
     let long_line = format!("func main() -> i32 {{ {} }}", "1 + ".repeat(1000) + "1");
-    let tokens = lexer::Lexer::new(&long_line).tokenize().unwrap();
+    let tokens = lexer::Lexer::new(&long_line).tokenize().expect("src/tests/fuzz/target_parser.rs:65 unwrap failed");
     let _ = parser::Parser::new(tokens).parse_file();
 }
 
@@ -73,7 +73,7 @@ fn test_parser_many_funcs() {
         src.push_str(&format!("func f{}() -> i32 {{ {} }}\n", i, i));
     }
     src.push_str("func main() -> i32 { 0 }");
-    let tokens = lexer::Lexer::new(&src).tokenize().unwrap();
+    let tokens = lexer::Lexer::new(&src).tokenize().expect("src/tests/fuzz/target_parser.rs:76 unwrap failed");
     let _ = parser::Parser::new(tokens).parse_file();
 }
 

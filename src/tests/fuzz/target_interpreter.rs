@@ -35,7 +35,7 @@ fn test_interp_simple_loop() {
         if let Ok(file) = parser::Parser::new(tokens).parse_file() {
             if core::check(&file).is_ok() {
                 let mut interp = interp::Interpreter::new(&file);
-                let result = interp.run().unwrap();
+                let result = interp.run().expect("src/tests/fuzz/target_interpreter.rs:38 unwrap failed");
                 assert_eq!(result, interp::Value::Int(5));
             }
         }
@@ -82,7 +82,7 @@ fn test_interp_while_loop() {
         return;
     }
     let mut interp = interp::Interpreter::new(&file);
-    let result = interp.run().unwrap();
+    let result = interp.run().expect("src/tests/fuzz/target_interpreter.rs:85 unwrap failed");
     assert_eq!(result, interp::Value::Int(100));
 }
 
@@ -100,11 +100,11 @@ fn test_interp_complex_match_edge_cases() {
         return;
     }
     let mut interp = interp::Interpreter::new(&file);
-    let result = interp.run().unwrap();
+    let result = interp.run().expect("src/tests/fuzz/target_interpreter.rs:103 unwrap failed");
     assert_eq!(result, interp::Value::Int(42));
 }
 
 fn parse_src(src: &str) -> crate::ast::File {
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    parser::Parser::new(tokens).parse_file().unwrap()
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/fuzz/target_interpreter.rs:108 unwrap failed");
+    parser::Parser::new(tokens).parse_file().expect("src/tests/fuzz/target_interpreter.rs:109 unwrap failed")
 }

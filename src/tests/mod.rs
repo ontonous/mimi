@@ -141,14 +141,14 @@ pub(crate) fn build_interp_ffi_so() -> Result<std::path::PathBuf, String> {
 }
 
 pub(crate) fn parse(src: &str) -> crate::ast::File {
-    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
-    parser::Parser::new(tokens).parse_file().unwrap()
+    let tokens = lexer::Lexer::new(src).tokenize().expect("src/tests/mod.rs:144 unwrap failed");
+    parser::Parser::new(tokens).parse_file().expect("src/tests/mod.rs:145 unwrap failed")
 }
 
 pub(crate) fn run_source(src: &str) -> interp::Value {
     let file = parse(src);
     let mut interp = interp::Interpreter::new(&file);
-    interp.run().unwrap()
+    interp.run().expect("src/tests/mod.rs:151 unwrap failed")
 }
 
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {

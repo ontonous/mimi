@@ -178,7 +178,7 @@ func main() -> i32 {
     y
 }
 "#;
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("src/tests/v1_2_error_paths.rs:181 unwrap failed");
     let (file, _errors) = crate::parser::Parser::new(tokens).parse_file_with_recovery();
     // Recovery should produce a partial AST with the function
     assert!(file.items.len() == 1, "should still parse the function");
@@ -201,7 +201,7 @@ func working() -> i32 {
     42
 }
 "#;
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("src/tests/v1_2_error_paths.rs:204 unwrap failed");
     let (file, errors) = crate::parser::Parser::new(tokens).parse_file_with_recovery();
     assert!(!errors.is_empty(), "should have parse errors");
     assert!(file.items.len() >= 1, "should still parse the working function");
