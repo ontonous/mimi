@@ -260,6 +260,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         fallback
     }
 
+    /// Compute the size in bytes of an LLVM type using a portable layout.
+    /// This does not rely on the module data layout being set.
+    fn llvm_type_size_bytes(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        match ty {
+            BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
+            BasicTypeEnum::FloatType(_) => 8,
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::StructType(t) => {
+                t.get_field_types().iter().map(|f| self.llvm_type_size_bytes(*f)).sum()
+            }
+            BasicTypeEnum::ArrayType(t) => {
+                t.len() as u64 * self.llvm_type_size_bytes(t.get_element_type())
+            }
+            BasicTypeEnum::VectorType(t) => {
+                t.get_size() as u64 * self.llvm_type_size_bytes(t.get_element_type())
+            }
+            BasicTypeEnum::ScalableVectorType(_) => 8,
+        }
+    }
+
     /// G5: Compile a `shared let` / `local_shared let` / `weak` statement.
     pub(super) fn compile_shared_let_stmt(
         &mut self,
@@ -334,9 +354,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             val.get_type()
         };
 
-        let ty_size_bytes = llvm_ty.size_of()
-            .and_then(|v: inkwell::values::IntValue<'ctx>| v.get_zero_extended_constant())
-            .unwrap_or(8);
+        let ty_size_bytes = self.llvm_type_size_bytes(llvm_ty);
         let ty_size = self.context.i64_type().const_int(ty_size_bytes, false);
         let alloc_fn = self.module.get_function("mimi_rc_alloc")
             .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc not declared".to_string()))?;
