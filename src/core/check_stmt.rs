@@ -154,7 +154,7 @@ impl<'a> Checker<'a> {
                             // _ type: infer from init expression
                             init_ty.clone()
                         } else {
-                            if !same_type(&d, &init_ty) && !is_trait_coercion(&d, &init_ty, &self.impls) {
+                            if !same_type(&d, &init_ty) && !is_numeric_coercion(&d, &init_ty) && !is_trait_coercion(&d, &init_ty, &self.impls) {
                                 self.emit_code(crate::diagnostic::codes::E0209, format!(
                                     "pattern declared as {} but initialized with {}",
                                     fmt_type(&d),
@@ -479,8 +479,21 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) => {
+            Stmt::Requires(expr, _) => {
                 self.infer_expr(expr, scopes);
+            }
+            Stmt::Ensures(expr, _) => {
+                // Inject `result` (with the function's return type) and `old_*`
+                // variable placeholders so that `ensures: result == ...` and
+                // `ensures: old(x) > 0` type-check correctly.
+                let mut ensure_scope = HashMap::new();
+                ensure_scope.insert("result".to_string(), (*ret).clone());
+                // old(x) is handled by Expr::Old which delegates to
+                // infer_expr on the inner expression, so any variable in scope
+                // naturally works.
+                scopes.push(ensure_scope);
+                self.infer_expr(expr, scopes);
+                scopes.pop();
             }
             Stmt::Desc(..) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
         }

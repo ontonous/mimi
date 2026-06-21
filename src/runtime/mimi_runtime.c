@@ -299,9 +299,15 @@ void mimi_rc_retain(void* ptr) {
 void mimi_rc_release(void* ptr) {
     if (!ptr) return;
     MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
-    atomic_fetch_sub(&hdr->strong, 1);
-    if (atomic_load(&hdr->strong) <= 0 && atomic_load(&hdr->weak) <= 0) {
-        free(hdr);
+    // Use fetch_sub return value to atomically detect last-strong-drop.
+    // This eliminates the TOCTOU race between fetch_sub and a subsequent
+    // separate load where another thread could retain between the two.
+    if (atomic_fetch_sub(&hdr->strong, 1) == 1) {
+        // We were the last strong reference. If no weak refs remain, free now.
+        // Otherwise weak_release will free when it drops the last weak ref.
+        if (atomic_load(&hdr->weak) == 0) {
+            free(hdr);
+        }
     }
 }
 
@@ -314,9 +320,14 @@ void mimi_rc_weak_retain(void* ptr) {
 void mimi_rc_weak_release(void* ptr) {
     if (!ptr) return;
     MimiRcHeader* hdr = (MimiRcHeader*)ptr - 1;
-    atomic_fetch_sub(&hdr->weak, 1);
-    if (atomic_load(&hdr->strong) <= 0 && atomic_load(&hdr->weak) <= 0) {
-        free(hdr);
+    // Use fetch_sub return value to atomically detect last-weak-drop,
+    // avoiding the TOCTOU race between separate fetch_sub and load.
+    if (atomic_fetch_sub(&hdr->weak, 1) == 1) {
+        // We were the last weak reference. Free only if strong refs are also
+        // gone (they must be, because strong_release defers to us when weak>0).
+        if (atomic_load(&hdr->strong) <= 0) {
+            free(hdr);
+        }
     }
 }
 

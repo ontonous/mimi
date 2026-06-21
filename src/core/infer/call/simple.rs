@@ -1,7 +1,8 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
-    fmt_type, is_bool, is_int, is_numeric, same_type, suggest_name, subst_type_params,
+    fmt_type, is_bool, is_int, is_numeric, is_numeric_coercion, same_type, suggest_name,
+    subst_type_params,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -977,7 +978,7 @@ impl<'a> Checker<'a> {
                     } else {
                         for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate() {
                             let arg_ty = self.infer_expr(arg, scopes);
-                            if !same_type(&arg_ty, param_ty) {
+                            if !same_type(&arg_ty, param_ty) && !is_numeric_coercion(param_ty, &arg_ty) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -1120,7 +1121,7 @@ impl<'a> Checker<'a> {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
                     let subst_param = subst_type_params(param, &generics, &type_map);
-                    if !same_type(&at, &subst_param) {
+                    if !same_type(&at, &subst_param) && !is_numeric_coercion(&subst_param, &at) {
                         self.emit_code(
                             crate::diagnostic::codes::E0211,
                             format!(
@@ -1138,7 +1139,7 @@ impl<'a> Checker<'a> {
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
-                    if !same_type(&at, param) {
+                    if !same_type(&at, param) && !is_numeric_coercion(param, &at) {
                         self.emit_code(
                             crate::diagnostic::codes::E0211,
                             format!(

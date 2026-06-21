@@ -223,6 +223,18 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
 
 /// Check if a concrete type can be coerced to a dyn Trait type (e.g., Circle → dyn Drawable)
 /// `impls` maps (trait_name, type_name) -> method_names
+/// Check for numeric type widening (i32→i64, i32→f64, i64→f64).
+/// Integer literals default to i32; this allows them to flow into i64/i32/f64 parameters.
+pub(crate) fn is_numeric_coercion(declared: &Type, init_ty: &Type) -> bool {
+    match (declared, init_ty) {
+        (Type::Name(dn, _), Type::Name(in_n, _)) => {
+            let (d, i) = (dn.as_str(), in_n.as_str());
+            matches!((d, i), ("i64", "i32") | ("f64", "i32") | ("f64", "i64"))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn is_trait_coercion(declared: &Type, init_ty: &Type, impls: &HashMap<(String, String), Vec<String>>) -> bool {
     match (declared, init_ty) {
         (Type::DynTrait(trait_names), Type::Name(ty_name, _)) => {

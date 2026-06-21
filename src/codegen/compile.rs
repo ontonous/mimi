@@ -59,9 +59,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Apply a handler to every item in `items`, recursing into modules.
+    fn process_items<F>(items: &[Item], f: &mut F) -> MimiResult<()>
+    where
+        F: FnMut(&Item) -> MimiResult<()>,
+    {
+        for item in items {
+            if let Item::Module(m) = item {
+                for inner in &m.items {
+                    f(inner)?;
+                }
+            } else {
+                f(item)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn compile_file(&mut self, file: &File) -> MimiResult<()> {
         // First pass: collect type definitions, function definitions, and cap definitions
-        for item in &file.items {
+        Self::process_items(&file.items, &mut |item| {
             match item {
                 Item::Type(t) => {
                     self.register_type_def(t)?;
@@ -84,68 +101,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .or_default()
                         .insert(imp.trait_name.clone(), imp.methods.clone());
                 }
-                Item::Module(m) => {
-                    for inner in &m.items {
-                        match inner {
-                            Item::Type(t) => {
-                                self.register_type_def(t)?;
-                            }
-                            Item::Actor(actor) => {
-                                self.register_actor_def(actor)?;
-                            }
-                            Item::Func(f) if !f.is_comptime => {
-                                self.func_defs.insert(f.name.clone(), f.clone());
-                            }
-                            Item::Cap(cap) => {
-                                self.cap_type_names.insert(cap.name.clone());
-                            }
-                            Item::Trait(t) => {
-                                self.trait_defs.insert(t.name.clone(), t.clone());
-                            }
-                            Item::Impl(imp) => {
-                                self.type_impls
-                                    .entry(imp.type_name.clone())
-                                    .or_default()
-                                    .insert(imp.trait_name.clone(), imp.methods.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
                 _ => {}
             }
-        }
+            Ok(())
+        })?;
         // Second pass: register extern functions and external types
-        for item in &file.items {
+        Self::process_items(&file.items, &mut |item| {
             match item {
                 Item::ExternBlock(block) => {
                     self.register_extern_block(block)?;
-                }
-                Item::Module(m) => {
-                    for inner in &m.items {
-                        match inner {
-                            Item::ExternBlock(block) => {
-                                self.register_extern_block(block)?;
-                            }
-                            Item::Type(t) if self.is_committed(&t.commitment) => {
-                                self.register_type_def(t)?;
-                            }
-                            _ => {}
-                        }
-                    }
                 }
                 Item::Type(t) if self.is_committed(&t.commitment) => {
                     self.register_type_def(t)?;
                 }
                 _ => {}
             }
-        }
+            Ok(())
+        })?;
         // Third pass: compile impl methods (needed before vtable construction)
         self.compile_impl_methods()?;
         // Fourth pass: compile vtables (needed before user function compilation)
         self.compile_vtables()?;
         // Fifth pass: compile user functions and actors
-        for item in &file.items {
+        Self::process_items(&file.items, &mut |item| {
             match item {
                 Item::Func(f) if !f.is_comptime && self.is_committed(&f.commitment) => {
                     self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
@@ -153,22 +131,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::Actor(actor) if self.is_committed(&actor.commitment) => {
                     self.compile_actor(actor)?;
                 }
-                Item::Module(m) => {
-                    for inner in &m.items {
-                        match inner {
-                            Item::Func(f) if !f.is_comptime && self.is_committed(&f.commitment) => {
-                                self.compile_func(f)?;
-                            }
-                            Item::Actor(actor) if self.is_committed(&actor.commitment) => {
-                                self.compile_actor(actor)?;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
                 _ => {}
             }
-        }
+            Ok(())
+        })?;
         Ok(())
     }
 
