@@ -254,3 +254,89 @@ fn interp_ffi_no_panic_abort_fork_mode() {
     std::env::remove_var("MIMI_FFI_LIB");
     assert!(result.is_err(), "abort should be caught (fork mode)");
 }
+
+#[test]
+fn interp_ffi_struct_by_value_i32() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:struct_by_val unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        #[repr(C)]
+        type TestPoint { x: i32, y: i32 }
+        extern "C" {
+            func test_struct_by_val(p: TestPoint) -> i32
+        }
+        func main() -> i32 {
+            test_struct_by_val(TestPoint { x: 10, y: 20 })
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(result.expect("ffi_interp_e2e.rs:struct_by_val unwrap failed"), interp::Value::Int(30));
+}
+
+#[test]
+fn interp_ffi_struct_by_value_mixed() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:mixed unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        #[repr(C)]
+        type MixedStruct { id: i32, value: f64, flag: i32 }
+        extern "C" {
+            func test_mixed_struct(s: MixedStruct) -> f64
+        }
+        func main() -> f64 {
+            test_mixed_struct(MixedStruct { id: 10, value: 3.5, flag: 1 })
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    let val = result.expect("ffi_interp_e2e.rs:mixed unwrap failed");
+    match val {
+        interp::Value::Float(f) => assert!((f - 14.5).abs() < 0.001, "expected ~14.5, got {}", f),
+        _ => panic!("expected Float, got {:?}", val),
+    }
+}
+
+#[test]
+fn interp_ffi_struct_by_value_nested() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:nested unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        #[repr(C)]
+        type Inner { a: i32, b: i32 }
+        #[repr(C)]
+        type Outer { inner: Inner, c: i32 }
+        extern "C" {
+            func test_nested_struct(o: Outer) -> i32
+        }
+        func main() -> i32 {
+            test_nested_struct(Outer { inner: Inner { a: 1, b: 2 }, c: 3 })
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(result.expect("ffi_interp_e2e.rs:nested unwrap failed"), interp::Value::Int(6));
+}
+
+#[test]
+fn interp_ffi_struct_by_value_i64() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:i64 unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        #[repr(C)]
+        type Timespec { sec: i64, nsec: i64 }
+        extern "C" {
+            func test_timespec_sum(t: Timespec) -> i64
+        }
+        func main() -> i64 {
+            test_timespec_sum(Timespec { sec: 100, nsec: 200 })
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(result.expect("ffi_interp_e2e.rs:i64 unwrap failed"), interp::Value::Int(300));
+}

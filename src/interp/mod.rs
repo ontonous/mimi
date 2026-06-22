@@ -304,6 +304,10 @@ impl<'a> Interpreter<'a> {
             .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
             .map(|(name, _)| name.clone())
             .collect();
+        let repr_c_record_names: std::collections::HashSet<String> = type_defs.iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .map(|(name, _)| name.clone())
+            .collect();
         match item {
             Item::ExternBlock(block) => {
                 let no_panic = block.no_panic;
@@ -314,7 +318,7 @@ impl<'a> Interpreter<'a> {
                         f.no_panic = true;
                     }
                     out.insert(f.name.clone(), f);
-                    contracts.insert(func.name.clone(), FfiContract::from_extern_with_caps(func, &cap_names, &record_type_names));
+                    contracts.insert(func.name.clone(), FfiContract::from_extern_with_caps_repr(func, &cap_names, &record_type_names, &repr_c_record_names));
                 }
             }
             Item::Module(m) => {

@@ -276,6 +276,7 @@ impl CHeaderGenerator {
                 format!("MimiHandle /* {} */", self.mimi_type_to_c_type(inner))
             }
             FfiArgContract::Json => "const char*".to_string(),
+            FfiArgContract::StructByValue(type_name) => format!("struct {}", type_name),
             FfiArgContract::Callback { param_types, ret_type } => {
                 let ret_c = self.mimi_type_to_c_type(ret_type);
                 let params_c: Vec<String> = param_types.iter()
@@ -301,6 +302,7 @@ impl CHeaderGenerator {
             crate::ffi::contract::FfiRetContract::String => "char*".to_string(),
             crate::ffi::contract::FfiRetContract::StringOwned => "char*".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "char*".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(type_name) => format!("struct {}", type_name),
             crate::ffi::contract::FfiRetContract::RawPtr(inner) | crate::ffi::contract::FfiRetContract::RawPtrMut(inner) => {
                 format!("{}*", self.mimi_type_to_c_type(inner))
             }

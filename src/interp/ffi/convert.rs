@@ -107,6 +107,11 @@ impl<'a> Interpreter<'a> {
             FfiArgContract::Callback { param_types, ret_type } => {
                 self.value_to_ffi_callback(arg, param_types, ret_type, string_guards, shared_handles, ffi_guards, callback_ids)
             }
+            FfiArgContract::StructByValue(_) => {
+                Err(Errno::Generic(
+                    "FFI wrapper: StructByValue args are handled in the call_extern CIF/arg loop, not via value_to_ffi_arg".to_string()
+                ))
+            }
             FfiArgContract::RawPtr(_) => match arg {
                 // *T: immutable raw pointer
                 Value::Shared(arc) => {
@@ -436,6 +441,10 @@ impl<'a> Interpreter<'a> {
             | FfiRetContract::CBorrowMut(_) => {
                 Ok(Value::Int(result))
             }
+            FfiRetContract::StructByValue(ty) => Err(Errno::Generic(format!(
+                "FFI safety: struct-by-value return for '{}' is not yet supported in the interpreter; use JSON fallback",
+                ty
+            ))),
             FfiRetContract::Unsupported(ty) => Err(Errno::Generic(format!(
                 "FFI safety: extern function declared with unsupported return type '{}'",
                 ty

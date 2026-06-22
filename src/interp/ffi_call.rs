@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::{Field, TypeAttribute, TypeDefKind};
 use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract, Errno};
 use libffi::middle::{Cif, Type as FfiType, CodePtr, arg as ffi_arg};
 use std::collections::HashMap;
@@ -43,18 +44,27 @@ impl<'a> Interpreter<'a> {
         let mut shared_guard = FfiSharedGuard::new();
         let mut shared_dedup: HashMap<*const (), i64> = HashMap::new();
         let mut callback_ids: Vec<i64> = Vec::new();
+        // Buffer for struct-by-value marshalled data; kept alive during the C call.
+        let mut struct_buffers: Vec<Vec<u8>> = Vec::new();
         for (arg, arg_contract) in args.iter().zip(&contract.args) {
-            let c_arg = self.value_to_ffi_arg(
-                arg,
-                arg_contract,
-                &mut string_guards,
-                &mut shared_handles,
-                &mut ffi_guards,
-                &mut shared_guard,
-                &mut shared_dedup,
-                &mut callback_ids,
-            )?;
-            c_args.push(c_arg);
+            match arg_contract {
+                FfiArgContract::StructByValue(_) => {
+                    c_args.push(0); // placeholder; actual marshalling in arg-prep loop
+                }
+                _ => {
+                    let c_arg = self.value_to_ffi_arg(
+                        arg,
+                        arg_contract,
+                        &mut string_guards,
+                        &mut shared_handles,
+                        &mut ffi_guards,
+                        &mut shared_guard,
+                        &mut shared_dedup,
+                        &mut callback_ids,
+                    )?;
+                    c_args.push(c_arg);
+                }
+            }
         }
 
         let lib_path = std::env::var("MIMI_FFI_LIB")
@@ -92,6 +102,15 @@ impl<'a> Interpreter<'a> {
                 match arg_contract {
                     FfiArgContract::Float => cif_arg_types.push(FfiType::f64()),
                     FfiArgContract::Callback { .. } => cif_arg_types.push(FfiType::pointer()),
+                    FfiArgContract::StructByValue(type_name) => {
+                        let fields = self.lookup_struct_fields(type_name)
+                            .map_err(|e| Errno::Generic(e))?;
+                        let field_types: Result<Vec<FfiType>, String> = fields.iter()
+                            .map(|f| self.ffi_type_from_mimi_type(&f.ty))
+                            .collect();
+                        let field_types = field_types.map_err(|e| Errno::Generic(e))?;
+                        cif_arg_types.push(FfiType::structure(field_types));
+                    }
                     _ => cif_arg_types.push(FfiType::i64()),
                 }
             }
@@ -123,6 +142,18 @@ impl<'a> Interpreter<'a> {
                         let ptr = last.downcast_ref::<f64>()
                             .ok_or_else(|| "FFI call: expected f64 in typed_storage but downcast failed".to_string())?;
                         ffi_args.push(ffi_arg(ptr));
+                    }
+                    FfiArgContract::StructByValue(type_name) => {
+                        let fields = self.lookup_struct_fields(type_name)
+                            .map_err(|e| Errno::Generic(e))?;
+                        let buffer = self.marshall_record_to_buffer(arg_val, &fields)
+                            .map_err(|e| Errno::Generic(e))?;
+                        // Arg points to the struct data in the buffer.
+                        // SAFETY: buffer is kept alive by struct_buffers for the call duration.
+                        let buf_ref = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), buffer.len()) };
+                        ffi_args.push(ffi_arg(buf_ref));
+                        struct_buffers.push(buffer);
+                        typed_storage.push(Box::new(0i64)); // placeholder
                     }
                     _ => {
                         let v = c_args[i];
@@ -230,6 +261,214 @@ impl<'a> Interpreter<'a> {
         }
 
         Ok(return_value)
+    }
+
+    // ── struct-by-value helpers ──────────────────────────────────────────
+
+    /// Look up the record fields for a StructByValue type name.
+    pub(in crate::interp) fn lookup_struct_fields(
+        &self,
+        type_name: &str,
+    ) -> Result<Vec<Field>, String> {
+        let td = self.type_defs.get(type_name).ok_or_else(|| {
+            format!("StructByValue: type '{}' not found in type_defs", type_name)
+        })?;
+        match &td.kind {
+            TypeDefKind::Record(fields) => Ok(fields.clone()),
+            _ => Err(format!(
+                "StructByValue: type '{}' is not a record (kind={:?})",
+                type_name, td.kind
+            )),
+        }
+    }
+
+    /// Convert a Mimi `Type` to a libffi `Type` for struct field layout.
+    /// Only supports types valid in #[repr(C)] records: scalars and nested
+    /// #[repr(C)] records.
+    pub(in crate::interp) fn ffi_type_from_mimi_type(&self, ty: &crate::ast::Type) -> Result<FfiType, String> {
+        match ty {
+            crate::ast::Type::Name(name, _) => match name.as_str() {
+                "i32" => Ok(FfiType::i32()),
+                "i64" => Ok(FfiType::i64()),
+                "f64" => Ok(FfiType::f64()),
+                "bool" => Ok(FfiType::u8()),
+                other => {
+                    // Check for nested #[repr(C)] record
+                    if let Some(td) = self.type_defs.get(other) {
+                        if td.attributes.contains(&TypeAttribute::ReprC) {
+                            if let TypeDefKind::Record(fields) = &td.kind {
+                                let field_types: Result<Vec<FfiType>, String> = fields
+                                    .iter()
+                                    .map(|f| self.ffi_type_from_mimi_type(&f.ty))
+                                    .collect();
+                                return Ok(FfiType::structure(field_types?));
+                            }
+                        }
+                    }
+                    Err(format!(
+                        "StructByValue: unsupported field type '{}' in #[repr(C)] record",
+                        name
+                    ))
+                }
+            },
+            _ => Err(format!(
+                "StructByValue: unsupported type '{:?}' in #[repr(C)] record",
+                ty
+            )),
+        }
+    }
+
+    /// Compute the size and alignment of a Mimi type in #[repr(C)] layout.
+    fn mimi_type_size_align(&self, ty: &crate::ast::Type) -> Result<(usize, usize), String> {
+        match ty {
+            crate::ast::Type::Name(name, _) => match name.as_str() {
+                "i32" => Ok((4, 4)),
+                "i64" => Ok((8, 8)),
+                "f64" => Ok((8, 8)),
+                "bool" => Ok((1, 1)),
+                other => {
+                    if let Some(td) = self.type_defs.get(other) {
+                        if td.attributes.contains(&TypeAttribute::ReprC) {
+                            if let TypeDefKind::Record(fields) = &td.kind {
+                                return self.struct_size_align(fields);
+                            }
+                        }
+                    }
+                    Err(format!(
+                        "StructByValue: unsupported field type '{}' in #[repr(C)] record",
+                        name
+                    ))
+                }
+            },
+            _ => Err(format!(
+                "StructByValue: unsupported type '{:?}' in #[repr(C)] record",
+                ty
+            )),
+        }
+    }
+
+    /// Compute the total size and alignment of a #[repr(C)] struct from its fields.
+    fn struct_size_align(&self, fields: &[Field]) -> Result<(usize, usize), String> {
+        let mut current_offset = 0usize;
+        let mut max_align = 1usize;
+        for field in fields {
+            let (size, align) = self.mimi_type_size_align(&field.ty)?;
+            let aligned = (current_offset + align - 1) & !(align - 1);
+            current_offset = aligned + size;
+            max_align = max_align.max(align);
+        }
+        // Round up to max alignment
+        let total = (current_offset + max_align - 1) & !(max_align - 1);
+        Ok((total, max_align))
+    }
+
+    /// Marshal a Mimi `Value::Record` into a byte buffer matching #[repr(C)]
+    /// layout. The field types are used to compute offsets and sizes.
+    fn marshall_record_to_buffer(
+        &self,
+        val: &Value,
+        fields: &[Field],
+    ) -> Result<Vec<u8>, String> {
+        let field_vals = match val {
+            Value::Record(_, map) => map,
+            _ => return Err(format!("StructByValue: expected Record, got {}", val)),
+        };
+
+        // Build field offset/size info
+        let mut offsets: Vec<usize> = Vec::with_capacity(fields.len());
+        let mut sizes: Vec<usize> = Vec::with_capacity(fields.len());
+        let mut current_offset = 0usize;
+        for field in fields {
+            let (size, align) = self.mimi_type_size_align(&field.ty)?;
+            let aligned = (current_offset + align - 1) & !(align - 1);
+            offsets.push(aligned);
+            sizes.push(size);
+            current_offset = aligned + size;
+        }
+
+        let (total_size, _) = self.struct_size_align(fields)?;
+        let mut buf = vec![0u8; total_size];
+
+        for (i, field) in fields.iter().enumerate() {
+            let offset = offsets[i];
+            let fv = field_vals.get(&field.name).ok_or_else(|| {
+                format!("StructByValue: field '{}' missing in record value", field.name)
+            })?;
+            self.write_field_to_buf(fv, &field.ty, &mut buf, offset)?;
+        }
+
+        Ok(buf)
+    }
+
+    /// Write a single Mimi value into a byte buffer at the given offset,
+    /// using the C ABI scalar layout (little-endian).
+    fn write_field_to_buf(&self, val: &Value, ty: &crate::ast::Type, buf: &mut [u8], offset: usize) -> Result<(), String> {
+        let type_name = match ty {
+            crate::ast::Type::Name(n, _) => n.as_str(),
+            _ => return Err(format!("StructByValue: cannot write field of type {:?}", ty)),
+        };
+        match type_name {
+            "i32" => {
+                let v = match val {
+                    Value::Int(n) => *n as i32,
+                    Value::Bool(b) => *b as i32,
+                    _ => return Err(format!("StructByValue: expected i32, got {}", val)),
+                };
+                let bytes = v.to_le_bytes();
+                buf[offset..offset+4].copy_from_slice(&bytes);
+            }
+            "i64" => {
+                let v = match val {
+                    Value::Int(n) => *n,
+                    _ => return Err(format!("StructByValue: expected i64, got {}", val)),
+                };
+                let bytes = v.to_le_bytes();
+                buf[offset..offset+8].copy_from_slice(&bytes);
+            }
+            "f64" => {
+                let v = match val {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err(format!("StructByValue: expected f64, got {}", val)),
+                };
+                let bytes = v.to_bits().to_le_bytes();
+                buf[offset..offset+8].copy_from_slice(&bytes);
+            }
+            "bool" => {
+                let v = match val {
+                    Value::Bool(b) => *b as u8,
+                    Value::Int(n) => {
+                        if *n == 0 { 0u8 } else { 1u8 }
+                    }
+                    _ => return Err(format!("StructByValue: expected bool, got {}", val)),
+                };
+                buf[offset] = v;
+            }
+            other => {
+                // Check for nested #[repr(C)] record
+                if let Some(td) = self.type_defs.get(other) {
+                    if td.attributes.contains(&TypeAttribute::ReprC) {
+                        if let TypeDefKind::Record(fields) = &td.kind {
+                            if let Value::Record(_, map) = val {
+                                // Build a sub-record from the map for recursive marshalling
+                                let sub_val = Value::Record(None, map.clone());
+                                let sub_buf = self.marshall_record_to_buffer(&sub_val, fields)?;
+                                let len = sub_buf.len();
+                                if offset + len <= buf.len() {
+                                    buf[offset..offset+len].copy_from_slice(&sub_buf);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+                return Err(format!(
+                    "StructByValue: unsupported field type '{}' in record",
+                    other
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

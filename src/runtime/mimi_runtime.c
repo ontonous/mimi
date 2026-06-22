@@ -1907,6 +1907,31 @@ double __mimi_extern_test_float_identity(double x) {
     return x;
 }
 
+// Struct-by-value: add two int32 fields of a #[repr(C)] struct
+typedef struct { int32_t x; int32_t y; } __mimi_TestPoint;
+int32_t __mimi_extern_test_struct_by_val(__mimi_TestPoint p) {
+    return p.x + p.y;
+}
+
+// Struct with mixed types: compute weighted sum
+typedef struct { int32_t id; double value; int32_t flag; } __mimi_MixedStruct;
+double __mimi_extern_test_mixed_struct(__mimi_MixedStruct s) {
+    return (double)s.id + s.value + (double)s.flag;
+}
+
+// Nested struct: inner struct + outer field
+typedef struct { int32_t a; int32_t b; } __mimi_Inner;
+typedef struct { __mimi_Inner inner; int32_t c; } __mimi_Outer;
+int32_t __mimi_extern_test_nested_struct(__mimi_Outer o) {
+    return o.inner.a + o.inner.b + o.c;
+}
+
+// Struct with i64 fields (like stat timestamp)
+typedef struct { int64_t sec; int64_t nsec; } __mimi_Timespec;
+int64_t __mimi_extern_test_timespec_sum(__mimi_Timespec t) {
+    return t.sec + t.nsec;
+}
+
 // G3: String length (borrowed string)
 int __mimi_extern_test_strlen(const char* s) {
     if (!s) return -1;
@@ -2239,6 +2264,10 @@ int    test_json_sum(const char* json) { return __mimi_extern_test_json_sum(json
 void   test_segfault(void) { __mimi_extern_test_segfault(); }
 void   test_abort(void) { __mimi_extern_test_abort(); }
 
+int    test_struct_by_val(__mimi_TestPoint p) { return __mimi_extern_test_struct_by_val(p); }
+double test_mixed_struct(__mimi_MixedStruct s) { return __mimi_extern_test_mixed_struct(s); }
+int    test_nested_struct(__mimi_Outer o) { return __mimi_extern_test_nested_struct(o); }
+int64_t test_timespec_sum(__mimi_Timespec t) { return __mimi_extern_test_timespec_sum(t); }
 // greet uses a static buffer to avoid allocation issues across .so boundary
 char* test_greet(int x) { return __mimi_extern_test_greet(x); }
 // callback wrapper

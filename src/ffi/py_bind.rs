@@ -92,6 +92,7 @@ impl PyBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "int".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int".to_string(),
             FfiArgContract::Json => "str".to_string(),
+            FfiArgContract::StructByValue(_) => "int".to_string(), // opaque struct handle
             FfiArgContract::Callback { .. } => "callable".to_string(),
             FfiArgContract::Unsupported(_) => "Any".to_string(),
         }
@@ -107,6 +108,7 @@ impl PyBindGenerator {
             crate::ffi::contract::FfiRetContract::RawPtr(_) | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "int".to_string(),
             crate::ffi::contract::FfiRetContract::CShared(_) | crate::ffi::contract::FfiRetContract::CBorrow(_) | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "Dict[str, Any]".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(_) => "int".to_string(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "Any".to_string(),
         }
     }
@@ -303,6 +305,7 @@ impl PyBindGenerator {
                 format!("MimiHandle /* {} */", self.mimi_type_to_cpp(inner))
             }
             FfiArgContract::Json => "const std::string&".to_string(),
+            FfiArgContract::StructByValue(_) => "int64_t".to_string(),
             FfiArgContract::Callback { .. } => "py::function".to_string(),
             FfiArgContract::Unsupported(_) => "py::object".to_string(),
         }
@@ -327,6 +330,7 @@ impl PyBindGenerator {
             | crate::ffi::contract::FfiRetContract::CBorrowMut(inner) => {
                 format!("MimiHandle /* {} */", self.mimi_type_to_cpp(inner))
             }
+            crate::ffi::contract::FfiRetContract::StructByValue(_) => "int64_t".to_string(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "py::object".to_string(),
         }
     }

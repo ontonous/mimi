@@ -54,6 +54,10 @@ pub enum FfiArgContract {
     /// JSON-serialized value: List, Record, Tuple etc. passed as a JSON string.
     /// The C side receives a `const char*` and must parse it.
     Json,
+    /// A `#[repr(C)]` record passed as a C struct by value.
+    /// The type name is stored so the interpreter/codegen can look up field
+    /// definitions and build the correct ABI type descriptor.
+    StructByValue(String),
     /// A C-compatible function pointer (callback).
     /// The Mimi closure is registered with the CallbackTable and a dynamically
     /// generated trampoline pointer is passed to C.
@@ -96,6 +100,8 @@ pub enum FfiRetContract {
     /// JSON-serialized return value: List, Record, Tuple etc. returned as a
     /// C string (Mimi frees the pointer after reading).
     Json,
+    /// A `#[repr(C)]` record returned as a C struct by value.
+    StructByValue(String),
     /// A return type that the type checker rejects but which may be reached at
     /// runtime in tests that bypass `core::check`.
     Unsupported(String),
@@ -223,8 +229,8 @@ impl FfiArgContract {
                     other => {
                         if record_type_names.contains(other) {
                             if repr_c_record_names.contains(other) {
-                                // repr(C) records: codegen passes as LLVM struct, interpreter uses JSON
-                                FfiArgContract::Json
+                                // #[repr(C)] record: pass as C struct by value
+                                FfiArgContract::StructByValue(other.to_string())
                             } else {
                                 FfiArgContract::Json
                             }
@@ -262,6 +268,7 @@ impl FfiRetContract {
                 "List" => FfiRetContract::Json,
                 other => {
                     if record_type_names.contains(other) {
+                        // Interpreter returns Json for all records (struct-by-value return not yet supported)
                         FfiRetContract::Json
                     } else {
                         FfiRetContract::Unsupported(other.to_string())
