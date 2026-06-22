@@ -263,6 +263,31 @@ impl Value {
     pub fn is_arena_block(&self) -> bool {
         matches!(self, Value::ArenaBlock(_))
     }
+
+    /// Return the numeric value as an integer if it is one.
+    pub(crate) fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Return the numeric value as a float, widening integers as needed.
+    pub(crate) fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Return the value as a borrowed string if it is one.
+    pub(crate) fn as_string(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -471,6 +496,14 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(a), Value::Int(b)) => a == b,
+        // Cross numeric comparison: widen the integer side to float.
+        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+            let a_f = *a as f64;
+            let diff = (a_f - b).abs();
+            if diff == 0.0 { return true; }
+            let scale = a_f.abs().max(b.abs());
+            diff <= f64::EPSILON * scale.max(1.0)
+        }
         (Value::Float(a), Value::Float(b)) => {
             let diff = (a - b).abs();
             if diff == 0.0 { return true; }
@@ -554,6 +587,9 @@ where
 {
     let ord = match (&a, &b) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        // Mixed numeric comparison: widen the integer side to float.
+        (Value::Int(i), Value::Float(fl)) => (*i as f64).partial_cmp(fl).ok_or_else(|| InterpError::new("cannot compare NaN with float"))?,
+        (Value::Float(fl), Value::Int(i)) => fl.partial_cmp(&(*i as f64)).ok_or_else(|| InterpError::new("cannot compare NaN with float"))?,
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).ok_or_else(|| InterpError::new("cannot compare NaN with float"))?,
         (Value::String(a), Value::String(b)) => a.cmp(b),
         _ => return Err(InterpError::new(format!("cannot compare {} with {}", type_name(&a), type_name(&b)))),

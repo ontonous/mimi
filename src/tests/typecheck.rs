@@ -340,7 +340,6 @@ fn typecheck_ensures_result_binding() {
 // the interpreter executes i32 + i64 but the typechecker rejects it.
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn typecheck_binary_numeric_coercion_i32_i64_add() {
     let src = r#"
         func main() -> i64 {
@@ -354,7 +353,6 @@ fn typecheck_binary_numeric_coercion_i32_i64_add() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn typecheck_binary_numeric_coercion_i32_i64_all_ops() {
     let src = r#"
         func main() -> i64 {
@@ -372,7 +370,6 @@ fn typecheck_binary_numeric_coercion_i32_i64_all_ops() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn typecheck_binary_numeric_coercion_i32_f64() {
     let src = r#"
         func main() -> f64 {
@@ -386,7 +383,6 @@ fn typecheck_binary_numeric_coercion_i32_f64() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn typecheck_binary_numeric_coercion_i64_f64() {
     let src = r#"
         func main() -> f64 {
@@ -400,7 +396,6 @@ fn typecheck_binary_numeric_coercion_i64_f64() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn typecheck_comparison_numeric_coercion_i32_i64() {
     let src = r#"
         func main() -> bool {

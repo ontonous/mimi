@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::core::borrow::BorrowState;
 use crate::core::checker::Checker;
-use crate::core::helpers::{fmt_type, is_bool, is_int, is_numeric, is_string, same_type};
+use crate::core::helpers::{fmt_type, is_bool, is_int, is_numeric, is_string, same_type, common_numeric_type};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -157,7 +157,9 @@ impl<'a> Checker<'a> {
                 // String concatenation: string + string -> string
                 if is_string(&lt) && is_string(&rt) {
                     Type::Name("string".into(), vec![])
-                } else if !same_type(&lt, &rt) || !is_numeric(&lt) {
+                } else if let Some(t) = common_numeric_type(&lt, &rt) {
+                    t
+                } else {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(
@@ -167,12 +169,21 @@ impl<'a> Checker<'a> {
                         ),
                     );
                     Type::Name("unknown".into(), vec![])
-                } else {
-                    lt
                 }
             }
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
-                if !same_type(&lt, &rt) || !is_numeric(&lt) {
+                if let Some(t) = common_numeric_type(&lt, &rt) {
+                    // Static divide-by-zero detection
+                    if op == BinOp::Div {
+                        if let Expr::Literal(Lit::Int(0)) = r {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0237,
+                                "division by zero literal".to_string(),
+                            );
+                        }
+                    }
+                    t
+                } else {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(
@@ -182,20 +193,6 @@ impl<'a> Checker<'a> {
                         ),
                     );
                     Type::Name("unknown".into(), vec![])
-                } else {
-                    // Static divide-by-zero detection
-                    if op == BinOp::Div || op == BinOp::Mod {
-                        if let Expr::Literal(Lit::Int(0)) = r {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0237,
-                                format!(
-                                    "{} by zero literal",
-                                    if op == BinOp::Div { "division" } else { "modulo" }
-                                ),
-                            );
-                        }
-                    }
-                    lt
                 }
             }
             BinOp::Mod
@@ -204,7 +201,30 @@ impl<'a> Checker<'a> {
             | BinOp::BitXor
             | BinOp::Shl
             | BinOp::Shr => {
-                if !same_type(&lt, &rt) || !is_int(&lt) {
+                if let Some(t) = common_numeric_type(&lt, &rt) {
+                    if !is_int(&t) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0202,
+                            format!(
+                                "operator requires integer types, found {} and {}",
+                                fmt_type(&lt),
+                                fmt_type(&rt)
+                            ),
+                        );
+                        Type::Name("unknown".into(), vec![])
+                    } else {
+                        // Static modulo-by-zero detection
+                        if op == BinOp::Mod {
+                            if let Expr::Literal(Lit::Int(0)) = r {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0238,
+                                    "modulo by zero literal".to_string(),
+                                );
+                            }
+                        }
+                        t
+                    }
+                } else {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(
@@ -214,21 +234,11 @@ impl<'a> Checker<'a> {
                         ),
                     );
                     Type::Name("unknown".into(), vec![])
-                } else {
-                    // Static modulo-by-zero detection
-                    if op == BinOp::Mod {
-                        if let Expr::Literal(Lit::Int(0)) = r {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0238,
-                                "modulo by zero literal".to_string(),
-                            );
-                        }
-                    }
-                    lt
                 }
             }
             BinOp::EqCmp | BinOp::NeCmp => {
-                if !same_type(&lt, &rt) {
+                let compatible = same_type(&lt, &rt) || common_numeric_type(&lt, &rt).is_some();
+                if !compatible {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(
@@ -241,7 +251,9 @@ impl<'a> Checker<'a> {
                 Type::Name("bool".into(), vec![])
             }
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                if !same_type(&lt, &rt) || !(is_numeric(&lt) || is_string(&lt)) {
+                let compatible = common_numeric_type(&lt, &rt).is_some()
+                    || (is_string(&lt) && is_string(&rt));
+                if !compatible {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(

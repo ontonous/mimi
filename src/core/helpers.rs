@@ -256,8 +256,30 @@ pub(crate) fn is_int(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "i32" || n == "i64")
 }
 
+pub(crate) fn is_float(t: &Type) -> bool {
+    matches!(t, Type::Name(n, _) if n == "f64")
+}
+
 pub(crate) fn is_numeric(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "i32" || n == "i64" || n == "f64")
+}
+
+/// Compute the common type of two numeric operands for binary operators.
+/// Returns `None` if either operand is not numeric.  Widening follows the
+/// usual numeric-promotion rules: any `f64` operand produces `f64`, otherwise
+/// mixed integer widths produce `i64`.
+pub(crate) fn common_numeric_type(a: &Type, b: &Type) -> Option<Type> {
+    if !is_numeric(a) || !is_numeric(b) {
+        return None;
+    }
+    if same_type(a, b) {
+        return Some(a.clone());
+    }
+    if is_float(a) || is_float(b) {
+        Some(Type::Name("f64".into(), vec![]))
+    } else {
+        Some(Type::Name("i64".into(), vec![]))
+    }
 }
 
 pub(crate) fn is_bool(t: &Type) -> bool {

@@ -1936,7 +1936,6 @@ fn dual_extern_with_cap() {
 // though both backends already execute them correctly.
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn dual_numeric_coercion_i32_i64_add() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1950,7 +1949,6 @@ fn dual_numeric_coercion_i32_i64_add() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn dual_numeric_coercion_i32_i64_sub() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1964,7 +1962,6 @@ fn dual_numeric_coercion_i32_i64_sub() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn dual_numeric_coercion_i32_i64_comparison() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1979,7 +1976,6 @@ fn dual_numeric_coercion_i32_i64_comparison() {
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn dual_numeric_coercion_i32_f64_add() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -1989,11 +1985,10 @@ fn dual_numeric_coercion_i32_f64_add() {
             println(x + y);
             0
         }
-    "#, "12.5");
+    "#, "12.500000");
 }
 
 #[test]
-#[ignore = "pending binary numeric coercion fix"]
 fn dual_numeric_coercion_i64_f64_mul() {
     if !can_link() { return; }
     dual_assert!(r#"
@@ -2003,5 +1998,5 @@ fn dual_numeric_coercion_i64_f64_mul() {
             println(x * y);
             0
         }
-    "#, "14");
+    "#, "14.000000");
 }

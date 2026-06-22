@@ -88,7 +88,6 @@ proptest! {
     /// Known gaps: the interpreter does not track i32 vs i64 at runtime, so
     /// `i32 + i64` is accepted by the interpreter but rejected by the typechecker.
     #[test]
-    #[ignore = "interp doesn't distinguish i32/i64 at runtime"]
     fn typecheck_no_false_negative(src in arb_maybe_ill_typed_program()) {
         let tc_result = typecheck(&src);
         let interp_result = interpret(&src);

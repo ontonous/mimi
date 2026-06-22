@@ -130,6 +130,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     (lhs, ext.into())
                 }
             }
+            // Mixed integer/float operands: promote the integer side to float.
+            (BasicValueEnum::IntValue(i), BasicValueEnum::FloatValue(f)) => {
+                let promoted = self.builder.build_signed_int_to_float(i, f.get_type(), "promote_float")
+                    .map_err(|e| CompileError::LlvmError(format!("float promote error: {}", e)))?;
+                (promoted.into(), f.into())
+            }
+            (BasicValueEnum::FloatValue(f), BasicValueEnum::IntValue(i)) => {
+                let promoted = self.builder.build_signed_int_to_float(i, f.get_type(), "promote_float")
+                    .map_err(|e| CompileError::LlvmError(format!("float promote error: {}", e)))?;
+                (f.into(), promoted.into())
+            }
             _ => (lhs, rhs),
         };
         match op {

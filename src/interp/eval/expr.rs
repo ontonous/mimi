@@ -78,6 +78,31 @@ impl<'a> Interpreter<'a> {
         }
         let left = self.eval_expr(l)?;
         let right = self.eval_expr(r)?;
+
+        // Helper for mixed numeric arithmetic: any float operand promotes the
+        // whole operation to float, matching the typechecker's widening rules.
+        let float_binop = |a: f64, b: f64, op: &str| -> Result<Value, InterpError> {
+            let r = match op {
+                "+" => a + b,
+                "-" => a - b,
+                "*" => a * b,
+                "/" => {
+                    if b == 0.0 { return Err(InterpError::new("division by zero")); }
+                    let v = a / b;
+                    if v.is_nan() { return Err(InterpError::new(format!("NaN from {} / {}", a, b))); }
+                    if v.is_infinite() { return Err(InterpError::new(format!("infinity from {} / {}", a, b))); }
+                    v
+                }
+                "^" => {
+                    let v = a.powf(b);
+                    if v.is_nan() { return Err(InterpError::new(format!("NaN from pow({}, {})", a, b))); }
+                    v
+                }
+                _ => unreachable!("unsupported float binop {}", op),
+            };
+            Ok(Value::Float(r))
+        };
+
         match op {
             BinOp::Add => match (&left, &right) {
                 (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
@@ -86,7 +111,8 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::new(format!("integer overflow in addition: {} + {}", a, b)))
                         .map(Value::Int)
                 }
-                (Value::Float(a), Value::Float(b)) => { let r = a + b; if r.is_nan() { Err(InterpError::new(format!("NaN from {} + {}", a, b))) } else { Ok(Value::Float(r)) } },
+                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "+"),
+                (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => float_binop(*a as f64, *b, "+"),
                 _ => Err(InterpError::new(format!("cannot apply '+' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::Sub => match (&left, &right) {
@@ -95,7 +121,9 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::new(format!("integer overflow in subtraction: {} - {}", a, b)))
                         .map(Value::Int)
                 }
-                (Value::Float(a), Value::Float(b)) => { let r = a - b; if r.is_nan() { Err(InterpError::new(format!("NaN from {} - {}", a, b))) } else { Ok(Value::Float(r)) } },
+                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "-"),
+                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "-"),
+                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "-"),
                 _ => Err(InterpError::new(format!("cannot apply '-' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::Mul => match (&left, &right) {
@@ -104,23 +132,20 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::new(format!("integer overflow in multiplication: {} * {}", a, b)))
                         .map(Value::Int)
                 }
-                (Value::Float(a), Value::Float(b)) => { let r = a * b; if r.is_nan() { Err(InterpError::new(format!("NaN from {} * {}", a, b))) } else { Ok(Value::Float(r)) } },
+                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "*"),
+                (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => float_binop(*a as f64, *b, "*"),
                 _ => Err(InterpError::new(format!("cannot apply '*' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::Div => match (&left, &right) {
                 (Value::Int(_), Value::Int(0)) => Err(InterpError::new("division by zero")),
-                (Value::Float(a), Value::Float(b)) => {
-                    if *b == 0.0 { return Err(InterpError::new("division by zero")); }
-                    let r = a / b;
-                    if r.is_nan() { Err(InterpError::new(format!("NaN from {} / {}", a, b))) }
-                    else if r.is_infinite() { Err(InterpError::new(format!("infinity from {} / {}", a, b))) }
-                    else { Ok(Value::Float(r)) }
-                }
                 (Value::Int(a), Value::Int(b)) => {
                     crate::safe_arith::checked_div(*a, *b)
                         .ok_or_else(|| InterpError::new(format!("integer overflow in division: {} / {}", a, b)))
                         .map(Value::Int)
                 }
+                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "/"),
+                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "/"),
+                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "/"),
                 _ => Err(InterpError::new(format!("cannot apply '/' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::Mod => match (&left, &right) {
@@ -139,7 +164,9 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::new(format!("integer overflow in power: {} ^ {}", a, b)))
                         .map(Value::Int)
                 }
-                (Value::Float(a), Value::Float(b)) => { let r = a.powf(*b); if r.is_nan() { Err(InterpError::new(format!("NaN from pow({}, {})", a, b))) } else { Ok(Value::Float(r)) } },
+                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "^"),
+                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "^"),
+                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "^"),
                 _ => Err(InterpError::new(format!("cannot apply '^' to {} and {}", type_name(&left), type_name(&right)))),
             },
             BinOp::EqCmp => Ok(Value::Bool(values_equal(&left, &right))),
