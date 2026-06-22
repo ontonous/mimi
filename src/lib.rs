@@ -20,6 +20,7 @@ pub mod verifier;
 
 pub mod core;
 pub mod doc_core;
+pub mod pkg_registry;
 
 #[cfg(test)]
 pub mod tests;

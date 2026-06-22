@@ -1,5 +1,7 @@
+use mimi::pkg_registry;
+
 pub(crate) fn search(query: &str) -> Result<(), String> {
-    let reg = registry_dir()?;
+    let reg = pkg_registry::registry_dir()?;
     if !reg.exists() {
         println!("Registry is empty. Use 'mimi publish' to add packages.");
         return Ok(());
@@ -45,13 +47,4 @@ pub(crate) fn search(query: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// Get the local registry directory (~/.mimi/registry/)
-pub(crate) fn registry_dir() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|e| format!("cannot get HOME: {}", e))?;
-    let reg_dir = std::path::PathBuf::from(home).join(".mimi").join("registry");
-    std::fs::create_dir_all(&reg_dir)
-        .map_err(|e| format!("failed to create registry dir: {}", e))?;
-    Ok(reg_dir)
 }

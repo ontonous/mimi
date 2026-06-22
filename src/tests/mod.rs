@@ -405,6 +405,74 @@ pub fn main_promote(path: &std::path::Path, output: Option<&std::path::Path>) ->
     Ok(())
 }
 
+/// Test helper: run update in a specific directory.
+pub fn main_update(dir: &std::path::Path) -> Result<(), String> {
+    let manifest = match crate::manifest::Manifest::find(dir)? {
+        Some((_d, m)) => m,
+        None => return Err("no mimi.toml found".into()),
+    };
+
+    let deps = match &manifest.dependencies {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => return Ok(()),
+    };
+
+    let reg = crate::pkg_registry::registry_dir()?;
+    let deps_dir = dir.join(".mimi").join("deps");
+    std::fs::create_dir_all(&deps_dir)
+        .map_err(|e| format!("failed to create deps dir: {}", e))?;
+
+    let mut lock = crate::lockfile::Lockfile::load(dir)?
+        .unwrap_or_else(crate::lockfile::Lockfile::new);
+
+    for dep in &deps {
+        if dep.git.is_some() {
+            continue;
+        }
+        let source = dep.path.as_deref().unwrap_or("registry");
+        if source == "registry" {
+            let pkg_dir = reg.join(&dep.name);
+            if !pkg_dir.exists() {
+                continue;
+            }
+            let version = dep.version.as_deref().unwrap_or("*");
+            let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
+                .map_err(|e| format!("failed to read registry: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .collect();
+            let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
+            let resolved = crate::lockfile::Lockfile::resolve_version(version, &version_refs);
+            if let Some(v) = resolved {
+                let src = pkg_dir.join(&v);
+                let dst = deps_dir.join(&dep.name);
+                if dst.exists() {
+                    std::fs::remove_dir_all(&dst).ok();
+                }
+                crate::pkg_registry::copy_dir_recursive(&src, &dst)
+                    .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+                lock.add_package(&dep.name, &v, Some("registry"), None);
+            }
+        } else {
+            let src = std::path::PathBuf::from(source);
+            if !src.exists() {
+                continue;
+            }
+            let dst = deps_dir.join(&dep.name);
+            if dst.exists() {
+                std::fs::remove_dir_all(&dst).ok();
+            }
+            crate::pkg_registry::copy_dir_recursive(&src, &dst)
+                .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+            lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), None);
+        }
+    }
+
+    lock.save(dir)?;
+    Ok(())
+}
+
 /// Test helper: generate documentation from a Mimi source file.
 pub fn main_doc(path: &std::path::Path, format: &str, output: Option<&std::path::Path>) -> Result<(), String> {
     let source = std::fs::read_to_string(path)

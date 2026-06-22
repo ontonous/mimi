@@ -167,6 +167,22 @@ fn lockfile_add_package_without_source() {
 }
 
 #[test]
+fn update_command_basic() {
+    let dir = std::env::temp_dir().join("mimi_update_test_basic");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    // Create minimal project with mimi.toml
+    let manifest = crate::manifest::Manifest::new("test-pkg");
+    manifest.save(&dir).expect("save manifest");
+
+    // Call update — should succeed even with no deps
+    let result = super::main_update(&dir);
+    assert!(result.is_ok(), "update should succeed with empty deps: {:?}", result.err());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn manifest_invalid_dependency_path() {
     let mut manifest = crate::manifest::Manifest::new("test");
     manifest.add_dependency("local-dep", None, Some("/nonexistent/path"));

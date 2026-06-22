@@ -1,6 +1,5 @@
-use crate::install::copy_dir_recursive;
 use mimi::manifest;
-use crate::search::registry_dir;
+use mimi::pkg_registry;
 
 pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
@@ -16,14 +15,14 @@ pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), S
         .or(pkg.version.as_deref())
         .unwrap_or("0.1.0");
 
-    let reg = registry_dir()?;
+    let reg = pkg_registry::registry_dir()?;
     let pkg_dir = reg.join(pkg_name).join(pkg_version);
 
     if pkg_dir.exists() {
         return Err(format!("package {} v{} already exists in registry", pkg_name, pkg_version));
     }
 
-    copy_dir_recursive(&cwd, &pkg_dir)
+    pkg_registry::copy_dir_recursive(&cwd, &pkg_dir)
         .map_err(|e| format!("failed to publish: {}", e))?;
 
     println!("✓ Published {} v{} to local registry", pkg_name, pkg_version);

@@ -1,4 +1,5 @@
 use mimi::{lockfile, manifest};
+use mimi::pkg_registry;
 
 pub(crate) fn install(_all: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
@@ -23,7 +24,7 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
         }
     };
 
-    let reg = crate::search::registry_dir()?;
+    let reg = pkg_registry::registry_dir()?;
     let deps_dir = dir.join(".mimi").join("deps");
     std::fs::create_dir_all(&deps_dir)
         .map_err(|e| format!("failed to create deps dir: {}", e))?;
@@ -89,7 +90,7 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
                         std::fs::remove_dir_all(&dst)
                             .map_err(|e| format!("failed to remove old: {}", e))?;
                     }
-                    copy_dir_recursive(&src, &dst)
+                    pkg_registry::copy_dir_recursive(&src, &dst)
                         .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
                     println!("  ✓ {} v{}", dep.name, v);
                     lock.add_package(&dep.name, &v, Some("registry"), None);
@@ -110,7 +111,7 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
                 std::fs::remove_dir_all(&dst)
                     .map_err(|e| format!("failed to remove old: {}", e))?;
             }
-            copy_dir_recursive(&src, &dst)
+            pkg_registry::copy_dir_recursive(&src, &dst)
                 .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
             println!("  ✓ {} (path: {})", dep.name, source);
             lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), None);
@@ -122,25 +123,5 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
     lock.save(&dir)?;
 
     println!("Installed {} package(s).", installed);
-    Ok(())
-}
-
-/// Recursively copy a directory
-pub(crate) fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| format!("read_dir {}: {}", src.display(), e))?
-    {
-        let entry = entry.map_err(|e| format!("read_dir entry: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy {}: {}", src_path.display(), e))?;
-        }
-    }
     Ok(())
 }

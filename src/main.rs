@@ -27,6 +27,7 @@ use mimi::diagnostic::format::format_simple_error;
 #[path = "main/install.rs"] mod install;
 #[path = "main/publish.rs"] mod publish;
 #[path = "main/search.rs"] mod search;
+#[path = "main/update.rs"] mod update;
 
 #[derive(Parser, Debug)]
 #[command(name = "mimi", version = "0.1.1", about = "Mimi language driver")]
@@ -219,6 +220,8 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Update dependencies to latest compatible versions
+    Update,
     /// Publish package to local registry
     Publish {
         /// Package name (defaults to mimi.toml name)
@@ -261,6 +264,7 @@ fn main() {
         Command::Mms { files, ast, json, render, latex } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
         Command::Install { all } => install::install(all),
+        Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),
         Command::Search { query } => search::search(&query),
     };
