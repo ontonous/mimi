@@ -1,4 +1,18 @@
 /**
+ * ⚠️  ARCHIVED — Historical Reference Only  ⚠️
+ * 
+ * This header describes the v0.1 handle-ID-based FFI runtime API and is
+ * preserved for historical reference. The current runtime uses a different
+ * API (raw *const Value / *mut Value pointers instead of handle IDs).
+ * 
+ * For the current C FFI API, use the auto-generated `mimi_ffi.h` produced
+ * by `mimi build --emit-c-headers` or `mimi emit-c-header`.
+ * 
+ * Current runtime source: src/ffi/runtime.rs
+ * Header generator:      src/ffi/c_header.rs
+ * 
+ * --- Original content follows ---
+ * 
  * Mimi FFI Runtime Library Header
  * 
  * This header declares the C ABI functions provided by libmimi_ffi_rt.

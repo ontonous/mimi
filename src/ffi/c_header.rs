@@ -37,24 +37,32 @@ impl CHeaderGenerator {
         writeln!(header, "typedef int64_t MimiHandle;")?;
         writeln!(header)?;
 
-        // Shared handle API (opaque integer handle IDs)
+        // Shared handle API
+        writeln!(header, "/** Retain a shared handle (increment C-side reference count). Returns the handle ID. */")?;
         writeln!(header, "MimiHandle mimi_shared_retain(MimiHandle handle);")?;
+        writeln!(header, "/** Release a shared handle (decrement reference count). Removed from table at zero. */")?;
         writeln!(header, "void mimi_shared_release(MimiHandle handle);")?;
+        writeln!(header, "/** Get a raw pointer to the inner value. Pointer valid only while handle alive. Returns NULL if invalid. */")?;
         writeln!(header, "void* mimi_shared_get_ptr(MimiHandle handle);")?;
         writeln!(header)?;
 
         // Cap API
-        writeln!(header, "// Capability API")?;
+        writeln!(header, "/** Opaque capability handle — see mimi_cap_check / mimi_cap_consume. */")?;
         writeln!(header, "typedef int64_t MimiCap;")?;
+        writeln!(header, "/** Check if a capability is valid and matches name (non-consuming). */")?;
         writeln!(header, "bool mimi_cap_check(MimiCap cap, const char* name);")?;
+        writeln!(header, "/** Consume a capability (mark as used). Returns true if valid and consumed. */")?;
         writeln!(header, "bool mimi_cap_consume(MimiCap cap, const char* name);")?;
         writeln!(header)?;
 
         // String API
-        writeln!(header, "// String API")?;
+        writeln!(header, "/** Get a C string pointer from a Mimi string (borrow). Caller must NOT free the result. */")?;
         writeln!(header, "const char* mimi_string_as_c_str(void* mimi_string);")?;
+        writeln!(header, "/** Transfer string ownership to C. Caller must call mimi_string_free_raw() on result. */")?;
         writeln!(header, "char* mimi_string_into_raw(void* mimi_string);")?;
+        writeln!(header, "/** Create a Mimi string from a C string (takes ownership of c_str). */")?;
         writeln!(header, "void* mimi_string_from_raw(char* c_str);")?;
+        writeln!(header, "/** Free a string obtained via mimi_string_into_raw() or C-allocated strings returned by extern functions. */")?;
         writeln!(header, "void mimi_string_free_raw(char* c_str);")?;
         writeln!(header)?;
 
