@@ -419,3 +419,57 @@ fn typecheck_binary_numeric_coercion_does_not_allow_string() {
     let result = check_source(src);
     assert!(result.is_err(), "string + number must remain a type error");
 }
+
+#[test]
+fn typecheck_contract_with_shared_param_is_error() {
+    let src = r#"
+func bad_shared(x: shared i32) -> i32 {
+    requires: x > 0
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for contract on shared param function");
+    let errors = result.unwrap_err();
+    let has_shared_contract_error = errors.iter().any(|e| e.message.contains("shared"));
+    assert!(has_shared_contract_error, "expected shared contract error, got: {:?}", errors);
+}
+
+#[test]
+fn typecheck_contract_with_local_shared_param_is_error() {
+    let src = r#"
+func bad_local(x: local_shared i32) -> i32 {
+    requires: x > 0
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for contract on local_shared param function");
+}
+
+#[test]
+fn typecheck_shared_param_no_contract_ok() {
+    let src = r#"
+func ok_shared(x: shared i32) -> i32 {
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "expected no error for shared param without contract, got: {:?}", result);
+}
+
+#[test]
+fn typecheck_contract_without_shared_param_ok() {
+    let src = r#"
+func ok_normal(x: i32) -> i32 {
+    requires: x > 0
+    x
+}
+func main() -> i32 { ok_normal(1) }
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "expected no error for contract without shared param, got: {:?}", result);
+}

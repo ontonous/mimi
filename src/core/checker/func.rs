@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::diagnostic::codes;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -26,6 +27,22 @@ impl<'a> Checker<'a> {
                 }
             }
             scopes[0].insert(p.name.clone(), ty);
+        }
+
+        // Check for contracts on shared-param functions (E0502)
+        let has_shared_param = func.params.iter().any(|p| matches!(&p.ty,
+            Type::Shared(_) | Type::LocalShared(_) | Type::CShared(_)
+        ));
+        if has_shared_param {
+            let has_contract = func.body.iter().any(|s| matches!(s,
+                Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Math(_) | Stmt::MmsBlock { .. }
+            ));
+            if has_contract {
+                self.emit_code(codes::E0502, format!(
+                    "function '{}' has contracts but takes a shared parameter — Z3 cannot verify heap state",
+                    func.name
+                ));
+            }
         }
         // Comptime functions: type-check body but mark as compile-time evaluable
         if func.is_comptime {

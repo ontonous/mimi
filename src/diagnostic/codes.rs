@@ -109,6 +109,7 @@ pub const E0411: &str = "E0411"; // weak requires a shared value
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
 pub const E0501: &str = "E0501"; // strict mode: contract modifications not allowed
+pub const E0502: &str = "E0502"; // contracts on shared-param functions not verifiable by Z3
 
 /// Warning codes (W0xxx)
 pub const W001: &str = "W001"; // standalone desc/rule has no implementation
@@ -280,6 +281,7 @@ pub fn describe(code: &str) -> &'static str {
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
+        E0502 => "contract on function with shared parameter is not verifiable by Z3",
 
         E0600 => "variable shadows outer variable",
         E0601 => "unused variable",
