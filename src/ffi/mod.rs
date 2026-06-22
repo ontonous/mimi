@@ -10,7 +10,7 @@ pub mod errno;
 pub use contract::{FfiArgContract, FfiContract, FfiRetContract};
 pub use runtime::{
     cap_table_consume, cap_table_register,
-    shared_table_create, shared_table_get,
+    shared_table_create, shared_table_create_dedup, shared_table_get,
 };
 pub use callback::{
     callback_table_register, callback_table_remove,

@@ -3,7 +3,7 @@ use super::helpers::{FfiGuard, FfiSharedGuard};
 use crate::ast::*;
 use crate::ffi::{
     cap_table_consume, cap_table_register,
-    shared_table_create, shared_table_get,
+    shared_table_create, shared_table_create_dedup, shared_table_get,
     FfiArgContract, FfiRetContract, Errno,
 };
 use std::collections::HashMap;
@@ -131,7 +131,7 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr dedup".to_string()))
                         }
                     } else {
-                        let handle_id = shared_table_create(Arc::clone(arc));
+                        let handle_id = shared_table_create_dedup(Arc::clone(arc), Arc::as_ptr(arc) as *const ());
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
@@ -185,7 +185,7 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during raw ptr mut dedup".to_string()))
                         }
                     } else {
-                        let handle_id = shared_table_create(Arc::clone(arc));
+                        let handle_id = shared_table_create_dedup(Arc::clone(arc), Arc::as_ptr(arc) as *const ());
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
@@ -226,7 +226,7 @@ impl<'a> Interpreter<'a> {
                     if let Some(&existing_id) = shared_dedup.get(&arc_ptr) {
                         Ok(existing_id)
                     } else {
-                        let handle_id = shared_table_create(Arc::clone(arc));
+                        let handle_id = shared_table_create_dedup(Arc::clone(arc), Arc::as_ptr(arc) as *const ());
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         Ok(handle_id)
@@ -236,11 +236,9 @@ impl<'a> Interpreter<'a> {
                     // Clone the inner value into an Arc<RwLock> for SharedHandle.
                     // The original local_shared retains its local refcount; the FFI
                     // side gets an independent shared copy via the handle table.
-                    let handle_id = {
-                        let value = rc.0.borrow().clone();
-                        let arc = Arc::new(RwLock::new(value));
-                        shared_table_create(arc)
-                    };
+                    let value = rc.0.borrow().clone();
+                    let arc = Arc::new(RwLock::new(value));
+                    let handle_id = shared_table_create(arc);
                     shared_guard.register(handle_id);
                     Ok(handle_id)
                 }
@@ -272,7 +270,7 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow dedup".to_string()))
                         }
                     } else {
-                        let handle_id = shared_table_create(Arc::clone(arc));
+                        let handle_id = shared_table_create_dedup(Arc::clone(arc), Arc::as_ptr(arc) as *const ());
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {
@@ -327,7 +325,7 @@ impl<'a> Interpreter<'a> {
                             Err(Errno::Generic("FFI wrapper: shared handle missing from table during c_borrow_mut dedup".to_string()))
                         }
                     } else {
-                        let handle_id = shared_table_create(Arc::clone(arc));
+                        let handle_id = shared_table_create_dedup(Arc::clone(arc), Arc::as_ptr(arc) as *const ());
                         shared_dedup.insert(arc_ptr, handle_id);
                         shared_guard.register(handle_id);
                         if let Some(handle) = shared_table_get(handle_id) {

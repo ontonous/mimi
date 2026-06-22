@@ -195,9 +195,15 @@ impl Drop for SharedHandle {
 }
 
 /// Thread-safe table mapping opaque handles (i64) to shared handles.
+/// Also provides cross-call deduplication: the same Arc pointer always maps
+/// to the same handle ID, preventing handle table growth on repeated FFI
+/// calls that pass the same shared value.
 pub struct SharedHandleTable {
     next_id: AtomicI64,
     handles: Mutex<HashMap<i64, Arc<SharedHandle>>>,
+    /// Cross-call dedup: Arc inner pointer → handle ID.
+    /// Entries are cleaned up when the handle is removed from the table.
+    dedup: Mutex<HashMap<*const (), i64>>,
 }
 
 impl SharedHandleTable {
@@ -206,6 +212,7 @@ impl SharedHandleTable {
         Self {
             next_id: AtomicI64::new(1),
             handles: Mutex::new(HashMap::new()),
+            dedup: Mutex::new(HashMap::new()),
         }
     }
 
@@ -216,6 +223,41 @@ impl SharedHandleTable {
         let mut handles = self.handles.lock()
             .expect("SHARED_TABLE handles lock poisoned");
         handles.insert(id, handle);
+        id
+    }
+
+    /// Create or reuse a handle, deduplicating by Arc inner pointer.
+    /// If the same Arc pointer has been registered before, returns the
+    /// existing handle ID and increments the C-side reference count.
+    pub fn create_dedup(&self, inner: Arc<RwLock<Value>>, ptr: *const ()) -> i64 {
+        // Check dedup table first (lock dedup, then release before locking handles)
+        {
+            let dedup = self.dedup.lock()
+                .expect("SHARED_TABLE dedup lock poisoned");
+            if let Some(&existing_id) = dedup.get(&ptr) {
+                // Found existing handle — retain and return existing ID.
+                // Don't hold dedup lock while touching handles to avoid deadlock.
+                drop(dedup);
+                if self.retain(existing_id) {
+                    return existing_id;
+                }
+                // Handle was cleaned up from under us; fall through to create new.
+            }
+        }
+
+        // Create new handle
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let handle = Arc::new(SharedHandle::new(id, inner));
+        {
+            let mut handles = self.handles.lock()
+                .expect("SHARED_TABLE handles lock poisoned");
+            handles.insert(id, handle);
+        }
+        {
+            let mut dedup = self.dedup.lock()
+                .expect("SHARED_TABLE dedup lock poisoned");
+            dedup.insert(ptr, id);
+        }
         id
     }
 
@@ -256,10 +298,20 @@ impl SharedHandleTable {
     }
 
     /// Remove a handle from the table unconditionally (cleanup).
+    /// Also removes the corresponding dedup entry.
     pub fn remove(&self, id: i64) -> bool {
-        let mut handles = self.handles.lock()
-            .expect("SHARED_TABLE handles lock poisoned");
-        handles.remove(&id).is_some()
+        let removed = {
+            let mut handles = self.handles.lock()
+                .expect("SHARED_TABLE handles lock poisoned");
+            handles.remove(&id).is_some()
+        };
+        if removed {
+            // Clean up dedup entry for this handle ID.
+            if let Ok(mut dedup) = self.dedup.lock() {
+                dedup.retain(|_, &mut vid| vid != id);
+            }
+        }
+        removed
     }
 
     /// Get the number of active handles (for diagnostics).
@@ -293,6 +345,12 @@ pub fn with_shared_table<R, F: FnOnce(&SharedHandleTable) -> R>(f: F) -> R {
 /// Convenience wrappers for the per-thread shared handle table.
 pub fn shared_table_create(inner: Arc<RwLock<Value>>) -> i64 {
     SHARED_TABLE.with(|table| table.create(inner))
+}
+
+/// Create or reuse a shared handle with cross-call deduplication.
+/// `ptr` should be `Arc::as_ptr(&arc) as *const ()`.
+pub fn shared_table_create_dedup(inner: Arc<RwLock<Value>>, ptr: *const ()) -> i64 {
+    SHARED_TABLE.with(|table| table.create_dedup(inner, ptr))
 }
 
 pub fn shared_table_get(id: i64) -> Option<Arc<SharedHandle>> {
