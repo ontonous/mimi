@@ -40,6 +40,22 @@ cc = "1.0"
 
 [dev-dependencies]
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parser"
+path = "benches/parser.rs"
+harness = false
+
+[[bench]]
+name = "codegen"
+path = "benches/codegen.rs"
+harness = false
+
+[[bench]]
+name = "interp"
+path = "benches/interp.rs"
+harness = false
 
 [profile.release]
 lto = "fat"

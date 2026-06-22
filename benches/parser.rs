@@ -1,11 +1,13 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
+use mimi::{lexer, parser};
+
 fn parse_simple(c: &mut Criterion) {
     let src = "func main() -> i32 { 42 }";
     c.bench_function("parser/simple", |b| {
         b.iter(|| {
-            let tokens = mimispec::lexer::Lexer::new(black_box(src)).tokenize().unwrap();
-            let _file = mimispec::parser::Parser::new(tokens).parse_file().unwrap();
+            let tokens = lexer::Lexer::new(black_box(src)).tokenize().unwrap();
+            let _file = parser::Parser::new(tokens).parse_file().unwrap();
         })
     });
 }
@@ -31,8 +33,8 @@ func main() -> f64 {
 "#;
     c.bench_function("parser/complex", |b| {
         b.iter(|| {
-            let tokens = mimispec::lexer::Lexer::new(black_box(src)).tokenize().unwrap();
-            let _file = mimispec::parser::Parser::new(tokens).parse_file().unwrap();
+            let tokens = lexer::Lexer::new(black_box(src)).tokenize().unwrap();
+            let _file = parser::Parser::new(tokens).parse_file().unwrap();
         })
     });
 }
@@ -42,8 +44,8 @@ fn parse_large(c: &mut Criterion) {
     let src = format!("{}func main() -> i32 {{ 0 }}", src);
     c.bench_function("parser/500_functions", |b| {
         b.iter(|| {
-            let tokens = mimispec::lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
-            let _file = mimispec::parser::Parser::new(tokens).parse_file().unwrap();
+            let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
+            let _file = parser::Parser::new(tokens).parse_file().unwrap();
         })
     });
 }
@@ -61,8 +63,8 @@ fn parse_deep_nesting(c: &mut Criterion) {
     src.push_str("\n}");
     c.bench_function("parser/deep_nesting_100", |b| {
         b.iter(|| {
-            let tokens = mimispec::lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
-            let _file = mimispec::parser::Parser::new(tokens).parse_file().unwrap();
+            let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
+            let _file = parser::Parser::new(tokens).parse_file().unwrap();
         })
     });
 }
