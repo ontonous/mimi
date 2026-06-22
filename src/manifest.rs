@@ -87,7 +87,7 @@ impl Manifest {
     }
 
     /// Add a dependency
-    pub fn add_dependency(&mut self, name: &str, version: Option<&str>, path: Option<&str>) {
+    pub fn add_dependency(&mut self, name: &str, version: Option<&str>, path: Option<&str>, git: Option<&str>, tag: Option<&str>) {
         let deps = self.dependencies.get_or_insert_with(Vec::new);
         // Remove existing dependency with same name
         deps.retain(|d| d.name != name);
@@ -95,8 +95,8 @@ impl Manifest {
             name: name.to_string(),
             version: version.map(|v| v.to_string()),
             path: path.map(|p| p.to_string()),
-            git: None,
-            tag: None,
+            git: git.map(|g| g.to_string()),
+            tag: tag.map(|t| t.to_string()),
         });
     }
 
@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn manifest_no_conflicts() {
         let mut manifest = Manifest::new("test");
-        manifest.add_dependency("foo", Some("^1.0"), None);
-        manifest.add_dependency("bar", Some("^2.0"), None);
+        manifest.add_dependency("foo", Some("^1.0"), None, None, None);
+        manifest.add_dependency("bar", Some("^2.0"), None, None, None);
         let conflicts = manifest.check_conflicts();
         assert!(conflicts.is_empty());
     }

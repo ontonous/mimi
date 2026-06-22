@@ -101,6 +101,12 @@ enum Command {
         /// Local path
         #[arg(short, long)]
         path: Option<String>,
+        /// Git repository URL
+        #[arg(long)]
+        git: Option<String>,
+        /// Git tag/branch (default: main)
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Remove a dependency
     Remove {
@@ -248,7 +254,7 @@ fn main() {
         }
         Command::Test { path, allocator, filter, verbose, strict } => test::test(path.as_deref(), &allocator, filter.as_deref(), verbose, strict),
         Command::Init { name } => init::init(name.as_deref()),
-        Command::Add { name, version, path } => add::add(&name, version.as_deref(), path.as_deref()),
+        Command::Add { name, version, path, git, tag } => add::add(&name, version.as_deref(), path.as_deref(), git.as_deref(), tag.as_deref()),
         Command::Remove { name } => remove::remove(&name),
         Command::List => list::list(),
         Command::Tree => tree::tree(),

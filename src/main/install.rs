@@ -1,6 +1,5 @@
 use std::collections::HashSet;
-use mimi::{lockfile, manifest};
-use mimi::pkg_registry;
+use mimi::{lockfile, manifest, pkg_registry, pkg_resolve};
 
 pub(crate) fn install(_all: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
@@ -42,108 +41,15 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
 
         let dst = deps_dir.join(&dep.name);
 
-        if let Some(git_url) = &dep.git {
-            let tag_arg = dep.tag.as_deref().unwrap_or("main");
+        let resolved = pkg_resolve::resolve_single_dep(&dep, &dst, &reg)?;
+        println!("  ✓ {} (v{})", resolved.name, resolved.version);
+        lock.add_package(&resolved.name, &resolved.version, resolved.source.as_deref(), resolved.checksum.as_deref());
+        installed += 1;
 
-            if dst.exists() {
-                std::fs::remove_dir_all(&dst)
-                    .map_err(|e| format!("failed to remove old {}: {}", dep.name, e))?;
-            }
-
-            let status = std::process::Command::new("git")
-                .arg("clone").arg("--branch").arg(tag_arg)
-                .arg("--depth").arg("1")
-                .arg(git_url).arg(&dst)
-                .status()
-                .map_err(|e| format!("git clone failed: {}", e))?;
-            if !status.success() {
-                println!("  ⚠ git clone failed for {}", dep.name);
-                continue;
-            }
-            let resolved_version = if let Ok(output) = std::process::Command::new("git")
-                .arg("rev-parse").arg("--short").arg("HEAD")
-                .current_dir(&dst)
-                .output()
-            {
-                String::from_utf8_lossy(&output.stdout).trim().to_string()
-            } else {
-                tag_arg.to_string()
-            };
-            println!("  ✓ {} (git: {} @ {} -> {})", dep.name, git_url, tag_arg, resolved_version);
-            let checksum = pkg_registry::compute_dir_checksum(&dst).ok();
-            lock.add_package(&dep.name, &resolved_version, Some(&format!("git+{}", git_url)), checksum.as_deref());
-            installed += 1;
-        } else {
-            let source = dep.path.as_deref().unwrap_or("registry");
-
-            if source == "registry" {
-                let pkg_dir = reg.join(&dep.name);
-                if !pkg_dir.exists() {
-                    println!("  ⚠ Package '{}' not found in local registry (use 'mimi publish' first)", dep.name);
-                    continue;
-                }
-
-                let version = dep.version.as_deref().unwrap_or("*");
-                let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
-                    .map_err(|e| format!("failed to read registry: {}", e))?
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                    .collect();
-                let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
-                let resolved = lockfile::Lockfile::resolve_version(version, &version_refs);
-
-                match resolved {
-                    Some(v) => {
-                        let src = pkg_dir.join(&v);
-                        if dst.exists() {
-                            std::fs::remove_dir_all(&dst)
-                                .map_err(|e| format!("failed to remove old: {}", e))?;
-                        }
-                        pkg_registry::copy_dir_recursive(&src, &dst)
-                            .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
-                        println!("  ✓ {} v{}", dep.name, v);
-                        let checksum = pkg_registry::compute_dir_checksum(&dst).ok();
-                        lock.add_package(&dep.name, &v, Some("registry"), checksum.as_deref());
-                        installed += 1;
-                    }
-                    None => {
-                        println!("  ⚠ No matching version for '{}' {}", dep.name, version);
-                        continue;
-                    }
-                }
-            } else {
-                let src = std::path::PathBuf::from(source);
-                if !src.exists() {
-                    println!("  ⚠ Path dependency '{}' not found at {}", dep.name, source);
-                    continue;
-                }
-                if dst.exists() {
-                    std::fs::remove_dir_all(&dst)
-                        .map_err(|e| format!("failed to remove old: {}", e))?;
-                }
-                pkg_registry::copy_dir_recursive(&src, &dst)
-                    .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
-                println!("  ✓ {} (path: {})", dep.name, source);
-                let checksum = pkg_registry::compute_dir_checksum(&dst).ok();
-                lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), checksum.as_deref());
-                installed += 1;
-            }
-        }
-
-        // Read transitive deps from installed package's mimi.toml
-        let dep_manifest_path = dst.join("mimi.toml");
-        if dep_manifest_path.exists() {
-            if let Ok(Some((_sub_dir, sub_manifest))) = manifest::Manifest::find(&dst) {
-                if let Some(sub_deps) = &sub_manifest.dependencies {
-                    for sub_dep in sub_deps.iter() {
-                        if !visited.contains(&sub_dep.name) {
-                            println!("    → {} (dependency of {})", sub_dep.name, dep.name);
-                            queue.push(sub_dep.clone());
-                        }
-                    }
-                }
-            }
+        let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+        for sub_dep in sub_deps {
+            println!("    → {} (dependency of {})", sub_dep.name, dep.name);
+            queue.push(sub_dep);
         }
     }
 

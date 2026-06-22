@@ -47,8 +47,8 @@ fn manifest_load_nonexistent() {
 #[test]
 fn manifest_add_dependency() {
     let mut m = Manifest::new("test");
-    m.add_dependency("foo", Some("1.0"), None);
-    m.add_dependency("bar", None, Some("./bar"));
+    m.add_dependency("foo", Some("1.0"), None, None, None);
+    m.add_dependency("bar", None, Some("./bar"), None, None);
 
     let deps = m.dependencies.as_ref().expect("src/tests/manifest.rs:53 unwrap failed");
     assert_eq!(deps.len(), 2);
@@ -61,8 +61,8 @@ fn manifest_add_dependency() {
 #[test]
 fn manifest_add_duplicate_replaces() {
     let mut m = Manifest::new("test");
-    m.add_dependency("foo", Some("1.0"), None);
-    m.add_dependency("foo", Some("2.0"), None);
+    m.add_dependency("foo", Some("1.0"), None, None, None);
+    m.add_dependency("foo", Some("2.0"), None, None, None);
 
     let deps = m.dependencies.as_ref().expect("src/tests/manifest.rs:67 unwrap failed");
     assert_eq!(deps.len(), 1, "duplicate should be replaced");
@@ -72,8 +72,8 @@ fn manifest_add_duplicate_replaces() {
 #[test]
 fn manifest_remove_dependency() {
     let mut m = Manifest::new("test");
-    m.add_dependency("foo", Some("1.0"), None);
-    m.add_dependency("bar", Some("2.0"), None);
+    m.add_dependency("foo", Some("1.0"), None, None, None);
+    m.add_dependency("bar", Some("2.0"), None, None, None);
 
     let removed = m.remove_dependency("foo");
     assert!(removed, "should return true when removing existing dep");
@@ -127,7 +127,7 @@ fn manifest_invalid_toml() {
 #[test]
 fn manifest_dependency_serialization() {
     let mut m = Manifest::new("test");
-    m.add_dependency("dep1", Some("0.5.0"), Some("./local"));
+    m.add_dependency("dep1", Some("0.5.0"), Some("./local"), None, None);
 
     let toml_str = toml::to_string_pretty(&m).expect("src/tests/manifest.rs:132 unwrap failed");
     assert!(toml_str.contains("dep1"));

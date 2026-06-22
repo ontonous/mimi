@@ -437,44 +437,9 @@ pub fn main_update(dir: &std::path::Path) -> Result<(), String> {
         if dep.git.is_some() {
             continue;
         }
-        let source = dep.path.as_deref().unwrap_or("registry");
-        if source == "registry" {
-            let pkg_dir = reg.join(&dep.name);
-            if !pkg_dir.exists() {
-                continue;
-            }
-            let version = dep.version.as_deref().unwrap_or("*");
-            let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
-                .map_err(|e| format!("failed to read registry: {}", e))?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                .collect();
-            let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
-            let resolved = crate::lockfile::Lockfile::resolve_version(version, &version_refs);
-            if let Some(v) = resolved {
-                let src = pkg_dir.join(&v);
-                let dst = deps_dir.join(&dep.name);
-                if dst.exists() {
-                    std::fs::remove_dir_all(&dst).ok();
-                }
-                crate::pkg_registry::copy_dir_recursive(&src, &dst)
-                    .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
-                lock.add_package(&dep.name, &v, Some("registry"), None);
-            }
-        } else {
-            let src = std::path::PathBuf::from(source);
-            if !src.exists() {
-                continue;
-            }
-            let dst = deps_dir.join(&dep.name);
-            if dst.exists() {
-                std::fs::remove_dir_all(&dst).ok();
-            }
-            crate::pkg_registry::copy_dir_recursive(&src, &dst)
-                .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
-            lock.add_package(&dep.name, "*", Some(&format!("path:{}", source)), None);
-        }
+        let dst = deps_dir.join(&dep.name);
+        let resolved = crate::pkg_resolve::resolve_single_dep(dep, &dst, &reg)?;
+        lock.add_package(&resolved.name, &resolved.version, resolved.source.as_deref(), resolved.checksum.as_deref());
     }
 
     lock.save(dir)?;
@@ -507,12 +472,16 @@ pub fn main_install_transitive(project_dir: &std::path::Path, reg: &std::path::P
             continue;
         }
 
-        let dep_version = dep.version.as_deref().unwrap_or("*");
+        let dst = deps_dir.join(&dep.name);
+
+        // resolve_single_dep for registry-only (custom registry path)
+        // Reuse the function but override registry with the test reg dir
         let pkg_dir = reg.join(&dep.name);
         if !pkg_dir.exists() {
             return Err(format!("package '{}' not found in registry", dep.name));
         }
 
+        let version = dep.version.as_deref().unwrap_or("*");
         let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
             .map_err(|e| format!("failed to read registry: {}", e))?
             .filter_map(|e| e.ok())
@@ -520,32 +489,24 @@ pub fn main_install_transitive(project_dir: &std::path::Path, reg: &std::path::P
             .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
             .collect();
         let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
-        let resolved = crate::lockfile::Lockfile::resolve_version(dep_version, &version_refs)
-            .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, dep_version))?;
+        let resolved_ver = crate::lockfile::Lockfile::resolve_version(version, &version_refs)
+            .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
 
-        let src = pkg_dir.join(&resolved);
-        let dst = deps_dir.join(&dep.name);
+        let src = pkg_dir.join(&resolved_ver);
         if dst.exists() {
             std::fs::remove_dir_all(&dst).ok();
         }
         crate::pkg_registry::copy_dir_recursive(&src, &dst)
             .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
 
-        // Read transitive deps from installed package's mimi.toml
-        let dep_manifest_path = dst.join("mimi.toml");
-        if dep_manifest_path.exists() {
-            if let Ok(Some((_sub_dir, sub_manifest))) = crate::manifest::Manifest::find(&dst) {
-                if let Some(sub_deps) = &sub_manifest.dependencies {
-                    for sub_dep in sub_deps.iter() {
-                        if !visited.contains(&sub_dep.name) {
-                            queue.push(sub_dep.clone());
-                        }
-                    }
-                }
+        lock.add_package(&dep.name, &resolved_ver, Some("registry"), None);
+
+        let sub_deps = crate::pkg_resolve::read_transitive_deps(&dst, &visited);
+        for sub_dep in sub_deps {
+            if !visited.contains(&sub_dep.name) {
+                queue.push(sub_dep);
             }
         }
-
-        lock.add_package(&dep.name, &resolved, Some("registry"), None);
     }
 
     lock.save(project_dir)?;

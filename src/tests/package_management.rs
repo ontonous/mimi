@@ -73,8 +73,8 @@ fn lockfile_resolve_version_range() {
 #[test]
 fn manifest_add_dependency() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("foo", Some("^1.0"), None);
-    manifest.add_dependency("bar", Some("2.0.0"), Some("./local"));
+    manifest.add_dependency("foo", Some("^1.0"), None, None, None);
+    manifest.add_dependency("bar", Some("2.0.0"), Some("./local"), None, None);
 
     let deps = manifest.dependencies.expect("src/tests/package_management.rs:79 unwrap failed");
     assert_eq!(deps.len(), 2);
@@ -87,8 +87,8 @@ fn manifest_add_dependency() {
 #[test]
 fn manifest_remove_dependency() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("foo", Some("1.0"), None);
-    manifest.add_dependency("bar", Some("2.0"), None);
+    manifest.add_dependency("foo", Some("1.0"), None, None, None);
+    manifest.add_dependency("bar", Some("2.0"), None, None, None);
 
     assert!(manifest.remove_dependency("foo"));
     assert!(!manifest.remove_dependency("foo"));
@@ -101,8 +101,8 @@ fn manifest_remove_dependency() {
 #[test]
 fn manifest_replace_dependency() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("foo", Some("1.0"), None);
-    manifest.add_dependency("foo", Some("2.0"), None);
+    manifest.add_dependency("foo", Some("1.0"), None, None, None);
+    manifest.add_dependency("foo", Some("2.0"), None, None, None);
 
     let deps = manifest.dependencies.expect("src/tests/package_management.rs:107 unwrap failed");
     assert_eq!(deps.len(), 1);
@@ -213,7 +213,7 @@ fn directory_checksum_simple() {
 #[test]
 fn manifest_invalid_dependency_path() {
     let mut manifest = crate::manifest::Manifest::new("test");
-    manifest.add_dependency("local-dep", None, Some("/nonexistent/path"));
+    manifest.add_dependency("local-dep", None, Some("/nonexistent/path"), None, None);
 
     let deps = manifest.dependencies.as_ref().expect("src/tests/package_management.rs:174 unwrap failed");
     assert_eq!(deps[0].path.as_deref(), Some("/nonexistent/path"));

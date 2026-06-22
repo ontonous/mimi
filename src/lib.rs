@@ -21,6 +21,7 @@ pub mod verifier;
 pub mod core;
 pub mod doc_core;
 pub mod pkg_registry;
+pub mod pkg_resolve;
 
 #[cfg(test)]
 pub mod tests;

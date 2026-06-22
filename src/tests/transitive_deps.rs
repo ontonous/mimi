@@ -115,3 +115,100 @@ fn transitive_resolution_cycle_detection() {
     // Cleanup
     fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn transitive_resolution_diamond() {
+    let root = std::env::temp_dir().join("mimi_transitive_test_diamond");
+    let reg = root.join("registry");
+    let project = root.join("project");
+
+    fs::create_dir_all(&reg).expect("create reg");
+    fs::create_dir_all(&project).expect("create project");
+
+    // Diamond: A -> B -> D, A -> C -> D
+    // D should only appear once in lockfile
+    setup_registry_pkg(&reg, "dep-d", "1.0.0", &[]);
+    setup_registry_pkg(&reg, "dep-b", "1.0.0", &[("dep-d", "^1.0")]);
+    setup_registry_pkg(&reg, "dep-c", "2.0.0", &[("dep-d", "^1.0")]);
+
+    let mut manifest = crate::manifest::Manifest::new("root");
+    manifest.dependencies = Some(vec![
+        crate::manifest::Dependency {
+            name: "dep-b".into(), version: Some("^1.0".into()), path: None, git: None, tag: None,
+        },
+        crate::manifest::Dependency {
+            name: "dep-c".into(), version: Some("^2.0".into()), path: None, git: None, tag: None,
+        },
+    ]);
+    manifest.save(&project).expect("save manifest");
+    fs::write(project.join("main.mimi"), "func main() {}").expect("write main.mimi");
+
+    let result = super::main_install_transitive(&project, &reg);
+    assert!(result.is_ok(), "diamond install should succeed: {:?}", result.err());
+
+    let lock = crate::lockfile::Lockfile::load(&project)
+        .expect("load lockfile")
+        .expect("lockfile should exist after install");
+
+    assert!(lock.get_package("dep-d").is_some(), "lockfile should contain dep-d (shared transitive)");
+    assert!(lock.get_package("dep-b").is_some(), "lockfile should contain dep-b");
+    assert!(lock.get_package("dep-c").is_some(), "lockfile should contain dep-c");
+
+    // Count dep-d occurrences: should be exactly 1
+    let d_count = lock.package.iter().filter(|p| p.name == "dep-d").count();
+    assert_eq!(d_count, 1, "dep-d should appear exactly once in lockfile");
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn transitive_resolution_deep_chain() {
+    let root = std::env::temp_dir().join("mimi_transitive_test_deep");
+    let reg = root.join("registry");
+    let project = root.join("project");
+
+    fs::create_dir_all(&reg).expect("create reg");
+    fs::create_dir_all(&project).expect("create project");
+
+    // Chain: A -> B -> C -> D -> E (5 deep)
+    setup_registry_pkg(&reg, "dep-e", "1.0.0", &[]);
+    setup_registry_pkg(&reg, "dep-d", "1.0.0", &[("dep-e", "^1.0")]);
+    setup_registry_pkg(&reg, "dep-c", "1.0.0", &[("dep-d", "^1.0")]);
+    setup_registry_pkg(&reg, "dep-b", "1.0.0", &[("dep-c", "^1.0")]);
+
+    let mut manifest = crate::manifest::Manifest::new("root");
+    manifest.dependencies = Some(vec![
+        crate::manifest::Dependency {
+            name: "dep-b".into(), version: Some("^1.0".into()), path: None, git: None, tag: None,
+        },
+    ]);
+    manifest.save(&project).expect("save manifest");
+    fs::write(project.join("main.mimi"), "func main() {}").expect("write main.mimi");
+
+    let result = super::main_install_transitive(&project, &reg);
+    assert!(result.is_ok(), "deep chain install should succeed: {:?}", result.err());
+
+    let lock = crate::lockfile::Lockfile::load(&project)
+        .expect("load lockfile")
+        .expect("lockfile should exist after install");
+
+    for name in &["dep-b", "dep-c", "dep-d", "dep-e"] {
+        assert!(lock.get_package(name).is_some(), "lockfile should contain {}", name);
+    }
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn manifest_add_git_dependency() {
+    let mut m = crate::manifest::Manifest::new("test");
+    m.add_dependency("my-lib", None, None, Some("https://github.com/example/my-lib"), Some("v1.0"));
+
+    let deps = m.dependencies.as_ref().expect("deps should exist");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].name, "my-lib");
+    assert_eq!(deps[0].git.as_deref(), Some("https://github.com/example/my-lib"));
+    assert_eq!(deps[0].tag.as_deref(), Some("v1.0"));
+    assert!(deps[0].version.is_none());
+    assert!(deps[0].path.is_none());
+}

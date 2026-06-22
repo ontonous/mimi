@@ -107,7 +107,7 @@ fn manifest_new() {
 #[test]
 fn manifest_add_dependency() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("serde", Some("1.0"), None);
+    manifest.add_dependency("serde", Some("1.0"), None, None, None);
     let deps = manifest.dependencies.expect("src/tests/v1_2_infra.rs:111 unwrap failed");
     assert_eq!(deps.len(), 1);
     assert_eq!(deps[0].name, "serde");
@@ -118,8 +118,8 @@ fn manifest_add_dependency() {
 #[test]
 fn manifest_add_dependency_replace() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("serde", Some("1.0"), None);
-    manifest.add_dependency("serde", Some("2.0"), None);
+    manifest.add_dependency("serde", Some("1.0"), None, None, None);
+    manifest.add_dependency("serde", Some("2.0"), None, None, None);
     let deps = manifest.dependencies.expect("src/tests/v1_2_infra.rs:123 unwrap failed");
     assert_eq!(deps.len(), 1);
     assert_eq!(deps[0].version, Some("2.0".to_string()));
@@ -129,8 +129,8 @@ fn manifest_add_dependency_replace() {
 #[test]
 fn manifest_remove_dependency() {
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("serde", Some("1.0"), None);
-    manifest.add_dependency("tokio", Some("1.0"), None);
+    manifest.add_dependency("serde", Some("1.0"), None, None, None);
+    manifest.add_dependency("tokio", Some("1.0"), None, None, None);
     assert!(manifest.remove_dependency("serde"));
     let deps = manifest.dependencies.expect("src/tests/v1_2_infra.rs:135 unwrap failed");
     assert_eq!(deps.len(), 1);
@@ -150,7 +150,7 @@ fn manifest_save_and_load() {
     let dir = std::env::temp_dir().join("mimi_test_manifest");
     let _ = std::fs::create_dir_all(&dir);
     let mut manifest = crate::manifest::Manifest::new("test-pkg");
-    manifest.add_dependency("serde", Some("1.0"), None);
+    manifest.add_dependency("serde", Some("1.0"), None, None, None);
     manifest.save(&dir).expect("src/tests/v1_2_infra.rs:154 unwrap failed");
     let loaded = crate::manifest::Manifest::load(&dir).expect("src/tests/v1_2_infra.rs:155 unwrap failed").expect("src/tests/v1_2_infra.rs:155 unwrap failed");
     assert_eq!(loaded.package.expect("src/tests/v1_2_infra.rs:156 unwrap failed").name, "test-pkg");
