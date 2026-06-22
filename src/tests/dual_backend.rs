@@ -2049,7 +2049,6 @@ fn dual_parasteps_spawn_discard() {
 }
 
 #[test]
-#[ignore = "codegen gap: await inside parasteps calls pthread_join(0) which returns ESRCH"]
 fn dual_parasteps_spawn_await() {
     if !can_link() { return; }
     // Interpreter runs correctly (thread pool + mpsc channel).
@@ -2062,7 +2061,7 @@ fn dual_parasteps_spawn_await() {
             parasteps {
                 let a = spawn double(10);
                 let b = spawn double(5);
-                r = await a + await b
+                r = (await a) + (await b)
             }
             println(r);
             0

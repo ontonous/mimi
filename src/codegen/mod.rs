@@ -75,6 +75,7 @@ pub struct CodeGenerator<'ctx> {
     pub verify_contracts: bool,
     in_parasteps: bool,
     parasteps_thread_ids: Vec<inkwell::values::IntValue<'ctx>>,
+
     compensation_blocks: Vec<Vec<Stmt>>,
     comp_scope_stack: Vec<usize>,
     /// Stack of shared variable heap pointers that need release on scope exit.

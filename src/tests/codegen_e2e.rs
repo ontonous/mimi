@@ -2643,7 +2643,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "codegen gap: await inside parasteps uses pthread_join(0)"]
 fn e2e_parasteps_spawn_and_await() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     // Would work with interpreter; codegen breaks because spawn
