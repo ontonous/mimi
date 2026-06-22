@@ -584,3 +584,25 @@ func read_shared(x: shared i32) -> i32 {
         assert_eq!(results[0].status, VerifStatus::Verified,
             "shared scalar param contract should verify: {:?}", results[0]);
     }
+
+    #[test]
+    fn verify_multi_func_no_calls() {
+        require_z3!();
+        // Multiple functions with contracts, no function calls in bodies.
+        let src = r#"
+func add(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > x
+    x + 1
+}
+func double(y: i32) -> i32 {
+    requires: y > 5
+    ensures: result > 5
+    y * 2
+}
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: verify_multi_func_no_calls");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.status == VerifStatus::Verified),
+            "all functions should verify: {:?}", results);
+    }
