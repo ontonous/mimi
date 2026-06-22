@@ -210,8 +210,8 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,800+ 个）
-2.  cargo test dual_                    # 双后端等价性（L1，168 个）
+1.  cargo test                          # 所有测试（1,822 个）
+2.  cargo test dual_                    # 双后端等价性（L1，~168 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
 5.  cargo test ffi_                     # FFI 契约等价性
