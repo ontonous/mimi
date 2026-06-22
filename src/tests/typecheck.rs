@@ -645,3 +645,34 @@ func main() -> i32 {
     let has_w005 = warnings.iter().any(|w| w.code.as_deref() == Some(crate::diagnostic::codes::W005));
     assert!(!has_w005, "expected no W005 for non-shared vars, got: {:?}", warnings);
 }
+
+// ─── Regex builtin type check tests (L2) ──────────────────────
+
+#[test]
+fn typecheck_regex_match_wrong_args() {
+    check_source(r#"
+func main() -> bool {
+    regex_match("hello")
+}
+"#).expect_err("regex_match with 1 arg should fail typecheck");
+}
+
+#[test]
+fn typecheck_regex_find_return_string() {
+    let src = r#"
+func main() -> string {
+    regex_find("hello", "[a-z]+")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello".to_string()));
+}
+
+#[test]
+fn typecheck_regex_replace_wrong_args() {
+    check_source(r#"
+func main() -> string {
+    regex_replace("hello", "pattern")
+}
+"#).expect_err("regex_replace with 2 args should fail typecheck");
+}

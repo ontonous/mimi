@@ -361,3 +361,104 @@ func main() -> string {
 "#;
     assert_eq!(run_source(src), interp::Value::String("prefix".to_string()));
 }
+
+// === Regex builtin tests ===
+
+#[test]
+fn regex_match_basic() {
+    let src = r#"
+func main() -> bool {
+    regex_match("hello world", "world")
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn regex_match_no_match() {
+    let src = r#"
+func main() -> bool {
+    regex_match("hello world", "xyz")
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(false));
+}
+
+#[test]
+fn regex_match_digits() {
+    let src = r#"
+func main() -> bool {
+    regex_match("abc123def", "[0-9]+")
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn regex_match_anchored() {
+    let src = r#"
+func main() -> bool {
+    regex_match("hello world", "^hello")
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn regex_match_invalid_pattern() {
+    let src = r#"
+func main() -> bool {
+    regex_match("hello", "[")
+}
+"#;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_source(src)
+    }));
+    assert!(result.is_err(), "invalid regex pattern should panic");
+}
+
+#[test]
+fn regex_find_basic() {
+    let src = r#"
+func main() -> string {
+    regex_find("hello world 42", "[0-9]+")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("42".to_string()));
+}
+
+#[test]
+fn regex_find_no_match() {
+    let src = r#"
+func main() -> string {
+    regex_find("hello world", "[0-9]+")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("".to_string()));
+}
+
+#[test]
+fn regex_replace_basic() {
+    let src = r#"
+func main() -> string {
+    regex_replace("hello 42 world 99 end", "[0-9]+", "X")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello X world X end".to_string()));
+}
+
+#[test]
+fn regex_replace_no_match() {
+    let src = r#"
+func main() -> string {
+    regex_replace("hello world", "[0-9]+", "X")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello world".to_string()));
+}
+
+

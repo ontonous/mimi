@@ -646,6 +646,43 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            "regex_match" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "regex_match expects 2 arguments (text, pattern)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "regex_find" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "regex_find expects 2 arguments (text, pattern)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "regex_replace" => {
+                if args.len() != 3 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "regex_replace expects 3 arguments (text, pattern, replacement)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    self.infer_expr(&args[2], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             "str_replace" => {
                 if args.len() != 3 {
                     self.emit_code(

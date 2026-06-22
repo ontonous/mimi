@@ -163,6 +163,45 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_regex_match(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 { return Err(InterpError::new("regex_match expects 2 arguments (text, pattern)")); }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::String(pattern)) => {
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| InterpError::new(format!("regex_match: invalid pattern '{}': {}", pattern, e)))?;
+                Ok(Value::Bool(re.is_match(s)))
+            }
+            _ => Err(InterpError::new("regex_match expects (string, string)")),
+        }
+    }
+
+    pub(crate) fn builtin_regex_find(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 { return Err(InterpError::new("regex_find expects 2 arguments (text, pattern)")); }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::String(pattern)) => {
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| InterpError::new(format!("regex_find: invalid pattern '{}': {}", pattern, e)))?;
+                match re.find(s) {
+                    Some(m) => Ok(Value::String(m.as_str().to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            _ => Err(InterpError::new("regex_find expects (string, string)")),
+        }
+    }
+
+    pub(crate) fn builtin_regex_replace(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 3 { return Err(InterpError::new("regex_replace expects 3 arguments (text, pattern, replacement)")); }
+        match (&args[0], &args[1], &args[2]) {
+            (Value::String(s), Value::String(pattern), Value::String(replacement)) => {
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| InterpError::new(format!("regex_replace: invalid pattern '{}': {}", pattern, e)))?;
+                Ok(Value::String(re.replace_all(s, replacement.as_str()).to_string()))
+            }
+            _ => Err(InterpError::new("regex_replace expects (string, string, string)")),
+        }
+    }
+
     pub(crate) fn builtin_str_index_of(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 { return Err(InterpError::new("str_index_of expects 2 arguments")); }
         match (&args[0], &args[1]) {

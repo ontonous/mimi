@@ -61,6 +61,12 @@ declare ptr @mimi_str_concat(ptr, ptr)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
+declare i32 @mimi_regex_match(ptr, ptr)
+
+declare ptr @mimi_regex_find(ptr, ptr)
+
+declare ptr @mimi_regex_replace(ptr, ptr, ptr)
+
 declare void @mimi_try_exit(i64)
 
 declare void @mimi_try_exit_str(ptr, i64)

@@ -145,6 +145,11 @@ void mimi_rc_weak_retain(void* ptr);
 void mimi_rc_weak_release(void* ptr);
 void* mimi_rc_upgrade(void* ptr);
 
+/* Regex functions (POSIX regex.h) */
+int mimi_regex_match(const char* text, const char* pattern);
+char* mimi_regex_find(const char* text, const char* pattern);
+char* mimi_regex_replace(const char* text, const char* pattern, const char* replacement);
+
 /* Integer power: __mimi_pow_i64(base, exp) -> base^exp (i64).
    Returns 0 on overflow (use safe_arith::checked_pow semantics). */
 int64_t __mimi_pow_i64(int64_t base, int64_t exp);

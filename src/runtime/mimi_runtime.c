@@ -1258,9 +1258,102 @@ const char* json_get_element(const char* json_str, int64_t index) {
     return NULL;
 }
 
-/* ========== Network / Socket functions (POSIX only) ========== */
+/* ========== Regex functions (POSIX regex.h) ========== */
 
 #ifndef MIMI_NO_STD
+
+#include <regex.h>
+
+/* regex_match(text, pattern) -> int (0 or 1) */
+int mimi_regex_match(const char* text, const char* pattern) {
+    if (!text || !pattern) return 0;
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) return 0;
+    ret = regexec(&regex, text, 0, NULL, 0);
+    regfree(&regex);
+    return ret == 0 ? 1 : 0;
+}
+
+/* regex_find(text, pattern) -> malloc'd first match substring (empty on no match) */
+char* mimi_regex_find(const char* text, const char* pattern) {
+    if (!text || !pattern) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    regex_t regex;
+    if (regcomp(&regex, pattern, REG_EXTENDED) != 0) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    regmatch_t match;
+    int ret = regexec(&regex, text, 1, &match, 0);
+    regfree(&regex);
+    if (ret != 0) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    size_t len = (size_t)(match.rm_eo - match.rm_so);
+    char* result = (char*)malloc(len + 1);
+    if (result) {
+        strncpy(result, text + match.rm_so, len);
+        result[len] = '\0';
+    }
+    return result;
+}
+
+/* regex_replace(text, pattern, replacement) -> malloc'd result string */
+char* mimi_regex_replace(const char* text, const char* pattern, const char* replacement) {
+    if (!text || !pattern || !replacement) return NULL;
+    regex_t regex;
+    if (regcomp(&regex, pattern, REG_EXTENDED) != 0) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    regmatch_t match;
+    const char* cursor = text;
+    size_t result_cap = strlen(text) * 2 + 16;
+    if (result_cap < 64) result_cap = 64;
+    char* result = (char*)malloc(result_cap);
+    if (!result) { regfree(&regex); return NULL; }
+    result[0] = '\0';
+    size_t offset = 0;
+    while (regexec(&regex, cursor, 1, &match, 0) == 0) {
+        size_t prefix_len = (size_t)match.rm_so;
+        if (offset + prefix_len + strlen(replacement) + 1 > result_cap) {
+            result_cap = (result_cap + prefix_len + strlen(replacement) + 1) * 2;
+            char* new_result = (char*)realloc(result, result_cap);
+            if (!new_result) { free(result); regfree(&regex); return NULL; }
+            result = new_result;
+        }
+        if (prefix_len > 0) {
+            strncpy(result + offset, cursor, prefix_len);
+            offset += prefix_len;
+        }
+        size_t repl_len = strlen(replacement);
+        strncpy(result + offset, replacement, repl_len);
+        offset += repl_len;
+        cursor += (size_t)match.rm_eo;
+    }
+    size_t remaining = strlen(cursor);
+    if (offset + remaining + 1 > result_cap) {
+        result_cap = offset + remaining + 1;
+        char* new_result = (char*)realloc(result, result_cap);
+        if (!new_result) { free(result); regfree(&regex); return NULL; }
+        result = new_result;
+    }
+    strncpy(result + offset, cursor, remaining);
+    offset += remaining;
+    result[offset] = '\0';
+    regfree(&regex);
+    return result;
+}
+
+/* ========== Network / Socket functions (POSIX only) ========== */
 
 #include <sys/socket.h>
 #include <netinet/in.h>

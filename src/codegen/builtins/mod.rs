@@ -197,6 +197,30 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ], false),
         Some(inkwell::module::Linkage::External));
 
+    // Regex functions
+    // mimi_regex_match(text, pattern) -> int (0 or 1)
+    module.add_function("mimi_regex_match",
+        i32.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_regex_find(text, pattern) -> i8* (malloc'd match, empty on no match)
+    module.add_function("mimi_regex_find",
+        i8_ptr.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+    // mimi_regex_replace(text, pattern, replacement) -> i8* (malloc'd result)
+    module.add_function("mimi_regex_replace",
+        i8_ptr.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+
     // mimi_try_exit(payload): print error and exit(1) for ? operator
     module.add_function("mimi_try_exit",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
@@ -459,6 +483,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "send" | "recv" | "close_fd"
         | "http_get" | "http_post"
         | "from_int"
+        | "regex_match" | "regex_find" | "regex_replace"
     )
 }
 
@@ -569,6 +594,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Err(CompileError::BuiltinError(format!("'{}' is a runtime-only function, not available in codegen", name)))
             }
             "from_int" => self.compile_from_int(args),
+            "regex_match" => self.compile_regex_match(args),
+            "regex_find" => self.compile_regex_find(args),
+            "regex_replace" => self.compile_regex_replace(args),
             "ast_eval" => {
                 // ast_eval on a compile-time folded quote block:
                 // quote! { 42 } evaluates directly to i64(42) at compile time,

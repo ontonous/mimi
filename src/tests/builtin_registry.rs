@@ -91,6 +91,9 @@ mod tests {
         ("close_fd", true, true, true),
         ("http_get", true, true, true),
         ("http_post", true, true, true),
+        ("regex_match", true, true, true),
+        ("regex_find", true, true, true),
+        ("regex_replace", true, true, true),
         ("exit", true, true, true),
         ("from_int", true, true, true),
         // lexer/parse are in is_builtin() but codegen returns a compile error

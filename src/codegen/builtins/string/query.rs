@@ -183,6 +183,94 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(phi.as_basic_value())
 
     }
+    pub(in crate::codegen) fn compile_regex_match(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 { return Err(CompileError::WrongArgCount("regex_match expects 2 arguments (text, pattern)".to_string())); }
+        let text_ptr = match args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_match: first arg must be string".to_string())),
+        };
+        let pattern_ptr = match args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_match: second arg must be string".to_string())),
+        };
+        let func = self.module.get_function("mimi_regex_match")
+            .ok_or("mimi_regex_match not declared")?;
+        let result = self.builder.build_call(func, &[
+            BasicMetadataValueEnum::PointerValue(text_ptr),
+            BasicMetadataValueEnum::PointerValue(pattern_ptr),
+        ], "regex_match_call")
+            .map_err(|e| CompileError::LlvmError(format!("regex_match error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_regex_match returned void")?;
+        let cmp = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            result.into_int_value(),
+            self.context.i32_type().const_int(0, false),
+            "regex_match_bool",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let ext = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "result")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        Ok(ext.into())
+    }
+
+    pub(in crate::codegen) fn compile_regex_find(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 { return Err(CompileError::WrongArgCount("regex_find expects 2 arguments (text, pattern)".to_string())); }
+        let text_ptr = match args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_find: first arg must be string".to_string())),
+        };
+        let pattern_ptr = match args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_find: second arg must be string".to_string())),
+        };
+        let func = self.module.get_function("mimi_regex_find")
+            .ok_or("mimi_regex_find not declared")?;
+        let result = self.builder.build_call(func, &[
+            BasicMetadataValueEnum::PointerValue(text_ptr),
+            BasicMetadataValueEnum::PointerValue(pattern_ptr),
+        ], "regex_find_call")
+            .map_err(|e| CompileError::LlvmError(format!("regex_find error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_regex_find returned void")?;
+        Ok(result)
+    }
+
+    pub(in crate::codegen) fn compile_regex_replace(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 { return Err(CompileError::WrongArgCount("regex_replace expects 3 arguments (text, pattern, replacement)".to_string())); }
+        let text_ptr = match args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_replace: first arg must be string".to_string())),
+        };
+        let pattern_ptr = match args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_replace: second arg must be string".to_string())),
+        };
+        let replacement_ptr = match args[2] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv,
+            _ => return Err(CompileError::TypeMismatch("regex_replace: third arg must be string".to_string())),
+        };
+        let func = self.module.get_function("mimi_regex_replace")
+            .ok_or("mimi_regex_replace not declared")?;
+        let result = self.builder.build_call(func, &[
+            BasicMetadataValueEnum::PointerValue(text_ptr),
+            BasicMetadataValueEnum::PointerValue(pattern_ptr),
+            BasicMetadataValueEnum::PointerValue(replacement_ptr),
+        ], "regex_replace_call")
+            .map_err(|e| CompileError::LlvmError(format!("regex_replace error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_regex_replace returned void")?;
+        Ok(result)
+    }
+
     pub(in crate::codegen) fn compile_str_index_of(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

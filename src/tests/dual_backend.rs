@@ -2161,3 +2161,59 @@ fn dual_rule_requires_via_contract_ok() {
         }
     "#);
 }
+
+// ─── 19. Regex builtins (6 tests) ─────────────────────────────
+
+#[test]
+fn dual_regex_match() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(match regex_match("hello world", "world") { true => 1, false => 0 }); 0 }"#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_regex_match_no() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(match regex_match("hello world", "xyz") { true => 1, false => 0 }); 0 }"#,
+        "0"
+    );
+}
+
+#[test]
+fn dual_regex_find() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(regex_find("abc123def", "[0-9]+")); 0 }"#,
+        "123"
+    );
+}
+
+#[test]
+fn dual_regex_find_empty() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(regex_find("hello", "[0-9]+")); 0 }"#,
+        ""
+    );
+}
+
+#[test]
+fn dual_regex_replace() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(regex_replace("x1y2z", "[0-9]+", "X")); 0 }"#,
+        "xXyXz"
+    );
+}
+
+#[test]
+fn dual_regex_replace_no_match() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"func main() -> i32 { println(regex_replace("abc", "[0-9]+", "X")); 0 }"#,
+        "abc"
+    );
+}
