@@ -265,6 +265,7 @@ fn start_echo_server(port: u16) -> std::thread::JoinHandle<()> {
 
 const DUAL_PORT: i32 = 32001;
 const DUAL_PORT2: i32 = 32002;
+const CODEGEN_PORT: i32 = 32003;
 
 const TCP_CLIENT_PROG: &str = r#"
 func main() -> i32 {
@@ -282,25 +283,37 @@ func main() -> i32 {
 
 #[test]
 fn dual_net_tcp_client_echo() {
-    let echo_server = start_echo_server(DUAL_PORT as u16);
-    std::thread::sleep(Duration::from_millis(100));
+    // Interpreter test
+    {
+        let echo_server = start_echo_server(DUAL_PORT as u16);
+        std::thread::sleep(Duration::from_millis(200));
+        let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT.to_string());
+        let interp_result = run_source(&src);
+        assert_eq!(interp_result, interp::Value::Int(0),
+            "Interpreter should exit with 0, got {:?}", interp_result);
+        let _ = echo_server.join();
+    }
 
-    let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT.to_string());
-
-    let interp_result = run_source(&src);
-    assert_eq!(interp_result, interp::Value::Int(0),
-        "Interpreter should exit with 0, got {:?}", interp_result);
-
-    let _ = echo_server.join();
+    // Codegen test — separate server on a different port
+    {
+        let echo_server = start_echo_server(DUAL_PORT2 as u16);
+        std::thread::sleep(Duration::from_millis(200));
+        let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT2.to_string());
+        let codegen_result = compile_and_run(&src);
+        assert!(codegen_result.is_ok(), "Codegen should succeed: {:?}", codegen_result.err());
+        let stdout = codegen_result.unwrap();
+        assert_eq!(stdout.trim(), "ping",
+            "Codegen should output 'ping', got: {}", stdout.trim());
+        let _ = echo_server.join();
+    }
 }
 
 #[test]
-#[ignore = "codegen: recv returns struct value (WIP)"]
 fn codegen_net_tcp_client_echo() {
-    let echo_server = start_echo_server(DUAL_PORT2 as u16);
+    let echo_server = start_echo_server(CODEGEN_PORT as u16);
     std::thread::sleep(Duration::from_millis(100));
 
-    let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT2.to_string());
+    let src = TCP_CLIENT_PROG.replace("PORT", &CODEGEN_PORT.to_string());
     let codegen_result = compile_and_run(&src);
     assert!(codegen_result.is_ok(), "Codegen should succeed: {:?}", codegen_result.err());
     let stdout = codegen_result.unwrap();

@@ -369,6 +369,7 @@ void* mimi_rc_upgrade(void* ptr) {
   #include <regex.h>
   #include <sys/socket.h>
   #include <netinet/in.h>
+  #include <netinet/tcp.h>
   #include <netdb.h>
   #include <arpa/inet.h>
   #include <fcntl.h>
@@ -1656,6 +1657,14 @@ int64_t mimi_connect(int64_t fd, const char* host, int64_t port) {
 #else
     int ret = connect((int)fd, res->ai_addr, res->ai_addrlen);
 #endif
+    if (ret == 0) {
+        int flag = 1;
+#ifdef _WIN32
+        setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
+#else
+        setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
+#endif
+    }
     freeaddrinfo(res);
     return (int64_t)ret;
 }

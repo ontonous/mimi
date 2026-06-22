@@ -206,10 +206,12 @@ dual_assert_contract_ok(program)
 
 ### 已知 Codegen 差距速查
 
-当前未解决的已知 codegen 差距：
-- **HTTP server (net.rs)**: 3 个 TCP echo 测试仅 interpreter 路径。codegen 端需 `tcp_accept`/`recv`/`send` 的 C runtime 实现(当前 interpreter 直接用 `libc`)。规划在 v0.12 补齐。(tests/net.rs, interpreter-only)
+当前无未解决的已知 codegen 差距。所有底层网络函数（socket/bind/listen/accept/connect/send/recv/close_fd/http_get/http_post）均在三个层（interpreter、codegen compile methods、C runtime）完整实现。`recv` 返回 struct value 的集成问题已修复，TCP_NODELAY 已在 C runtime 的 `mimi_connect` 中添加。
 
 以下差距已在本轮 IDD 修复中关闭：
+- **TCP client codegen** (codegen_net_tcp_client_echo): 之前 `#[ignore = "codegen: recv returns struct value (WIP)"]`，现已通过。`println(data)` 可以正确处理 `recv` 返回的 Mimi string struct。
+- **TCP_NODELAY** 行为差异：interpreter 和 codegen 现在都在 connect 后设置 `TCP_NODELAY`。
+- **双后端 TCP 客户端测试**：`dual_net_tcp_client_echo` 同时测试 interpreter 和 codegen 路径。 
 - 正则表达式: interpreter 使用 Rust `regex` crate，codegen 使用 POSIX `regex.h`（`regcomp`/`regexec`），双后端等价。
 
 - match guard SIGSEGV
