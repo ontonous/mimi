@@ -195,12 +195,15 @@ dual_assert_contract_ok(program)
 | `2cee0cf` | v0.9-4 合约+shared E0502 | — | `typecheck_contract_with_shared_param_is_error` ✅, `typecheck_requires_with_shared_param_rejected` ✅, `typecheck_ensures_with_shared_param_rejected` ✅, `typecheck_contract_with_shared_mut_rejected` ✅ |
 | `2cee0cf` | v0.9-5 parasteps 合约提取 | — | `typecheck_parasteps_requires_local_shared_rejected` ✅, `typecheck_parasteps_ensures_local_shared_rejected` ✅ |
 | `3b0e102` | v0.10 bug 修复: spawn+await 类型跟踪 + malloc 尺寸 | `e2e_parasteps_spawn_and_await` ✅ | — |
+| `ed48315` | 操作符修复: EqCmp/NeCmp/Add struct-typed string 参数 | `ensures_string_concat_with_old_runtime_check` ✅, `codegen_contract_string_requires_nonempty` ✅, `dual_contract_string_requires_nonempty` ✅ | — |
+| `342976c` | 正则表达式标准库: regex_match/find/replace | `dual_regex_match` ✅, `dual_regex_find` ✅, `dual_regex_replace` ✅ | `typecheck_regex_match_wrong_args` ✅, `typecheck_regex_replace_wrong_args` ✅ |
 
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
 ### 已知 Codegen 差距速查
 
 当前无未解决的已知 codegen 差距。
+- 正则表达式: interpreter 使用 Rust `regex` crate，codegen 使用 POSIX `regex.h`（`regcomp`/`regexec`），双后端等价。
 
 以下差距已在本轮 IDD 修复中关闭：
 
@@ -220,7 +223,7 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,881 个）
+1.  cargo test                          # 所有测试（1,907 个）
 2.  cargo test dual_                    # 双后端等价性（L1，~177 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
