@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use super::helpers::elem_type_tag;
 
 impl<'ctx> CodeGenerator<'ctx> {
-    fn type_to_llvm_for_extern(&self, ty: &crate::ast::Type) -> BasicTypeEnum<'ctx> {
+    fn type_to_llvm_for_extern(&self, ty: &crate::ast::Type) -> MimiResult<BasicTypeEnum<'ctx>> {
         // For user-defined types (Type::Name), prefer the registered type_llvm entry
         // which has the correct layout (e.g. i32 for #[repr(C)] enums).
         if let crate::ast::Type::Name(name, _) = ty {
             if let Some(&registered) = self.type_llvm.get(name.as_str()) {
-                return registered;
+                return Ok(registered);
             }
         }
         // G1b: Closure types (Type::Func) cross FFI as raw function pointers (i8*),
@@ -21,10 +21,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         // via get_or_create_callback_thunk + TLS globals.
         if matches!(ty, crate::ast::Type::Func(_, _)) {
             let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
-            return BasicTypeEnum::PointerType(i8_ptr);
+            return Ok(BasicTypeEnum::PointerType(i8_ptr));
+        }
+        // Explicitly map unit to i64 (zero-size type has no C ABI representation of its own,
+        // but extern wrappers always produce/consume an i64 to keep the function signature uniform).
+        // This is NOT a fallback — it is the intended representation for unit in FFI.
+        if let crate::ast::Type::Name(name, _) = ty {
+            if name == "unit" {
+                return Ok(BasicTypeEnum::IntType(self.context.i64_type()));
+            }
         }
         types::mimi_type_to_llvm_extern(self.context, ty)
-            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+            .ok_or_else(|| CompileError::LlvmError(format!(
+                "cannot map type '{}' to LLVM for extern FFI: type has no C ABI representation",
+                crate::core::fmt_type(ty)
+            )))
     }
 
     pub(in crate::codegen) fn compile_impl_methods(&mut self) -> MimiResult<()> {
@@ -320,7 +331,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())) => {
                     list_ptr_ty
                 }
-                _ => self.type_to_llvm_for_extern(&p.ty),
+                _ => self.type_to_llvm_for_extern(&p.ty)?,
             };
             param_tys.push(types::basic_to_metadata(self.context, ty));
         }
@@ -336,7 +347,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataTypeEnum::PointerType(i8_ptr_ty)
                 }
                 _ => {
-                    let ty = self.type_to_llvm_for_extern(&p.ty);
+                    let ty = self.type_to_llvm_for_extern(&p.ty)?;
                     types::basic_to_metadata(self.context, ty)
                 }
             };
@@ -349,9 +360,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // F7: Tuple return — wrapper returns the LLVM struct type
                 } else if matches!(ty, crate::ast::Type::Tuple(_)) {
                     types::mimi_type_to_llvm(self.context, ty)
-                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+                        .unwrap_or_else(|| {
+                            panic!("Tuple type '{}' should always map to LLVM struct", crate::core::fmt_type(ty))
+                        })
                 } else {
-                    self.type_to_llvm_for_extern(ty)
+                    self.type_to_llvm_for_extern(ty)?
                 }
             }
             None => BasicTypeEnum::IntType(self.context.i64_type()),
@@ -370,7 +383,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else if matches!(ty, crate::ast::Type::Name(n, _) if n == "string") {
                     BasicTypeEnum::PointerType(i8_ptr_ty)
                 } else {
-                    self.type_to_llvm_for_extern(ty)
+                    self.type_to_llvm_for_extern(ty)?
                 }
             }
             None => BasicTypeEnum::IntType(self.context.i64_type()),

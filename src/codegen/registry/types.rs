@@ -12,7 +12,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut field_tys = Vec::new();
                 for f in fields {
                     let ty = types::mimi_type_to_llvm(self.context, &f.ty)
-                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                        .ok_or_else(|| CompileError::LlvmError(format!(
+                            "cannot map record field '{}' type to LLVM", crate::core::fmt_type(&f.ty)
+                        )))?;
                     field_tys.push(ty);
                 }
                 BasicTypeEnum::StructType(self.context.struct_type(&field_tys, false))

@@ -3004,4 +3004,46 @@ func main() -> i32 {
     assert_eq!(compile_and_run(src).unwrap().trim(), "42");
 }
 
+// ===================== Extern type mapping =====================
+
+#[test]
+fn e2e_extern_no_silent_i64_fallback() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // An extern function with no explicit return type (defaults to unit)
+    // should not silently fall back to i64. The compile step (before linking)
+    // must not crash or produce wrong code regardless of link result.
+    let src = r#"
+        extern "C" {
+            func noop()
+        }
+        func main() -> i32 {
+            noop();
+            0
+        }
+    "#;
+    // Compilation may fail at link stage (missing `noop` symbol),
+    // but must NOT fail at codegen with a panic or silent type mismatch.
+    let result = compile_and_run(src);
+    if let Err(e) = &result {
+        // Linker errors are acceptable; codegen-level panics are not
+        assert!(!e.contains("no C ABI"), "codegen should not reject unit return type: {}", e);
+        assert!(!e.contains("cannot map type"), "codegen should not reject unit return type: {}", e);
+    }
+}
+
+#[test]
+fn e2e_extern_rejects_unrepresentable_type() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // A `nothing` type in extern FFI should be rejected (either by type checker
+    // or by codegen), never silently produce wrong binary.
+    let src = r#"
+        extern "C" {
+            func bad_param(x: nothing)
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let result = compile_and_run(src);
+    assert!(result.is_err(), "nothing type in extern should fail, got Ok");
+}
+
 
