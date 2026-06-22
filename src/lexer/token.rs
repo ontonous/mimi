@@ -1,4 +1,3 @@
-use crate::ast::Commitment;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,7 +412,6 @@ impl TokenKind {
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: TokenKind,
-    pub commitment: Commitment,
     pub line: usize,
     pub col: usize,
 }

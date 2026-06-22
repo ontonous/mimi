@@ -31,10 +31,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (type_name, trait_impls) in self.type_impls.clone() {
             for (trait_name, methods) in &trait_impls {
                 for method in methods {
-                    // Skip non-committed methods
-                    if !self.is_committed(&method.commitment) {
-                        continue;
-                    }
                     // Mangle name: {type_name}__{trait_name}__{method_name}
                     let mangled = format!("{}__{}__{}", type_name, trait_name, method.name);
                     // Build function: prepend self: &type_name as first param

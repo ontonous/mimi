@@ -8,7 +8,7 @@
 
 use crate::ast::{File, Item, FuncDef};
 use crate::diagnostic::Diagnostic;
-use crate::diagnostic::codes::{W001, W002, W003, W004};
+use crate::diagnostic::codes::{W002, W003, W004};
 use crate::span::Span;
 
 pub struct Linter;
@@ -26,28 +26,10 @@ impl Linter {
     pub fn lint(&self, file: &File, source: &str) -> LintResult {
         let mut diagnostics = Vec::new();
 
-        for (idx, item) in file.items.iter().enumerate() {
+        for item in file.items.iter() {
             match item {
                 Item::Func(f) => {
                     self.lint_func(f, source, &mut diagnostics);
-                }
-                Item::Desc(_, span) => {
-                    if !is_followed_by_impl(&file.items, idx) {
-                        diagnostics.push(Diagnostic::warning_code(
-                            W001,
-                            format!("standalone `desc` has no associated implementation"),
-                            *span,
-                        ));
-                    }
-                }
-                Item::Rule(_, span) => {
-                    if !is_followed_by_impl(&file.items, idx) {
-                        diagnostics.push(Diagnostic::warning_code(
-                            W001,
-                            format!("standalone `rule` has no associated implementation"),
-                            *span,
-                        ));
-                    }
                 }
                 _ => {}
             }
@@ -78,8 +60,8 @@ impl Linter {
             ));
         }
 
-        // W002: Check for locked fragments with empty body
-        if func.commitment.is_locked() && func.body.is_empty() {
+        // W002: Check for locked fragments with empty body (commitment removed in v0.8)
+        if func.body.is_empty() {
             diagnostics.push(Diagnostic::warning_code(
                 W002,
                 format!("locked function `{}` has empty implementation", func.name),
@@ -93,10 +75,6 @@ impl Default for Linter {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn is_followed_by_impl(items: &[Item], idx: usize) -> bool {
-    idx + 1 < items.len() && matches!(items[idx + 1], Item::Func(_) | Item::Type(_))
 }
 
 fn is_snake_case(name: &str) -> bool {

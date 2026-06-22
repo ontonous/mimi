@@ -1,34 +1,5 @@
 use crate::span::Span;
 
-/// 意图锁后缀（直接复用 mimispec 的语义）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Commitment {
-    #[default]
-    None,
-    Question,
-    QuestionQuestion,
-    Locked,
-    StrongLocked,
-    LockedQuestion,
-    StrongLockedQuestion,
-    LockedQuestionQuestion,
-    StrongLockedQuestionQuestion,
-}
-
-impl Commitment {
-    pub fn is_locked(&self) -> bool {
-        matches!(
-            self,
-            Self::Locked
-                | Self::StrongLocked
-                | Self::LockedQuestion
-                | Self::StrongLockedQuestion
-                | Self::LockedQuestionQuestion
-                | Self::StrongLockedQuestionQuestion
-        )
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct File {
     pub imports: Vec<Import>,
@@ -50,8 +21,6 @@ pub enum Item {
     Trait(TraitDef),
     Impl(ImplDef),
     ExternBlock(ExternBlock),
-    Rule(String, Span),
-    Desc(String, Span),
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +58,6 @@ pub enum CapMode {
 #[derive(Debug, Clone)]
 pub struct TraitDef {
     pub name: String,
-    pub commitment: Commitment,
     pub methods: Vec<TraitMethod>,
     pub generics: Vec<GenericParam>,
 }
@@ -115,7 +83,6 @@ pub struct ImplDef {
 #[derive(Debug, Clone)]
 pub struct CapDef {
     pub name: String,
-    pub commitment: Commitment,
     /// None for simple cap, Some(other_cap) for combined cap (A + B)
     pub combined_with: Option<String>,
 }
@@ -123,7 +90,6 @@ pub struct CapDef {
 #[derive(Debug, Clone)]
 pub struct ActorDef {
     pub name: String,
-    pub commitment: Commitment,
     pub pub_: bool,
     pub fields: Vec<ActorField>,
     pub methods: Vec<FuncDef>,
@@ -146,7 +112,6 @@ pub struct GenericParam {
 #[derive(Debug, Clone)]
 pub struct FuncDef {
     pub name: String,
-    pub commitment: Commitment,
     pub pub_: bool,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
@@ -179,7 +144,6 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct ModuleDef {
     pub name: String,
-    pub commitment: Commitment,
     pub imports: Vec<Import>,
     pub items: Vec<Item>,
 }
@@ -187,7 +151,6 @@ pub struct ModuleDef {
 #[derive(Debug, Clone)]
 pub struct TypeDef {
     pub name: String,
-    pub commitment: Commitment,
     pub pub_: bool,
     pub kind: TypeDefKind,
     pub generics: Vec<GenericParam>,

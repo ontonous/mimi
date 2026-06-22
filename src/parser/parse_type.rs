@@ -349,7 +349,7 @@ impl Parser {
     }
 
     pub(crate) fn parse_type_def(&mut self, derives: Vec<String>, attributes: Vec<crate::ast::TypeAttribute>) -> Result<TypeDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Type)?;
+        self.expect_keyword(TokenKind::Type)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         self.skip_newlines();
@@ -387,7 +387,7 @@ impl Parser {
                 let variants = self.parse_enum_variants()?;
                 TypeDefKind::Enum(variants)
             };
-            return Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives, attributes });
+            return Ok(TypeDef { name, pub_: false, kind, generics, derives, attributes });
         }
         if self.at(&TokenKind::Eq) {
             self.advance();
@@ -402,7 +402,6 @@ impl Parser {
                 self.expect(TokenKind::RBrace, "`}`")?;
                 return Ok(TypeDef {
                     name,
-                    commitment,
                     pub_: false,
                     kind: TypeDefKind::Union(fields),
                     generics,
@@ -414,7 +413,6 @@ impl Parser {
             self.match_semi();
             return Ok(TypeDef {
                 name,
-                commitment,
                 pub_: false,
                 kind: TypeDefKind::Alias(ty),
                 generics,
@@ -433,7 +431,7 @@ impl Parser {
         };
         self.skip_newlines();
         self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(TypeDef { name, commitment, pub_: false, kind, generics, derives, attributes })
+        Ok(TypeDef { name, pub_: false, kind, generics, derives, attributes })
     }
 
     fn lookahead_is_record(&self) -> bool {
@@ -513,7 +511,7 @@ impl Parser {
     }
 
     pub(crate) fn parse_newtype(&mut self) -> Result<TypeDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Newtype)?;
+        self.expect_keyword(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         self.expect(TokenKind::Eq, "`=`")?;
@@ -521,7 +519,6 @@ impl Parser {
         self.match_semi();
         Ok(TypeDef {
             name,
-            commitment,
             pub_: false,
             kind: TypeDefKind::Newtype(ty),
             generics,

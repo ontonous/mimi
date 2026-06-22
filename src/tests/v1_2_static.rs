@@ -189,12 +189,11 @@ func main() -> i32 {
 #[test]
 fn strict_locked_func_no_mms_ok() {
     let src = r#"
-func$ add(a: i32, b: i32) -> i32 {
+func add(a: i32, b: i32) -> i32 {
     a + b
 }
 "#;
     let result = check_source_strict(src);
-    // $ locked function without mms blocks should pass
     assert!(result.is_ok());
 }
 

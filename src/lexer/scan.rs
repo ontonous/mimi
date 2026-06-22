@@ -1,4 +1,3 @@
-use crate::ast::Commitment;
 use crate::lexer::errors::{
     dedent_mismatch, indent_not_multiple_of_four, tabs_not_allowed, unexpected_character,
     unexpected_dollar, unterminated_escape, unterminated_fstring, unterminated_fstring_escape,
@@ -317,7 +316,7 @@ impl<'a> super::Lexer<'a> {
         }
     }
 
-    pub(crate) fn scan_ident(&mut self, first: char) -> (String, Commitment) {
+    pub(crate) fn scan_ident(&mut self, first: char) -> String {
         let mut s = String::new();
         s.push(first);
         while let Some(c) = self.peek() {
@@ -328,53 +327,7 @@ impl<'a> super::Lexer<'a> {
                 break;
             }
         }
-        let commitment = self.scan_commitment();
-        (s, commitment)
-    }
-
-    pub(crate) fn scan_commitment(&mut self) -> Commitment {
-        match self.peek() {
-            Some('$') => {
-                self.advance();
-                match self.peek() {
-                    Some('$') => {
-                        self.advance();
-                        match self.peek() {
-                            Some('?') => {
-                                self.advance();
-                                if self.peek() == Some('?') {
-                                    self.advance();
-                                    Commitment::StrongLockedQuestionQuestion
-                                } else {
-                                    Commitment::StrongLockedQuestion
-                                }
-                            }
-                            _ => Commitment::StrongLocked,
-                        }
-                    }
-                    Some('?') => {
-                        self.advance();
-                        if self.peek() == Some('?') {
-                            self.advance();
-                            Commitment::LockedQuestionQuestion
-                        } else {
-                            Commitment::LockedQuestion
-                        }
-                    }
-                    _ => Commitment::Locked,
-                }
-            }
-            Some('?') => {
-                self.advance();
-                if self.peek() == Some('?') {
-                    self.advance();
-                    Commitment::QuestionQuestion
-                } else {
-                    Commitment::Question
-                }
-            }
-            _ => Commitment::None,
-        }
+        s
     }
 
     pub(crate) fn process_line_start(&mut self, tokens: &mut Vec<Token>) -> Result<(), LexerError> {
@@ -414,21 +367,11 @@ impl<'a> super::Lexer<'a> {
                 let current = *self.indent_stack.last().unwrap_or(&0);
                 if spaces > current {
                     self.indent_stack.push(spaces);
-                    tokens.push(Token {
-                        kind: TokenKind::Indent,
-                        commitment: Commitment::None,
-                        line: self.line,
-                        col: spaces,
-                    });
+                    tokens.push(Token { kind: TokenKind::Indent, line: self.line, col: spaces });
                 } else if spaces < current {
                     while *self.indent_stack.last().unwrap_or(&0) > spaces {
                         self.indent_stack.pop();
-                        tokens.push(Token {
-                            kind: TokenKind::Dedent,
-                            commitment: Commitment::None,
-                            line: self.line,
-                            col: spaces,
-                        });
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: spaces });
                     }
                     if *self.indent_stack.last().unwrap_or(&0) != spaces {
                         return Err(dedent_mismatch(self.line, self.col));
@@ -444,12 +387,7 @@ impl<'a> super::Lexer<'a> {
         if self.mode == LexerMode::Sketch {
             while self.indent_stack.len() > 1 {
                 self.indent_stack.pop();
-                tokens.push(Token {
-                    kind: TokenKind::Dedent,
-                    commitment: Commitment::None,
-                    line: self.line,
-                    col: self.col,
-                });
+                tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: self.col });
             }
         }
     }
@@ -459,231 +397,50 @@ impl<'a> super::Lexer<'a> {
         c: char,
         line: usize,
         col: usize,
-    ) -> Result<(TokenKind, Commitment), LexerError> {
+    ) -> Result<TokenKind, LexerError> {
         match c {
             'f' if self.chars.clone().next() == Some('"') => {
                 let s = self.scan_fstring()?;
-                let commitment = self.scan_commitment();
-                Ok((TokenKind::FString(s), commitment))
+                Ok(TokenKind::FString(s))
             }
             '"' => {
                 let s = self.scan_string()?;
-                let commitment = self.scan_commitment();
-                Ok((TokenKind::String(s), commitment))
+                Ok(TokenKind::String(s))
             }
-            '0'..='9' => Ok((self.scan_number(), Commitment::None)),
+            '0'..='9' => Ok(self.scan_number()),
             'a'..='z' | 'A'..='Z' | '_' => {
                 let first = self.advance().unwrap_or('\0');
-                let (name, commitment) = self.scan_ident(first);
-                Ok((keyword_or_ident(&name), commitment))
+                let name = self.scan_ident(first);
+                Ok(keyword_or_ident(&name))
             }
-            '+' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::PlusEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::Plus, Commitment::None))
-                }
-            }
-            '-' => {
-                self.advance();
-                if self.peek() == Some('>') {
-                    self.advance();
-                    Ok((TokenKind::Arrow, Commitment::None))
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::MinusEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::Minus, Commitment::None))
-                }
-            }
-            '*' => {
-                self.advance();
-                if self.peek() == Some('*') {
-                    self.advance();
-                    Ok((TokenKind::Pow, Commitment::None))
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::StarEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::Star, Commitment::None))
-                }
-            }
-            '/' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::SlashEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::Slash, Commitment::None))
-                }
-            }
-            '%' => {
-                self.advance();
-                Ok((TokenKind::Percent, Commitment::None))
-            }
-            '=' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::EqEq, Commitment::None))
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    Ok((TokenKind::FatArrow, Commitment::None))
-                } else {
-                    Ok((TokenKind::Eq, Commitment::None))
-                }
-            }
-            '!' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::Ne, Commitment::None))
-                } else {
-                    Ok((TokenKind::Bang, Commitment::None))
-                }
-            }
-            '<' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::Le, Commitment::None))
-                } else if self.peek() == Some('<') {
-                    self.advance();
-                    Ok((TokenKind::Shl, Commitment::None))
-                } else {
-                    Ok((TokenKind::Lt, Commitment::None))
-                }
-            }
-            '>' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::Ge, Commitment::None))
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    Ok((TokenKind::Shr, Commitment::None))
-                } else {
-                    Ok((TokenKind::Gt, Commitment::None))
-                }
-            }
-            '&' => {
-                self.advance();
-                if self.peek() == Some('&') {
-                    self.advance();
-                    Ok((TokenKind::AndAnd, Commitment::None))
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::BitAndEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::BitAnd, Commitment::None))
-                }
-            }
-            '|' => {
-                self.advance();
-                if self.peek() == Some('|') {
-                    self.advance();
-                    Ok((TokenKind::OrOr, Commitment::None))
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::BitOrEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::BitOr, Commitment::None))
-                }
-            }
-            '^' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Ok((TokenKind::BitXorEq, Commitment::None))
-                } else {
-                    Ok((TokenKind::BitXor, Commitment::None))
-                }
-            }
-            '~' => {
-                self.advance();
-                Ok((TokenKind::Tilde, Commitment::None))
-            }
-            '$' => {
-                self.advance();
-                if self.peek() == Some('(') {
-                    self.advance();
-                    Ok((TokenKind::DollarParen, Commitment::None))
-                } else {
-                    Err(unexpected_dollar(line, col))
-                }
-            }
-            '(' => {
-                self.advance();
-                Ok((TokenKind::LParen, Commitment::None))
-            }
-            ')' => {
-                self.advance();
-                Ok((TokenKind::RParen, Commitment::None))
-            }
-            '{' => {
-                self.advance();
-                Ok((TokenKind::LBrace, Commitment::None))
-            }
-            '}' => {
-                self.advance();
-                Ok((TokenKind::RBrace, Commitment::None))
-            }
-            '[' => {
-                self.advance();
-                Ok((TokenKind::LBracket, Commitment::None))
-            }
-            ']' => {
-                self.advance();
-                Ok((TokenKind::RBracket, Commitment::None))
-            }
-            ':' => {
-                self.advance();
-                if self.peek() == Some(':') {
-                    self.advance();
-                    Ok((TokenKind::ColonColon, Commitment::None))
-                } else {
-                    Ok((TokenKind::Colon, Commitment::None))
-                }
-            }
-            ';' => {
-                self.advance();
-                Ok((TokenKind::Semi, Commitment::None))
-            }
-            ',' => {
-                self.advance();
-                Ok((TokenKind::Comma, Commitment::None))
-            }
-            '.' => {
-                self.advance();
-                if self.peek() == Some('.') && self.chars.clone().next() == Some('.') {
-                    self.advance();
-                    self.advance();
-                    Ok((TokenKind::Ellipsis, Commitment::None))
-                } else if self.peek() == Some('.') {
-                    self.advance();
-                    Ok((TokenKind::DotDot, Commitment::None))
-                } else {
-                    Ok((TokenKind::Dot, Commitment::None))
-                }
-            }
-            '?' => {
-                self.advance();
-                Ok((TokenKind::Question, Commitment::None))
-            }
-            '@' => {
-                self.advance();
-                Ok((TokenKind::At, Commitment::None))
-            }
-            '#' => {
-                self.advance();
-                Ok((TokenKind::Hash, Commitment::None))
-            }
-            '\'' => {
-                self.advance();
-                Ok((TokenKind::Tick, Commitment::None))
-            }
+            '+' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::PlusEq) } else { Ok(TokenKind::Plus) } }
+            '-' => { self.advance(); if self.peek() == Some('>') { self.advance(); Ok(TokenKind::Arrow) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::MinusEq) } else { Ok(TokenKind::Minus) } }
+            '*' => { self.advance(); if self.peek() == Some('*') { self.advance(); Ok(TokenKind::Pow) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::StarEq) } else { Ok(TokenKind::Star) } }
+            '/' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::SlashEq) } else { Ok(TokenKind::Slash) } }
+            '%' => { self.advance(); Ok(TokenKind::Percent) }
+            '=' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::EqEq) } else if self.peek() == Some('>') { self.advance(); Ok(TokenKind::FatArrow) } else { Ok(TokenKind::Eq) } }
+            '!' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::Ne) } else { Ok(TokenKind::Bang) } }
+            '<' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::Le) } else if self.peek() == Some('<') { self.advance(); Ok(TokenKind::Shl) } else { Ok(TokenKind::Lt) } }
+            '>' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::Ge) } else if self.peek() == Some('>') { self.advance(); Ok(TokenKind::Shr) } else { Ok(TokenKind::Gt) } }
+            '&' => { self.advance(); if self.peek() == Some('&') { self.advance(); Ok(TokenKind::AndAnd) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitAndEq) } else { Ok(TokenKind::BitAnd) } }
+            '|' => { self.advance(); if self.peek() == Some('|') { self.advance(); Ok(TokenKind::OrOr) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitOrEq) } else { Ok(TokenKind::BitOr) } }
+            '^' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitXorEq) } else { Ok(TokenKind::BitXor) } }
+            '~' => { self.advance(); Ok(TokenKind::Tilde) }
+            '$' => { self.advance(); if self.peek() == Some('(') { self.advance(); Ok(TokenKind::DollarParen) } else { Err(unexpected_dollar(line, col)) } }
+            '(' => { self.advance(); Ok(TokenKind::LParen) }
+            ')' => { self.advance(); Ok(TokenKind::RParen) }
+            '{' => { self.advance(); Ok(TokenKind::LBrace) }
+            '}' => { self.advance(); Ok(TokenKind::RBrace) }
+            '[' => { self.advance(); Ok(TokenKind::LBracket) }
+            ']' => { self.advance(); Ok(TokenKind::RBracket) }
+            ':' => { self.advance(); if self.peek() == Some(':') { self.advance(); Ok(TokenKind::ColonColon) } else { Ok(TokenKind::Colon) } }
+            ';' => { self.advance(); Ok(TokenKind::Semi) }
+            ',' => { self.advance(); Ok(TokenKind::Comma) }
+            '.' => { self.advance(); if self.peek() == Some('.') && self.chars.clone().next() == Some('.') { self.advance(); self.advance(); Ok(TokenKind::Ellipsis) } else if self.peek() == Some('.') { self.advance(); Ok(TokenKind::DotDot) } else { Ok(TokenKind::Dot) } }
+            '?' => { self.advance(); Ok(TokenKind::Question) }
+            '@' => { self.advance(); Ok(TokenKind::At) }
+            '#' => { self.advance(); Ok(TokenKind::Hash) }
+            '\'' => { self.advance(); Ok(TokenKind::Tick) }
             _ => Err(unexpected_character(c, line, col)),
         }
     }

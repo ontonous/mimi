@@ -6,8 +6,6 @@ pub mod token;
 pub use errors::LexerError;
 pub use token::{LexerMode, Token, TokenKind};
 
-use crate::ast::Commitment;
-
 pub struct Lexer<'a> {
     #[allow(dead_code)]
     source: &'a str,
@@ -59,12 +57,7 @@ impl<'a> Lexer<'a> {
             if c == '\n' {
                 self.advance();
                 self.at_line_start = true;
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
-                    commitment: Commitment::None,
-                    line,
-                    col,
-                });
+                tokens.push(Token { kind: TokenKind::Newline, line, col });
                 continue;
             }
 
@@ -74,21 +67,11 @@ impl<'a> Lexer<'a> {
             }
 
             self.at_line_start = false;
-            let (kind, commitment) = self.scan_token(c, line, col)?;
-            tokens.push(Token {
-                kind,
-                commitment,
-                line,
-                col,
-            });
+            let kind = self.scan_token(c, line, col)?;
+            tokens.push(Token { kind, line, col });
         }
         self.flush_indent(&mut tokens);
-        tokens.push(Token {
-            kind: TokenKind::Eof,
-            commitment: Commitment::None,
-            line: self.line,
-            col: self.col,
-        });
+        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: self.col });
         Ok(tokens)
     }
 }

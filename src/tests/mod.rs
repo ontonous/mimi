@@ -33,7 +33,6 @@ pub(crate) mod v1_2_static;
 pub(crate) mod v1_2_boundary;
 pub(crate) mod v1_2_error_paths;
 pub(crate) mod v1_2_modules;
-pub(crate) mod v1_2_commitment;
 pub(crate) mod v1_2_allocators;
 pub(crate) mod v1_2_codegen;
 pub(crate) mod v1_2_operators;

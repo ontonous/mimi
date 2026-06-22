@@ -161,7 +161,6 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let kind = self.peek().kind.clone();
-        let commitment = self.peek().commitment;
         let mut expr = match kind {
             TokenKind::Int(s) => {
                 let (line, col) = (self.peek().line, self.peek().col);
@@ -538,15 +537,9 @@ impl Parser {
                 ));
             }
         };
-        // ? after an identifier: the lexer may attach it as commitment:Question
-        // (via scan_commitment called from scan_ident), so check both the
-        // commitment field on the primary token AND a separate Question token.
-        let try_from_commitment = commitment == Commitment::Question
-            || commitment == Commitment::QuestionQuestion;
-        if try_from_commitment || self.at(&TokenKind::Question) {
-            if !try_from_commitment {
-                self.advance();
-            }
+        // ? after an identifier: check for a separate Question token.
+        if self.at(&TokenKind::Question) {
+            self.advance();
             expr = Expr::Try(Box::new(expr));
         }
         Ok(expr)

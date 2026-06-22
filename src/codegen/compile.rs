@@ -40,25 +40,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         types::mimi_type_to_llvm(self.context, &resolved)
     }
 
-    /// Check if an item is committed ($/$$) in strict mode.
-    /// In loose mode (default), all items pass.
-    /// In strict mode, only items with Locked/StrongLocked commitment compile.
-    pub(super) fn is_committed(&self, c: &Commitment) -> bool {
-        if !self.strict { return true; }
-        c.is_locked()
-    }
-
-    /// Get the commitment of a top-level item for strict-mode filtering.
-    pub(super) fn item_commitment(item: &Item) -> Commitment {
-        match item {
-            Item::Func(f) => f.commitment,
-            Item::Type(t) => t.commitment,
-            Item::Actor(a) => a.commitment,
-            Item::Module(m) => m.commitment,
-            _ => Commitment::None,
-        }
-    }
-
     /// Apply a handler to every item in `items`, recursing into modules.
     fn process_items<F>(items: &[Item], f: &mut F) -> MimiResult<()>
     where
@@ -114,7 +95,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::ExternBlock(block) => {
                     self.register_extern_block(block)?;
                 }
-                Item::Type(t) if self.is_committed(&t.commitment) => {
+                Item::Type(t) => {
                     self.register_type_def(t)?;
                 }
                 _ => {}
@@ -128,10 +109,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Fifth pass: compile user functions and actors
         Self::process_items(&file.items, &mut |item| {
             match item {
-                Item::Func(f) if self.is_committed(&f.commitment) => {
+                Item::Func(f) => {
                     self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
                 }
-                Item::Actor(actor) if self.is_committed(&actor.commitment) => {
+                Item::Actor(actor) => {
                     self.compile_actor(actor)?;
                 }
                 _ => {}
@@ -142,8 +123,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (from external modules that were excluded)
         for item in &file.items {
             if let Item::Func(f) = item {
-                if f.is_comptime && !self.is_committed(&f.commitment) {
-                    eprintln!("warning: comptime function '{}' was not compiled (commitment excluded)", f.name);
+                if f.is_comptime {
+                    eprintln!("warning: comptime function '{}' was not compiled", f.name);
                 }
             }
         }

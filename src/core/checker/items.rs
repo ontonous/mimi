@@ -166,7 +166,6 @@ impl<'a> Checker<'a> {
                 // Register actor type so it can be used as a type
                 let actor_type_def = TypeDef {
                     name: actor.name.clone(),
-                    commitment: actor.commitment,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(actor.fields.iter().map(|f| Field {
                         name: f.name.clone(),
@@ -203,7 +202,7 @@ impl<'a> Checker<'a> {
                     self.funcs.insert(method.name.clone(), (params, ret));
                 }
             }
-            Item::Rule(..) | Item::Desc(..) | Item::Cap(_) => {}
+            Item::Cap(_) => {}
             Item::Trait(trait_def) => {
                 let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits.insert(trait_def.name.clone(), method_names.clone());
@@ -296,10 +295,6 @@ impl<'a> Checker<'a> {
         match item {
             Item::Func(f) => {
                 self.set_pos(f.pos.0, f.pos.1);
-                // Strict mode: check commitment locks
-                if self.strict {
-                    self.check_commitment_locks(f.name.as_str(), f.commitment, &f.body);
-                }
                 self.check_func(f)
             }
             Item::Module(m) => {
@@ -353,7 +348,6 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Type(_) | Item::Cap(_) => {}
-            Item::Rule(..) | Item::Desc(..) => {}
             Item::Trait(trait_def) => {
                 // Check that all trait method types are well-formed
                 let generic_names: Vec<String> = trait_def.generics.iter().map(|g| g.name.clone()).collect();

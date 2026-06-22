@@ -122,20 +122,6 @@ impl Parser {
                 }
                 Ok(Item::ExternBlock(self.parse_extern_block()?))
             }
-            TokenKind::Rule => {
-                let span = Span::single(self.peek().line, self.peek().col);
-                self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                Ok(Item::Rule(s, span))
-            }
-            TokenKind::Desc => {
-                let span = Span::single(self.peek().line, self.peek().col);
-                self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                Ok(Item::Desc(s, span))
-            }
             _ => {
                 let tok = self.peek();
                 Err(ParseError::new(
@@ -148,7 +134,7 @@ impl Parser {
     }
 
     fn parse_cap_def(&mut self) -> Result<CapDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Cap)?;
+        self.expect_keyword(TokenKind::Cap)?;
         let name = self.expect_ident()?;
         let combined_with = if self.at(&TokenKind::Plus) {
             // cap A + B syntax
@@ -173,13 +159,12 @@ impl Parser {
         self.match_semi();
         Ok(CapDef {
             name,
-            commitment,
             combined_with,
         })
     }
 
     fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Trait)?;
+        self.expect_keyword(TokenKind::Trait)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         self.skip_newlines();
@@ -215,7 +200,6 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(TraitDef {
             name,
-            commitment,
             methods,
             generics,
         })
@@ -383,7 +367,7 @@ impl Parser {
     }
 
     fn parse_actor_def(&mut self) -> Result<ActorDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Actor)?;
+        self.expect_keyword(TokenKind::Actor)?;
         let name = self.expect_ident()?;
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
@@ -440,11 +424,11 @@ impl Parser {
         }
 
         self.expect(TokenKind::RBrace, "`}`")?;
-        Ok(ActorDef { name, commitment, pub_: false, fields, methods })
+        Ok(ActorDef { name, pub_: false, fields, methods })
     }
 
     fn parse_module(&mut self) -> Result<ModuleDef, ParseError> {
-        let commitment = self.expect_keyword(TokenKind::Module)?;
+        self.expect_keyword(TokenKind::Module)?;
         let name = self.expect_ident()?;
         self.skip_newlines();
         if self.is_sketch() {
@@ -462,7 +446,6 @@ impl Parser {
         let items = self.parse_item_block()?;
         Ok(ModuleDef {
             name,
-            commitment,
             imports,
             items,
         })
@@ -470,7 +453,7 @@ impl Parser {
 
     fn parse_func(&mut self) -> Result<FuncDef, ParseError> {
         let pos = (self.peek().line, self.peek().col);
-        let commitment = self.expect_keyword(TokenKind::Func)?;
+        self.expect_keyword(TokenKind::Func)?;
         let name = self.expect_ident()?;
         // Parse optional generic parameters: <T> or <T: Trait>
         let generics = self.parse_generic_params()?;
@@ -525,7 +508,6 @@ impl Parser {
         let body = self.parse_block()?;
         Ok(FuncDef {
             name,
-            commitment,
             pub_: false,
             params,
             ret,

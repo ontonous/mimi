@@ -31,7 +31,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body_name = format!("{}__async_body", func.name);
         let body_func = FuncDef {
             name: body_name,
-            commitment: func.commitment,
             pub_: false,
             params: func.params.clone(),
             ret: func.ret.clone(),
@@ -59,7 +58,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         ));
         let spawner_func = FuncDef {
             name: func.name.clone(),
-            commitment: func.commitment,
             pub_: func.pub_,
             params: func.params.clone(),
             ret: Some(Type::Name("i64".into(), vec![])),

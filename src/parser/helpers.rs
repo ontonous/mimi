@@ -58,10 +58,8 @@ impl Parser {
 
     pub(crate) fn peek(&self) -> &Token {
         if self.pos >= self.tokens.len() {
-            use crate::ast::Commitment;
             static EOF: Token = Token {
                 kind: TokenKind::Eof,
-                commitment: Commitment::None,
                 line: 0,
                 col: 0,
             };
@@ -109,7 +107,6 @@ impl Parser {
             self.tokens[self.pos].kind = TokenKind::Gt;
             let extra = Token {
                 kind: TokenKind::Gt,
-                commitment: self.tokens[self.pos].commitment,
                 line: self.tokens[self.pos].line,
                 col: self.tokens[self.pos].col,
             };
@@ -125,9 +122,9 @@ impl Parser {
         }
     }
 
-    pub(crate) fn expect_keyword(&mut self, kind: TokenKind) -> Result<Commitment, ParseError> {
-        let tok = self.expect(kind, "keyword")?;
-        Ok(tok.commitment)
+    pub(crate) fn expect_keyword(&mut self, kind: TokenKind) -> Result<(), ParseError> {
+        self.expect(kind, "keyword")?;
+        Ok(())
     }
 
     pub(crate) fn expect_ident(&mut self) -> Result<String, ParseError> {

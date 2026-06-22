@@ -186,7 +186,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Also register as a type definition for field access
         let type_def = crate::ast::TypeDef {
             name: actor.name.clone(),
-            commitment: actor.commitment,
             pub_: actor.pub_,
             kind: crate::ast::TypeDefKind::Record(actor.fields.iter().map(|f| crate::ast::Field {
                 name: f.name.clone(),

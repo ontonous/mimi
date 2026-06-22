@@ -250,7 +250,7 @@ enum Command {
         #[arg(short, long)]
         latex: bool,
     },
-    /// Analyze Commitment suffix distribution (intent modeling)
+    /// Display Mimi usage statistics
     Stats {
         path: Option<PathBuf>,
     },
@@ -359,66 +359,6 @@ pub(crate) fn extract_item_contracts(items: &[Item], out: &mut HashMap<String, C
             }
             Item::Module(m) => {
                 extract_item_contracts(&m.items, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-pub(crate) fn format_commitment(c: ast::Commitment) -> String {
-    match c {
-        ast::Commitment::None => "None".into(),
-        ast::Commitment::Question => "?".into(),
-        ast::Commitment::QuestionQuestion => "??".into(),
-        ast::Commitment::Locked => "$".into(),
-        ast::Commitment::StrongLocked => "$$".into(),
-        ast::Commitment::LockedQuestion => "$?".into(),
-        ast::Commitment::StrongLockedQuestion => "$$?".into(),
-        ast::Commitment::LockedQuestionQuestion => "$??".into(),
-        ast::Commitment::StrongLockedQuestionQuestion => "$$??".into(),
-    }
-}
-
-pub(crate) fn count_commitments(items: &[ast::Item], counts: &mut std::collections::HashMap<String, usize>) {
-    for item in items {
-        match item {
-            ast::Item::Func(f) => {
-                *counts.entry(format_commitment(f.commitment)).or_insert(0) += 1;
-                count_commitments_in_block(&f.body, counts);
-            }
-            ast::Item::Type(t) => {
-                *counts.entry(format_commitment(t.commitment)).or_insert(0) += 1;
-            }
-            ast::Item::Module(m) => {
-                *counts.entry(format_commitment(m.commitment)).or_insert(0) += 1;
-                count_commitments(&m.items, counts);
-            }
-            ast::Item::Actor(a) => {
-                *counts.entry(format_commitment(a.commitment)).or_insert(0) += 1;
-            }
-            ast::Item::Trait(t) => {
-                *counts.entry(format_commitment(t.commitment)).or_insert(0) += 1;
-            }
-            _ => {}
-        }
-    }
-}
-
-#[allow(clippy::only_used_in_recursion)]
-pub(crate) fn count_commitments_in_block(block: &[ast::Stmt], counts: &mut std::collections::HashMap<String, usize>) {
-    for stmt in block {
-        match stmt {
-            ast::Stmt::If { then_, else_, .. } => {
-                count_commitments_in_block(then_, counts);
-                if let Some(else_) = else_ {
-                    count_commitments_in_block(else_, counts);
-                }
-            }
-            ast::Stmt::While { body, .. } | ast::Stmt::For { body, .. } => {
-                count_commitments_in_block(body, counts);
-            }
-            ast::Stmt::Block(block) => {
-                count_commitments_in_block(block, counts);
             }
             _ => {}
         }

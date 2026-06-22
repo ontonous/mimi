@@ -1,9 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use crate::ast::{Item, Stmt};
-use crate::{lexer, parser};
-
 pub(crate) fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
     let source = fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -11,22 +8,6 @@ pub(crate) fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> 
     // Check for ... placeholders
     if source.contains("...") {
         return Err(format!("file contains '...' placeholders, cannot promote: {}", path.display()));
-    }
-
-    // Check for uncommitted desc/rule (without $ suffix)
-    let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
-
-    for item in &file.items {
-        if let Item::Func(f) = item {
-            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
-            if has_intent && !f.commitment.is_locked() {
-                return Err(format!(
-                    "function '{}' has uncommitted intent (no $ suffix on desc/rule); add '$' to lock before promoting",
-                    f.name
-                ));
-            }
-        }
     }
 
     // Determine output path

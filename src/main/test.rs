@@ -45,7 +45,7 @@ pub(crate) fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, v
     // Find test functions (functions starting with "test_")
     let test_funcs: Vec<String> = merged_file.items.iter().filter_map(|item| {
         match item {
-            Item::Func(f) if f.name.starts_with("test_") && (!strict || f.commitment.is_locked()) => Some(f.name.clone()),
+            Item::Func(f) if f.name.starts_with("test_") => Some(f.name.clone()),
             _ => None,
         }
     }).collect();

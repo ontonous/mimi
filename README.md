@@ -1,8 +1,8 @@
 # Mimi 语言
 
-**Mimi** 是一门面向 **Intent-as-Code + Safe AI Collaboration** 的系统编程语言。
+**Mimi** 是一门带契约验证、结构化并发和线性能力的系统编程语言，是 MimiSpec 意图描述的编译后端。
 
-它的核心目标不是单纯的性能或表达力，而是把"人类已锁定的决策"与"AI 可生成的未确定区域"之间的边界，变成编译器、IDE 和构建工具可以直接执行的一等语言构造。
+Mimi 把函数契约（`requires`/`ensures`）、并行步骤（`parasteps`/`on failure`）和线性能力（`cap`）作为一等语言构造，通过双后端（解释器 + LLVM codegen）+ Z3 验证器保障程序正确性。
 
 ---
 
@@ -23,11 +23,9 @@
 | `on failure` 补偿 | ✅ | LIFO 逆序执行补偿块 |
 | `requires` / `ensures` | ✅ | 运行时契约断言, `result` 变量 |
 | `cap` 线性能力 | ✅ | 类型检查层面的能力追踪 |
-| `desc` / `rule` 元数据 | ✅ | 意图描述与约束声明 |
 | 复合赋值运算符 | ✅ | `+=`, `-=`, `*=`, `/=` |
 | 字符串操作 | ✅ | 拼接 `+`, `len()`, `to_string()`, `contains()` |
 | 内置函数 | ✅ | `abs`, `min`/`max`, `push`/`pop`, `range`, `sqrt`, `input` |
-| 意图后缀 | ✅ | `$`, `$$`, `?`, `??` 锁定与委托标记 |
 | `pub` 可见性 | ✅ | 函数、类型、Actor 的公开标记 |
 | `old()` in ensures | ✅ | 函数入口变量快照语义 |
 | `trait` / `impl` | ✅ | 基础 trait 系统与静态分派 |
@@ -242,8 +240,7 @@ mimi/
 ├── examples/            # 示例程序
 └── docs/                # 文档
     ├── syntax-reference.md   # 语法规范 (★)
-    ├── mimi.md               # 语言设计规范
-    └── ...
+    └── mimi.md               # 语言设计规范
 ```
 
 ---
@@ -280,10 +277,21 @@ mimi run demo.mimi   # 输出: 字符串长度: 22
 | [syntax-reference.md](docs/syntax-reference.md) | **语法规范** — 基于解析器实现 | 所有 Mimi 开发者 |
 | [mimi.md](docs/mimi.md) | 语言设计规范 v1.0 | 语言实现者、贡献者 |
 | [design-decisions.md](docs/design-decisions.md) | 设计决策与语言对比 | 想了解"为什么这样设计"的人 |
-| [future-vision.md](docs/future-vision.md) | 长期愿景 v1.x/L4 | 核心开发者、架构师 |
+| [future-vision.md](docs/future-vision.md) | 长期愿景 | 核心开发者、架构师 |
 | [ffi-ownership-abi.md](docs/ffi-ownership-abi.md) | **FFI 设计** — 双栈边界、护照类型、实现路线图 | 需要跨语言集成的开发者 |
 | [readme/10-ffi.md](readme/10-ffi.md) | FFI 用户指南 | 快速上手的开发者 |
 | [product-strategy.md](docs/product-strategy.md) | 产品与开源策略 | 项目管理者、投资者 |
+
+---
+
+## 设计理念
+
+Mimi 是 [MimiSpec](https://github.com/ontomimi/mimispec) 意图描述语言的生产编译后端：
+
+- **MimiSpec** (`.mms`) 负责渐进开发：$/? 锁定标记、desc/rule 意图描述、结构化约束
+- **Mimi** (`.mimi`) 负责生产编译：合约验证、结构化并发、线性能力、LLVM codegen
+
+两个语言共享契约语法（`requires`/`ensures`/`old()`），通过 `mms {}` 块建立设计→实现的追溯链接。
 
 ---
 

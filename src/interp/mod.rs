@@ -327,7 +327,6 @@ impl<'a> Interpreter<'a> {
             Item::Actor(actor) => {
                 let actor_type_def = TypeDef {
                     name: actor.name.clone(),
-                    commitment: actor.commitment,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(actor.fields.iter().map(|f| Field {
                         name: f.name.clone(),
@@ -357,7 +356,6 @@ impl<'a> Interpreter<'a> {
                         // Generate to_string method for Debug
                         let to_string_func = FuncDef {
                             name: "to_string".to_string(),
-                            commitment: Commitment::None,
                             pub_: false,
                             params: vec![],
                             ret: Some(Type::Name("string".into(), vec![])),
@@ -381,7 +379,6 @@ impl<'a> Interpreter<'a> {
                         // Generate clone method for Clone
                         let clone_func = FuncDef {
                             name: "clone".to_string(),
-                            commitment: Commitment::None,
                             pub_: false,
                             params: vec![],
                             ret: Some(Type::Name(type_name.clone(), vec![])),
@@ -405,7 +402,6 @@ impl<'a> Interpreter<'a> {
                         // Generate eq method for Eq
                         let eq_func = FuncDef {
                             name: "eq".to_string(),
-                            commitment: Commitment::None,
                             pub_: false,
                             params: vec![Param {
                                 name: "other".to_string(),

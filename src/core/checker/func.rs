@@ -109,45 +109,4 @@ impl<'a> Checker<'a> {
             }
         }
     }
-
-    /// Check commitment locks in strict mode
-    pub(crate) fn check_commitment_locks(&mut self, name: &str, commitment: Commitment, body: &Block) {
-        match commitment {
-            Commitment::StrongLocked | Commitment::StrongLockedQuestion | Commitment::StrongLockedQuestionQuestion => {
-                // $$ locked: any modification to the function body is an error
-                // Check for mms blocks that contain modified contracts
-                for stmt in body {
-                    if let Stmt::MmsBlock { content: text, .. } = stmt {
-                        if text.contains("requires:") || text.contains("ensures:") || text.contains("math:") {
-                            // In strict mode, $$ locked functions should not have their contracts changed
-                            self.errors.push(
-                                Diagnostic::error_code(
-                                    crate::diagnostic::codes::E0501,
-                                    format!("strict mode: function '{}' is $$ locked - contract modifications not allowed", name),
-                                    Span::single(self.current_line, self.current_col),
-                                ).with_help("remove $$ suffix to allow modification, or use $$? for AI-reviewable lock")
-                            );
-                        }
-                    }
-                }
-            }
-            Commitment::Locked | Commitment::LockedQuestion | Commitment::LockedQuestionQuestion => {
-                // $ locked: warn about contract modifications
-                for stmt in body {
-                    if let Stmt::MmsBlock { content: text, .. } = stmt {
-                        if text.contains("requires:") || text.contains("ensures:") || text.contains("math:") {
-                            self.errors.push(
-                                Diagnostic::warning_code(
-                                    crate::diagnostic::codes::E0600,
-                                    format!("strict mode: function '{}' is $ locked - contract modifications discouraged", name),
-                                    Span::single(self.current_line, self.current_col),
-                                ).with_help("remove $ suffix to allow modification")
-                            );
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
