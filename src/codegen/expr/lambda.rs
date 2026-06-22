@@ -342,6 +342,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::TypeOf(inner) => {
                 self.collect_free_vars_expr(inner, defined, vars, free_vars);
             }
+            Expr::Block(block) => {
+                self.collect_free_vars(block, defined, vars, free_vars);
+            }
             _ => {}
         }
     }

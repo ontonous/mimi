@@ -16,17 +16,9 @@ impl Parser {
             let body = if self.at(&TokenKind::LBrace) {
                 self.advance();
                 let stmts = self.parse_block()?;
-                if let Some(last) = stmts.last() {
-                    if let Stmt::Expr(e) = last {
-                        e.clone()
-                    } else {
-                        return Err(ParseError::new("match arm block must end with an expression", self.peek().line, self.peek().col));
-                    }
-                } else {
-                    return Err(ParseError::new("match arm block must not be empty", self.peek().line, self.peek().col));
-                }
+                Expr::Block(stmts)
             } else {
-                self.parse_expr(0)?
+                Expr::Block(vec![Stmt::Expr(self.parse_expr(0)?)])
             };
             arms.push(MatchArm { pat, guard, body });
             self.skip_newlines();

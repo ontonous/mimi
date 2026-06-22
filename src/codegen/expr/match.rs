@@ -41,16 +41,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 local_vars.insert(name.clone(), (alloca, ty));
             }
-            Pattern::Constructor(_, inner_patterns) => {
+            Pattern::Constructor(name, inner_patterns) => {
                 // For constructor patterns, bind inner variables from the payload field.
-                // All enum-like representations in this codegen put the tag at index 0
-                // and the first payload field at index 1.
+                // Most enum-like representations put the tag at index 0 and the payload
+                // at index 1. Built-in Result<T,E> is special: Ok uses index 1, Err uses
+                // index 2 for its error payload.
+                let payload_idx = match name.as_str() {
+                    "Err" => 2,
+                    _ => 1,
+                };
                 let (payload, payload_ty) = match scrutinee_val {
                     BasicValueEnum::StructValue(sv) => {
-                        let payload = self.builder.build_extract_value(sv, 1, "payload")
+                        let payload = self.builder.build_extract_value(sv, payload_idx, "payload")
                             .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
                         let ty = sv.get_type()
-                            .get_field_type_at_index(1)
+                            .get_field_type_at_index(payload_idx)
                             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
                         (payload, ty)
                     }
@@ -67,7 +72,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicValueEnum::StructValue(sv) => sv,
                             _ => return Err("constructor pattern: expected struct from pointer".into()),
                         };
-                        let payload = self.builder.build_extract_value(sv, 1, "payload")
+                        let payload = self.builder.build_extract_value(sv, payload_idx, "payload")
                             .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
                         (payload, BasicTypeEnum::IntType(self.context.i64_type()))
                     }
@@ -380,7 +385,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let tag = self.builder.build_extract_value(sv, 0, "enum_tag")
                     .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
                     .into_int_value();
-                Some(self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
+                Some(self.builder.build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
                     .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?)
             }
             BasicValueEnum::PointerValue(pv) if needs_tag => {
@@ -396,7 +401,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(self.context.i32_type()), tag_gep, "tag_load",
                 ).map_err(|e| CompileError::LlvmError(format!("tag load: {}", e)))?
                     .into_int_value();
-                Some(self.builder.build_int_cast(tag, self.context.i64_type(), "tag_ext")
+                Some(self.builder.build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
                     .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?)
             }
             _ => None,

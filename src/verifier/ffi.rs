@@ -134,6 +134,9 @@ impl super::Verifier {
                     Self::find_extern_calls_in_expr(item, extern_names, calls);
                 }
             }
+            Expr::Block(block) => {
+                Self::find_extern_calls_in_block(block, extern_names, calls);
+            }
             _ => {}
         }
     }
@@ -312,6 +315,9 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
         }
         Expr::List(items) => {
             Expr::List(items.iter().map(|i| substitute_args(i, params, args)).collect())
+        }
+        Expr::Block(block) => {
+            Expr::Block(block.iter().map(|s| substitute_args_in_stmt(s, params, args)).collect())
         }
         Expr::Literal(_) => expr.clone(),
         _ => expr.clone(),

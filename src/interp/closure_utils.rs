@@ -174,6 +174,11 @@ pub(crate) fn collect_expr_free_vars(
         Expr::TypeOf(inner) => {
             collect_expr_free_vars(inner, bound, free);
         }
+        Expr::Block(block) => {
+            for s in block {
+                collect_stmt_free_vars(s, bound, free, &mut bound.clone());
+            }
+        }
         // Expr::Literal, Expr::Quote, Expr::Comptime, Expr::TypeInfo have no free vars
         // or their content is compile-time only
         _ => {}

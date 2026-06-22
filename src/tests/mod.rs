@@ -231,6 +231,10 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     }
     codegen.compile_file(&file).map_err(|e| e.to_string())?;
 
+    if std::env::var("MIMI_DUMP_IR").is_ok() {
+        eprintln!("{}", codegen.module.print_to_string().to_string());
+    }
+
     let tmp_dir = std::env::temp_dir().join(format!("mimi_e2e_{}_{}", std::process::id(), counter));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
     let obj_path = tmp_dir.join("test.o");

@@ -238,6 +238,15 @@ impl<'a> Interpreter<'a> {
                     args,
                 ))
             }
+            Expr::Block(block) => {
+                let mut q_stmts = Vec::new();
+                for s in block {
+                    if let Some(q) = self.quote_stmt(s)? {
+                        q_stmts.push(q);
+                    }
+                }
+                Ok(QuotedAst::Block(q_stmts))
+            }
             Expr::Range { start, end } => {
                 let q_start = self.quote_expr(start)?;
                 let q_end = self.quote_expr(end)?;

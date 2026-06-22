@@ -352,6 +352,8 @@ pub enum Expr {
         ty: Option<String>,
         fields: Vec<RecordFieldExpr>,
     },
+    /// Block expression `{ stmt; ...; expr }`
+    Block(Block),
     /// `?` operator for Result/Option error propagation
     Try(Box<Expr>),
     /// Spawn a new task/actor

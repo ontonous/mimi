@@ -120,6 +120,10 @@ pub(crate) fn format_expr(expr: &Expr) -> String {
         }
         Expr::Unary(UnOp::Neg, inner) => format!("-{}", format_expr(inner)),
         Expr::Unary(UnOp::Not, inner) => format!("!{}", format_expr(inner)),
+        Expr::Block(block) => {
+            let s: Vec<String> = block.iter().map(|s| format_stmt(s)).collect();
+            format!("{{ {} }}", s.join("; "))
+        }
         _ => "<expr>".to_string(),
     }
 }
@@ -175,6 +179,11 @@ pub(crate) fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
         Expr::Record { fields, .. } => {
             for f in fields {
                 collect_idents_in_expr(&f.value, idents);
+            }
+        }
+        Expr::Block(block) => {
+            for s in block {
+                collect_idents_in_stmt(s, idents);
             }
         }
         Expr::If { cond, then_, else_ } => {

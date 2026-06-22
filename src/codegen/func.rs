@@ -84,13 +84,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Expr::Record { ty, .. } => ty.clone(),
                 Expr::Call(callee, _) => {
                     if let Expr::Ident(_fname) = callee.as_ref() {
-                        // We can't look up func_defs here (static context),
-                        // so return None; caller must handle this case
                         None
                     } else {
                         None
                     }
                 }
+                Expr::Block(block) => Self::concrete_return_type_for_impl_trait(block),
                 _ => None,
             },
             Stmt::If { cond: _, then_, else_ } => {

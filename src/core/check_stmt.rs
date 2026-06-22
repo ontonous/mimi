@@ -112,6 +112,16 @@ impl<'a> Checker<'a> {
             Expr::TupleIndex(obj, _) => {
                 self.check_expr_parasteps_safe(obj, scopes);
             }
+            Expr::If { cond, then_, else_ } => {
+                self.check_expr_parasteps_safe(cond, scopes);
+                for s in then_ { self.check_stmt_parasteps_safe(s, scopes); }
+                if let Some(eb) = else_ {
+                    for s in eb { self.check_stmt_parasteps_safe(s, scopes); }
+                }
+            }
+            Expr::Block(block) => {
+                for s in block { self.check_stmt_parasteps_safe(s, scopes); }
+            }
             _ => {}
         }
     }

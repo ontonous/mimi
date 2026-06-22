@@ -40,6 +40,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::SliceExpr { target, start, end } => self.compile_slice_expr(target, start, end, vars),
             Expr::Lambda { params, ret, body } => self.compile_lambda_expr(params, ret, body, vars),
             Expr::Comprehension { expr: comp_expr, var, iter, guard } => self.compile_comprehension_expr(comp_expr, var, iter, guard, vars),
+            Expr::Block(block) => {
+                let mut block_vars = vars.clone();
+                self.compile_block_last_val(block, &mut block_vars)
+            }
             Expr::Comptime(_) => {
                 Err("comptime { ... } block encountered in runtime function: compile-time evaluation must be resolved before codegen (use `mimi run` to evaluate compile-time code)".into())
             }
@@ -146,6 +150,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expr::Field(obj, _) => self.infer_object_type(obj, vars),
+            Expr::Block(block) => {
+                block.last().and_then(|last| {
+                    if let Stmt::Expr(e) = last {
+                        Some(self.infer_object_type(e, vars))
+                    } else {
+                        None
+                    }
+                }).unwrap_or_default()
+            }
             _ => String::new(),
         }
     }

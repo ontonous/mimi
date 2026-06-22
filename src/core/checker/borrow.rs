@@ -56,6 +56,9 @@ impl<'a> Checker<'a> {
                 Self::collect_uses_in_expr(obj, uses);
                 Self::collect_uses_in_expr(idx, uses);
             }
+            Expr::Block(block) => {
+                for s in block { Self::collect_uses_in_stmt(s, uses); }
+            }
             Expr::If { cond, then_, else_ } => {
                 Self::collect_uses_in_expr(cond, uses);
                 for s in then_ { Self::collect_uses_in_stmt(s, uses); }

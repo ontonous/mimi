@@ -187,6 +187,9 @@ fn collect_calls_from_expr(
         Expr::Lambda { body, .. } => {
             collect_calls_from_exprs(body, text, items, uri, calls, visited);
         }
+        Expr::Block(stmts) => {
+            collect_calls_from_exprs(stmts, text, items, uri, calls, visited);
+        }
         Expr::Quote(stmts) | Expr::Comptime(stmts) => {
             collect_calls_from_exprs(stmts, text, items, uri, calls, visited);
         }

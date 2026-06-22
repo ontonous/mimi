@@ -161,6 +161,7 @@ impl<'a> Interpreter<'a> {
             Expr::List(elems) => self.eval_list(elems),
             Expr::Comprehension { expr, var, iter, guard } => self.eval_comprehension(expr, var, iter, guard),
             Expr::If { cond, then_, else_ } => self.eval_if_expr(cond, then_, else_),
+            Expr::Block(block) => Ok(self.eval_block(block)?.unwrap_or(Value::Unit)),
             Expr::Match(subject, arms) => self.eval_match(subject, arms),
             Expr::Field(obj, field) => self.eval_field(obj, field),
             Expr::Record { ty, fields } => self.eval_record(ty, fields),
