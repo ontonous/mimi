@@ -384,11 +384,12 @@ impl<'a> Checker<'a> {
                 scopes.pop();
             }
             Stmt::Arena(block) => {
-                // Arena block is like a scope with special memory semantics
-                // For now, just check the block contents
+                // Arena block: track depth for escape detection
+                self.arena_depth += 1;
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();
+                self.arena_depth -= 1;
             }
             Stmt::Unsafe(block) => {
                 // Unsafe block: check the body (no additional restrictions at type-check level)
@@ -396,8 +397,14 @@ impl<'a> Checker<'a> {
                 self.check_block(block, ret, scopes);
                 scopes.pop();
             }
+            Stmt::Alloc { kind: AllocKind::Arena, body } => {
+                self.arena_depth += 1;
+                scopes.push(HashMap::new());
+                self.check_block(body, ret, scopes);
+                scopes.pop();
+                self.arena_depth -= 1;
+            }
             Stmt::Alloc { kind: _, body } => {
-                // alloc(Kind) block: check the body with the specified allocator
                 scopes.push(HashMap::new());
                 self.check_block(body, ret, scopes);
                 scopes.pop();
@@ -501,6 +508,25 @@ impl<'a> Checker<'a> {
                                 name,
                                 fmt_type(&target_ty)
                             ));
+                        }
+                        // E0306: Arena escape — assigning arena-scoped ref to outer-scope variable
+                        if self.arena_depth > 0 {
+                            if let Expr::Ident(value_name) = value {
+                                let value_in_arena_scope = scopes.last()
+                                    .and_then(|s| s.get(value_name))
+                                    .map(|ty| matches!(ty, Type::Ref(_, _) | Type::RefMut(_, _)))
+                                    .unwrap_or(false);
+                                if value_in_arena_scope {
+                                    let target_in_outer = scopes[..scopes.len().saturating_sub(1)].iter().rev()
+                                        .any(|s| s.contains_key(name));
+                                    if target_in_outer {
+                                        self.emit_code(crate::diagnostic::codes::E0306, format!(
+                                            "arena escape: variable '{}' from outer scope cannot hold a reference to arena memory (assigned from '{}')",
+                                            name, value_name
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                     Expr::Unary(UnOp::Deref, inner) => {

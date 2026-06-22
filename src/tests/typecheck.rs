@@ -578,6 +578,58 @@ func main() -> i32 {
     assert!(result.is_err(), "expected E0305 for local_shared in parasteps ensures");
 }
 
+#[test]
+fn typecheck_arena_escape_ref_to_outer_rejected() {
+    // Assigning arena-scoped ref to outer-scope ref → error
+    let src = r#"
+func main() -> i32 {
+    let mut x: &i32 = &0;
+    arena {
+        let ref y = 42;
+        x = y;
+    }
+    *x
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for arena escape via ref-to-ref assign");
+    let errors = result.unwrap_err();
+    let has_escape_error = errors.iter().any(|e| e.message.contains("arena"));
+    assert!(has_escape_error, "expected arena escape error, got: {:?}", errors);
+}
+
+#[test]
+fn typecheck_arena_no_escape_value_copy_ok() {
+    // Copying value out of arena (via deref) is fine → no error
+    let src = r#"
+func main() -> i32 {
+    arena {
+        let ref x = 42;
+        *x
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "expected no error for copying value out of arena, got: {:?}", result);
+}
+
+#[test]
+fn typecheck_arena_ref_stays_in_scope_ok() {
+    // Using arena ref within arena scope is fine → no error
+    let src = r#"
+func main() -> i32 {
+    arena {
+        let ref x = 42;
+        let ref y = 10;
+        println(*x + *y);
+    }
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "expected no error for ref use within arena, got: {:?}", result);
+}
+
 fn warn_no_shared_no_parasteps_write() {
     // No shared vars in parasteps → no W005
     let src = r#"

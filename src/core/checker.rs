@@ -52,6 +52,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) loop_depth: usize,
     /// Track generic parameters in scope while checking signatures
     pub(crate) generic_scope: Vec<String>,
+    /// Track arena block nesting depth for escape detection
+    pub(crate) arena_depth: usize,
     /// Current item/function line-col for fallback error positioning
     pub(crate) current_line: usize,
     pub(crate) current_col: usize,
@@ -86,6 +88,7 @@ impl<'a> Checker<'a> {
             module_path: Vec::new(),
             loop_depth: 0,
             generic_scope: Vec::new(),
+            arena_depth: 0,
             current_line: 0,
             current_col: 0,
         }
