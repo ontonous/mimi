@@ -547,6 +547,37 @@ func main() -> i32 {
 }
 
 #[test]
+fn typecheck_parasteps_requires_local_shared_rejected() {
+    // requires inside parasteps referencing local_shared → E0305
+    let src = r#"
+func main() -> i32 {
+    local_shared x = 42
+    parasteps {
+        requires: *x > 0
+        0
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected E0305 for local_shared in parasteps requires");
+}
+
+#[test]
+fn typecheck_parasteps_ensures_local_shared_rejected() {
+    // ensures inside parasteps referencing local_shared → E0305
+    let src = r#"
+func main() -> i32 {
+    local_shared x = 42
+    parasteps {
+        ensures: *x > 0
+        0
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected E0305 for local_shared in parasteps ensures");
+}
+
 fn warn_no_shared_no_parasteps_write() {
     // No shared vars in parasteps → no W005
     let src = r#"

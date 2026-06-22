@@ -61,6 +61,14 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
+            Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) => {
+                self.check_expr_parasteps_safe(expr, scopes);
+            }
+            Stmt::Math(exprs) => {
+                for e in exprs {
+                    self.check_expr_parasteps_safe(e, scopes);
+                }
+            }
             _ => {}
         }
     }
