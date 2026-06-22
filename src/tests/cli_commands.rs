@@ -137,6 +137,60 @@ fn doc_with_output_file() {
 }
 
 #[test]
+fn doc_mms_input_to_markdown() {
+    let dir = temp_dir();
+    let src_path = dir.join("shop.mms");
+    fs::write(&src_path, r#"module Shop:
+    desc "Shop module description"
+    rule "payment must be idempotent"
+    func Pay(order, amount):
+        desc "Process payment"
+        requires: order.status == Pending
+        steps:
+            check balance
+            charge amount >>> done
+"#).expect("write mms");
+
+    let output_path = dir.join("output.md");
+    let result = super::main_doc(&src_path, "markdown", Some(&output_path));
+    assert!(result.is_ok(), "doc should succeed on .mms input: {:?}", result.err());
+    assert!(output_path.exists(), "output file should exist");
+    let content = fs::read_to_string(&output_path).expect("read output");
+    assert!(content.contains("Shop"), "output should contain module name");
+    assert!(content.contains("Pay"), "output should contain function name");
+    assert!(content.contains("Shop module description"), "output should contain desc");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_mms_output_mms_format() {
+    let dir = temp_dir();
+    let src_path = dir.join("shop.mms");
+    fs::write(&src_path, r#"module Shop:
+    desc "Shop module description"
+    func Pay(order, amount):
+        desc "Process payment"
+        requires: order.status == Pending
+        steps:
+            check balance
+            charge amount >>> done
+"#).expect("write mms");
+
+    let output_path = dir.join("output.mms");
+    let result = super::main_doc(&src_path, "mms", Some(&output_path));
+    assert!(result.is_ok(), "doc should succeed on mms format: {:?}", result.err());
+    assert!(output_path.exists(), "output file should exist");
+    let content = fs::read_to_string(&output_path).expect("read output");
+    assert!(content.contains("module Shop"), "output should contain module");
+    assert!(content.contains("Process payment"), "output should contain desc");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn promote_nonexistent_file() {
     let dir = temp_dir();
     let src_path = dir.join("nonexistent.mms");

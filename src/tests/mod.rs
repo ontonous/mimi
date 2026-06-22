@@ -410,8 +410,22 @@ pub fn main_doc(path: &std::path::Path, format: &str, output: Option<&std::path:
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
 
+    let is_mms = path.extension().map(|e| e == "mms").unwrap_or(false);
+
     let doc_text = match format {
-        "markdown" | "md" => crate::doc_core::generate_markdown(&source)?,
+        "markdown" | "md" => {
+            if is_mms {
+                crate::doc_core::generate_markdown_from_mms(&source)?
+            } else {
+                crate::doc_core::generate_markdown(&source)?
+            }
+        }
+        "mms" => {
+            if !is_mms {
+                return Err("mms output format requires .mms input".into());
+            }
+            crate::doc_core::generate_mms(&source)?
+        }
         _ => return Err(format!("unsupported doc format: {}", format)),
     };
 
