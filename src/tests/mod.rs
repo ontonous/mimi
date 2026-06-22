@@ -388,3 +388,56 @@ pub(crate) fn dual_assert_contract_ok(src: &str) {
     compile_and_verify_contracts(src).expect("codegen contract run failed");
 }
 
+/// Test helper: promote a .mms file to .mimi (copies source to output).
+pub fn main_promote(path: &std::path::Path, output: Option<&std::path::Path>) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    if source.contains("...") {
+        return Err(format!("file contains '...' placeholders, cannot promote: {}", path.display()));
+    }
+    let output_path = output.map_or_else(|| {
+        let mut out = path.to_path_buf();
+        out.set_extension("mimi");
+        out
+    }, |p| p.to_path_buf());
+    std::fs::write(&output_path, &source)
+        .map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
+    Ok(())
+}
+
+/// Test helper: generate documentation from a Mimi source file.
+pub fn main_doc(path: &std::path::Path, format: &str) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = crate::lexer::Lexer::new(&source).tokenize()?;
+    let file = crate::parser::Parser::new(tokens).parse_file()?;
+    match format {
+        "markdown" | "md" => {
+            for item in &file.items {
+                match item {
+                    crate::ast::Item::Func(f) => {
+                        let params: Vec<String> = f.params.iter()
+                            .map(|p| format!("{}: {:?}", p.name, p.ty))
+                            .collect();
+                        let ret = f.ret.as_ref().map(|t| format!(" -> {:?}", t)).unwrap_or_default();
+                        println!("## `func {}({}){}`", f.name, params.join(", "), ret);
+                        for stmt in &f.body {
+                            if let crate::ast::Stmt::Desc(desc, _) = stmt {
+                                println!("{}", desc);
+                                println!();
+                            }
+                            if let crate::ast::Stmt::Rule(text, _) = stmt {
+                                println!("rule: {}", text);
+                                println!();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => return Err(format!("unsupported doc format: {}", format)),
+    }
+    Ok(())
+}
+

@@ -1,76 +1,32 @@
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-
-#[path = "../ast.rs"]
-mod ast;
-#[path = "../codegen/mod.rs"]
-mod codegen;
-#[path = "../contracts.rs"]
-mod contracts;
-#[path = "../core/mod.rs"]
-pub mod core;
-#[path = "../diagnostic/mod.rs"]
-pub mod diagnostic;
-#[path = "../error.rs"]
-pub mod error;
-#[path = "../ffi/mod.rs"]
-mod ffi;
-#[path = "../fmt.rs"]
-mod fmt;
-#[path = "../interp/mod.rs"]
-mod interp;
-#[path = "../lexer/mod.rs"]
-mod lexer;
-#[path = "../lint.rs"]
-mod lint;
-#[path = "../loader.rs"]
-mod loader;
-#[path = "../lockfile.rs"]
-mod lockfile;
-#[path = "../lsp/mod.rs"]
-mod lsp;
-#[path = "../manifest.rs"]
-mod manifest;
-#[path = "../parser/mod.rs"]
-mod parser;
-#[path = "../safe_arith.rs"]
-pub mod safe_arith;
-#[path = "../span.rs"]
-pub mod span;
-#[path = "../verifier/mod.rs"]
-mod verifier;
-#[cfg(test)]
-#[path = "../tests/mod.rs"]
-mod tests;
-
-mod check;
-mod run;
-mod build;
-mod test;
-mod fmt_cmd;
-mod lint_cmd;
-mod verify;
-mod lsp_cmd;
-mod init;
-mod add;
-mod remove;
-mod list;
-mod tree;
-mod emit;
-mod promote;
-mod doc;
-mod mms;
-mod stats;
-mod install;
-mod publish;
-mod search;
-
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{File, Item, Stmt};
-use crate::contracts::Contract;
-use crate::diagnostic::format::format_simple_error;
+use mimi::ast::{File, Item, Stmt};
+use mimi::contracts::Contract;
+use mimi::diagnostic::format::format_simple_error;
+
+#[path = "main/check.rs"]  mod check;
+#[path = "main/run.rs"]    mod run;
+#[path = "main/build.rs"]  mod build;
+#[path = "main/test.rs"]   mod test;
+#[path = "main/fmt_cmd.rs"] mod fmt_cmd;
+#[path = "main/lint_cmd.rs"] mod lint_cmd;
+#[path = "main/verify.rs"] mod verify;
+#[path = "main/lsp_cmd.rs"] mod lsp_cmd;
+#[path = "main/init.rs"]   mod init;
+#[path = "main/add.rs"]    mod add;
+#[path = "main/remove.rs"] mod remove;
+#[path = "main/list.rs"]   mod list;
+#[path = "main/tree.rs"]   mod tree;
+#[path = "main/emit.rs"]   mod emit;
+#[path = "main/promote.rs"] mod promote;
+#[path = "main/doc.rs"]    mod doc;
+#[path = "main/mms.rs"]    mod mms;
+#[path = "main/stats.rs"]  mod stats;
+#[path = "main/install.rs"] mod install;
+#[path = "main/publish.rs"] mod publish;
+#[path = "main/search.rs"] mod search;
 
 #[derive(Parser, Debug)]
 #[command(name = "mimi", version = "0.1.1", about = "Mimi language driver")]
@@ -318,7 +274,7 @@ pub(crate) fn resolve_path(arg: Option<&Path>) -> Result<PathBuf, String> {
     }
     // Search for mimi.toml
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
-    match manifest::Manifest::find(&cwd)? {
+    match mimi::manifest::Manifest::find(&cwd)? {
         Some((dir, m)) => Ok(m.entry_path(&dir)),
         None => Err("no path specified and no mimi.toml found".into()),
     }
@@ -346,7 +302,7 @@ pub(crate) fn extract_item_contracts(items: &[Item], out: &mut HashMap<String, C
                 let mut contract = Contract::default();
                 for stmt in &func.body {
                     if let Stmt::MmsBlock { content: text, span, .. } = stmt {
-                        let c = contracts::extract_contracts_with_span(text, *span);
+                        let c = mimi::contracts::extract_contracts_with_span(text, *span);
                         contract.requires.extend(c.requires);
                         contract.ensures.extend(c.ensures);
                         contract.math.extend(c.math);
@@ -365,12 +321,4 @@ pub(crate) fn extract_item_contracts(items: &[Item], out: &mut HashMap<String, C
     }
 }
 
-#[cfg(test)]
-pub fn main_promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
-    promote::promote(path, output)
-}
 
-#[cfg(test)]
-pub fn main_doc(path: &Path, format: &str) -> Result<(), String> {
-    doc::doc(path, format)
-}

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::ast::{self, File, Item};
-use crate::{ffi, lexer, parser, resolve_path};
+use mimi::ast::{self, File, Item};
+use mimi::{ffi, lexer, parser};
+use crate::resolve_path;
 
 pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;

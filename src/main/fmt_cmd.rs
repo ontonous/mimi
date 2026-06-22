@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::fmt;
+use mimi::fmt;
 
 pub(crate) fn fmt_files(files: &[PathBuf], check: bool) -> Result<(), String> {
     let formatter = fmt::Formatter::new();

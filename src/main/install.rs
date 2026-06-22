@@ -1,4 +1,4 @@
-use crate::{lockfile, manifest};
+use mimi::{lockfile, manifest};
 
 pub(crate) fn install(_all: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;

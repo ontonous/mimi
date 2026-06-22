@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use mimispec::latex::render_file_latex;
 use serde::Serialize;
 
-use crate::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use crate::span;
-use crate::diagnostic::Diagnostic;
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::span;
+use mimi::diagnostic::Diagnostic;
 
 #[derive(Serialize)]
 struct MmsJsonError {

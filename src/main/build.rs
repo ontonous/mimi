@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::codegen;
-use crate::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use crate::{lexer, loader, parser, resolve_path, verifier};
+use mimi::codegen;
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::{lexer, loader, parser, verifier};
+use crate::resolve_path;
 
 pub(crate) fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, verify_ffi: bool, shared: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
@@ -23,9 +24,9 @@ pub(crate) fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, s
     };
 
     // Map inline rule statements to structured contracts
-    crate::contracts::map_rule_contracts(&mut merged_file);
+    mimi::contracts::map_rule_contracts(&mut merged_file);
 
-    let check_result = if strict { crate::core::check_strict(&merged_file) } else { crate::core::check(&merged_file) };
+    let check_result = if strict { mimi::core::check_strict(&merged_file) } else { mimi::core::check(&merged_file) };
     if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
         let use_color = colors_enabled();

@@ -1,4 +1,4 @@
-use crate::manifest;
+use mimi::manifest;
 
 pub(crate) fn list() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;

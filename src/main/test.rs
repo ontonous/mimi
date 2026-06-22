@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::ast::Item;
-use crate::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use crate::{interp, is_sketch, lexer, loader, parser, resolve_path};
+use mimi::ast::Item;
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::{interp, lexer, loader, parser};
+use crate::{is_sketch, resolve_path};
 
 pub(crate) fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, verbose: bool, strict: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
@@ -25,7 +26,7 @@ pub(crate) fn test(path: Option<&Path>, allocator: &str, filter: Option<&str>, v
         file
     };
 
-    let check_result = if strict { crate::core::check_strict(&merged_file) } else { crate::core::check(&merged_file) };
+    let check_result = if strict { mimi::core::check_strict(&merged_file) } else { mimi::core::check(&merged_file) };
     if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
         let use_color = colors_enabled();

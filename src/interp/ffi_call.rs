@@ -3,12 +3,9 @@ use crate::ffi::{FfiArgContract, FfiContract, FfiRetContract, Errno};
 use libffi::middle::{Cif, Type as FfiType, CodePtr, arg as ffi_arg};
 use std::collections::HashMap;
 
-#[path = "ffi/mod.rs"]
-mod ffi;
-
 #[cfg(test)]
-pub(crate) use self::ffi::helpers::compute_arg_free_mask;
-pub(in crate::interp) use self::ffi::helpers::{FfiGuard, FfiSharedGuard};
+pub(crate) use super::ffi::helpers::compute_arg_free_mask;
+pub(in crate::interp) use super::ffi::helpers::{FfiGuard, FfiSharedGuard};
 
 impl<'a> Interpreter<'a> {
     pub(crate) fn call_extern(
@@ -149,14 +146,14 @@ impl<'a> Interpreter<'a> {
 
             // F8: Set up thread-local callback context if any callback contracts exist
             let has_callbacks = contract.args.iter().any(|a| matches!(a, FfiArgContract::Callback { .. }));
-            let mut prev_ctx: Option<self::ffi::callback::FfiCallbackCtx> = None;
+            let mut prev_ctx: Option<super::ffi::callback::FfiCallbackCtx> = None;
             if has_callbacks {
                 // Save the previous context to handle nested FFI calls correctly.
                 // If an FFI callback invokes another FFI call on the same thread,
                 // the old context is restored after the inner call completes.
-                prev_ctx = Some(self::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
+                prev_ctx = Some(super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                     let ctx = c.borrow();
-                    self::ffi::callback::FfiCallbackCtx {
+                    super::ffi::callback::FfiCallbackCtx {
                         interp: ctx.interp,
                         entries: ctx.entries.clone(),
                     }
@@ -170,7 +167,7 @@ impl<'a> Interpreter<'a> {
                 // during the C function's execution, which is within the scope
                 // of `self`.
                 let static_ptr = interp_ptr as *const Interpreter<'static>;
-                self::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
+                super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
                     ctx.interp = static_ptr;
                 });
@@ -191,13 +188,13 @@ impl<'a> Interpreter<'a> {
             // pointer and calls it later) can still find their closure and handle.
             if has_callbacks {
                 if let Some(prev) = prev_ctx.take() {
-                    self::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
+                    super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                         let mut ctx = c.borrow_mut();
                         ctx.interp = prev.interp;
                         ctx.entries = prev.entries;
                     });
                 } else {
-                    self::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
+                    super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                         let mut ctx = c.borrow_mut();
                         ctx.interp = std::ptr::null();
                         ctx.entries.clear();

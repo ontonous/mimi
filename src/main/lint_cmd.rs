@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::diagnostic::Severity;
-use crate::{lexer, lint, parser};
+use mimi::diagnostic::Severity;
+use mimi::{lexer, lint, parser};
 
 pub(crate) fn lint_files(files: &[PathBuf]) -> Result<(), String> {
     let linter = lint::Linter::new();

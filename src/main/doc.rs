@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use crate::ast::Item;
-use crate::{lexer, parser};
+use mimi::ast::Item;
+use mimi::{lexer, parser};
 
 pub(crate) fn doc(path: &Path, format: &str) -> Result<(), String> {
     let source = fs::read_to_string(path)
@@ -27,11 +27,11 @@ pub(crate) fn doc(path: &Path, format: &str) -> Result<(), String> {
                         println!();
                         // Extract desc from body
                         for stmt in &f.body {
-                            if let crate::ast::Stmt::Desc(desc, _) = stmt {
+                            if let mimi::ast::Stmt::Desc(desc, _) = stmt {
                                 println!("{}", desc);
                                 println!();
                             }
-                            if let crate::ast::Stmt::Rule(text, _) = stmt {
+                            if let mimi::ast::Stmt::Rule(text, _) = stmt {
                                 println!("rule: {}", text);
                                 println!();
                             }

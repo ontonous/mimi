@@ -1,4 +1,4 @@
-use crate::lsp;
+use mimi::lsp;
 
 pub(crate) fn lsp() -> Result<(), String> {
     let mut server = lsp::LspServer::new();

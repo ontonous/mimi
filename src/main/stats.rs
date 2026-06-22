@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{lexer, parser, resolve_path};
+use mimi::{lexer, parser};
+use crate::resolve_path;
 
 pub(crate) fn stats(path: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
@@ -10,9 +11,9 @@ pub(crate) fn stats(path: Option<&Path>) -> Result<(), String> {
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
-    let func_count = file.items.iter().filter(|i| matches!(i, crate::ast::Item::Func(_))).count();
-    let type_count = file.items.iter().filter(|i| matches!(i, crate::ast::Item::Type(_))).count();
-    let module_count = file.items.iter().filter(|i| matches!(i, crate::ast::Item::Module(_))).count();
+    let func_count = file.items.iter().filter(|i| matches!(i, mimi::ast::Item::Func(_))).count();
+    let type_count = file.items.iter().filter(|i| matches!(i, mimi::ast::Item::Type(_))).count();
+    let module_count = file.items.iter().filter(|i| matches!(i, mimi::ast::Item::Module(_))).count();
     let total = file.items.len();
 
     println!("Mimi source statistics for {}:", path.display());

@@ -2,6 +2,7 @@
 
 mod value;
 mod closure_utils;
+mod ffi;
 mod eval;
 mod call;
 mod builtins;

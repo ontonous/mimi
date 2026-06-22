@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::contracts;
-use crate::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use crate::{extract_all_contracts, is_production, is_sketch, lexer, parser, resolve_path};
+use mimi::contracts;
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::{lexer, parser};
+use crate::{extract_all_contracts, is_production, is_sketch, resolve_path};
 
 pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, verify_rules: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
@@ -78,9 +79,9 @@ pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, 
     contracts::map_rule_contracts(&mut file);
 
     let check_result = if strict {
-        crate::core::check_strict(&file)
+        mimi::core::check_strict(&file)
     } else {
-        crate::core::check(&file)
+        mimi::core::check(&file)
     };
     if let Err(diagnostics) = check_result {
         eprintln!("{} has {} type error(s):", path.display(), diagnostics.len());
@@ -100,7 +101,7 @@ pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, 
 
     // Verify MMS rule attachment consistency
     if verify_rules {
-        let rule_errors = crate::core::verify_rules(&file);
+        let rule_errors = mimi::core::verify_rules(&file);
         if !rule_errors.is_empty() {
             eprintln!("✗ {} has {} rule error(s):", path.display(), rule_errors.len());
             for e in &rule_errors {

@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use crate::{lexer, loader, parser, resolve_path, verifier};
+use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::{lexer, loader, parser, verifier};
+use crate::resolve_path;
 
 pub(crate) fn verify(path: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;

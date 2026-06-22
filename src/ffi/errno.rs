@@ -10,6 +10,8 @@ use thiserror::Error;
 /// # Example
 ///
 /// ```rust
+/// use mimi::ffi::Errno;
+/// let errno = Errno::ENOENT;
 /// match errno {
 ///     Errno::ENOENT => { /* file not found */ }
 ///     Errno::EACCES => { /* permission denied */ }

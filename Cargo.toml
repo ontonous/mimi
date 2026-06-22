@@ -7,9 +7,13 @@ authors = ["OntomimiSE Contributors"]
 description = "Mimi language reference implementation (Rust)"
 license = "Apache-2.0"
 
+[lib]
+name = "mimi"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mimi"
-path = "src/main/mod.rs"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

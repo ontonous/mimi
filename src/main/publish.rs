@@ -1,5 +1,5 @@
 use crate::install::copy_dir_recursive;
-use crate::manifest;
+use mimi::manifest;
 use crate::search::registry_dir;
 
 pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), String> {
