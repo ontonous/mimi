@@ -151,14 +151,16 @@ pub(crate) fn parse(src: &str) -> crate::ast::File {
 }
 
 pub(crate) fn run_source(src: &str) -> interp::Value {
-    let file = parse(src);
+    let mut file = parse(src);
+    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.run().expect("src/tests/mod.rs:151 unwrap failed")
 }
 
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
-    let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    let mut file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_contracts = true;
     interp.run().map_err(|e| e.message)
@@ -170,7 +172,8 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
 /// (child-process heap is not accessible from the parent).
 pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
-    let file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    let mut file = parser::Parser::new(tokens).parse_file().map_err(|e| e.message)?;
+    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_ffi = false;
     interp.verify_contracts = true;
@@ -378,7 +381,8 @@ pub(crate) fn compile_only(src: &str) -> Result<std::path::PathBuf, String> {
 /// asserting both succeed. Does NOT compare stdout (contracts may
 /// produce different diagnostic output between backends).
 pub(crate) fn dual_assert_contract_ok(src: &str) {
-    let file = parse(src);
+    let mut file = parse(src);
+    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_contracts = true;
     interp.run().expect("interpreter contract run failed");

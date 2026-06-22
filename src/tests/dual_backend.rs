@@ -2133,3 +2133,37 @@ fn dual_parasteps_shared_capture() {
         }
     "#, "42\n-1");
 }
+
+// ─── 24. Stage 6: rule → requires/ensures structured mapping ───
+
+#[test]
+fn dual_rule_ensures_via_contract_ok() {
+    if !can_link() { return; }
+    dual_assert_contract_ok(r#"
+        func double(x: i32) -> i32 {
+            rule "result == x * 2"
+            x * 2
+        }
+        func main() -> i32 {
+            let r = double(21)
+            println(r)
+            0
+        }
+    "#);
+}
+
+#[test]
+fn dual_rule_requires_via_contract_ok() {
+    if !can_link() { return; }
+    dual_assert_contract_ok(r#"
+        func safe_div(x: i32, y: i32) -> i32 {
+            rule "requires: y != 0"
+            x / y
+        }
+        func main() -> i32 {
+            let r = safe_div(10, 2)
+            println(r)
+            0
+        }
+    "#);
+}
