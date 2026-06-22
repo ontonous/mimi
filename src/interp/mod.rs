@@ -80,6 +80,8 @@ pub struct Interpreter<'a> {
     loop_action: Option<LoopAction>,
     /// Early return signal for ? propagation (exception-like, preserves value)
     early_return: Option<Value>,
+    /// Exit code signal from builtin `exit()`; once set, execution stops.
+    exited: Option<i32>,
     /// Call stack for error context (function names being executed)
     call_stack: Vec<String>,
     /// Recursion depth guard to prevent stack overflow
@@ -154,6 +156,7 @@ impl<'a> Interpreter<'a> {
             default_allocator: AllocatorKind::System,
             loop_action: None,
             early_return: None,
+            exited: None,
             call_stack: Vec::new(),
             recursion_depth: 0,
             func_index,
@@ -199,6 +202,9 @@ impl<'a> Interpreter<'a> {
         }
         let result = self.eval_block(body)?;
         self.pop_scope();
+        if self.exited.is_some() {
+            return Ok(result.unwrap_or(Value::Unit));
+        }
         if let Some(val) = self.early_return.take() {
             return Ok(val);
         }

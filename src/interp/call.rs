@@ -46,6 +46,15 @@ impl<'a> Interpreter<'a> {
 
         let result = self.eval_block(&func.body);
 
+        // If `exit()` was called inside the function body, propagate the exit code
+        // and bypass the remaining post-conditions.
+        if let Some(code) = self.exited.take() {
+            self.pop_scope();
+            self.pop_call();
+            self.early_return = saved_early_return;
+            return Ok(Value::Int(code as i64));
+        }
+
         // Extract and check ensures conditions
         if self.verify_contracts {
             if let Ok(Some(ref rv)) = result {
@@ -105,6 +114,9 @@ impl<'a> Interpreter<'a> {
                     }
                     let result = self.eval_block(&body);
                     self.pop_scope();
+                    if self.exited.is_some() {
+                        return result.map(|v| v.unwrap_or(Value::Unit));
+                    }
                     if let Some(val) = self.early_return.take() {
                         return Ok(val);
                     }

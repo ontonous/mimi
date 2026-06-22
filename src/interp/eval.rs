@@ -8,7 +8,7 @@ impl<'a> Interpreter<'a> {
     pub(crate) fn eval_block(&mut self, block: &Block) -> Result<Option<Value>, InterpError> {
         self.push_compensation_scope();
         let result = self.eval_block_inner(block);
-        self.pop_compensation_scope(result.is_err() || self.early_return.is_some());
+        self.pop_compensation_scope(result.is_err() || self.early_return.is_some() || self.exited.is_some());
         result
     }
 
@@ -18,6 +18,10 @@ impl<'a> Interpreter<'a> {
             match stmt {
                 Stmt::Expr(e) if is_last => {
                     let result = self.eval_expr(e);
+                    // `exit()` inside the final expression must abort the block.
+                    if self.exited.is_some() {
+                        return Ok(None);
+                    }
                     match result {
                         Ok(Value::Error(msg)) => {
                             return Err(InterpError::new(msg));
@@ -30,6 +34,10 @@ impl<'a> Interpreter<'a> {
                 }
                 Stmt::Expr(e) => {
                     let result = self.eval_expr(e);
+                    // `exit()` inside a side-effect expression must abort the block.
+                    if self.exited.is_some() {
+                        return Ok(None);
+                    }
                     match result {
                         Ok(Value::Error(msg)) => {
                             return Err(InterpError::new(msg));
@@ -46,8 +54,8 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            // Propagate break/continue and early return signals out of the block
-            if self.loop_action.is_some() || self.early_return.is_some() {
+            // Propagate break/continue, early return, and exit signals out of the block
+            if self.loop_action.is_some() || self.early_return.is_some() || self.exited.is_some() {
                 return Ok(None);
             }
         }
