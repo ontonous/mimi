@@ -152,20 +152,10 @@ impl crate::verifier::Verifier {
     fn verify_func(&mut self, func: &FuncDef) -> VerificationResult {
         let start = Instant::now();
 
-        // Functions with shared parameters cannot be verified by Z3 (heap state is opaque)
-        if func.params.iter().any(|p| matches!(&p.ty,
-            Type::Shared(_) | Type::LocalShared(_) | Type::CShared(_)
-        )) {
-            return VerificationResult {
-                func_name: func.name.clone(),
-                status: VerifStatus::Unknown,
-                message: "contract on shared-param function skipped: Z3 cannot verify heap state".into(),
-                diagnostic: None,
-                duration_us: start.elapsed().as_micros() as u64,
-                constraint_count: 0,
-            };
-        }
-
+        // Shared parameters use abstract heap encoding:
+        // shared identity → opaque Int variable,
+        // field accesses → fresh Z3 variables (handled by Expr::Field encoding).
+        // This allows verifying scalar-field contracts on shared params.
         self.solver.reset();
 
         let mut requires_exprs: Vec<Expr> = Vec::new();

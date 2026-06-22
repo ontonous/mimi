@@ -568,3 +568,19 @@ func bad_point_x(p: Point) -> i32 {
         assert_eq!(results[0].status, VerifStatus::Failed,
             "record field violation should be detected: {:?}", results[0]);
     }
+
+    #[test]
+    fn verify_shared_param_field_scalar_contract() {
+        require_z3!();
+        let src = r#"
+func read_shared(x: shared i32) -> i32 {
+    requires: x > 0
+    ensures: result > 0
+    x
+}
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: verify_shared_param_field_scalar_contract");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, VerifStatus::Verified,
+            "shared scalar param contract should verify: {:?}", results[0]);
+    }
