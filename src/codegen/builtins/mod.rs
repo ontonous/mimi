@@ -202,6 +202,15 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External));
 
+    // mimi_try_exit_str(str, len): print string error and exit(1) for ? operator
+    // Used when the error type is Result<T, string> to display the actual message.
+    module.add_function("mimi_try_exit_str",
+        void.fn_type(&[
+            BasicMetadataTypeEnum::PointerType(i8_ptr),
+            BasicMetadataTypeEnum::IntType(i64),
+        ], false),
+        Some(inkwell::module::Linkage::External));
+
     // FFI runtime functions (defined in Rust ffi/runtime.rs)
     // mimi_shared_retain(handle) -> handle
     module.add_function("mimi_shared_retain",

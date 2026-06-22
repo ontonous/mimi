@@ -65,6 +65,8 @@ declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
 declare void @mimi_try_exit(i64)
 
+declare void @mimi_try_exit_str(ptr, i64)
+
 declare i64 @mimi_shared_retain(i64)
 
 declare void @mimi_shared_release(i64)

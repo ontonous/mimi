@@ -112,18 +112,62 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(err_bb);
         let mut comp_vars = vars.clone();
         self.compile_compensations(&mut comp_vars).map_err(|e| CompileError::Generic(e.to_string()))?;
-        let try_exit_fn = self.module.get_function("mimi_try_exit")
-            .ok_or("mimi_try_exit not declared")?;
-        // Pass error value to mimi_try_exit; if it's not an integer (e.g., string struct),
-        // pass a zero value instead to avoid panic.
-        let err_int = match err_val {
-            BasicValueEnum::IntValue(iv) => iv,
-            _ => i64_ty.const_zero(),
-        };
-        self.builder.build_call(try_exit_fn, &[
-            BasicMetadataValueEnum::IntValue(err_int),
-        ], "try_exit")
-            .map_err(|e| CompileError::LlvmError(format!("try_exit error: {}", e)))?;
+
+        // Determine if the error type is string (Result<T, string>) to display
+        // the actual error message instead of a numeric pointer value.
+        let is_string_err = is_result && inner_type_name.as_ref()
+            .map(|tn| {
+                tn.rsplitn(2, ',').next()
+                    .map(|last| last.trim_end_matches('>').trim() == "string")
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if is_string_err {
+            // String error: the i64 slot contains a ptrtoint-encoded pointer
+            // to a heap-allocated string struct {i8*, i64}.
+            // Decode it back and call mimi_try_exit_str(ptr, len).
+            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let string_struct_ty = self.context.struct_type(&[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ], false);
+            let err_ptr = self.builder.build_int_to_ptr(
+                err_val.into_int_value(), string_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                "err_str_ptr",
+            ).map_err(|e| CompileError::LlvmError(format!("inttoptr error: {}", e)))?;
+            let str_ptr_ptr = self.builder.build_struct_gep(
+                BasicTypeEnum::StructType(string_struct_ty), err_ptr, 0, "str_ptr_gep",
+            ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let str_ptr = self.builder.build_load(
+                BasicTypeEnum::PointerType(i8_ptr_ty), str_ptr_ptr, "str_ptr",
+            ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
+            let str_len_ptr = self.builder.build_struct_gep(
+                BasicTypeEnum::StructType(string_struct_ty), err_ptr, 1, "str_len_gep",
+            ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let str_len = self.builder.build_load(
+                BasicTypeEnum::IntType(i64_ty), str_len_ptr, "str_len",
+            ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
+            let try_exit_str_fn = self.module.get_function("mimi_try_exit_str")
+                .ok_or("mimi_try_exit_str not declared")?;
+            self.builder.build_call(try_exit_str_fn, &[
+                BasicMetadataValueEnum::PointerValue(str_ptr),
+                BasicMetadataValueEnum::IntValue(str_len),
+            ], "try_exit_str")
+                .map_err(|e| CompileError::LlvmError(format!("try_exit_str error: {}", e)))?;
+        } else {
+            // Numeric error: pass the i64 value directly to mimi_try_exit
+            let try_exit_fn = self.module.get_function("mimi_try_exit")
+                .ok_or("mimi_try_exit not declared")?;
+            let err_int = match err_val {
+                BasicValueEnum::IntValue(iv) => iv,
+                _ => i64_ty.const_zero(),
+            };
+            self.builder.build_call(try_exit_fn, &[
+                BasicMetadataValueEnum::IntValue(err_int),
+            ], "try_exit")
+                .map_err(|e| CompileError::LlvmError(format!("try_exit error: {}", e)))?;
+        }
         let unreachable = self.context.append_basic_block(function, "unreachable");
         self.builder.build_unconditional_branch(unreachable)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;

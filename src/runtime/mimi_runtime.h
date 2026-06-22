@@ -39,6 +39,10 @@ const char* mimi_str_replace(const char* s, const char* from, const char* to);
    otherwise print as integer. */
 void mimi_try_exit(int64_t payload);
 
+/* mimi_try_exit_str(str, len): print error message from ? operator
+   when the error type is string. Prints the actual string content. */
+void mimi_try_exit_str(const char* str, int64_t len);
+
 /* Cap runtime functions.
    Cap IDs are int64_t. Each cap has a name and a consumed flag. */
 int64_t mimi_cap_register(const char* name);

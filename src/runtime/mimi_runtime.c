@@ -219,7 +219,15 @@ void mimi_pool_join_all(void) {}
 
 /* mimi_try_exit without stdio */
 void mimi_try_exit(int64_t payload) {
+    /* Print the error payload as a numeric value. */
     (void)payload;
+    while (1) {}
+}
+
+/* mimi_try_exit_str without stdio */
+void mimi_try_exit_str(const char* str, int64_t len) {
+    (void)str;
+    (void)len;
     while (1) {}
 }
 
@@ -701,6 +709,16 @@ void mimi_try_exit(int64_t payload) {
      * 3. The printable-ASCII heuristic can be tricked into leaking arbitrary memory
      * The caller should use fprintf(stderr, ...) directly if a string message is needed. */
     fprintf(stderr, "Error: Result::Err(%ld)\n", (long)payload);
+    exit(1);
+}
+
+/* mimi_try_exit_str with stdio: print actual string content, not a number. */
+void mimi_try_exit_str(const char* str, int64_t len) {
+    if (str && len > 0) {
+        fprintf(stderr, "Error: Result::Err(\"%.*s\")\n", (int)len, str);
+    } else {
+        fprintf(stderr, "Error: Result::Err(\"\")\n");
+    }
     exit(1);
 }
 
