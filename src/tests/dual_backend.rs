@@ -1929,3 +1929,79 @@ fn dual_extern_with_cap() {
         }
     "#, "42");
 }
+
+// ─── 30.  IDD numeric coercion regression tests ────────────────
+// These cover the known type-system gap where mixed-width numeric
+// operands (e.g. i32 + i64) were rejected by the typechecker even
+// though both backends already execute them correctly.
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn dual_numeric_coercion_i32_i64_add() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: i32 = 10;
+            let y: i64 = 25;
+            println(x + y);
+            0
+        }
+    "#, "35");
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn dual_numeric_coercion_i32_i64_sub() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: i32 = 100;
+            let y: i64 = 30;
+            println(x - y);
+            0
+        }
+    "#, "70");
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn dual_numeric_coercion_i32_i64_comparison() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: i32 = 5;
+            let y: i64 = 10;
+            let r = if x < y { 1 } else { 0 };
+            println(r);
+            0
+        }
+    "#, "1");
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn dual_numeric_coercion_i32_f64_add() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: i32 = 10;
+            let y: f64 = 2.5;
+            println(x + y);
+            0
+        }
+    "#, "12.5");
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn dual_numeric_coercion_i64_f64_mul() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: i64 = 7;
+            let y: f64 = 2.0;
+            println(x * y);
+            0
+        }
+    "#, "14");
+}

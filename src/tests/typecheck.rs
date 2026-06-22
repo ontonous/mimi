@@ -334,3 +334,93 @@ fn typecheck_ensures_result_binding() {
     let result = check_source(src);
     assert!(result.is_ok(), "ensures with `result` should type-check, got: {:?}", result.err());
 }
+
+// ─── IDD binary numeric coercion tests ─────────────────────────
+// Covers the gap tracked in fuzz::target_typesoundness:
+// the interpreter executes i32 + i64 but the typechecker rejects it.
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn typecheck_binary_numeric_coercion_i32_i64_add() {
+    let src = r#"
+        func main() -> i64 {
+            let x: i32 = 1;
+            let y: i64 = 2;
+            x + y
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32 + i64 should type-check with widening, got: {:?}", result.err());
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn typecheck_binary_numeric_coercion_i32_i64_all_ops() {
+    let src = r#"
+        func main() -> i64 {
+            let x: i32 = 10;
+            let y: i64 = 3;
+            let a = x + y;
+            let b = x - y;
+            let c = x * y;
+            let d = x / y;
+            a + b + c + d
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "mixed i32/i64 arithmetic should type-check, got: {:?}", result.err());
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn typecheck_binary_numeric_coercion_i32_f64() {
+    let src = r#"
+        func main() -> f64 {
+            let x: i32 = 1;
+            let y: f64 = 2.5;
+            x + y
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32 + f64 should type-check with widening, got: {:?}", result.err());
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn typecheck_binary_numeric_coercion_i64_f64() {
+    let src = r#"
+        func main() -> f64 {
+            let x: i64 = 1;
+            let y: f64 = 2.5;
+            x * y
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i64 * f64 should type-check with widening, got: {:?}", result.err());
+}
+
+#[test]
+#[ignore = "pending binary numeric coercion fix"]
+fn typecheck_comparison_numeric_coercion_i32_i64() {
+    let src = r#"
+        func main() -> bool {
+            let x: i32 = 1;
+            let y: i64 = 2;
+            x < y
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "i32 < i64 comparison should type-check, got: {:?}", result.err());
+}
+
+#[test]
+fn typecheck_binary_numeric_coercion_does_not_allow_string() {
+    // Sanity check: widening must not accept string + number.
+    let src = r#"
+        func main() -> i32 {
+            "hello" + 1
+        }
+    "#;
+    let result = check_source(src);
+    assert!(result.is_err(), "string + number must remain a type error");
+}
