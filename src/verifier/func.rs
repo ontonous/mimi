@@ -617,7 +617,7 @@ impl crate::verifier::Verifier {
                     model
                         .eval(z3_var, true)
                         .and_then(|v| v.as_rational())
-                        .map(|(num, _den)| num != 0)
+                        .map(|(num, den)| den != 0 && num != 0)
                         .unwrap_or(false)
                 } else {
                     false
