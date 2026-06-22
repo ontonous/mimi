@@ -181,9 +181,12 @@ enum Command {
     /// Generate documentation from Mimi source
     Doc {
         path: PathBuf,
-        /// Output format: markdown (default)
+        /// Output format: markdown (default), mms
         #[arg(short, long, default_value = "markdown")]
         format: String,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// Parse and process .mms files (MimiSpec)
     Mms {
@@ -254,7 +257,7 @@ fn main() {
         Command::EmitCHeaders { path, output } => emit::emit_c_headers(path.as_deref(), output.as_deref()),
         Command::EmitPyBindings { path, output, mimi_lib } => emit::emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
         Command::Promote { path, output } => promote::promote(&path, output.as_deref()),
-        Command::Doc { path, format } => doc::doc(&path, &format),
+        Command::Doc { path, format, output } => doc::doc(&path, &format, output.as_deref()),
         Command::Mms { files, ast, json, render, latex } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
         Command::Install { all } => install::install(all),

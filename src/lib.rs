@@ -19,6 +19,7 @@ pub mod span;
 pub mod verifier;
 
 pub mod core;
+pub mod doc_core;
 
 #[cfg(test)]
 pub mod tests;

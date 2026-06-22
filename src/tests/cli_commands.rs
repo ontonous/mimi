@@ -60,7 +60,7 @@ fn doc_markdown() {
     let src_path = dir.join("test.mimi");
     fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { a + b }\ntype Point { x: i32, y: i32 }").expect("src/tests/cli_commands.rs:61 unwrap failed");
 
-    let result = super::main_doc(&src_path, "markdown");
+    let result = super::main_doc(&src_path, "markdown", None);
     assert!(result.is_ok(), "doc should succeed: {:?}", result.err());
 
     // Cleanup
@@ -73,7 +73,7 @@ fn doc_empty_file() {
     let src_path = dir.join("empty.mimi");
     fs::write(&src_path, "").expect("src/tests/cli_commands.rs:74 unwrap failed");
 
-    let result = super::main_doc(&src_path, "markdown");
+    let result = super::main_doc(&src_path, "markdown", None);
     assert!(result.is_ok(), "doc should succeed on empty file");
 
     // Cleanup
@@ -99,7 +99,7 @@ fn doc_markdown_with_type_and_func() {
     let src_path = dir.join("test.mimi");
     fs::write(&src_path, "type Point { x: i32, y: i32 }\n\nfunc distance(p: Point) -> f64 { sqrt(p.x * p.x + p.y * p.y) }").expect("src/tests/cli_commands.rs:100 unwrap failed");
 
-    let result = super::main_doc(&src_path, "markdown");
+    let result = super::main_doc(&src_path, "markdown", None);
     assert!(result.is_ok(), "doc should succeed with type and func");
 
     // Cleanup
@@ -112,8 +112,25 @@ fn doc_unsupported_format() {
     let src_path = dir.join("test.mimi");
     fs::write(&src_path, "func main() { }").expect("src/tests/cli_commands.rs:113 unwrap failed");
 
-    let result = super::main_doc(&src_path, "html");
-    let _ = result;
+    let result = super::main_doc(&src_path, "html", None);
+    assert!(result.is_err(), "doc should fail on unsupported format");
+
+    // Cleanup
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doc_with_output_file() {
+    let dir = temp_dir();
+    let src_path = dir.join("test.mimi");
+    fs::write(&src_path, "func add(a: i32, b: i32) -> i32 { desc \"This function adds two numbers\"\n a + b }").expect("write src");
+
+    let output_path = dir.join("output.md");
+    let result = super::main_doc(&src_path, "markdown", Some(&output_path));
+    assert!(result.is_ok(), "doc should succeed: {:?}", result.err());
+    assert!(output_path.exists(), "output file should exist");
+    let content = fs::read_to_string(&output_path).expect("read output");
+    assert!(content.contains("add"), "output should contain function name");
 
     // Cleanup
     fs::remove_dir_all(&dir).ok();
@@ -136,7 +153,7 @@ fn doc_nonexistent_file() {
     let dir = temp_dir();
     let src_path = dir.join("nonexistent.mimi");
 
-    let result = super::main_doc(&src_path, "markdown");
+    let result = super::main_doc(&src_path, "markdown", None);
     assert!(result.is_err(), "doc should fail on nonexistent file");
 
     // Cleanup

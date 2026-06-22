@@ -1,56 +1,26 @@
 use std::fs;
 use std::path::Path;
 
-use mimi::ast::Item;
-use mimi::{lexer, parser};
-
-pub(crate) fn doc(path: &Path, format: &str) -> Result<(), String> {
+pub(crate) fn doc(path: &Path, format: &str, output: Option<&Path>) -> Result<(), String> {
     let source = fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
 
-    let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let doc_text = match format {
+        "markdown" | "md" => mimi::doc_core::generate_markdown(&source)?,
+        _ => return Err(format!("unsupported doc format: {}", format)),
+    };
 
-    match format {
-        "markdown" | "md" => {
-            println!("# Documentation for {}", path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown"));
-            println!();
-
-            for item in &file.items {
-                match item {
-                    Item::Func(f) => {
-                        let params: Vec<String> = f.params.iter()
-                            .map(|p| format!("{}: {:?}", p.name, p.ty))
-                            .collect();
-                        let ret = f.ret.as_ref().map(|t| format!(" -> {:?}", t)).unwrap_or_default();
-                        println!("## `func {}({}){}`", f.name, params.join(", "), ret);
-                        println!();
-                        // Extract desc from body
-                        for stmt in &f.body {
-                            if let mimi::ast::Stmt::Desc(desc, _) = stmt {
-                                println!("{}", desc);
-                                println!();
-                            }
-                            if let mimi::ast::Stmt::Rule(text, _) = stmt {
-                                println!("rule: {}", text);
-                                println!();
-                            }
-                        }
-                    }
-                    Item::Type(t) => {
-                        println!("## `type {}`", t.name);
-                        println!();
-                    }
-                    Item::Module(m) => {
-                        println!("## `module {}`", m.name);
-                        println!();
-                    }
-                    _ => {}
-                }
+    match output {
+        Some(out_path) => {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create output dir: {}", e))?;
             }
+            fs::write(out_path, &doc_text)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
         }
-        _ => {
-            return Err(format!("unsupported doc format: {}", format));
+        None => {
+            print!("{}", doc_text);
         }
     }
 

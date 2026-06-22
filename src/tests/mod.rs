@@ -406,38 +406,29 @@ pub fn main_promote(path: &std::path::Path, output: Option<&std::path::Path>) ->
 }
 
 /// Test helper: generate documentation from a Mimi source file.
-pub fn main_doc(path: &std::path::Path, format: &str) -> Result<(), String> {
+pub fn main_doc(path: &std::path::Path, format: &str, output: Option<&std::path::Path>) -> Result<(), String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    let tokens = crate::lexer::Lexer::new(&source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens).parse_file()?;
-    match format {
-        "markdown" | "md" => {
-            for item in &file.items {
-                match item {
-                    crate::ast::Item::Func(f) => {
-                        let params: Vec<String> = f.params.iter()
-                            .map(|p| format!("{}: {:?}", p.name, p.ty))
-                            .collect();
-                        let ret = f.ret.as_ref().map(|t| format!(" -> {:?}", t)).unwrap_or_default();
-                        println!("## `func {}({}){}`", f.name, params.join(", "), ret);
-                        for stmt in &f.body {
-                            if let crate::ast::Stmt::Desc(desc, _) = stmt {
-                                println!("{}", desc);
-                                println!();
-                            }
-                            if let crate::ast::Stmt::Rule(text, _) = stmt {
-                                println!("rule: {}", text);
-                                println!();
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+
+    let doc_text = match format {
+        "markdown" | "md" => crate::doc_core::generate_markdown(&source)?,
         _ => return Err(format!("unsupported doc format: {}", format)),
+    };
+
+    match output {
+        Some(out_path) => {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create output dir: {}", e))?;
+            }
+            std::fs::write(out_path, &doc_text)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+        }
+        None => {
+            print!("{}", doc_text);
+        }
     }
+
     Ok(())
 }
 
