@@ -198,15 +198,19 @@ dual_assert_contract_ok(program)
 | `ed48315` | 操作符修复: EqCmp/NeCmp/Add struct-typed string 参数 | `ensures_string_concat_with_old_runtime_check` ✅, `codegen_contract_string_requires_nonempty` ✅, `dual_contract_string_requires_nonempty` ✅ | — |
 | `342976c` | 正则表达式标准库: regex_match/find/replace | `dual_regex_match` ✅, `dual_regex_find` ✅, `dual_regex_replace` ✅ | `typecheck_regex_match_wrong_args` ✅, `typecheck_regex_replace_wrong_args` ✅ |
 | `58407c2` | Windows 移植: C runtime POSIX→Win32 | *所有 1907 测试 Linux 通过* | — |
+| `1f690bc` | HTTP server 测试 + SO_REUSEADDR + send typecheck fix | `net_echo_server` ✅, `net_echo_server_accept_wrapper` ✅, `net_echo_server_sequential` ✅ (所有 tests/net.rs) | — |
+| `1f690bc` | SO_REUSEADDR 在 interpreter + C runtime 添加 | 同上 net 测试重复运行通过（TIME_WAIT 不再阻塞） | — |
+| `1f690bc` | send 参数计数 3→2 (fd, data) | 已有 `send` 测试因类型错误先前被忽略；修正后通过 | — |
 
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
 ### 已知 Codegen 差距速查
 
-当前无未解决的已知 codegen 差距。
-- 正则表达式: interpreter 使用 Rust `regex` crate，codegen 使用 POSIX `regex.h`（`regcomp`/`regexec`），双后端等价。
+当前未解决的已知 codegen 差距：
+- **HTTP server (net.rs)**: 3 个 TCP echo 测试仅 interpreter 路径。codegen 端需 `tcp_accept`/`recv`/`send` 的 C runtime 实现(当前 interpreter 直接用 `libc`)。(tests/net.rs, interpreter-only)
 
 以下差距已在本轮 IDD 修复中关闭：
+- 正则表达式: interpreter 使用 Rust `regex` crate，codegen 使用 POSIX `regex.h`（`regcomp`/`regexec`），双后端等价。
 
 - match guard SIGSEGV
 - tuple 模式匹配
@@ -224,7 +228,7 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,907 个）
+1.  cargo test                          # 所有测试（1,910 个）
 2.  cargo test dual_                    # 双后端等价性（L1，~177 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
