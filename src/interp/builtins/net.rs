@@ -56,6 +56,15 @@ impl<'a> Interpreter<'a> {
         }
         let ret = unsafe { libc::connect(fd as i32, (*res).ai_addr, (*res).ai_addrlen) };
         unsafe { libc::freeaddrinfo(res) };
+        if ret == 0 {
+            // Disable Nagle's algorithm for responsive small-message communication
+            let nodelay: libc::c_int = 1;
+            unsafe {
+                libc::setsockopt(fd as i32, libc::IPPROTO_TCP, libc::TCP_NODELAY,
+                    &nodelay as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&nodelay) as libc::socklen_t);
+            }
+        }
         Ok(Value::Int(ret as i64))
     }
 

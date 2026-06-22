@@ -157,26 +157,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("mimi_recv returned void")?
                     .into_pointer_value();
                 // NOTE: not registered — returned value owns the allocation
-                // Build Mimi string struct {i8*, i64}
+                // Build Mimi string struct {i8*, i64} value directly (not pointer to struct)
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr_ty),
                     BasicTypeEnum::IntType(self.context.i64_type()),
                 ], false);
-                let str_alloca = self.builder.build_alloca(string_ty, "recv_str")
-                    .map_err(|e| format!("alloca error: {}", e))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-                    .map_err(|e| format!("gep error: {}", e))?;
-                self.builder.build_store(ptr_gep, result)
-                    .map_err(|e| format!("store error: {}", e))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
-                    .map_err(|e| format!("gep error: {}", e))?;
                 let out_len = self.builder.build_load(
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     out_len_alloca, "recv_len"
                 ).map_err(|e| format!("load error: {}", e))?;
-                self.builder.build_store(len_gep, out_len)
-                    .map_err(|e| format!("store error: {}", e))?;
-                Ok(str_alloca.into())
+                let str_val = self.builder.build_insert_value(
+                    string_ty.get_undef(), result, 0, "str_ptr"
+                ).map_err(|e| format!("insert ptr error: {}", e))?;
+                let str_val = self.builder.build_insert_value(
+                    str_val, out_len, 1, "str_len"
+                ).map_err(|e| format!("insert len error: {}", e))?;
+                Ok(str_val.into_struct_value().into())
 
     }
 

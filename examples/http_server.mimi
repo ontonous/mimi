@@ -1,0 +1,38 @@
+// HTTP Server Demo — a basic HTTP server in Mimi
+// Listens on port 8080, responds with "Hello from Mimi!"
+
+type NetError {
+    SocketCreate
+    ConnectFailed
+    BindFailed
+    ListenFailed
+    AcceptFailed
+    SendFailed
+    RecvFailed
+    HttpGetFailed
+    HttpPostFailed
+}
+
+func handle_client(client_fd: i32) {
+    recv(client_fd, 1024)
+    let body = "Hello from Mimi!"
+    let content_len = to_string(body.len())
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + content_len + "\r\nConnection: close\r\n\r\n" + body
+    send(client_fd, response)
+    close_fd(client_fd)
+}
+
+func main() -> i32 {
+    let fd = socket(2, 1, 0)
+    if fd < 0 { println("socket failed"); return 1 }
+    let ret = bind(fd, 8080)
+    if ret < 0 { close_fd(fd); println("bind failed"); return 1 }
+    let ret2 = listen(fd, 5)
+    if ret2 < 0 { close_fd(fd); println("listen failed"); return 1 }
+    println("listening on port 8080")
+    let client_fd = accept(fd)
+    if client_fd < 0 { close_fd(fd); println("accept failed"); return 1 }
+    handle_client(client_fd)
+    close_fd(fd)
+    0
+}

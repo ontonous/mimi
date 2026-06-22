@@ -200,9 +200,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         match arg {
             BasicMetadataValueEnum::PointerValue(pv) => {
                 // Could be a raw C string pointer OR a pointer to a Mimi string struct {i8*, i64}.
-                // Try to detect: if it points to a struct with ptr+len, load field 0.
                 // For now, assume it's a raw C string pointer (string literal case).
-                // String variables may produce pointer-to-struct — handle below.
+                // String variables that hold recv() results produce struct values, not pointers.
                 Ok(*pv)
             }
             BasicMetadataValueEnum::StructValue(sv) => {
