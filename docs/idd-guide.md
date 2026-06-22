@@ -188,6 +188,13 @@ dual_assert_contract_ok(program)
 | `77e538e` | await-in-parasteps 中 spawn 返回占位符 0 | `dual_parasteps_spawn_await` ✅, `e2e_parasteps_spawn_and_await` ✅ | — |
 | `77e538e` | codegen: await 在 parasteps 内调用 pthread_join(0) | 同上 | — |
 | (current) | `rule` 文本未映射为结构化合约 | `e2e_rule_ensures_basic` ✅, `e2e_rule_requires_prefix` ✅, `e2e_rule_colon_separated` ✅, `e2e_rule_unmappable_is_metadata` ✅, `e2e_rule_violation_detected` ✅, `e2e_rule_requires_violation_detected` ✅, `e2e_rule_spawn_and_await` ✅, `e2e_rule_parasteps_with_rule` ✅, `e2e_rule_ensures_prefix` ✅ | — |
+| 
+| `2cee0cf` | v0.10 后端对齐: codegen parasteps 改为真实 pthread | `dual_parasteps_spawn_await` ✅, `e2e_parasteps_spawn_and_await` ✅ | — |
+| `2cee0cf` | v0.9-3 shared write-write W005 | — | `warn_shared_write_write_parasteps` ✅, `warn_shared_write_write_no_warning_single_write` ✅, `warn_shared_write_write_different_vars` ✅, `warn_shared_write_write_nested_parasteps` ✅, `warn_shared_write_write_no_warning_read_only` ✅ |
+| `2cee0cf` | v0.9-2 arena 逃逸 E0306 | — | `typecheck_arena_escape_ref_to_outer_rejected` ✅, `typecheck_arena_escape_ref_to_outer_rejected_func_call` ✅, `typecheck_arena_escape_ref_arg_to_outer` ✅ |
+| `2cee0cf` | v0.9-4 合约+shared E0502 | — | `typecheck_contract_with_shared_param_is_error` ✅, `typecheck_requires_with_shared_param_rejected` ✅, `typecheck_ensures_with_shared_param_rejected` ✅, `typecheck_contract_with_shared_mut_rejected` ✅ |
+| `2cee0cf` | v0.9-5 parasteps 合约提取 | — | `typecheck_parasteps_requires_local_shared_rejected` ✅, `typecheck_parasteps_ensures_local_shared_rejected` ✅ |
+| `3b0e102` | v0.10 bug 修复: spawn+await 类型跟踪 + malloc 尺寸 | `e2e_parasteps_spawn_and_await` ✅ | — |
 
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
@@ -204,7 +211,7 @@ dual_assert_contract_ok(program)
 - `contains()` SIGSEGV
 - 嵌套 enum 作为 payload（通过 heap-allocated struct payload 机制已修复，`dual_nested_enum_match` ✅）
 - `quote!` + `ast_eval`（编译期折叠：literal-only quote 块在 codegen 中直接求值，`dual_quote_eval_literal` ✅）
-- await-in-parasteps（spawn 在 parasteps 内直接求值，await 返回值而非调用 pthread_join，`dual_parasteps_spawn_await` ✅）
+- await-in-parasteps（spawn 在 parasteps 内创建真实 pthread, await 调用 pthread_join 获取返回值，`dual_parasteps_spawn_await` ✅）
 
 CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增功能的 L1 测试不可跳过；和代码一起提交。
 
@@ -213,7 +220,7 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,877 个）
+1.  cargo test                          # 所有测试（1,881 个）
 2.  cargo test dual_                    # 双后端等价性（L1，~177 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
