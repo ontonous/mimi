@@ -38,11 +38,12 @@ fn test_codegen_large_return() {
         func main() -> i32 {
             let a = 1000000;
             let b = 2000000;
-            a + b
+            println(a + b);
+            0
         }
     "#;
     let stdout = crate::tests::compile_and_run(src).expect("src/tests/fuzz/target_codegen.rs:44 unwrap failed");
-    assert_eq!(stdout.trim(), "");
+    assert_eq!(stdout.trim(), "3000000");
 }
 
 #[test]

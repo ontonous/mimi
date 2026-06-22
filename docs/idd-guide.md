@@ -183,6 +183,7 @@ dual_assert_contract_ok(program)
 | `e895f82` | ensures `result` 绑定 | — | `typecheck_ensures_result_binding` ✅ |
 | `10802d7` | NaN 排序语义 | (跳过: 无 `nan()` 内建) | — |
 | 本次修复 | match guard / tuple / enum / contains 回归 | `dual_match_guard_mixed_literal`, `dual_match_tuple_bind_vars`, `dual_enum_custom_mixed_variants`, `dual_contains_false`, `dual_contains_empty`, `dual_push_mut_read_back` ✅ | — |
+| `be574a1` | 二进制数值运算符 widening | `dual_numeric_coercion_i32_i64_add`, `dual_numeric_coercion_i32_i64_sub`, `dual_numeric_coercion_i32_i64_comparison`, `dual_numeric_coercion_i32_f64_add`, `dual_numeric_coercion_i64_f64_mul` ✅ | `typecheck_binary_numeric_coercion_i32_i64_add` ✅, `typecheck_binary_numeric_coercion_i32_i64_all_ops` ✅, `typecheck_binary_numeric_coercion_i32_f64` ✅, `typecheck_binary_numeric_coercion_i64_f64` ✅ |
 
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
@@ -209,8 +210,8 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,700+ 个）
-2.  cargo test dual_                    # 双后端等价性（L1，112 个启用）
+1.  cargo test                          # 所有测试（1,800+ 个）
+2.  cargo test dual_                    # 双后端等价性（L1，168 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
 5.  cargo test ffi_                     # FFI 契约等价性
