@@ -109,7 +109,7 @@ impl<'a> Interpreter<'a> {
             Stmt::Assign { target, value } => {
                 return self.eval_assign(target, value);
             }
-            Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
             Stmt::Math(exprs) => {
                 // Math block: evaluate constant expressions at compile time
                 for expr in exprs {

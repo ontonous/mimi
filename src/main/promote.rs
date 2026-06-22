@@ -19,7 +19,7 @@ pub(crate) fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> 
 
     for item in &file.items {
         if let Item::Func(f) = item {
-            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
+            let has_intent = f.body.iter().any(|s| matches!(s, Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _)));
             if has_intent && !f.commitment.is_locked() {
                 return Err(format!(
                     "function '{}' has uncommitted intent (no $ suffix on desc/rule); add '$' to lock before promoting",

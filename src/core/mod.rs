@@ -56,9 +56,7 @@ fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str
     let mut rule_pos = String::new();
     for stmt in block {
         match stmt {
-            Stmt::Desc(text, _) if text.starts_with("rule:") => {
-                // Rule must be followed by requires/ensures or a block that contains them.
-                // For now, flag any consecutive rules without intervening contract.
+            Stmt::Rule(text, _) => {
                 if last_was_rule {
                     errors.push(format!(
                         "consecutive rules without attached contract in '{}': '{}'",

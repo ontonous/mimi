@@ -505,7 +505,7 @@ impl<'a> Checker<'a> {
                 self.infer_expr(expr, scopes);
                 scopes.pop();
             }
-            Stmt::Desc(..) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
+            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::OnFailure(_) | Stmt::MmsBlock { .. } => {}
         }
     }
 }

@@ -184,4 +184,9 @@ impl Parser {
         self.dec_depth();
         result
     }
+
+    /// Return the current token position (number of tokens consumed so far).
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
 }

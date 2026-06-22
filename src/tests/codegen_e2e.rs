@@ -2771,6 +2771,224 @@ func main() -> i32 {
     assert_eq!(compile_and_run(src).unwrap().trim(), "41");
 }
 
+// ===================== Stage 6: rule → requires/ensures mapping =====================
+
+#[test]
+fn e2e_rule_ensures_basic() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // rule "result >= 0" maps to ensures: result >= 0
+    let src = r#"
+func abs(x: i32) -> i32 {
+    rule "result >= 0"
+    if x < 0 { -x } else { x }
+}
+func main() -> i32 {
+    println(abs(-5))
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn e2e_rule_requires_prefix() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // rule "requires: x != 0" maps to requires: x != 0
+    let src = r#"
+func safe_div(x: i32, y: i32) -> i32 {
+    rule "requires: y != 0"
+    x / y
+}
+func main() -> i32 {
+    println(safe_div(10, 2))
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn e2e_rule_ensures_prefix() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // rule "ensures: result > 0" maps to ensures: result > 0
+    let src = r#"
+func double(x: i32) -> i32 {
+    rule "ensures: result > 0"
+    x * 2
+}
+func main() -> i32 {
+    println(double(5))
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "10");
+}
+
+#[test]
+fn e2e_rule_colon_separated() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // rule "幂等: result == 42" maps to ensures: result == 42
+    let src = r#"
+func answer() -> i32 {
+    rule "幂等: result == 42"
+    42
+}
+func main() -> i32 {
+    println(answer())
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_rule_unmappable_is_metadata() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Natural language rule — kept as Desc metadata, no contract assertion
+    let src = r#"
+func doit() -> i32 {
+    rule "this is a natural language description"
+    42
+}
+func main() -> i32 {
+    println(doit())
+    0
+}
+"#;
+    let stdout = compile_and_run(src).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_rule_violation_detected() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Rule maps to ensures: result >= 0, but function returns -1 → contract violation
+    let src = r#"
+func bad() -> i32 {
+    rule "result >= 0"
+    -1
+}
+func main() -> i32 {
+    bad();
+    0
+}
+"#;
+    // Must abort under verify_contracts
+    let result = compile_and_verify_contracts(src);
+    assert!(result.is_err(), "expected contract violation, got success: {:?}", result);
+}
+
+#[test]
+fn e2e_rule_in_nested_block() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Rule inside an if block — mapping must recurse into inner blocks
+    let src = r#"
+func test(x: i32) -> i32 {
+    if x > 0 {
+        rule "result > 0"
+        x
+    } else {
+        0
+    }
+}
+func main() -> i32 {
+    println(test(5))
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+#[ignore = "ensures inside nested blocks not yet collected by codegen — only func.body top-level ensures are checked"]
+fn e2e_rule_violation_in_nested_block() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Rule inside if block, violation
+    let src = r#"
+func bad(x: i32) -> i32 {
+    if x > 0 {
+        rule "result > 0"
+        -1
+    } else {
+        0
+    }
+}
+func main() -> i32 {
+    bad(5);
+    0
+}
+"#;
+    let result = compile_and_verify_contracts(src);
+    assert!(result.is_err(), "expected contract violation, got success: {:?}", result);
+}
+
+#[test]
+fn e2e_rule_requires_violation_detected() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // requires: rule violation — caller passes 0
+    let src = r#"
+func safe_div(x: i32, y: i32) -> i32 {
+    rule "requires: y != 0"
+    x / y
+}
+func main() -> i32 {
+    safe_div(10, 0);
+    0
+}
+"#;
+    let result = compile_and_verify_contracts(src);
+    assert!(result.is_err(), "expected contract violation, got success: {:?}", result);
+}
+
+#[test]
+fn e2e_rule_spawn_and_await() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Rule inside a spawned function
+    let src = r#"
+func double(n: i32) -> i32 {
+    rule "result == n * 2"
+    n * 2
+}
+func main() -> i32 {
+    let t = spawn double(21);
+    let r = await t;
+    println(r);
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_rule_parasteps_with_rule() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    // Rule inside a function called from parasteps
+    let src = r#"
+func double(n: i32) -> i32 {
+    rule "result >= 0"
+    n * 2
+}
+func main() -> i32 {
+    let mut sum = 0;
+    parasteps {
+        let a = spawn double(5);
+        let b = spawn double(10);
+        sum = (await a) + (await b)
+    }
+    println(sum);
+    0
+}
+"#;
+    let stdout = compile_and_verify_contracts(src).unwrap();
+    assert_eq!(stdout.trim(), "30");
+}
+
 #[test]
 fn e2e_spawn_identity_noop() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }

@@ -291,6 +291,7 @@ pub enum Stmt {
     },
     Block(Block),
     Desc(String, Span),
+    Rule(String, Span),
     Requires(Expr, Span),
     Ensures(Expr, Span),
     Math(Vec<Expr>),

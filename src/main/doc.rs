@@ -31,6 +31,10 @@ pub(crate) fn doc(path: &Path, format: &str) -> Result<(), String> {
                                 println!("{}", desc);
                                 println!();
                             }
+                            if let crate::ast::Stmt::Rule(text, _) = stmt {
+                                println!("rule: {}", text);
+                                println!();
+                            }
                         }
                     }
                     Item::Type(t) => {

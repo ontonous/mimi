@@ -185,6 +185,10 @@ dual_assert_contract_ok(program)
 | 本次修复 | match guard / tuple / enum / contains 回归 | `dual_match_guard_mixed_literal`, `dual_match_tuple_bind_vars`, `dual_enum_custom_mixed_variants`, `dual_contains_false`, `dual_contains_empty`, `dual_push_mut_read_back` ✅ | — |
 | `be574a1` | 二进制数值运算符 widening | `dual_numeric_coercion_i32_i64_add`, `dual_numeric_coercion_i32_i64_sub`, `dual_numeric_coercion_i32_i64_comparison`, `dual_numeric_coercion_i32_f64_add`, `dual_numeric_coercion_i64_f64_mul` ✅ | `typecheck_binary_numeric_coercion_i32_i64_add` ✅, `typecheck_binary_numeric_coercion_i32_i64_all_ops` ✅, `typecheck_binary_numeric_coercion_i32_f64` ✅, `typecheck_binary_numeric_coercion_i64_f64` ✅ |
 
+| `77e538e` | await-in-parasteps 中 spawn 返回占位符 0 | `dual_parasteps_spawn_await` ✅, `e2e_parasteps_spawn_and_await` ✅ | — |
+| `77e538e` | codegen: await 在 parasteps 内调用 pthread_join(0) | 同上 | — |
+| (current) | `rule` 文本未映射为结构化合约 | `e2e_rule_ensures_basic` ✅, `e2e_rule_requires_prefix` ✅, `e2e_rule_colon_separated` ✅, `e2e_rule_unmappable_is_metadata` ✅, `e2e_rule_violation_detected` ✅, `e2e_rule_requires_violation_detected` ✅, `e2e_rule_spawn_and_await` ✅, `e2e_rule_parasteps_with_rule` ✅, `e2e_rule_ensures_prefix` ✅ | — |
+
 ✅ = 通过且启用 | (已忽略) = `#[ignore]` 标记的已知 codegen 差距
 
 ### 已知 Codegen 差距速查
@@ -200,6 +204,7 @@ dual_assert_contract_ok(program)
 - `contains()` SIGSEGV
 - 嵌套 enum 作为 payload（通过 heap-allocated struct payload 机制已修复，`dual_nested_enum_match` ✅）
 - `quote!` + `ast_eval`（编译期折叠：literal-only quote 块在 codegen 中直接求值，`dual_quote_eval_literal` ✅）
+- await-in-parasteps（spawn 在 parasteps 内直接求值，await 返回值而非调用 pthread_join，`dual_parasteps_spawn_await` ✅）
 
 CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增功能的 L1 测试不可跳过；和代码一起提交。
 
@@ -208,8 +213,8 @@ CI 中 `cargo test dual_` 必须 100% 通过（忽略的测试除外）。新增
 ## CI 门禁顺序
 
 ```
-1.  cargo test                          # 所有测试（1,822 个）
-2.  cargo test dual_                    # 双后端等价性（L1，~168 个）
+1.  cargo test                          # 所有测试（1,875 个）
+2.  cargo test dual_                    # 双后端等价性（L1，~177 个）
 3.  cargo test "typecheck::"            # 类型系统健全性（L2）
 4.  cargo test "adv_comptime|adv_quote" # 编译时错误信息
 5.  cargo test ffi_                     # FFI 契约等价性

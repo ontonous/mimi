@@ -224,7 +224,8 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let tokens = crate::lexer::Lexer::new(src).tokenize().map_err(|e| format!("lexer: {}", e))?;
-    let file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| format!("parser: {}", e))?;
+    let mut file = crate::parser::Parser::new(tokens).parse_file().map_err(|e| format!("parser: {}", e))?;
+    crate::contracts::map_rule_contracts(&mut file);
 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");

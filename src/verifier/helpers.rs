@@ -59,7 +59,7 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
                 return extract_if_return(cond, then_, else_);
             }
             Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Math(_)
-            | Stmt::Desc(..) | Stmt::MmsBlock { .. } => continue,
+            | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => continue,
             _ => break,
         }
     }

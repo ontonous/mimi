@@ -350,7 +350,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified)
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Desc(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Math(_) => {
+                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Math(_) => {
                     // Skip contract-related statements in codegen
                 }
                 Stmt::Block(block) => {

@@ -102,6 +102,116 @@ fn bind_item_contracts(item: &mut Item, contracts: &HashMap<String, Contract>) {
     }
 }
 
+/// Map inline `rule "..."` statements to structured requires/ensures contracts.
+/// Runs AFTER `bind_contracts` (MimiSpec block contracts) and BEFORE type checking.
+///
+/// Mapping rules (from AGENTS.mimi.md §10):
+/// 1. Direct expression match: `"result > 0"` → ensures: result > 0
+/// 2. Colon-separated: `"幂等: result == old"` → ensures: result == old
+/// 3. Prefix: `"requires: x > 0"` → requires: x > 0
+/// 4. Unmappable: kept as Desc("rule: ...") metadata
+pub fn map_rule_contracts(file: &mut File) {
+    for item in &mut file.items {
+        match item {
+            Item::Func(func) => {
+                transform_rules_in_block(&mut func.body);
+            }
+            Item::Module(module) => {
+                for inner in &mut module.items {
+                    if let Item::Func(func) = inner {
+                        transform_rules_in_block(&mut func.body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn transform_rules_in_block(stmts: &mut Vec<Stmt>) {
+    let mut i = 0;
+    while i < stmts.len() {
+        // Phase 1: Transform Stmt::Rule (needs separate handling due to borrow rules)
+        match &stmts[i] {
+            Stmt::Rule(text, span) => {
+                let span = *span;
+                let text = text.clone();
+                match map_rule_text(&text, span) {
+                    Some(contract_stmt) => stmts[i] = contract_stmt,
+                    None => stmts[i] = Stmt::Desc(format!("rule: {}", text), span),
+                }
+            }
+            _ => {}
+        }
+
+        // Phase 2: Recurse into inner blocks (uses &mut to pass to recursive call)
+        match &mut stmts[i] {
+            Stmt::Block(block) | Stmt::While { body: block, .. }
+            | Stmt::For { body: block, .. } => {
+                transform_rules_in_block(block);
+            }
+            Stmt::If { then_, else_, .. } => {
+                transform_rules_in_block(then_);
+                if let Some(else_) = else_ {
+                    transform_rules_in_block(else_);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn map_rule_text(text: &str, span: Span) -> Option<Stmt> {
+    // Rule 3: requires:/ensures: prefix
+    if let Some(rest) = text.strip_prefix("requires:") {
+        let expr_str = rest.trim();
+        if !expr_str.is_empty() {
+            return parse_condition(expr_str).ok().map(|expr| Stmt::Requires(expr, span));
+        }
+    }
+    if let Some(rest) = text.strip_prefix("ensures:") {
+        let expr_str = rest.trim();
+        if !expr_str.is_empty() {
+            return parse_condition(expr_str).ok().map(|expr| Stmt::Ensures(expr, span));
+        }
+    }
+
+    // Rule 1: Try whole text as expression (default → ensures).
+    // Must consume ALL tokens — partial matches (e.g. "this" from "this is natural language") are rejected.
+    if let Ok((expr, consumed_all)) = parse_condition_full(text) {
+        if consumed_all {
+            return Some(Stmt::Ensures(expr, span));
+        }
+    }
+
+    // Rule 2: Colon-space separator → second part as ensures expression
+    if let Some((_desc, expr_str)) = text.split_once(": ") {
+        let trimmed = expr_str.trim();
+        if !trimmed.is_empty() {
+            if let Ok((expr, true)) = parse_condition_full(trimmed) {
+                return Some(Stmt::Ensures(expr, span));
+            }
+        }
+    }
+
+    // Rule 4: Unmappable
+    None
+}
+
+/// Like parse_condition, but also indicates whether ALL tokens were consumed.
+fn parse_condition_full(text: &str) -> Result<(Expr, bool), String> {
+    let tokens = crate::lexer::Lexer::new(text)
+        .tokenize()
+        .map_err(|e| format!("lex error: {}", e))?;
+    let total = tokens.len();
+    let mut parser = crate::parser::Parser::new(tokens);
+    let expr = parser.parse_expr(0).map_err(|e| format!("parse error: {}", e))?;
+    // tokens include EOF; parser stops before EOF
+    let consumed_all = parser.pos() >= total - 1;
+    Ok((expr, consumed_all))
+}
+
 /// Simple condition parser for contract expressions
 fn parse_condition(text: &str) -> Result<Expr, String> {
     // Try to parse as a simple expression using the Mimi lexer/parser

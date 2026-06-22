@@ -43,6 +43,13 @@ impl Parser {
                 self.match_semi();
                 Ok(Stmt::Desc(s, span))
             }
+            TokenKind::Rule => {
+                let span = crate::span::Span::single(self.peek().line, self.peek().col);
+                self.advance();
+                let s = self.expect_string()?;
+                self.match_semi();
+                Ok(Stmt::Rule(s, span))
+            }
             TokenKind::Ellipsis => {
                 self.advance();
                 if !self.is_sketch() {
@@ -511,7 +518,7 @@ impl Parser {
                 self.advance();
                 let s = self.expect_string()?;
                 self.match_semi();
-                stmts.push(Stmt::Desc(format!("rule: {}", s), span));
+                stmts.push(Stmt::Rule(s, span));
                 continue;
             }
             stmts.push(self.parse_stmt()?);
@@ -562,7 +569,7 @@ impl Parser {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
                 if let Ok(s) = self.expect_string() {
-                    stmts.push(Stmt::Desc(format!("rule: {}", s), span));
+                    stmts.push(Stmt::Rule(s, span));
                 }
                 continue;
             }

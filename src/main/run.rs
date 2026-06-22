@@ -21,7 +21,7 @@ pub(crate) fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool,
     let file = parser::Parser::new(tokens).parse_file()?;
 
     // Load imports if any
-    let merged_file = if !file.imports.is_empty() {
+    let mut merged_file = if !file.imports.is_empty() {
         let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
         let mut loader = loader::ModuleLoader::new(base_dir);
         loader.load_main(&path)?;
@@ -29,6 +29,9 @@ pub(crate) fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool,
     } else {
         file
     };
+
+    // Map inline rule statements to structured contracts
+    crate::contracts::map_rule_contracts(&mut merged_file);
 
     let check_result = if strict { crate::core::check_strict(&merged_file) } else { crate::core::check(&merged_file) };
     if let Err(diagnostics) = check_result {

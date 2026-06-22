@@ -74,6 +74,9 @@ pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, 
         contracts::bind_contracts(&mut file, contracts);
     }
 
+    // Map inline rule statements to structured contracts (independent of mms extraction)
+    contracts::map_rule_contracts(&mut file);
+
     let check_result = if strict {
         crate::core::check_strict(&file)
     } else {
