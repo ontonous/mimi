@@ -242,21 +242,111 @@ pub struct ActorInstance {
     pub methods: Vec<FuncDef>,
 }
 
-#[derive(Debug, Clone)]
+/// Message sent to an actor's mailbox for FIFO processing.
+pub struct ActorMailboxMsg {
+    pub method: String,
+    pub args: Vec<Value>,
+    pub response: std::sync::mpsc::Sender<Result<Value, InterpError>>,
+}
+
+/// Handle to a running actor with per-actor mailbox + dedicated worker thread.
+#[derive(Debug)]
 pub struct ActorHandle {
     pub inner: std::sync::Arc<std::sync::RwLock<ActorInstance>>,
+    pub mailbox: std::sync::mpsc::Sender<ActorMailboxMsg>,
     pub id: usize,
+}
+
+unsafe impl Send for ActorHandle {}
+unsafe impl Sync for ActorHandle {}
+
+impl Clone for ActorHandle {
+    fn clone(&self) -> Self {
+        ActorHandle {
+            inner: self.inner.clone(),
+            mailbox: self.mailbox.clone(),
+            id: self.id,
+        }
+    }
+}
+
+impl PartialEq for ActorHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 static ACTOR_HANDLE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Thread-local flag set when inside an actor's worker thread.
+/// Used to detect self-calls and avoid mailbox deadlock.
+thread_local! {
+    static CURRENT_ACTOR_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl ActorHandle {
+    /// Creates a new actor, spawns its worker thread.
     pub(crate) fn new(instance: ActorInstance) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        ActorHandle {
-            inner: std::sync::Arc::new(std::sync::RwLock::new(instance)),
-            id,
-        }
+        let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
+        let inner = std::sync::Arc::new(std::sync::RwLock::new(instance));
+
+        let worker_inner = inner.clone();
+        let mailbox_tx_clone = mailbox_tx.clone();
+        std::thread::Builder::new()
+            .name(format!("actor-{}", id))
+            .spawn(move || {
+                CURRENT_ACTOR_ID.with(|a| a.set(id));
+                let empty_file = crate::ast::File { imports: vec![], items: vec![] };
+                while let Ok(msg) = mailbox_rx.recv() {
+                    let result = {
+                        // Read method definition
+                        let (func, _actor_name) = {
+                            let actor = worker_inner.read()
+                                .expect("actor worker lock");
+                            let func = actor.methods.iter()
+                                .find(|f| f.name == msg.method)
+                                .cloned()
+                                .expect("actor method not found");
+                            (func, actor.actor_name.clone())
+                        };
+                        // Create minimal interpreter to run the method body
+                        let mut interp = crate::interp::Interpreter::new(&empty_file);
+                        let self_val = Value::Actor(ActorHandle {
+                            inner: worker_inner.clone(),
+                            mailbox: mailbox_tx_clone.clone(),
+                            id,
+                        });
+                        interp.push_scope();
+                        interp.bind("self", self_val)
+                            .expect("bind self in actor worker");
+                        // Bind method parameters
+                        let mut args_iter = msg.args.iter();
+                        for param in &func.params {
+                            if param.name == "self" { continue; }
+                            let arg = args_iter.next()
+                                .cloned()
+                                .unwrap_or(Value::Unit);
+                            interp.bind(&param.name, arg)
+                                .expect("bind param in actor worker");
+                        }
+                        let result = interp.eval_block(&func.body)
+                            .map(|opt| opt.unwrap_or(Value::Unit));
+                        interp.pop_scope();
+                        result
+                    };
+                    let _ = msg.response.send(result);
+                }
+                CURRENT_ACTOR_ID.with(|a| a.set(0));
+            })
+            .expect("failed to spawn actor worker");
+
+        ActorHandle { inner, mailbox: mailbox_tx, id }
+    }
+
+    /// Returns the current actor's thread-local ID (0 if not in an actor worker).
+    pub(crate) fn current_worker_id() -> usize {
+        CURRENT_ACTOR_ID.with(|a| a.get())
     }
 }
 

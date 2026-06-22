@@ -367,37 +367,49 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::Actor(actor_arc) => {
-                // Handle special methods
                 match method {
                     "spawn" => {
-                        // spawn() doesn't make sense on an instance - it's a constructor
                         Err("spawn() should be called on Actor type, not instance".into())
                     }
                     _ => {
-                        // Get actor name and methods (clone from RwLock)
-                        let actor_name: String;
-                        let actor_methods: Vec<FuncDef>;
-                        {
-                            let actor = actor_arc.inner.read().map_err(|e| format!("actor lock failed: {}", e))?;
-                            actor_name = actor.actor_name.clone();
-                            actor_methods = actor.methods.clone();
+                        // Check if we're inside this actor's own worker thread
+                        // If so, execute directly to avoid mailbox deadlock.
+                        // Cross-actor calls from a worker always go through mailbox.
+                        let is_self_call = crate::interp::value::ActorHandle::current_worker_id() == actor_arc.id;
+
+                        if is_self_call {
+                            // Direct execution (same thread, no mailbox)
+                            let actor_name: String;
+                            let actor_methods: Vec<FuncDef>;
+                            {
+                                let actor = actor_arc.inner.read()
+                                    .map_err(|e| format!("actor lock failed: {}", e))?;
+                                actor_name = actor.actor_name.clone();
+                                actor_methods = actor.methods.clone();
+                            }
+                            let func = actor_methods.iter()
+                                .find(|f| f.name == method)
+                                .ok_or_else(|| format!("actor {} has no method '{}'", actor_name, method))?;
+                            self.push_scope();
+                            self.bind("self", obj.clone())?;
+                            let result = self.call_func(func, args);
+                            self.pop_scope();
+                            result
+                        } else {
+                            // Mailbox dispatch: send message, wait for response
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let msg = crate::interp::value::ActorMailboxMsg {
+                                method: method.to_string(),
+                                args: args.to_vec(),
+                                response: tx,
+                            };
+                            actor_arc.mailbox.send(msg)
+                                .map_err(|_| InterpError::new("actor mailbox send failed".to_string()))?;
+                            match rx.recv() {
+                                Ok(result) => result,
+                                Err(_) => Err(InterpError::new("actor worker terminated".to_string())),
+                            }
                         }
-
-                        // Find the method in the actor's methods
-                        let func = actor_methods.iter()
-                            .find(|f| f.name == method)
-                            .ok_or_else(|| format!("actor {} has no method '{}'", actor_name, method))?;
-
-                        // For actor methods, we need to call with self bound to this actor
-                        self.push_scope();
-                        // Bind 'self' to the actor handle itself (for self.field access via RwLock)
-                        self.bind("self", obj.clone())?;
-
-                        let result = self.call_func(func, args);
-
-                        self.pop_scope();
-
-                        result
                     }
                 }
             }

@@ -584,76 +584,39 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(in crate::interp) fn eval_spawn(&mut self, expr: &Expr) -> Result<Value, InterpError> {
-        // Spawn evaluates the expression in a new thread and returns a Future
-        let (tx, rx) = std::sync::mpsc::channel();
-        // Evaluate args and actor reference in current thread
-        let spawned = {
-            if let Expr::Call(callee, args) = expr {
-                if let Expr::Field(obj, method) = callee.as_ref() {
-                    let obj_val = self.eval_expr(obj)?;
-                    let method_name = method.clone();
-                    let args_vals: Vec<Value> = args.iter()
-                        .map(|a| self.eval_expr(a))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    match obj_val {
-                        Value::Actor(handle) => {
-                            Some((handle, method_name, args_vals))
-                        }
-                        _ => None,
-                    }
-                } else { None }
-            } else { None }
-        };
-
-        if let Some((actor_handle, method, args_vals)) = spawned {
-            let spawned_file = self.file.clone();
-            super::super::pool::get_pool().execute(move || {
-                let mut interp = Interpreter::new(&spawned_file);
-                let actor_val = Value::Actor(actor_handle);
-                let result = interp.call_method(&actor_val, &method, args_vals);
-                let _ = tx.send(result);
-            });
-            Ok(Value::Future(Arc::new(std::sync::Mutex::new(rx))))
-        } else {
-            // Non-actor `spawn expr` — evaluate directly.
-            // Type checker marks this as Future<T>, but at runtime the
-            // value is unwrapped immediately (no threading). This is a
-            // known gap between compile-time and runtime types (#6).
-            self.eval_expr(expr)
-        }
-    }
-
-    pub(in crate::interp) fn eval_await(&mut self, expr: &Expr) -> Result<Value, InterpError> {
-        // Check if this is a method call on an actor
+        // Check for actor method spawn: `spawn actor.method(args)`
         if let Expr::Call(callee, args) = expr {
             if let Expr::Field(obj, method) = callee.as_ref() {
-                // Evaluate the object to get the actor handle
-                let obj_val = self.eval_expr(obj.as_ref())?;
-                if let Value::Actor(_) = &obj_val {
-                    // Spawn method call in a thread and wait for result
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let method = method.clone();
-                    let args_clone: Vec<Value> = args.iter()
-                        .map(|a| self.eval_expr(a))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let actor_arc = match &obj_val {
-                        Value::Actor(h) => h.clone(),
-                        other => return Err(InterpError::new(format!("unexpected expression type in await: {}", other))),
-                    };
-                    let spawned_file = self.file.clone();
-                    super::super::pool::get_pool().execute(move || {
-                        let mut interp = Interpreter::new(&spawned_file);
-                        let actor_val = Value::Actor(actor_arc);
-                        let result = interp.call_method(&actor_val, &method, args_clone);
-                        let _ = tx.send(result);
-                    });
-                    // Wait for the result
-                    let result = rx.recv().map_err(|e| InterpError::new(format!("await failed: {}", e)))?;
-                    return result;
+                let obj_val = self.eval_expr(obj)?;
+                let method_name = method.clone();
+                let args_vals: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match obj_val {
+                    Value::Actor(handle) => {
+                        // Send through mailbox, return Future<T> for awaiting later
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let msg = crate::interp::value::ActorMailboxMsg {
+                            method: method_name,
+                            args: args_vals,
+                            response: tx,
+                        };
+                        handle.mailbox.send(msg)
+                            .map_err(|_| InterpError::new("actor mailbox send failed"))?;
+                        return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(rx))));
+                    }
+                    _ => {}
                 }
             }
         }
-        // Default: evaluate and if it's a Future, wait for it
+        // Non-actor `spawn expr` — evaluate directly.
+        self.eval_expr(expr)
+    }
+
+    pub(in crate::interp) fn eval_await(&mut self, expr: &Expr) -> Result<Value, InterpError> {
+        // Evaluate expression. For actor methods, call_method now sends through
+        // mailbox and blocks for response (synchronous from caller's perspective).
+        // For non-actor expressions, evaluate normally and await if Future.
         let v = self.eval_expr(expr)?;
         match v {
             Value::Future(rx) => {
