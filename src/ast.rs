@@ -374,6 +374,40 @@ pub enum Expr {
     Arena(Block),
 }
 
+impl Expr {
+    pub fn call(self, args: Vec<Expr>) -> Expr {
+        Expr::Call(Box::new(self), args)
+    }
+
+    pub fn field(self, name: impl Into<String>) -> Expr {
+        Expr::Field(Box::new(self), name.into())
+    }
+
+    pub fn index(self, index: Expr) -> Expr {
+        Expr::Index(Box::new(self), Box::new(index))
+    }
+
+    pub fn tuple_index(self, idx: usize) -> Expr {
+        Expr::TupleIndex(Box::new(self), idx)
+    }
+
+    pub fn try_expr(self) -> Expr {
+        Expr::Try(Box::new(self))
+    }
+
+    pub fn with_slice(self, start: Option<Box<Expr>>, end: Option<Box<Expr>>) -> Expr {
+        Expr::SliceExpr { target: Box::new(self), start, end }
+    }
+
+    pub fn unary(self, op: UnOp) -> Expr {
+        Expr::Unary(op, Box::new(self))
+    }
+
+    pub fn binary(self, op: BinOp, rhs: Expr) -> Expr {
+        Expr::Binary(op, Box::new(self), Box::new(rhs))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordFieldExpr {
     pub name: String,

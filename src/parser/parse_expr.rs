@@ -43,7 +43,7 @@ impl Parser {
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let rhs = self.parse_expr(next_min)?;
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+            lhs = lhs.binary(op, rhs);
         }
         Ok(lhs)
     }
@@ -81,7 +81,7 @@ impl Parser {
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let rhs = self.parse_expr(next_min)?;
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+            lhs = lhs.binary(op, rhs);
         }
         self.dec_depth();
         Ok(lhs)
@@ -100,24 +100,24 @@ impl Parser {
             TokenKind::If => self.parse_if_expr(),
             TokenKind::Minus => {
                 self.advance();
-                Ok(Expr::Unary(UnOp::Neg, Box::new(self.parse_unary()?)))
+                Ok(self.parse_unary()?.unary(UnOp::Neg))
             }
             TokenKind::Bang | TokenKind::NotOp | TokenKind::Not => {
                 self.advance();
-                Ok(Expr::Unary(UnOp::Not, Box::new(self.parse_unary()?)))
+                Ok(self.parse_unary()?.unary(UnOp::Not))
             }
             TokenKind::BitAnd => {
                 self.advance();
                 if self.at(&TokenKind::Mut) {
                     self.advance();
-                    Ok(Expr::Unary(UnOp::RefMut, Box::new(self.parse_unary()?)))
+                    Ok(self.parse_unary()?.unary(UnOp::RefMut))
                 } else {
-                    Ok(Expr::Unary(UnOp::Ref, Box::new(self.parse_unary()?)))
+                    Ok(self.parse_unary()?.unary(UnOp::Ref))
                 }
             }
             TokenKind::Star => {
                 self.advance();
-                Ok(Expr::Unary(UnOp::Deref, Box::new(self.parse_unary()?)))
+                Ok(self.parse_unary()?.unary(UnOp::Deref))
             }
             TokenKind::Old => {
                 self.advance();
@@ -219,7 +219,7 @@ impl Parser {
                     self.advance();
                     let args = self.parse_args()?;
                     self.expect(TokenKind::RParen, "`)`")?;
-                    e = Expr::Call(Box::new(e), args);
+                    e = e.call(args);
                 }
                 return self.parse_postfix(e);
             }
@@ -339,7 +339,7 @@ impl Parser {
         // ? after an identifier: check for a separate Question token.
         if self.at(&TokenKind::Question) {
             self.advance();
-            expr = Expr::Try(Box::new(expr));
+            expr = expr.try_expr();
         }
         Ok(expr)
     }
@@ -351,18 +351,18 @@ impl Parser {
                 self.advance();
                 let args = self.parse_args()?;
                 self.expect(TokenKind::RParen, "`)`")?;
-                expr = Expr::Call(Box::new(expr), args);
-            } else if self.at(&TokenKind::Dot) {
-                self.advance();
-                // Check for numeric tuple index: t.0, t.1, etc.
-                if let TokenKind::Int(s) = &self.peek().kind {
-                    let idx = s.replace('_', "").parse::<usize>()
-                        .map_err(|_| ParseError::new("invalid tuple index", self.peek().line, self.peek().col))?;
+                    expr = expr.call(args);
+                } else if self.at(&TokenKind::Dot) {
                     self.advance();
-                    expr = Expr::TupleIndex(Box::new(expr), idx);
-                } else {
-                    let field = self.expect_ident()?;
-                    expr = Expr::Field(Box::new(expr), field);
+                    // Check for numeric tuple index: t.0, t.1, etc.
+                    if let TokenKind::Int(s) = &self.peek().kind {
+                        let idx = s.replace('_', "").parse::<usize>()
+                            .map_err(|_| ParseError::new("invalid tuple index", self.peek().line, self.peek().col))?;
+                        self.advance();
+                        expr = expr.tuple_index(idx);
+                    } else {
+                        let field = self.expect_ident()?;
+                        expr = expr.field(field);
                 }
             } else if self.at(&TokenKind::LBracket) {
                 expr = self.parse_slice_or_index(expr)?;
@@ -372,7 +372,7 @@ impl Parser {
         }
         if self.at(&TokenKind::Question) {
             self.advance();
-            expr = Expr::Try(Box::new(expr));
+            expr = expr.try_expr();
         }
         Ok(expr)
     }
@@ -405,11 +405,7 @@ impl Parser {
                 Some(Box::new(self.parse_expr(0)?))
             };
             self.expect(TokenKind::RBracket, "`]`")?;
-            Ok(Expr::SliceExpr {
-                target: Box::new(target),
-                start: None,
-                end,
-            })
+            Ok(target.with_slice(None, end))
         } else {
             // Parse start, stopping before `..` to handle slice syntax
             let first = self.parse_expr_without_range()?;
@@ -422,15 +418,11 @@ impl Parser {
                     Some(Box::new(self.parse_expr(0)?))
                 };
                 self.expect(TokenKind::RBracket, "`]`")?;
-                Ok(Expr::SliceExpr {
-                    target: Box::new(target),
-                    start: Some(Box::new(first)),
-                    end,
-                })
+                Ok(target.with_slice(Some(Box::new(first)), end))
             } else {
                 // expr[i] — regular index
                 self.expect(TokenKind::RBracket, "`]`")?;
-                Ok(Expr::Index(Box::new(target), Box::new(first)))
+                Ok(target.index(first))
             }
         }
     }
@@ -514,17 +506,17 @@ impl Parser {
                 return Ok(Expr::Turbofish(name, type_args, args));
             } else {
                 let field = self.expect_ident()?;
-                let mut e = Expr::Field(Box::new(Expr::Ident(name)), field);
+                let mut e = Expr::Ident(name).field(field);
                 while self.at(&TokenKind::ColonColon) {
                     self.advance();
                     let field = self.expect_ident()?;
-                    e = Expr::Field(Box::new(e), field);
+                    e = e.field(field);
                 }
                 if self.at(&TokenKind::LParen) {
                     self.advance();
                     let args = self.parse_args()?;
                     self.expect(TokenKind::RParen, "`)`")?;
-                    e = Expr::Call(Box::new(e), args);
+                    e = e.call(args);
                 }
                 return Ok(e);
             }
@@ -535,14 +527,14 @@ impl Parser {
                 self.advance();
                 let args = self.parse_args()?;
                 self.expect(TokenKind::RParen, "`)`")?;
-                e = Expr::Call(Box::new(e), args);
+                e = e.call(args);
             } else if self.at(&TokenKind::Dot) {
                 self.advance();
                 if let TokenKind::Int(s) = &self.peek().kind {
                     let idx = s.replace('_', "").parse::<usize>()
                         .map_err(|_| ParseError::new("invalid tuple index", self.peek().line, self.peek().col))?;
                     self.advance();
-                    e = Expr::TupleIndex(Box::new(e), idx);
+                    e = e.tuple_index(idx);
                 } else {
                     let field = if matches!(self.peek_kind(), TokenKind::Ident(_)) {
                         self.expect_ident()
@@ -558,7 +550,7 @@ impl Parser {
                     } else {
                         self.expect_ident()
                     }?;
-                    e = Expr::Field(Box::new(e), field);
+                    e = e.field(field);
                 }
             } else if self.at(&TokenKind::LBracket) {
                 e = self.parse_slice_or_index(e)?;

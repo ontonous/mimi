@@ -117,7 +117,7 @@ impl Parser {
                         TokenKind::BitXorEq => BinOp::BitXor,
                         _ => return Err(ParseError::new("unexpected token in statement parsing".to_string(), 0, 0)),
                     };
-                    let rhs = Expr::Binary(op, Box::new(expr.clone()), Box::new(value));
+                    let rhs = expr.clone().binary(op, value);
                     Ok(Stmt::Assign { target: expr, value: rhs })
                 } else {
                     self.match_semi();
