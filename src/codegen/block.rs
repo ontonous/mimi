@@ -201,6 +201,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if self.module.get_function(fn_name).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
                             }
+                            if self.cap_type_names.contains(fn_name.as_str()) {
+                                self.var_type_names.insert(name.clone(), fn_name.clone());
+                            }
                         }
                     }
                 }
@@ -416,6 +419,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Let { pat, init: Some(init), .. } => {
                     let val = self.compile_expr(init, vars)?;
                     self.compile_pattern_bind(pat, val, vars)?;
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Ident(fn_name) = init {
+                            if self.module.get_function(fn_name.as_str()).is_some() {
+                                self.fn_ptr_var_names.insert(name.clone());
+                            }
+                            if self.cap_type_names.contains(fn_name.as_str()) {
+                                self.var_type_names.insert(name.clone(), fn_name.clone());
+                            }
+                        }
+                    }
                 }
                 Stmt::Assign { target: Expr::Ident(name), value } => {
                     let val = self.compile_expr(value, vars)?;

@@ -1295,7 +1295,7 @@ fn dual_local_shared() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
-            local shared x = 42;
+            local_shared x = 42;
             println(x.deref());
             0
         }

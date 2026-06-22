@@ -418,6 +418,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     self.compile_pattern_bind(pat, val, &mut vars)?;
+                    if let Pattern::Variable(name) = pat {
+                        if let Expr::Ident(fn_name) = init {
+                            if self.module.get_function(fn_name.as_str()).is_some() {
+                                self.fn_ptr_var_names.insert(name.clone());
+                            }
+                            if self.cap_type_names.contains(fn_name.as_str()) {
+                                self.var_type_names.insert(name.clone(), fn_name.clone());
+                            }
+                        }
+                    }
                 }
                 Stmt::Assign { target, value } => {
                     self.compile_assign_stmt(target, value, &mut vars)?;
