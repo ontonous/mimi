@@ -1,0 +1,89 @@
+// Calculator — Simple arithmetic in Mimi
+// Demonstrates: functions, contracts (requires/ensures), recursion,
+// for/while loops, lists, and I/O
+//
+// Run: mimi run examples/calculator.mimi
+// Run with contracts: mimi run examples/calculator.mimi --verify-contracts
+
+// Factorial with contract
+func factorial(n: i32) -> i32 {
+    requires: n >= 0
+    ensures: result >= 1
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+// Fibonacci
+func fibonacci(n: i32) -> i32 {
+    requires: n >= 0
+    if n <= 1 { return n; }
+    fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+// Absolute value
+func abs(x: i32) -> i32 {
+    ensures: result >= 0
+    if x < 0 { -x } else { x }
+}
+
+// Check if a number is prime
+func is_prime(n: i32) -> bool {
+    requires: n >= 0
+    if n < 2 { return false; }
+    let mut i = 2
+    while i * i <= n {
+        if n % i == 0 { return false; }
+        i = i + 1
+    }
+    true
+}
+
+// GCD using Euclidean algorithm
+func gcd(a: i32, b: i32) -> i32 {
+    if b == 0 { abs(a) } else { gcd(b, a % b) }
+}
+
+// Sum a list of integers
+func sum_list(items: List<i32>) -> i32 {
+    let mut total = 0
+    for x in items {
+        total = total + x
+    }
+    total
+}
+
+// Run all calculator demos
+func demo_calculator() {
+    println("=== Calculator Demo ===")
+
+    println("\n--- Arithmetic ---")
+    println("  factorial(5) = " + to_string(factorial(5)))
+    println("  factorial(10) = " + to_string(factorial(10)))
+    println("  fibonacci(10) = " + to_string(fibonacci(10)))
+    println("  fibonacci(15) = " + to_string(fibonacci(15)))
+    println("  abs(-42) = " + to_string(abs(-42)))
+    println("  abs(7) = " + to_string(abs(7)))
+    println("  gcd(48, 18) = " + to_string(gcd(48, 18)))
+    println("  gcd(1071, 462) = " + to_string(gcd(1071, 462)))
+
+    println("\n--- Prime Check ---")
+    let test_nums = [2, 3, 4, 5, 17, 23, 97, 100]
+    for n in test_nums {
+        println("  " + to_string(n) + " is prime: " + to_string(is_prime(n)))
+    }
+
+    println("\n--- List Operations ---")
+    let nums = [3, 7, 2, 9, 5, 1, 8, 4, 6]
+    println("  sum of [3,7,2,9,5,1,8,4,6] = " + to_string(sum_list(nums)))
+
+    println("\n--- Recursion ---")
+    let mut i = 1
+    while i <= 10 {
+        println("  fib(" + to_string(i) + ") = " + to_string(fibonacci(i)))
+        i = i + 1
+    }
+}
+
+func main() {
+    demo_calculator()
+    println("\nCalculator demo completed successfully")
+}
