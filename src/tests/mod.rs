@@ -43,6 +43,7 @@ pub(crate) mod v1_2_builtin_hof;
 pub(crate) mod v1_2_infra;
 pub(crate) mod v1_2_misc_remaining;
 pub(crate) mod v1_2_core_edge;
+pub(crate) mod v1_2_error_coverage;
 
 pub(crate) mod loader;
 pub(crate) mod manifest;
