@@ -628,6 +628,8 @@ impl crate::verifier::Verifier {
                 }
             }
             Expr::Unary(UnOp::Neg, inner) => Self::resolve_to_i64(inner, model, vars).map(|v| -v),
+            Expr::Spawn(inner) => Self::resolve_to_i64(inner, model, vars),
+            Expr::Await(inner) => Self::resolve_to_i64(inner, model, vars),
             _ => None,
         }
     }
@@ -685,6 +687,8 @@ impl crate::verifier::Verifier {
             Expr::Unary(UnOp::Neg, inner) => {
                 Self::resolve_to_f64(inner, model, vars).map(|v| -v)
             }
+            Expr::Spawn(inner) => Self::resolve_to_f64(inner, model, vars),
+            Expr::Await(inner) => Self::resolve_to_f64(inner, model, vars),
             _ => None,
         }
     }
@@ -831,6 +835,8 @@ impl crate::verifier::Verifier {
                 }
             },
             Expr::Unary(UnOp::Not, inner) => !Self::eval_expr_on_model(inner, model, vars),
+            Expr::Spawn(inner) => Self::eval_expr_on_model(inner, model, vars),
+            Expr::Await(inner) => Self::eval_expr_on_model(inner, model, vars),
             _ => false,
         }
     }
@@ -1063,6 +1069,13 @@ impl crate::verifier::Verifier {
                     }
                 }
             }
+            Expr::Spawn(inner) => self.assert_callee_ensures_in_expr(inner, vars),
+            Expr::Await(inner) => self.assert_callee_ensures_in_expr(inner, vars),
+            Expr::Lambda { body, .. } => {
+                for s in body {
+                    self.assert_callee_ensures_in_stmt(s, vars);
+                }
+            }
             _ => {}
         }
     }
@@ -1197,6 +1210,27 @@ impl crate::verifier::Verifier {
                         body: Self::expand_lets_in_expr(&arm.body, subst),
                     }).collect(),
                 )
+            }
+            Expr::Spawn(inner) => {
+                Expr::Spawn(Box::new(Self::expand_lets_in_expr(inner, subst)))
+            }
+            Expr::Await(inner) => {
+                Expr::Await(Box::new(Self::expand_lets_in_expr(inner, subst)))
+            }
+            Expr::Lambda { params, ret, body } => {
+                Expr::Lambda {
+                    params: params.clone(),
+                    ret: ret.clone(),
+                    body: body.iter().map(|s| Self::expand_lets_in_stmt(s, subst)).collect(),
+                }
+            }
+            Expr::Comprehension { expr, var, iter, guard } => {
+                Expr::Comprehension {
+                    expr: Box::new(Self::expand_lets_in_expr(expr, subst)),
+                    var: var.clone(),
+                    iter: Box::new(Self::expand_lets_in_expr(iter, subst)),
+                    guard: guard.as_ref().map(|g| Box::new(Self::expand_lets_in_expr(g, subst))),
+                }
             }
             _ => expr.clone(),
         }

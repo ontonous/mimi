@@ -78,6 +78,8 @@ impl crate::verifier::Verifier {
                     None
                 }
             }
+            Expr::Spawn(inner) => self.expr_to_z3_int(inner, vars),
+            Expr::Await(inner) => self.expr_to_z3_int(inner, vars),
             _ => None,
         }
     }
@@ -210,6 +212,8 @@ impl crate::verifier::Verifier {
                     None
                 }
             }
+            Expr::Spawn(inner) => self.expr_to_z3_real(inner, vars),
+            Expr::Await(inner) => self.expr_to_z3_real(inner, vars),
             _ => None,
         }
     }
@@ -389,6 +393,8 @@ impl crate::verifier::Verifier {
                     None
                 }
             }
+            Expr::Spawn(inner) => self.expr_to_z3_bool(inner, vars),
+            Expr::Await(inner) => self.expr_to_z3_bool(inner, vars),
             _ => None,
         }
     }
@@ -436,6 +442,8 @@ impl crate::verifier::Verifier {
                     false
                 }
             }
+            Expr::Spawn(inner) => self.is_real_expr(inner, vars),
+            Expr::Await(inner) => self.is_real_expr(inner, vars),
             _ => false,
         }
     }

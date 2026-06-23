@@ -895,3 +895,71 @@ func main() -> i32 { 0 }
             || f.unwrap().status == VerifStatus::Unknown,
             "match violation should be detected: {:?}", f.unwrap());
     }
+
+    // --- P1.1: Spawn/Await encoding ---
+
+    #[test]
+    fn verify_spawn_await_body_verified() {
+        require_z3!();
+        let src = r#"
+func add_pair(x: i32, y: i32) -> i32 {
+    ensures: result == x + y
+    let task = spawn add(x, y)
+    await task
+}
+func add(a: i32, b: i32) -> i32 {
+    ensures: result == a + b
+    a + b
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: spawn_await");
+        let f = results.iter().find(|r| r.func_name == "add_pair");
+        assert!(f.is_some(), "add_pair should be present");
+        assert_eq!(f.unwrap().status, VerifStatus::Verified,
+            "spawn/await body should be verifiable: {:?}", f.unwrap());
+    }
+
+    #[test]
+    fn verify_spawn_await_violation_detected() {
+        require_z3!();
+        let src = r#"
+func bad_add(x: i32, y: i32) -> i32 {
+    ensures: result == x + y
+    let task = spawn sub(x, y)
+    await task
+}
+func sub(a: i32, b: i32) -> i32 {
+    a - b
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: spawn_await_violation");
+        let f = results.iter().find(|r| r.func_name == "bad_add");
+        assert!(f.is_some(), "bad_add should be present");
+        assert_eq!(f.unwrap().status, VerifStatus::Failed,
+            "spawn/await with wrong func should fail: {:?}", f.unwrap());
+    }
+
+    #[test]
+    fn verify_spawn_no_await_passes() {
+        require_z3!();
+        // Spawn without await (discard the future) — the function result
+        // still comes from a separate return expression.
+        let src = r#"
+func compute_discard(x: i32) -> i32 {
+    ensures: result == x
+    spawn side_effect(x)
+    x
+}
+func side_effect(a: i32) -> i32 {
+    a
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: spawn_discard");
+        let f = results.iter().find(|r| r.func_name == "compute_discard");
+        assert!(f.is_some(), "compute_discard should be present");
+        assert_eq!(f.unwrap().status, VerifStatus::Verified,
+            "spawn-discard body should be verifiable: {:?}", f.unwrap());
+    }
