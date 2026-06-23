@@ -241,6 +241,10 @@ impl crate::verifier::Verifier {
                     p.name.as_str(),
                     Z3Bool::new_const(format!("{}_ne", p.name)),
                 );
+                vars.insert_string_len(
+                    p.name.as_str(),
+                    Z3Int::new_const(format!("{}_len", p.name)),
+                );
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -264,6 +268,10 @@ impl crate::verifier::Verifier {
                 vars.insert_string_nonempty(
                     old_name,
                     Z3Bool::new_const(format!("{}_ne", old_name)),
+                );
+                vars.insert_string_len(
+                    old_name,
+                    Z3Int::new_const(format!("{}_len", old_name)),
                 );
             } else {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));

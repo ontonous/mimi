@@ -55,6 +55,15 @@ impl crate::verifier::Verifier {
             }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    // Special-case len(s) — returns the string length variable.
+                    if name == "len" && call_args.len() == 1 {
+                        if let Expr::Ident(s) = &call_args[0] {
+                            if let Some(len_var) = vars.get_string_len(s) {
+                                return Some(len_var.clone());
+                            }
+                            // Fallback: try call_var_key for consistency.
+                        }
+                    }
                     let call_key = self.call_var_key(name, call_args);
                     Some(vars.get_or_create_int(&call_key))
                 } else {
@@ -169,6 +178,14 @@ impl crate::verifier::Verifier {
             }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    // Special-case len(s) for string length in real context.
+                    if name == "len" && call_args.len() == 1 {
+                        if let Expr::Ident(s) = &call_args[0] {
+                            if let Some(len_var) = vars.get_string_len(s) {
+                                return Some(Z3Real::from_int(len_var));
+                            }
+                        }
+                    }
                     let call_key = self.call_var_key(name, call_args);
                     if let Some(v) = vars.get_real(&call_key) {
                         Some(v.clone())
@@ -331,6 +348,14 @@ impl crate::verifier::Verifier {
             }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
+                    // Special-case len(s) for string length in bool context.
+                    if name == "len" && call_args.len() == 1 {
+                        if let Expr::Ident(s) = &call_args[0] {
+                            if let Some(len_var) = vars.get_string_len(s) {
+                                return Some(len_var.ne(&Z3Int::from_i64(0)));
+                            }
+                        }
+                    }
                     let call_key = self.call_var_key(name, call_args);
                     if let Some(v) = vars.get_int(&call_key) {
                         Some(v.ne(&Z3Int::from_i64(0)))
@@ -373,7 +398,10 @@ impl crate::verifier::Verifier {
             }
             Expr::Unary(_, inner) => self.is_real_expr(inner, vars),
             Expr::Call(callee, args) => {
-                if let Expr::Ident(_) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if name == "len" {
+                        return false; // len() always returns int
+                    }
                     args.iter().any(|a| self.is_real_expr(a, vars))
                 } else {
                     false

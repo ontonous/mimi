@@ -667,3 +667,21 @@ func main() -> i32 { 0 }
         let wrap_result = results.iter().find(|r| r.func_name == "wrap");
         assert!(wrap_result.is_some(), "wrap function should be present");
     }
+
+    #[test]
+    fn verify_string_len_positive() {
+        require_z3!();
+        let src = r#"
+func validate(s: string) -> i32 {
+    requires: len(s) > 0
+    ensures: result > 0
+    len(s)
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: string_len");
+        let v = results.iter().find(|r| r.func_name == "validate");
+        assert!(v.is_some(), "validate should be verified");
+        assert_eq!(v.unwrap().status, VerifStatus::Verified,
+            "len(s) > 0 should imply result > 0: {:?}", v.unwrap());
+    }

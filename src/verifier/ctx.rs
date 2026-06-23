@@ -36,6 +36,8 @@ pub(crate) struct Z3VarMap {
     pub(crate) int_vars: HashMap<String, Z3Int>,
     pub(crate) real_vars: HashMap<String, Z3Real>,
     pub(crate) string_nonempty: HashMap<String, Z3Bool>,
+    /// String length variables: s_len = Z3Int for each string param.
+    pub(crate) string_len: HashMap<String, Z3Int>,
 }
 
 impl Z3VarMap {
@@ -44,6 +46,7 @@ impl Z3VarMap {
             int_vars: HashMap::new(),
             real_vars: HashMap::new(),
             string_nonempty: HashMap::new(),
+            string_len: HashMap::new(),
         }
     }
 
@@ -59,6 +62,11 @@ impl Z3VarMap {
         self.string_nonempty.insert(name.into(), var);
     }
 
+    /// Register a length variable for a string parameter.
+    pub(crate) fn insert_string_len(&mut self, name: impl Into<String>, var: Z3Int) {
+        self.string_len.insert(name.into(), var);
+    }
+
     #[inline]
     pub(crate) fn get_int(&self, name: &str) -> Option<&Z3Int> {
         self.int_vars.get(name)
@@ -72,6 +80,11 @@ impl Z3VarMap {
     #[inline]
     pub(crate) fn get_string_nonempty(&self, name: &str) -> Option<&Z3Bool> {
         self.string_nonempty.get(name)
+    }
+
+    #[inline]
+    pub(crate) fn get_string_len(&self, name: &str) -> Option<&Z3Int> {
+        self.string_len.get(name)
     }
 
     #[inline]
