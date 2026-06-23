@@ -698,3 +698,40 @@ fn outgoing_calls_no_calls() {
     let calls = server.compute_outgoing_calls(text, "file:///test.mimi", "main");
     assert!(calls.is_empty(), "main should have no outgoing calls");
 }
+
+#[test]
+fn lsp_hover_func_with_contracts() {
+    let server = LspServer::new();
+    let text = "func add(x: i32, y: i32) -> i32 {\n    requires: x >= 0 && y >= 0\n    ensures: result == x + y\n    x + y\n}";
+    let result = server.compute_hover(text, 0, 6);
+    assert!(result.is_some(), "should hover over 'add'");
+    let hover = result.expect("src/tests/lsp_extended.rs: hover_func_contracts");
+    let contents = hover.get("contents").expect("contents key").get("value").expect("value key").as_str().expect("string").to_string();
+    assert!(contents.contains("requires:"), "hover should show requires: {}", contents);
+    assert!(contents.contains("ensures:"), "hover should show ensures: {}", contents);
+    assert!(contents.contains("x >= 0"), "hover should show requires body: {}", contents);
+    assert!(contents.contains("result == x + y"), "hover should show ensures body: {}", contents);
+}
+
+#[test]
+fn lsp_hover_func_no_contracts() {
+    let server = LspServer::new();
+    let text = "func simple(x: i32) -> i32 { x }";
+    let result = server.compute_hover(text, 0, 6);
+    assert!(result.is_some(), "should hover over 'simple'");
+    let hover = result.expect("src/tests/lsp_extended.rs: hover_func_no_contracts");
+    let contents = hover.get("contents").expect("contents key").get("value").expect("value key").as_str().expect("string").to_string();
+    assert!(contents.contains("simple"), "hover should mention func name: {}", contents);
+    assert!(!contents.contains("requires:"), "hover should not show requires: {}", contents);
+}
+
+#[test]
+fn lsp_hover_func_with_invariant() {
+    let server = LspServer::new();
+    let text = "func loop_counter(n: i32) -> i32 {\n    invariant: result >= 0\n    let mut i = 0\n    while i < n { i += 1 }\n    i\n}";
+    let result = server.compute_hover(text, 0, 6);
+    assert!(result.is_some(), "should hover over 'loop_counter'");
+    let hover = result.expect("src/tests/lsp_extended.rs: hover_func_invariant");
+    let contents = hover.get("contents").expect("contents key").get("value").expect("value key").as_str().expect("string").to_string();
+    assert!(contents.contains("invariant:"), "hover should show invariant: {}", contents);
+}

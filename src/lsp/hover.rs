@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ast::{Item, Type, TypeDefKind};
+use crate::ast::{BinOp, Expr, Item, Lit, Pattern, Stmt, Type, TypeDefKind, UnOp};
 use crate::lsp::LspServer;
 
 impl LspServer {
@@ -47,10 +47,24 @@ impl LspServer {
                             let g: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
                             format!("[{}]", g.join(", "))
                         };
+                        let mut detail = format!("**func** `{}{}({}){}`", word, generics, params.join(", "), ret);
+                        // Collect contracts from body
+                        let contracts: Vec<String> = f.body.iter().filter_map(|s| {
+                            match s {
+                                Stmt::Requires(e, _) => Some(format!("  requires: {}", Self::format_contract_expr(e))),
+                                Stmt::Ensures(e, _) => Some(format!("  ensures: {}", Self::format_contract_expr(e))),
+                                Stmt::Invariant(e, _) => Some(format!("  invariant: {}", Self::format_contract_expr(e))),
+                                _ => None,
+                            }
+                        }).collect();
+                        if !contracts.is_empty() {
+                            detail.push_str("\n\nContracts:\n");
+                            detail.push_str(&contracts.join("\n"));
+                        }
                         return Some(serde_json::json!({
                             "contents": {
                                 "kind": "markdown",
-                                "value": format!("**func** `{}{}({}){}`", word, generics, params.join(", "), ret)
+                                "value": detail
                             }
                         }));
                     }
@@ -231,6 +245,112 @@ impl LspServer {
         }
 
         None
+    }
+
+    /// Format a literal for contract display
+    fn format_lit(lit: &Lit) -> String {
+        match lit {
+            Lit::Int(n) => format!("{}", n),
+            Lit::Float(f) => format!("{}", f),
+            Lit::Bool(b) => format!("{}", b),
+            Lit::String(s) => format!("\"{}\"", s),
+            Lit::FString(_) => "f\"...\"".to_string(),
+            Lit::Unit => "()".to_string(),
+        }
+    }
+
+    /// Format a contract expression for human-readable hover display
+    fn format_contract_expr(expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(name) => name.clone(),
+            Expr::Literal(lit) => Self::format_lit(lit),
+            Expr::Binary(op, lhs, rhs) => {
+                let op_str = match op {
+                    BinOp::Add => " + ",
+                    BinOp::Sub => " - ",
+                    BinOp::Mul => " * ",
+                    BinOp::Div => " / ",
+                    BinOp::Mod => " % ",
+                    BinOp::EqCmp => " == ",
+                    BinOp::NeCmp => " != ",
+                    BinOp::Lt => " < ",
+                    BinOp::Gt => " > ",
+                    BinOp::Le => " <= ",
+                    BinOp::Ge => " >= ",
+                    BinOp::And => " && ",
+                    BinOp::Or => " || ",
+                    _ => " ?? ",
+                };
+                format!("{}{}{}", Self::format_contract_expr(lhs), op_str, Self::format_contract_expr(rhs))
+            }
+            Expr::Unary(UnOp::Not, inner) => format!("!{}", Self::format_contract_expr(inner)),
+            Expr::Unary(UnOp::Neg, inner) => format!("-{}", Self::format_contract_expr(inner)),
+            Expr::If { cond, then_, else_ } => {
+                let then_expr = then_.iter().filter_map(|s| {
+                    if let Stmt::Expr(e) = s { Some(Self::format_contract_expr(e)) } else { None }
+                }).collect::<Vec<_>>().join("; ");
+                let else_expr = else_.as_ref().and_then(|b| b.iter().filter_map(|s| {
+                    if let Stmt::Expr(e) = s { Some(Self::format_contract_expr(e)) } else { None }
+                }).collect::<Vec<_>>().join("; ").into());
+                if let Some(else_s) = else_expr {
+                    format!("if {} {{ {} }} else {{ {} }}", Self::format_contract_expr(cond), then_expr, else_s)
+                } else {
+                    format!("if {} {{ {} }}", Self::format_contract_expr(cond), then_expr)
+                }
+            }
+            Expr::Call(callee, args) => {
+                let callee_str = Self::format_contract_expr(callee);
+                let args_str: Vec<String> = args.iter().map(Self::format_contract_expr).collect();
+                format!("{}({})", callee_str, args_str.join(", "))
+            }
+            Expr::Field(obj, name) => format!("{}.{}", Self::format_contract_expr(obj), name),
+            Expr::Old(inner) => format!("old({})", Self::format_contract_expr(inner)),
+            Expr::Tuple(items) => format!("({})", items.iter().map(Self::format_contract_expr).collect::<Vec<_>>().join(", ")),
+            Expr::Block(stmts) => {
+                let tail: Vec<String> = stmts.iter().filter_map(|s| {
+                    match s {
+                        Stmt::Expr(e) => Some(Self::format_contract_expr(e)),
+                        Stmt::Return(Some(e)) => Some(format!("return {}", Self::format_contract_expr(e))),
+                        _ => None,
+                    }
+                }).collect();
+                tail.join("; ")
+            }
+            Expr::Match(expr, arms) => {
+                let arms_str: Vec<String> = arms.iter().map(|arm| {
+                    format!("{} => {}", Self::format_pat(&arm.pat), Self::format_contract_expr(&arm.body))
+                }).collect();
+                format!("match {} {{ {} }}", Self::format_contract_expr(expr), arms_str.join(", "))
+            }
+            _ => "…".to_string(),
+        }
+    }
+
+    fn format_pat(pat: &Pattern) -> String {
+        match pat {
+            Pattern::Wildcard => "_",
+            Pattern::Variable(name) => name.as_str(),
+            Pattern::Literal(lit) => return Self::format_lit(lit),
+            Pattern::Constructor(name, args) => {
+                let args_str: Vec<String> = args.iter().map(Self::format_pat).collect();
+                return format!("{}({})", name, args_str.join(", "));
+            }
+            Pattern::Tuple(pats) => {
+                return format!("({})", pats.iter().map(Self::format_pat).collect::<Vec<_>>().join(", "));
+            }
+            Pattern::Array(pats) => {
+                return format!("[{}]", pats.iter().map(Self::format_pat).collect::<Vec<_>>().join(", "));
+            }
+            Pattern::Slice(pats, rest) => {
+                let mut s: Vec<String> = pats.iter().map(Self::format_pat).collect();
+                if let Some(r) = rest {
+                    s.push(format!("..{}", Self::format_pat(r)));
+                } else {
+                    s.push("..".to_string());
+                }
+                return format!("[{}]", s.join(", "));
+            }
+        }.to_string()
     }
 
     /// Format a type for human-readable display
