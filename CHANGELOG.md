@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.17.0-dev
+## [Unreleased] — 0.18.0-dev
 
 ### Added
 - (none yet)
@@ -10,6 +10,24 @@
 
 ### Security
 - (none yet)
+
+## [0.17.0] - 2026-06-23
+
+### Added
+- CheckedGepBuilder 抽象：`self.gep().build_gep/build_in_bounds_gep/build_struct_gep`（278 处 GEP 调用全部经由此 API）
+- `build_in_bounds_gep`：52 个运行时索引 GEP 改用 inbounds，LLVM 自动插入 trap IR
+- `check_list_bounds`：list 索引操作（读/写）添加运行时边界断言，OOB 时调用 `mimi_runtime_abort`
+- Struct FFI struct-by-value codegen 修复（LLVM x86_64 ABI 对齐）
+
+### Fixed
+- 消除 62 处 `unsafe { build_gep(...) }` → 安全 API 调用
+- `builtins/list/helpers.rs` 中 4 处漏网的 `self.builder.build_struct_gep(` 迁移至 `self.gep()`
+- 剩余 `#[ignore]` 清理：FFI codegen tcp_* 解除 ignore
+
+### Security
+- Item 5: 安全 GEP 抽象消除 62 处 unsafe 指针算术
+- Rust 运行时审计：Valgrind (4×) + ASan (1×) 零警告
+- List 操作越界不再产生野指针（inbounds GEP + 运行时断言）
 
 ## [0.16.0] - 2026-06-23
 
