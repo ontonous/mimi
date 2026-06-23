@@ -630,10 +630,9 @@ func main() -> i32 {
     #[test]
     fn verify_func_call_silent() {
         require_z3!();
-        // Function call in ensures: the call result variable is unconstrained,
-        // so ensures may pass even if the body doesn't satisfy it.
-        // This test ensures the verifier at least processes the call without
-        // crashing and produces a deterministic result.
+        // The body returns 0 but ensures says result > 0 — must fail.
+        // Before P0.2, this test did not assert the status; now it checks
+        // that the contradiction is detected.
         let src = r#"
 func double(x: i32) -> i32 {
     ensures: result > 0
@@ -643,14 +642,43 @@ func main() -> i32 { 0 }
 "#;
         let results = verify_source(src).expect("src/verifier/tests.rs: verify_func_call_silent");
         let double_result = results.iter().find(|r| r.func_name == "double");
-        assert!(double_result.is_some(), "double function should be verified");
+        assert!(double_result.is_some(), "double function should be present");
+        assert_eq!(double_result.unwrap().status, VerifStatus::Failed,
+            "double body 0 contradicts ensures result > 0: {:?}", double_result.unwrap());
+    }
+
+    #[test]
+    fn verify_func_call_let_binding_propagation() {
+        require_z3!();
+        // P0.1: Call in a let-binding must propagate callee ensures.
+        // Before the fix, assert_callee_ensures_in_expr only scanned
+        // the tail expression; `let y = double(x); y` would not propagate.
+        let src = r#"
+func double(x: i32) -> i32 {
+    ensures: result == x * 2
+    x * 2
+}
+func wrap(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > 0
+    let y = double(x)
+    y
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: let_binding_propagation");
+        let wrap_result = results.iter().find(|r| r.func_name == "wrap");
+        assert!(wrap_result.is_some(), "wrap function should be present");
+        assert_eq!(wrap_result.unwrap().status, VerifStatus::Verified,
+            "wrap with let-binding should verify with ensures propagation: {:?}", wrap_result.unwrap());
     }
 
     #[test]
     fn verify_func_call_wrap_pass() {
         require_z3!();
         // wrap(x) calls double(x), ensures result > 0.
-        // The double call is now modeled as a Z3 variable (call_double_x).
+        // With ensures propagation, double(x) == x*2 is asserted so
+        // wrap's ensures result > 0 should be Verified when x > 0.
         let src = r#"
 func double(x: i32) -> i32 {
     ensures: result == x * 2
@@ -666,6 +694,8 @@ func main() -> i32 { 0 }
         let results = verify_source(src).expect("src/verifier/tests.rs: verify_func_call_wrap_pass");
         let wrap_result = results.iter().find(|r| r.func_name == "wrap");
         assert!(wrap_result.is_some(), "wrap function should be present");
+        assert_eq!(wrap_result.unwrap().status, VerifStatus::Verified,
+            "wrap with x>0, double(x)==x*2 should satisfy result>0: {:?}", wrap_result.unwrap());
     }
 
     #[test]

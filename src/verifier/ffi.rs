@@ -27,10 +27,11 @@ impl super::Verifier {
                 let mut vars = self.setup_ffi_func_vars(func);
                 self.assert_func_requires(func, &mut vars);
 
+                let caller_span = Span::single(func.pos.0, func.pos.1);
                 for (extern_name, args) in &calls {
                     if let Some(extern_func) = externs.get(extern_name.as_str()) {
                         let result = self.check_extern_call(
-                            &func.name, extern_func, args, &mut vars,
+                            &func.name, extern_func, args, &mut vars, caller_span,
                         );
                         results.push(result);
                     }
@@ -168,6 +169,7 @@ impl super::Verifier {
 
     fn check_extern_call(
         &mut self, caller_name: &str, extern_func: &ExternFunc, args: &[Expr], vars: &mut Z3VarMap,
+        caller_span: Span,
     ) -> VerificationResult {
         let start = Instant::now();
         let func_name = format!("{} calls {}", caller_name, extern_func.name);
@@ -225,10 +227,10 @@ impl super::Verifier {
                         "call to extern '{}' may violate precondition: {:?}",
                         extern_func.name, requires,
                     ),
-                    Span::single(0, 0),
+                    caller_span,
                 )
                 .with_help(format!(
-                    "check call site of '{}' (source location tracking for extern calls is not yet implemented)",
+                    "ensure all preconditions of '{}' are satisfied at call site",
                     extern_func.name,
                 ));
                 VerificationResult {

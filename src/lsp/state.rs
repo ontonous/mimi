@@ -84,10 +84,13 @@ impl LspServer {
     /// Returns verification errors/warnings as LSP diagnostics.
     /// Uses caching: if the function body hasn't changed, skips re-verification.
     /// Returns empty vec on timeout, parser failure, or when no function is at cursor.
+    /// `uri` is included in the cache key to avoid collisions between identically
+    /// named functions in different files (fixes P1.4).
     pub fn compute_verification_diagnostics(
         &mut self,
         text: &str,
         cursor_line: usize,
+        uri: &str,
     ) -> Vec<Value> {
         let mut diagnostics = Vec::new();
 
@@ -119,7 +122,9 @@ impl LspServer {
 
         // Compute body hash for caching
         let body_hash = hash_func_body(text, func);
-        let cache_key = func.name.clone();
+        // Include URI in cache key to prevent collisions between identically
+        // named functions in different files.
+        let cache_key = format!("{}:{}", uri, func.name);
 
         // Check cache
         if let Some((cached_hash, ref status, ref msg)) = self.verification_cache.get(&cache_key) {

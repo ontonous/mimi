@@ -1,4 +1,4 @@
-use crate::ast::File;
+use crate::ast::{Expr, File};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
@@ -115,6 +115,11 @@ pub struct Verifier {
     /// Function definitions indexed by name, collected from the merged file.
     /// Used by cross-module verification to look up callee ensures.
     pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
+    /// Mapping from let-variable names to their init expressions.
+    /// Populated during verify_func to enable substitution of local variables
+    /// when encoding body-return expressions. Fixes P0.1 for let-binding calls:
+    /// `let y = double(x); y` now correctly resolves `y` to `double(x)`.
+    pub(crate) let_subst: HashMap<String, Expr>,
 }
 
 impl Verifier {
@@ -128,7 +133,7 @@ impl Verifier {
         let mut params = z3::Params::new();
         params.set_u32("timeout", timeout_ms as u32);
         solver.set_params(&params);
-        Ok(Self { solver, timeout_ms, func_defs: HashMap::new() })
+        Ok(Self { solver, timeout_ms, func_defs: HashMap::new(), let_subst: HashMap::new() })
     }
 
     /// Check satisfiability with timeout and crash protection.

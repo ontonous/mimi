@@ -119,7 +119,7 @@ pub(crate) fn handle_message(
                 .as_str()?;
             server.cache_put(uri.to_string(), text.to_string());
             let mut diagnostics = server.compute_diagnostics(text);
-            let verif_diags = server.compute_verification_diagnostics(text, server.last_cursor_line);
+            let verif_diags = server.compute_verification_diagnostics(text, server.last_cursor_line, uri);
             diagnostics.extend(verif_diags);
             Some(serde_json::json!({
                 "jsonrpc": "2.0",

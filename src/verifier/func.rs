@@ -6,6 +6,7 @@ use crate::verifier::ctx::{Counterexample, VerificationResult, VerifStatus, Z3Va
 use crate::verifier::helpers::{
     collect_idents_in_stmt, extract_body_return, format_expr, parse_contract_expr,
 };
+use std::collections::HashMap;
 use std::time::Instant;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
@@ -184,6 +185,7 @@ impl crate::verifier::Verifier {
         let mut requires_spans: Vec<Span> = Vec::new();
         let mut ensures_spans: Vec<Span> = Vec::new();
         let mut invariant_spans: Vec<Span> = Vec::new();
+        let mut parse_errors: Vec<String> = Vec::new();
 
         for stmt in &func.body {
             match stmt {
@@ -210,21 +212,24 @@ impl crate::verifier::Verifier {
                         requires_spans.push(*mms_span);
                     }
                     for req_text in &contract.requires {
-                        if let Ok(expr) = parse_contract_expr(req_text) {
-                            requires_exprs.push(expr);
+                        match parse_contract_expr(req_text) {
+                            Ok(expr) => requires_exprs.push(expr),
+                            Err(e) => parse_errors.push(format!("requires parse error: {}", e)),
                         }
                     }
                     for _ in &contract.ensures {
                         ensures_spans.push(*mms_span);
                     }
                     for ens_text in &contract.ensures {
-                        if let Ok(expr) = parse_contract_expr(ens_text) {
-                            ensures_exprs.push(expr);
+                        match parse_contract_expr(ens_text) {
+                            Ok(expr) => ensures_exprs.push(expr),
+                            Err(e) => parse_errors.push(format!("ensures parse error: {}", e)),
                         }
                     }
                     for math_text in &contract.math {
-                        if let Ok(expr) = parse_contract_expr(math_text) {
-                            math_exprs.push(expr);
+                        match parse_contract_expr(math_text) {
+                            Ok(expr) => math_exprs.push(expr),
+                            Err(e) => parse_errors.push(format!("math parse error: {}", e)),
                         }
                     }
                 }
@@ -233,10 +238,15 @@ impl crate::verifier::Verifier {
         }
 
         if requires_exprs.is_empty() && ensures_exprs.is_empty() && math_exprs.is_empty() {
+            let msg = if parse_errors.is_empty() {
+                "no contracts to verify".into()
+            } else {
+                format!("contract parse errors: {}", parse_errors.join("; "))
+            };
             return VerificationResult {
                 func_name: func.name.clone(),
                 status: VerifStatus::Unknown,
-                message: "no contracts to verify".into(),
+                message: msg,
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count: 0,
@@ -298,6 +308,14 @@ impl crate::verifier::Verifier {
         }
 
         let body_return = extract_body_return(&func.body);
+
+        // Build let-substitution map so that `let y = double(x); y` resolves
+        // `y` to `double(x)` for encoding purposes.
+        let let_subst = self.build_let_subst(&func.body);
+
+        // Expand let-variables in the body return expression to expose
+        // function calls that would otherwise be hidden behind local names.
+        let body_return = body_return.map(|expr| Self::expand_lets_in_expr(&expr, &let_subst));
 
         for req in &requires_exprs {
             if let Some(z3_bool) = self.expr_to_z3_bool(req, &mut vars) {
@@ -365,9 +383,14 @@ impl crate::verifier::Verifier {
         // 1.2: Cross-module ensures propagation — for each function call in
         // the body, assert the callee's ensures as constraints on the call
         // variable. This allows the verifier to reason across function calls.
+        // Scans the tail expression AND all body statements so that calls in
+        // let/assign/if blocks are also propagated. Fixes P0.1: ensures from
+        // calls in non-tail positions (e.g. `let y = double(x); y`) are now
+        // propagated to the solver.
         if let Some(ref return_expr) = body_return {
             self.assert_callee_ensures_in_expr(return_expr, &mut vars);
         }
+        self.assert_callee_ensures_in_block(&func.body, &mut vars);
 
         let num_real_params = func
             .params
@@ -380,6 +403,24 @@ impl crate::verifier::Verifier {
             + func.params.len() // old_* equality constraints (int)
             + num_real_params // old_* equality constraints (real)
             + if body_return.is_some() { 1 } else { 0 };
+
+        let annotate_parse_errors = |diag: Option<Diagnostic>| -> Option<Diagnostic> {
+            if !parse_errors.is_empty() {
+                let mut d = diag.unwrap_or_else(|| {
+                    Diagnostic::error(
+                        format!("contract parse errors in '{}'", func.name),
+                        Span::single(func.pos.0, func.pos.1),
+                    )
+                });
+                d = d.with_note(
+                    format!("contract parse errors: {}", parse_errors.join("; ")),
+                    Span::single(func.pos.0, func.pos.1),
+                );
+                Some(d)
+            } else {
+                diag
+            }
+        };
 
         match self.check_safe() {
             SatResult::Sat => {
@@ -397,7 +438,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Verified,
                                 message: "postconditions verified".into(),
-                                diagnostic: None,
+                                diagnostic: annotate_parse_errors(None),
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
@@ -419,7 +460,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Failed,
                                 message: diagnostic.message.clone(),
-                                diagnostic: Some(diagnostic),
+                                diagnostic: annotate_parse_errors(Some(diagnostic)),
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
@@ -430,7 +471,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Unknown,
                                 message: "verification inconclusive".into(),
-                                diagnostic: None,
+                                diagnostic: annotate_parse_errors(None),
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
@@ -441,7 +482,7 @@ impl crate::verifier::Verifier {
                         func_name: func.name.clone(),
                         status: VerifStatus::Verified,
                         message: "preconditions satisfiable, no postconditions".into(),
-                        diagnostic: None,
+                        diagnostic: annotate_parse_errors(None),
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count,
                     }
@@ -461,18 +502,20 @@ impl crate::verifier::Verifier {
                     func_name: func.name.clone(),
                     status: VerifStatus::Failed,
                     message: "preconditions are unsatisfiable".into(),
-                    diagnostic: Some(diagnostic),
+                    diagnostic: annotate_parse_errors(Some(diagnostic)),
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
                 }
             }
-            SatResult::Unknown => VerificationResult {
-                func_name: func.name.clone(),
-                status: VerifStatus::Unknown,
-                message: "precondition satisfiability unknown".into(),
-                diagnostic: None,
-                duration_us: start.elapsed().as_micros() as u64,
-                constraint_count,
+            SatResult::Unknown => {
+                VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::Unknown,
+                    message: "precondition satisfiability unknown".into(),
+                    diagnostic: annotate_parse_errors(None),
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                }
             },
         }
     }
@@ -1021,6 +1064,149 @@ impl crate::verifier::Verifier {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Walk function body statements looking for `Expr::Call` nodes and
+    /// propagate callee ensures. This complements `assert_callee_ensures_in_expr`
+    /// which only walks the tail expression tree. Together they ensure that
+    /// calls in let-bindings, assignments, if-branches, etc. are also covered.
+    fn assert_callee_ensures_in_block(&mut self, stmts: &[Stmt], vars: &mut Z3VarMap) {
+        for stmt in stmts {
+            self.assert_callee_ensures_in_stmt(stmt, vars);
+        }
+    }
+
+    fn assert_callee_ensures_in_stmt(&mut self, stmt: &Stmt, vars: &mut Z3VarMap) {
+        match stmt {
+            Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                self.assert_callee_ensures_in_expr(e, vars);
+            }
+            Stmt::Let { init: Some(init), .. } | Stmt::Assign { value: init, .. } => {
+                self.assert_callee_ensures_in_expr(init, vars);
+            }
+            Stmt::SharedLet { init, .. } => {
+                self.assert_callee_ensures_in_expr(init, vars);
+            }
+            Stmt::If { cond, then_, else_ } => {
+                self.assert_callee_ensures_in_expr(cond, vars);
+                self.assert_callee_ensures_in_block(then_, vars);
+                if let Some(else_block) = else_ {
+                    self.assert_callee_ensures_in_block(else_block, vars);
+                }
+            }
+            Stmt::While { cond, body, .. } | Stmt::For { iterable: cond, body, .. } => {
+                self.assert_callee_ensures_in_expr(cond, vars);
+                self.assert_callee_ensures_in_block(body, vars);
+            }
+            Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::Parasteps(body) => {
+                self.assert_callee_ensures_in_block(body, vars);
+            }
+            Stmt::Alloc { body, .. } => {
+                self.assert_callee_ensures_in_block(body, vars);
+            }
+            _ => {}
+        }
+    }
+
+    /// Build a mapping from let-variable names to their init expressions.
+    /// Used to expand `let y = double(x); y` into `double(x)` so that the
+    /// verifier can see the function call in the tail expression.
+    fn build_let_subst(&self, stmts: &[Stmt]) -> HashMap<String, Expr> {
+        let mut subst = HashMap::new();
+        Self::build_let_subst_in_block(stmts, &mut subst);
+        subst
+    }
+
+    fn build_let_subst_in_block(stmts: &[Stmt], subst: &mut HashMap<String, Expr>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { pat, init: Some(init), .. } => {
+                    if let Pattern::Variable(name) = pat {
+                        let init_expr: &Expr = init;
+                        subst.insert(name.clone(), init_expr.clone());
+                    }
+                }
+                Stmt::Block(body)
+                | Stmt::Arena(body)
+                | Stmt::Unsafe(body)
+                | Stmt::Parasteps(body) => {
+                    Self::build_let_subst_in_block(body, subst);
+                }
+                Stmt::If { then_, else_, .. } => {
+                    Self::build_let_subst_in_block(then_, subst);
+                    if let Some(else_block) = else_ {
+                        Self::build_let_subst_in_block(else_block, subst);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Recursively expand let-variables in an expression using the substitution map.
+    fn expand_lets_in_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
+        match expr {
+            Expr::Ident(name) => {
+                if let Some(replacement) = subst.get(name) {
+                    Self::expand_lets_in_expr(replacement, subst)
+                } else {
+                    expr.clone()
+                }
+            }
+            Expr::Binary(op, lhs, rhs) => {
+                Expr::Binary(*op,
+                    Box::new(Self::expand_lets_in_expr(lhs, subst)),
+                    Box::new(Self::expand_lets_in_expr(rhs, subst)),
+                )
+            }
+            Expr::Unary(op, inner) => {
+                Expr::Unary(*op, Box::new(Self::expand_lets_in_expr(inner, subst)))
+            }
+            Expr::Call(callee, args) => {
+                Expr::Call(
+                    Box::new(Self::expand_lets_in_expr(callee, subst)),
+                    args.iter().map(|a| Self::expand_lets_in_expr(a, subst)).collect(),
+                )
+            }
+            Expr::Field(obj, name) => {
+                Expr::Field(Box::new(Self::expand_lets_in_expr(obj, subst)), name.clone())
+            }
+            Expr::Old(inner) => {
+                Expr::Old(Box::new(Self::expand_lets_in_expr(inner, subst)))
+            }
+            Expr::Block(block) => {
+                Expr::Block(block.iter().map(|s| Self::expand_lets_in_stmt(s, subst)).collect())
+            }
+            Expr::If { cond, then_, else_ } => {
+                Expr::If {
+                    cond: Box::new(Self::expand_lets_in_expr(cond, subst)),
+                    then_: then_.iter().map(|s| Self::expand_lets_in_stmt(s, subst)).collect(),
+                    else_: else_.as_ref().map(|b| b.iter().map(|s| Self::expand_lets_in_stmt(s, subst)).collect()),
+                }
+            }
+            Expr::Match(scrutinee, arms) => {
+                Expr::Match(
+                    Box::new(Self::expand_lets_in_expr(scrutinee, subst)),
+                    arms.iter().map(|arm| crate::ast::MatchArm {
+                        pat: arm.pat.clone(),
+                        guard: arm.guard.as_ref().map(|g| Self::expand_lets_in_expr(g, subst)),
+                        body: Self::expand_lets_in_expr(&arm.body, subst),
+                    }).collect(),
+                )
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    fn expand_lets_in_stmt(stmt: &Stmt, subst: &HashMap<String, Expr>) -> Stmt {
+        match stmt {
+            Stmt::Expr(e) => Stmt::Expr(Self::expand_lets_in_expr(e, subst)),
+            Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| Self::expand_lets_in_expr(e, subst))),
+            _ => stmt.clone(),
         }
     }
 
