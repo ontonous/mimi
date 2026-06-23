@@ -20,6 +20,24 @@ impl LspServer {
         self.documents.insert(uri, text);
     }
 
+    /// Insert into verification cache with LRU eviction.
+    pub(crate) fn cache_put_verification(
+        &mut self,
+        key: String,
+        value: (u64, VerifStatus, String),
+    ) {
+        self.cache_access_order.retain(|k| *k != key);
+        self.cache_access_order.push_back(key.clone());
+        while self.cache_access_order.len() > crate::lsp::MAX_VERIFICATION_CACHE {
+            if let Some(lru) = self.cache_access_order.pop_front() {
+                self.verification_cache.remove(&lru);
+            } else {
+                break;
+            }
+        }
+        self.verification_cache.insert(key, value);
+    }
+
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
         self.documents.remove(uri);
@@ -142,8 +160,8 @@ impl LspServer {
             if result.func_name != func.name {
                 continue;
             }
-            // Update cache
-            self.verification_cache.insert(
+            // Update cache (with LRU eviction)
+            self.cache_put_verification(
                 cache_key.clone(),
                 (body_hash, result.status.clone(), result.message.clone()),
             );

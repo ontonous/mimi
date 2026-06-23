@@ -24,6 +24,9 @@ pub(crate) mod util;
 
 const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024; // 16MB
 const MAX_DOCUMENTS: usize = 256;
+/// Maximum number of verification cache entries before LRU eviction.
+/// Prevents unbounded memory growth in long-running LSP sessions.
+pub(crate) const MAX_VERIFICATION_CACHE: usize = 4096;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheEntry {
@@ -45,6 +48,8 @@ pub struct LspServer {
     workspace_root: Option<PathBuf>,
     last_cursor_line: usize,
     verification_cache: HashMap<String, (u64, VerifStatus, String)>,
+    /// LRU tracking for verification cache eviction.
+    cache_access_order: VecDeque<String>,
     verifier: Option<Verifier>,
     cache_path: Option<PathBuf>,
 }
@@ -57,6 +62,7 @@ impl LspServer {
             workspace_root: None,
             last_cursor_line: 0,
             verification_cache: HashMap::new(),
+            cache_access_order: VecDeque::new(),
             verifier: None,
             cache_path: None,
         }
