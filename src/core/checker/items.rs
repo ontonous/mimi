@@ -92,8 +92,15 @@ impl<'a> Checker<'a> {
                         (where_clause.type_param.clone(), where_clause.bounds.clone()),
                     );
                 }
-                // Store effects if present
+                // Store effects if present and validate against declared caps
                 if !f.effects.is_empty() {
+                    for effect in &f.effects {
+                        if !self.declared_caps.contains(effect) {
+                            self.emit_code(crate::diagnostic::codes::E0254,
+                                format!("effect '{}' in function '{}' is not a declared capability. Declare it with `cap {};`",
+                                    effect, f.name, effect));
+                        }
+                    }
                     self.func_effects.insert(qualified_name, f.effects.clone());
                 }
             }
@@ -202,7 +209,12 @@ impl<'a> Checker<'a> {
                     self.funcs.insert(method.name.clone(), (params, ret));
                 }
             }
-            Item::Cap(_) => {}
+            Item::Cap(c) => {
+                if !self.declared_caps.insert(c.name.clone()) {
+                    self.emit_code(crate::diagnostic::codes::E0402,
+                        format!("duplicate capability declaration '{}'", c.name));
+                }
+            }
             Item::Trait(trait_def) => {
                 let method_names: Vec<String> = trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits.insert(trait_def.name.clone(), method_names.clone());

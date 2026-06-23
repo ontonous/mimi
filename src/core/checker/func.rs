@@ -49,6 +49,12 @@ impl<'a> Checker<'a> {
             // Comptime functions can only use pure expressions (no side effects)
             // For now, just type-check the body normally
         }
+        // Make function's own effects available in its body
+        let mut effects_scope = HashMap::new();
+        for effect in &func.effects {
+            effects_scope.insert(effect.clone(), true);
+        }
+        self.available_effects.push(effects_scope);
         // Check all-return-paths requirement
         if !matches!(&ret, Type::Name(n, _) if n == "unit") && !self.block_returns_on_all_paths(&func.body) {
             self.errors.push(
@@ -62,6 +68,7 @@ impl<'a> Checker<'a> {
         self.check_block(&func.body, &ret, &mut scopes);
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
+        self.available_effects.pop();
         self.var_scopes.pop();
         self.cap_vars.pop();
     }

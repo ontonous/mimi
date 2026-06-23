@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use super::borrow::BorrowState;
 
@@ -30,6 +31,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) func_effects: HashMap<String, Vec<String>>,
     /// Track available effects in current scope
     pub(crate) available_effects: Vec<HashMap<String, bool>>,
+    /// Track declared capability names for cross-validation of `with` clauses
+    pub(crate) declared_caps: HashSet<String>,
     /// Strict mode: enforce $$ lock semantics
     pub(crate) strict: bool,
     /// Track variable scopes for shadowing detection
@@ -77,6 +80,7 @@ impl<'a> Checker<'a> {
             where_clauses: HashMap::new(),
             func_effects: HashMap::new(),
             available_effects: vec![HashMap::new()],
+            declared_caps: HashSet::new(),
             strict: false,
             var_scopes: vec![HashMap::new()],
             mut_vars: vec![HashMap::new()],
