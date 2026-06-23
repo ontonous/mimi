@@ -1,12 +1,13 @@
 use serde_json::Value;
 
-use crate::ast::Item;
+use crate::ast::{Item, Stmt};
 use crate::lsp::symbols::count_text_references;
 use crate::lsp::LspServer;
+use crate::verifier::VerifStatus;
 
 impl LspServer {
-    /// Compute code lenses for a document: reference counts
-    pub fn compute_code_lens(&self, text: &str, _uri: &str) -> Vec<Value> {
+    /// Compute code lenses for a document: reference counts and verification status
+    pub fn compute_code_lens(&self, text: &str, uri: &str) -> Vec<Value> {
         let mut lenses = Vec::new();
         let file = match self.parse_with_recovery(text) {
             Some(f) => f,
@@ -20,6 +21,33 @@ impl LspServer {
                         .position(|l| l.contains(&format!("func {}", f.name)))
                         .unwrap_or(0);
                     lenses.push(code_lens_value(def_line, count_text_references(text, &f.name)));
+
+                    // Add verification status lens if function has contracts
+                    let has_contracts = f.body.iter().any(|s| matches!(s,
+                        Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _)
+                    ));
+                    if has_contracts {
+                        let cache_key = format!("{}:{}", uri, f.name);
+                        let verify_title = if let Some((_, status, msg)) = self.verification_cache.get(&cache_key) {
+                            match status {
+                                VerifStatus::Verified => format!("✓ {}", msg),
+                                VerifStatus::Failed => format!("✗ {}", msg),
+                                VerifStatus::Unknown => format!("? {}", msg),
+                            }
+                        } else {
+                            "verify".to_string()
+                        };
+                        lenses.push(serde_json::json!({
+                            "range": {
+                                "start": { "line": def_line, "character": 0 },
+                                "end": { "line": def_line, "character": 0 }
+                            },
+                            "command": {
+                                "title": verify_title,
+                                "command": ""
+                            }
+                        }));
+                    }
                 }
                 Item::Type(t) => {
                     let def_line = text

@@ -74,6 +74,18 @@ impl LspServer {
             .map(|root| root.join(".mimi").join("verify_cache.json"))
     }
 
+    /// Insert a verification result into the cache. Used by tests.
+    #[cfg(test)]
+    pub(crate) fn insert_verification_cache(
+        &mut self,
+        key: String,
+        body_hash: u64,
+        status: VerifStatus,
+        message: String,
+    ) {
+        self.verification_cache.insert(key, (body_hash, status, message));
+    }
+
     pub(crate) fn load_cache(&mut self) {
         let path = self.cache_file_path();
         self.cache_path = path.clone();

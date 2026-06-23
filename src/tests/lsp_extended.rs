@@ -735,3 +735,57 @@ fn lsp_hover_func_with_invariant() {
     let contents = hover.get("contents").expect("contents key").get("value").expect("value key").as_str().expect("string").to_string();
     assert!(contents.contains("invariant:"), "hover should show invariant: {}", contents);
 }
+
+#[test]
+fn lsp_code_lens_verify_status_no_contracts() {
+    let server = LspServer::new();
+    let text = "func main() -> i32 { 42 }";
+    let lenses = server.compute_code_lens(text, "file:///test.mimi");
+    // Should have 1 lens for reference count, no verify lens
+    assert_eq!(lenses.len(), 1, "no-contract func should have 1 lens (ref count): {:?}", lenses);
+    let title = lenses[0]["command"]["title"].as_str().expect("title");
+    assert!(title.contains("reference"), "title should mention references: {}", title);
+}
+
+#[test]
+fn lsp_code_lens_verify_status_with_contracts() {
+    let server = LspServer::new();
+    let text = "func add(x: i32, y: i32) -> i32 {\n    requires: x >= 0 && y >= 0\n    ensures: result == x + y\n    x + y\n}";
+    let lenses = server.compute_code_lens(text, "file:///test.mimi");
+    // Should have ref count lens + verify lens
+    assert!(lenses.len() >= 2, "contract func should have at least 2 lenses: {:?}", lenses);
+    let titles: Vec<&str> = lenses.iter()
+        .filter_map(|l| l["command"]["title"].as_str())
+        .collect();
+    assert!(titles.iter().any(|t| t.contains(&"reference")), "should have ref lens: {:?}", titles);
+    assert!(titles.iter().any(|t| t.contains(&"verify") || t.contains("✓") || t.contains("✗") || t.contains("?")),
+        "should have verify lens: {:?}", titles);
+}
+
+#[test]
+fn lsp_code_lens_verify_status_with_cache() {
+    // Only run if Z3 is available
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    let mut server = LspServer::new();
+    // Directly populate the verification cache
+    let uri = "file:///test.mimi";
+    server.insert_verification_cache(
+        format!("{}:add", uri),
+        0u64,
+        crate::verifier::VerifStatus::Verified,
+        "postconditions verified".to_string(),
+    );
+    let text = "func add(x: i32, y: i32) -> i32 {\n    requires: x >= 0 && y >= 0\n    ensures: result == x + y\n    x + y\n}";
+    // Check lenses — should show ✓ (Verified) status
+    let lenses = server.compute_code_lens(text, uri);
+    let titles: Vec<&str> = lenses.iter()
+        .filter_map(|l| l["command"]["title"].as_str())
+        .collect();
+    assert!(titles.iter().any(|t| t.contains("✓")),
+        "verified func should show ✓ in lens: {:?}", titles);
+    assert!(titles.iter().any(|t| t.contains("postconditions verified")),
+        "lens should show verification message: {:?}", titles);
+}
