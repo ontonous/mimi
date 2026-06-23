@@ -53,6 +53,14 @@ impl crate::verifier::Verifier {
                     .and_then(|e| self.expr_to_z3_int(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
             }
+            Expr::Call(callee, call_args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    let call_key = self.call_var_key(name, call_args);
+                    Some(vars.get_or_create_int(&call_key))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -158,6 +166,18 @@ impl crate::verifier::Verifier {
                     .and_then(|b| block_tail_expr(b))
                     .and_then(|e| self.expr_to_z3_real(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
+            }
+            Expr::Call(callee, call_args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    let call_key = self.call_var_key(name, call_args);
+                    if let Some(v) = vars.get_real(&call_key) {
+                        Some(v.clone())
+                    } else {
+                        Some(vars.get_or_create_real(&call_key))
+                    }
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -309,6 +329,19 @@ impl crate::verifier::Verifier {
                     .and_then(|e| self.expr_to_z3_bool(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
             }
+            Expr::Call(callee, call_args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    let call_key = self.call_var_key(name, call_args);
+                    if let Some(v) = vars.get_int(&call_key) {
+                        Some(v.ne(&Z3Int::from_i64(0)))
+                    } else {
+                        let fresh = vars.get_or_create_int(&call_key);
+                        Some(fresh.ne(&Z3Int::from_i64(0)))
+                    }
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -339,7 +372,26 @@ impl crate::verifier::Verifier {
                 self.is_real_expr(lhs, vars) || self.is_real_expr(rhs, vars)
             }
             Expr::Unary(_, inner) => self.is_real_expr(inner, vars),
+            Expr::Call(callee, args) => {
+                if let Expr::Ident(_) = callee.as_ref() {
+                    args.iter().any(|a| self.is_real_expr(a, vars))
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
+    }
+
+    /// Build a deterministic Z3 variable key for a function call expression.
+    /// Uses the function name and field-var-name of each argument to create
+    /// a unique key, so the same call with the same args maps to the same
+    /// Z3 variable (functional consistency within a provedure).
+    fn call_var_key(&self, name: &str, args: &[Expr]) -> String {
+        let mut parts = vec![format!("call_{}", name)];
+        for a in args {
+            parts.push(self.field_var_name(a));
+        }
+        parts.join("_")
     }
 }
