@@ -2223,7 +2223,7 @@ fn dual_regex_replace_no_match() {
 }
 
 // ==================== FFI Struct-by-Value Dual Tests ====================
-// Requires: cc compiler, linker, and mimi_runtime.c compiled as .so
+// Requires: rustc compiler, cc linker, and standalone.rs compiled as .so
 
 #[test]
 #[ignore = "codegen gap: struct-by-value extern params broken (LLVM ABI mismatch)"]
@@ -2234,7 +2234,7 @@ fn dual_ffi_reprc_struct() {
     // Build the shared library containing test_struct_by_val
     let so_path = build_interp_ffi_so().expect("dual_ffi_reprc_struct: build so failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    // Codegen links test_struct_by_val statically from mimi_runtime.c;
+    // Codegen links test_struct_by_val from the Rust runtime;
     // interpreter loads it from .so via MIMI_FFI_LIB.
     let src = r#"
         #[repr(C)]

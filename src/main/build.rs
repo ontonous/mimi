@@ -161,24 +161,32 @@ pub(crate) fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, s
     // Determine the C compiler/linker to use (cross-compiler or native)
     let cc_cmd = target_linker(target).unwrap_or_else(|| "cc".to_string());
 
-    // Compile and link C runtime
+    // Compile and link Rust runtime
     let obj_path = output_path.with_extension("o");
-    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
-    let runtime_o = output_path.parent().unwrap_or(std::path::Path::new(".")).join("mimi_runtime.o");
-    let mut rt_cmd = std::process::Command::new(&cc_cmd);
-    if no_std {
-        rt_cmd.arg("-DMIMI_NO_STD");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runtime_rs = manifest_dir.join("src/runtime/standalone.rs");
+    let runtime_lib = output_path.parent().unwrap_or(std::path::Path::new(".")).join("libmimi_runtime.a");
+
+    // Compile the standalone runtime with rustc
+    let mut rt_cmd = std::process::Command::new("rustc");
+    rt_cmd.arg("--edition").arg("2021");
+    rt_cmd.arg("--crate-type").arg("staticlib");
+    rt_cmd.arg("--cfg").arg("standalone");
+    rt_cmd.arg("--crate-name").arg("mimi_runtime");
+    if let Some(triple) = target {
+        rt_cmd.arg("--target").arg(triple);
     }
     if shared {
-        rt_cmd.arg("-fPIC");
+        rt_cmd.arg("-C").arg("relocation-model=pic");
     }
+    rt_cmd.arg("-o").arg(&runtime_lib);
+    rt_cmd.arg(&runtime_rs);
     let rt_status = rt_cmd
-        .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
         .status()
-        .map_err(|e| format!("runtime compile: {}", e))?;
+        .map_err(|e| format!("runtime compile (rustc): {}", e))?;
     if !rt_status.success() {
         let _ = std::fs::remove_file(&obj_path);
-        return Err("C runtime compilation failed".into());
+        return Err("Rust runtime compilation failed".into());
     }
 
     // Link with cc to create executable or shared library
@@ -197,17 +205,21 @@ pub(crate) fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, s
     for flag in target_linker_flags(target) {
         cmd.arg(flag);
     }
+    // Link stdlib dependencies when not building no_std
+    if !no_std {
+        cmd.arg("-lpthread").arg("-ldl").arg("-lm");
+    }
     let status = cmd
         .arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
-        .arg(runtime_o.to_str().ok_or("runtime object path is not valid UTF-8")?)
+        .arg(runtime_lib.to_str().ok_or("runtime library path is not valid UTF-8")?)
         .arg("-o")
         .arg(output_path.to_str().ok_or("output path is not valid UTF-8")?)
         .status()
         .map_err(|e| format!("failed to run linker: {}", e))?;
 
-    // Cleanup object files
+    // Cleanup intermediate files
     let _ = std::fs::remove_file(&obj_path);
-    let _ = std::fs::remove_file(&runtime_o);
+    let _ = std::fs::remove_file(&runtime_lib);
 
     if status.success() {
         let kind = if shared { "shared library" } else { "executable" };

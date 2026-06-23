@@ -125,26 +125,48 @@ impl Drop for FfiEnvLock {
     }
 }
 
-/// Compile `mimi_runtime.c` into a shared library for interpreter FFI tests.
-/// Returns the path to the compiled `.so`.
+/// Compile the Rust runtime into a static library for interpreter FFI tests.
+/// Returns the path to the compiled `.a`.
 /// The caller MUST hold `FfiEnvLock` before calling this and setting `MIMI_FFI_LIB`.
 pub(crate) fn build_interp_ffi_so() -> Result<std::path::PathBuf, String> {
     use std::process::Command;
-    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
+    let runtime_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
     let tmp_dir = std::env::temp_dir().join(format!("mimi_ffi_so_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
+    let obj_path = tmp_dir.join("mimi_runtime_test.o");
+    let lib_path = tmp_dir.join("libmimi_runtime_test.a");
+    let status = Command::new("rustc")
+        .arg("--edition").arg("2021")
+        .arg("--crate-type").arg("staticlib")
+        .arg("--cfg").arg("standalone")
+        .arg("--crate-name").arg("mimi_runtime_test")
+        .arg("-C").arg("relocation-model=pic")
+        .arg("-o")
+        .arg(&lib_path)
+        .arg(&runtime_rs)
+        .status()
+        .map_err(|e| format!("rustc not found: {}", e))?;
+    if !status.success() {
+        return Err(format!("failed to compile test .a, exit code: {:?}", status.code()));
+    }
+
+    // Now link into a .so with cc (use --whole-archive to force all symbols from .a)
     let so_path = tmp_dir.join("mimi_runtime_test.so");
     let status = Command::new("cc")
         .arg("-shared")
         .arg("-fPIC")
         .arg("-o")
         .arg(&so_path)
-        .arg(&runtime_c)
+        .arg("-Wl,--whole-archive")
+        .arg(&lib_path)
+        .arg("-Wl,--no-whole-archive")
+        .arg("-lpthread").arg("-ldl").arg("-lm")
         .status()
         .map_err(|e| format!("cc not found: {}", e))?;
     if !status.success() {
-        return Err(format!("failed to compile test .so, exit code: {:?}", status.code()));
+        return Err(format!("failed to link test .so, exit code: {:?}", status.code()));
     }
+
     Ok(so_path)
 }
 
@@ -258,25 +280,25 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
 
     codegen.compile_to_object(&obj_path).map_err(|e| e.to_string())?;
 
-    // Compile the C runtime
-    let runtime_c = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
-    let runtime_o = tmp_dir.join("mimi_runtime.o");
-    let mut cc_compile = Command::new("cc");
-    cc_compile.arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o);
-    if config.use_asan {
-        cc_compile.arg("-fsanitize=address");
-    }
-    if config.use_ubsan {
-        cc_compile.arg("-fsanitize=undefined").arg("-fno-sanitize-recover=all");
-    }
-    let rt_status = cc_compile.status()
-        .map_err(|e| format!("runtime compile: {}", e))?;
+    // Compile the Rust runtime as a static library
+    let runtime_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
+    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
+    let mut rt_cmd = Command::new("rustc");
+    rt_cmd.arg("--edition").arg("2021");
+    rt_cmd.arg("--crate-type").arg("staticlib");
+    rt_cmd.arg("--cfg").arg("standalone");
+    rt_cmd.arg("--crate-name").arg("mimi_runtime");
+    let rt_status = rt_cmd
+        .arg("-o").arg(&runtime_lib)
+        .arg(&runtime_rs)
+        .status()
+        .map_err(|e| format!("runtime compile (rustc): {}", e))?;
     if !rt_status.success() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(format!("runtime compile failed with exit code {:?}", rt_status.code()));
     }
 
-    let mut object_files = vec![runtime_o.clone(), obj_path.clone()];
+    let mut object_files = vec![obj_path.clone(), runtime_lib.clone()];
 
     // Compile extra C source if provided
     if let Some(extra_c) = &config.extra_c_src {
@@ -306,6 +328,8 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
         cc_link.arg(obj);
     }
     cc_link.arg("-o").arg(&bin_path);
+    // Link system libraries needed by the Rust standard library
+    cc_link.arg("-lpthread").arg("-ldl").arg("-lm");
     if config.use_asan {
         cc_link.arg("-fsanitize=address");
     }

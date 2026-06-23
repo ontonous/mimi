@@ -432,32 +432,6 @@ pub extern "C" fn mimi_value_free(ptr: *const Value) {
     }
 }
 
-/// Check whether a capability is valid and matches the expected name.
-#[no_mangle]
-pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> bool {
-    if name.is_null() {
-        return false;
-    }
-    // SAFETY: name is a non-null pointer to a null-terminated C string (null-checked above).
-    let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
-        .to_str()
-        .unwrap_or("");
-    CAP_TABLE.with(|table| table.check(cap, name_str))
-}
-
-/// Consume a capability.  Returns true if the cap was valid and consumed.
-#[no_mangle]
-pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> bool {
-    if name.is_null() {
-        return false;
-    }
-    // SAFETY: name is a non-null pointer to a null-terminated C string (null-checked above).
-    let name_str = unsafe { std::ffi::CStr::from_ptr(name) }
-        .to_str()
-        .unwrap_or("");
-    CAP_TABLE.with(|table| table.consume(cap, name_str))
-}
-
 /// Free a raw string that was obtained via `string.into_raw()`.
 #[no_mangle]
 pub extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {

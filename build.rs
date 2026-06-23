@@ -1,8 +1,9 @@
 fn main() {
-    let mut build = cc::Build::new();
-    build.file("src/runtime/mimi_runtime.c");
-    if cfg!(feature = "no_std") {
-        build.define("MIMI_NO_STD", None);
-    }
-    build.compile("mimi_runtime");
+    // The Mimi runtime is now implemented in Rust (src/runtime/mod.rs)
+    // No C compilation needed — the runtime is compiled as part of the main crate.
+    //
+    // For standalone linking (codegen tests, `mimi build`), compile
+    // src/runtime/standalone.rs with:
+    //   rustc --edition 2021 --crate-type staticlib --crate-name mimi_runtime
+    //         -o libmimi_runtime.a src/runtime/standalone.rs
 }

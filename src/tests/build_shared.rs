@@ -22,35 +22,42 @@ fn compile_to_object(src: &str, module_name: &str, obj_path: &std::path::Path) {
     gen.compile_to_object(obj_path).expect("src/tests/build_shared.rs:22 unwrap failed");
 }
 
-/// Link an object file + C runtime into a shared library.
+/// Link an object file + Rust runtime into a shared library.
 fn link_shared(obj_path: &std::path::Path, output_so: &std::path::Path, no_std: bool) {
-    let runtime_c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/mimi_runtime.c");
+    let runtime_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
     let tmp_dir = output_so.parent().expect("src/tests/build_shared.rs:28 unwrap failed");
     let runtime_o = tmp_dir.join("mimi_runtime.o");
 
-    let mut rt_cmd = std::process::Command::new("cc");
-    rt_cmd.arg("-fPIC");
+    let mut rt_cmd = std::process::Command::new("rustc");
+    rt_cmd.arg("--edition").arg("2021");
+    rt_cmd.arg("--crate-type").arg("staticlib");
+    rt_cmd.arg("--cfg").arg("standalone");
+    rt_cmd.arg("--crate-name").arg("mimi_runtime");
     if no_std {
-        rt_cmd.arg("-DMIMI_NO_STD");
+        rt_cmd.arg("-C").arg("panic=abort");
     }
+    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
     let rt_status = rt_cmd
-        .arg("-c").arg(&runtime_c).arg("-o").arg(&runtime_o)
+        .arg("-o").arg(&runtime_lib)
+        .arg(&runtime_rs)
         .status().expect("runtime compile");
-    assert!(rt_status.success(), "runtime C compile failed");
+    assert!(rt_status.success(), "runtime Rust compile failed");
 
     let mut cmd = std::process::Command::new("cc");
     cmd.arg("-shared").arg("-fPIC");
     if no_std {
         cmd.arg("-nostdlib");
+    } else {
+        cmd.arg("-lpthread").arg("-ldl").arg("-lm");
     }
+    cmd.arg("-Wl,--whole-archive").arg(&runtime_lib).arg("-Wl,--no-whole-archive");
     let status = cmd
         .arg(obj_path)
-        .arg(&runtime_o)
         .arg("-o").arg(output_so)
         .status().expect("link");
     assert!(status.success(), "linking should succeed");
 
-    let _ = std::fs::remove_file(&runtime_o);
+    let _ = std::fs::remove_file(&runtime_lib);
 }
 
 #[test]
@@ -102,8 +109,8 @@ fn build_shared_library_no_std() {
     let nm_out = std::process::Command::new("nm")
         .arg("-D").arg(&output_so).output().expect("nm");
     let nm = String::from_utf8_lossy(&nm_out.stdout);
-    assert!(nm.contains("add") || nm.contains("_add"),
-        "missing 'add' symbol: {}", nm);
+    assert!(nm.contains("double") || nm.contains("_double"),
+        "missing 'double' symbol: {}", nm);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
