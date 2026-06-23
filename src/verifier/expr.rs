@@ -102,14 +102,12 @@ impl crate::verifier::Verifier {
                 } else if f.is_infinite() || f.is_nan() {
                     None
                 } else {
-                    // Encode as rational using string representation for full precision.
-                    // Use a high-precision denominator (10^15) to minimize rounding error.
-                    const PRECISION: f64 = 1_000_000_000_000_000.0;
-                    let scaled = (*f * PRECISION).round() as i64;
-                    Some(
-                        Z3Real::from_int(&Z3Int::from_i64(scaled))
-                            / Z3Real::from_int(&Z3Int::from_i64(PRECISION as i64)),
-                    )
+                    // Encode as exact rational via Z3Real::from_rational_str(num, den).
+                    // Uses f64::to_string() which produces the shortest decimal
+                    // representation that uniquely identifies the float value.
+                    // This avoids the i64 overflow from the old PRECISION scaling
+                    // approach (which capped out around |f| > 9e3).
+                    self.float_to_z3_real(*f)
                 }
             }
             Expr::Ident(name) => {
@@ -421,5 +419,30 @@ impl crate::verifier::Verifier {
             parts.push(self.field_var_name(a));
         }
         parts.join("_")
+    }
+
+    /// Encode an f64 value as an exact Z3 rational using string representation.
+    /// Uses Rust's standard f64-to-string conversion which produces the shortest
+    /// decimal that uniquely identifies the float value, then parses it as a
+    /// rational (num_str / 10^precision). This avoids i64 overflow from the
+    /// previous PRECISION-scaling approach.
+    fn float_to_z3_real(&self, f: f64) -> Option<Z3Real> {
+        if f == 0.0 {
+            return Some(Z3Real::from_int(&Z3Int::from_i64(0)));
+        }
+        if f.is_infinite() || f.is_nan() {
+            return None;
+        }
+        // Use to_string() for shortest unique decimal representation.
+        let s = format!("{}", f);
+        if let Some(dot) = s.find('.') {
+            let num_str: String = s.chars().filter(|&c| c != '.').collect();
+            let precision = s.len() - dot - 1;
+            let den_str = format!("1{}", "0".repeat(precision));
+            Z3Real::from_rational_str(&num_str, &den_str)
+        } else {
+            // Integer-valued float: use integer directly (no overflow from precise ints).
+            Z3Real::from_rational_str(&s, "1")
+        }
     }
 }

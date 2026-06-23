@@ -733,3 +733,44 @@ func main() -> i32 { 0 }
             || abs_result.unwrap().status == VerifStatus::Failed
             || abs_result.unwrap().status == VerifStatus::Unknown);
     }
+
+    #[test]
+    fn verify_f64_large_value_no_overflow() {
+        require_z3!();
+        // 3.1: Large f64 values should not overflow the verifier's encoding.
+        // The old i64 scaling approach would overflow for values > ~9e3.
+        // Test that both encoding and comparison work for positive large values.
+        let src = r#"
+func scale(x: f64) -> f64 {
+    requires: x >= 1e10
+    ensures: result >= 0.0
+    x * 2.0
+}
+func main() -> f64 { 0.0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: f64_large");
+        let s = results.iter().find(|r| r.func_name == "scale");
+        assert!(s.is_some(), "scale function should be verified");
+        assert_eq!(s.unwrap().status, VerifStatus::Verified,
+            "large f64 should verify correctly: {:?}", s.unwrap());
+    }
+
+    #[test]
+    fn verify_f64_tiny_value_no_underflow() {
+        require_z3!();
+        // Tiny f64 values (< 1e-15) should not underflow (old encoding
+        // used 1e15 precision denominator and overflowed for very small values).
+        let src = r#"
+func check(x: f64) -> f64 {
+    requires: x > 1e-20
+    ensures: result > 0.0
+    x * 2.0
+}
+func main() -> f64 { 0.0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: f64_tiny");
+        let c = results.iter().find(|r| r.func_name == "check");
+        assert!(c.is_some(), "check function should be verified");
+        assert_eq!(c.unwrap().status, VerifStatus::Verified,
+            "tiny f64 should verify correctly: {:?}", c.unwrap());
+    }
