@@ -160,7 +160,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
                         let idx = i64_ty.const_int(j as u64, false);
-                                                let elem_ptr = unsafe {
+                                                let elem_ptr = {
                             self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("arr_{}", j))
                         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("arrv_{}", j))
@@ -196,7 +196,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
                         let idx = i64_ty.const_int(j as u64, false);
-                                                let elem_ptr = unsafe {
+                                                let elem_ptr = {
                             self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("slc_{}", j))
                         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("slcv_{}", j))
@@ -339,7 +339,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(expected) = lit_val {
                 let idx = i64_ty.const_int(j as u64, false);
                 // SAFETY: pointer derived from valid list data allocation
-                let elem_ptr = unsafe {
+                let elem_ptr = {
                     self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("arr_el{}", j))
                 }.map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 let elem_val = self.builder.build_load(

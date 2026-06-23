@@ -122,14 +122,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "data_i64")
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                         .into_pointer_value();
-                                        let elem_ptr = unsafe {
+                                        let elem_ptr = {
                         self.gep().build_gep(self.context.i64_type(), data_ptr_i64, &[idx_iv], "elem")
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     return self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)));
                 }
                 // Fallback: treat as raw pointer to i64 array
-                                let elem_ptr = unsafe {
+                                let elem_ptr = {
                     self.gep().build_gep(self.context.i64_type(), pv, &[idx_iv], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
@@ -159,7 +159,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
                     "data_i64",
                 ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
-                let elem_ptr = unsafe {
+                let elem_ptr = {
                     self.gep().build_gep(self.context.i64_type(), data_ptr_i64, &[idx_iv], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")

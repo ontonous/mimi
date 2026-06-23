@@ -751,7 +751,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         };
                         // Store value to array via GEP
                         // SAFETY: vals_alloca is a valid alloca; indices are in-bounds constants.
-                        let val_gep = unsafe { self.gep().build_gep(
+                        let val_gep = { self.gep().build_gep(
                             i64_ty, vals_alloca, &[zero, idx],
                             &format!("tv_gep_{}_{}", i, ei))
                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -761,7 +761,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let tag_val = elem_type_tag(elem_ty);
                         let tag_i64 = i64_ty.const_int(tag_val as u64, false);
                         // SAFETY: tys_alloca is a valid alloca; indices are in-bounds constants.
-                        let ty_gep = unsafe { self.gep().build_gep(
+                        let ty_gep = { self.gep().build_gep(
                             i64_ty, tys_alloca, &[zero, idx],
                             &format!("tt_gep_{}_{}", i, ei))
                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -1043,7 +1043,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let tag_i64 = i64_ty.const_int(tag_val as u64, false);
                     let idx = i32_ty.const_int(ei as u64, false);
                     // SAFETY: GEP on struct pointer with correct field index 1 (type tag).
-                    let ty_gep = unsafe { self.gep().build_gep(
+                    let ty_gep = { self.gep().build_gep(
                         i64_ty, tys_alloca, &[zero, idx],
                         &format!("tuple_ret_ty_gep_{}", ei))
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -1088,7 +1088,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (ei, elem_ty) in elems.iter().enumerate() {
                     let idx = i32_ty.const_int(ei as u64, false);
                     // SAFETY: out_alloca is a valid alloca; indices are in-bounds constants.
-                    let val_gep = unsafe { self.gep().build_gep(
+                    let val_gep = { self.gep().build_gep(
                         i64_ty, out_alloca, &[zero, idx],
                         &format!("tuple_ret_val_gep_{}", ei))
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };

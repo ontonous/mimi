@@ -253,21 +253,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let idx_2 = self.builder.build_int_add(idx, idx, "map_from_list_idx_2")
                     .map_err(|e| format!("add error: {}", e))?;
                                 // SAFETY: data_ptr is i64* from bitcast; idx_2 is in-bounds (validated by loop).
-                let key_ptr_elem = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem") }
+                let key_ptr_elem = { self.gep().build_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let key_handle = self.builder.build_load(i64_ty, key_ptr_elem, "map_from_list_key_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                                let key_dest = unsafe { self.gep().build_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest") }
+                                let key_dest = { self.gep().build_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(key_dest, key_handle)
                     .map_err(|e| format!("store error: {}", e))?;
                 let idx_2_plus_1 = self.builder.build_int_add(idx_2, i64_ty.const_int(1, false), "map_from_list_idx_2_plus_1")
                     .map_err(|e| format!("add error: {}", e))?;
-                                let val_ptr_elem = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[idx_2_plus_1], "map_from_list_val_elem") }
+                                let val_ptr_elem = { self.gep().build_gep(i64_ty, data_ptr, &[idx_2_plus_1], "map_from_list_val_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let val_handle = self.builder.build_load(i64_ty, val_ptr_elem, "map_from_list_val_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                                let val_dest = unsafe { self.gep().build_gep(i64_ty, values_ptr, &[idx], "map_from_list_val_dest") }
+                                let val_dest = { self.gep().build_gep(i64_ty, values_ptr, &[idx], "map_from_list_val_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(val_dest, val_handle)
                     .map_err(|e| format!("store error: {}", e))?;

@@ -215,7 +215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
             let data_pv = if let BasicValueEnum::PointerValue(pv) = data_ptr { pv } else { return Err(CompileError::LlvmError("data must be pointer".to_string())); };
 
-                        let elem_ptr = unsafe {
+                        let elem_ptr = {
                 self.gep().build_gep(
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     data_pv,
@@ -439,7 +439,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "data_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
-                let elem_ptr = unsafe {
+                let elem_ptr = {
             self.gep().build_gep(self.context.i64_type(), data_ptr_i64, &[idx_iv], "elem")
         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(elem_ptr, val)

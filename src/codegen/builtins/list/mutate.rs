@@ -59,7 +59,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
                 // Store new element at data[old_len]: *(new_data + old_len*8) = elem
-                                let idx_ptr = unsafe {
+                                let idx_ptr = {
                     self.gep().build_gep(
                         BasicTypeEnum::IntType(i64_ty),
                         realloc_result,
@@ -143,7 +143,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(nonempty_bb);
                 let last_idx = self.builder.build_int_sub(old_len, i64_ty.const_int(1, false), "last_idx")
                     .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-                                let elem_ptr = unsafe {
+                                let elem_ptr = {
                     self.gep().build_gep(
                         BasicTypeEnum::IntType(i64_ty),
                         old_data,
@@ -249,12 +249,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
                 let src_idx = self.builder.build_int_sub(list_len, idx_plus_1, "src_idx")
                     .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-                                let src_ptr = unsafe {
+                                let src_ptr = {
                     self.gep().build_gep(i64_ty, data_ptr, &[src_idx], "src_elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let src_val = self.builder.build_load(i64_ty, src_ptr, "src_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-                                let dst_ptr = unsafe {
+                                let dst_ptr = {
                     self.gep().build_gep(i64_ty, new_data_i64, &[idx], "dst_elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(dst_ptr, src_val)
@@ -330,13 +330,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(inner_body_bb);
                 // Load arr[j] and arr[j+1]
                                 // SAFETY: data_ptr is i64* from bitcast; j_val is in-bounds (validated by inner loop condition).
-                let elem_j_ptr = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[j_val], "sort_elem_j") }
+                let elem_j_ptr = { self.gep().build_gep(i64_ty, data_ptr, &[j_val], "sort_elem_j") }
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem_j = self.builder.build_load(i64_ty, elem_j_ptr, "sort_elem_j_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
                 let j_plus_1 = self.builder.build_int_add(j_val, i64_ty.const_int(1, false), "sort_j_plus_1")
                     .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                                let elem_j1_ptr = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[j_plus_1], "sort_elem_j1") }
+                                let elem_j1_ptr = { self.gep().build_gep(i64_ty, data_ptr, &[j_plus_1], "sort_elem_j1") }
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem_j1 = self.builder.build_load(i64_ty, elem_j1_ptr, "sort_elem_j1_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();

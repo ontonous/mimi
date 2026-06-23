@@ -140,7 +140,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(check_bb);
                 let start_pos = self.builder.build_int_sub(s_len, suffix_len, "start_pos")
                     .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-                                let s_suffix_ptr = unsafe {
+                                let s_suffix_ptr = {
                     self.gep().build_gep(i8_ty, s_ptr, &[start_pos], "s_suffix")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let strncmp_fn = self.module.get_function("strncmp")

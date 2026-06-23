@@ -655,7 +655,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], "fread_call")
                     .map_err(|e| CompileError::LlvmError(format!("fread error: {}", e)))?;
                 // Null-terminate
-                                let null_gep = unsafe {
+                                let null_gep = {
                     self.gep().build_gep(
                         BasicTypeEnum::IntType(self.context.i8_type()),
                         buf,

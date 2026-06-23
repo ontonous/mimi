@@ -300,7 +300,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         _ => return Err("values: unsupported field type".into()),
                                     };
                                                                         // SAFETY: values_data_i64 is i64* from malloc; i is in-bounds (small constant index).
-                                    let elem_ptr = unsafe { self.gep().build_gep(i64_ty, values_data_i64, &[i64_ty.const_int(i as u64, false)], "values_elem") }
+                                    let elem_ptr = { self.gep().build_gep(i64_ty, values_data_i64, &[i64_ty.const_int(i as u64, false)], "values_elem") }
                                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                     self.builder.build_store(elem_ptr, val_i64)
                                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -419,7 +419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(body_bb);
                 // Load element
-                                let elem_ptr = unsafe {
+                                let elem_ptr = {
                     self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
@@ -433,7 +433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("function returned void")?;
                 if is_map {
                     // For map: store result to output array
-                                        let out_elem_ptr = unsafe {
+                                        let out_elem_ptr = {
                         self.gep().build_gep(i64_ty, out_i64, &[idx], "out_elem")
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     self.builder.build_store(out_elem_ptr, result)
@@ -453,7 +453,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(store_bb);
                     let wi = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), write_idx, "wi")
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-                                        let out_elem_ptr = unsafe {
+                                        let out_elem_ptr = {
                         self.gep().build_gep(i64_ty, out_i64, &[wi], "out_elem")
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     self.builder.build_store(out_elem_ptr, elem)
@@ -547,7 +547,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_conditional_branch(loop_cmp, body_bb, done_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(body_bb);
-                                let elem_ptr = unsafe {
+                                let elem_ptr = {
                     self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")

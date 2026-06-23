@@ -79,7 +79,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => return Err("list elements must be scalar types (int, float, pointer) for now".into()),
             };
             let idx = self.context.i64_type().const_int(i as u64, false);
-                        let elem_ptr = unsafe {
+                        let elem_ptr = {
                 self.gep().build_gep(self.context.i64_type(), data_ptr_i64, &[idx], "elem")
             }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.builder.build_store(elem_ptr, iv)
@@ -204,7 +204,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(body_bb);
         // Load element
-                let elem_ptr = unsafe {
+                let elem_ptr = {
             self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
@@ -238,7 +238,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = self.compile_expr(expr, &comp_vars)?;
         let wi = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), wi_alloca, "wi")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-                let out_elem_ptr = unsafe {
+                let out_elem_ptr = {
             self.gep().build_gep(i64_ty, out_i64, &[wi], "out_elem")
         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let result_i64 = match result {

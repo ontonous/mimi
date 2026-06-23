@@ -151,7 +151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 for (i, sub_pat) in sub_patterns.iter().enumerate() {
                     let idx = self.context.i64_type().const_int(i as u64, false);
-                                        let elem_ptr = unsafe {
+                                        let elem_ptr = {
                         self.gep().build_gep(self.context.i64_type(), data_i64, &[idx], &format!("pat_elem_{}", i))
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     let elem = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, &format!("pat_elem_val_{}", i))

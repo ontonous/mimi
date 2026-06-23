@@ -74,7 +74,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(body_bb);
                 let elem_val = self.builder.build_int_add(start, idx, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                                let elem_ptr = unsafe {
+                                let elem_ptr = {
                     self.gep().build_gep(i64_ty, data_ptr_i64, &[idx], "elem_ptr")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(elem_ptr, elem_val)
