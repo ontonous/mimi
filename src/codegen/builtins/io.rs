@@ -428,7 +428,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 // NOTE: not registered — returned value owns the allocation
                 // fgets(buf, 4096, stdin)
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let stdin_global = self.module.add_global(
                     i8_ptr_ty, None, "stdin"
                 );
@@ -440,7 +440,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ).map_err(|e| CompileError::LlvmError(format!("load stdin error: {}", e)))?.into_pointer_value();
                 let fgets_fn = self.module.get_function("fgets")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i8_ptr.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(self.context.i64_type()),
@@ -492,7 +492,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i32_ty = self.context.i32_type();
                 let access_fn = self.module.get_function("access")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i32_ty.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(i32_ty),
@@ -525,13 +525,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
                 if args.len() != 1 { return Err(CompileError::WrongArgCount("read_file expects 1 argument".to_string())); }
                 let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 // fopen(path, "r")
                 let mode_str = self.builder.build_global_string_ptr("r", "read_mode")
                     .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
                 let fopen_fn = self.module.get_function("fopen")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i8_ptr.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
@@ -550,7 +550,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i32_ty = self.context.i32_type();
                 let fseek_fn = self.module.get_function("fseek")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i32_ty.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(self.context.i64_type()),
@@ -577,7 +577,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // ftell(file) -> file size (may be -1 if fseek failed)
                 let ftell_fn = self.module.get_function("ftell")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = self.context.i64_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                         ], false);
@@ -611,7 +611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // rewind(file)
                 let rewind_fn = self.module.get_function("rewind")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = self.context.void_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                         ], false);
@@ -638,7 +638,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // fread(buf, 1, file_size, file)
                 let fread_fn = self.module.get_function("fread")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = self.context.i64_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(self.context.i64_type()),
@@ -668,7 +668,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // fclose(file)
                 let fclose_fn = self.module.get_function("fclose")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i32_ty.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                         ], false);
@@ -709,7 +709,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
                 let fopen_fn = self.module.get_function("fopen")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i8_ptr.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
@@ -736,7 +736,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // fwrite(content, 1, len, file)
                 let fwrite_fn = self.module.get_function("fwrite")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = self.context.i64_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(self.context.i64_type()),
@@ -756,7 +756,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i32_ty = self.context.i32_type();
                 let fclose_fn = self.module.get_function("fclose")
                     .unwrap_or_else(|| {
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let ty = i32_ty.fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                         ], false);

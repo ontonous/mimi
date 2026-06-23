@@ -13,7 +13,7 @@ use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::AddressSpace;
 
 pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
-    let i8_ptr = ctx.i8_type().ptr_type(AddressSpace::default());
+    let i8_ptr = ctx.ptr_type(AddressSpace::default());
     let i32 = ctx.i32_type();
     let i64 = ctx.i64_type();
     let void = ctx.void_type();
@@ -97,7 +97,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     // We use i8* for the function pointer (cast at call site)
     module.add_function("pthread_create",
         i32.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),  // pthread_t*
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),  // pthread_t*
             BasicMetadataTypeEnum::PointerType(i8_ptr),  // attr (NULL)
             BasicMetadataTypeEnum::PointerType(i8_ptr),  // start_routine (as i8*, cast at callsite)
             BasicMetadataTypeEnum::PointerType(i8_ptr),  // arg
@@ -105,7 +105,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External));
     module.add_function("pthread_join",
         i32.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),  // pthread_t
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),  // pthread_t
             BasicMetadataTypeEnum::PointerType(i8_ptr),  // retval (NULL)
         ], false),
         Some(inkwell::module::Linkage::External));
@@ -148,8 +148,8 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External));
     module.add_function("mimi_map_from_list",
         i64.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
             BasicMetadataTypeEnum::IntType(i64),
         ], false),
         Some(inkwell::module::Linkage::External));
@@ -294,9 +294,9 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     // mimi_tuple_serialize(values: *const i64, count: i64, elem_types: *const i64) -> i8*
     module.add_function("mimi_tuple_serialize",
         i8_ptr.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
             BasicMetadataTypeEnum::IntType(i64),
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
         ], false),
         Some(inkwell::module::Linkage::External));
     // F7: Tuple FFI deserialization — parse JSON array back to i64 values.
@@ -305,8 +305,8 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         i64.fn_type(&[
             BasicMetadataTypeEnum::PointerType(i8_ptr),
             BasicMetadataTypeEnum::IntType(i64),
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
-            BasicMetadataTypeEnum::PointerType(i64.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
         ], false),
         Some(inkwell::module::Linkage::External));
 
@@ -437,7 +437,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         i8_ptr.fn_type(&[
             BasicMetadataTypeEnum::IntType(i64),
             BasicMetadataTypeEnum::IntType(i64),
-            BasicMetadataTypeEnum::PointerType(i8_ptr.ptr_type(AddressSpace::default())),
+            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),
         ], false),
         Some(inkwell::module::Linkage::External));
     // mimi_close(fd: i64) -> i64
@@ -659,7 +659,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        if args.len() < 1 {
+        if args.is_empty() {
             return Err(CompileError::WrongArgCount("from_int expects at least 1 argument (int)".to_string()));
         }
         let val = match args[0] {

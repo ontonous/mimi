@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::IntPredicate;
 use std::collections::HashMap;
@@ -22,10 +22,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 0. Special case: weak<T>.upgrade() -> Option<T*>
         if method_name == "upgrade" && (obj_type.starts_with("weak ") || obj_type.starts_with("weak_local ")) {
             if let Expr::Ident(name) = obj {
-                let &(alloca, val_ty) = vars.get(name)
+                let &(alloca, _val_ty) = vars.get(name)
                     .ok_or_else(|| CompileError::LlvmError(format!("weak variable '{}' not found", name)))?;
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
-                let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let heap_ptr = self.builder.build_load(
                     BasicTypeEnum::PointerType(ptr_ty), alloca, "weak_heap_ptr"
                 ).map_err(|e| CompileError::LlvmError(format!("weak heap ptr load: {}", e)))?.into_pointer_value();
@@ -75,7 +75,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if self.shared_var_names.contains(name.as_str()) {
                     let &(alloca, ty) = vars.get(name)
                         .ok_or_else(|| CompileError::LlvmError(format!("shared variable '{}' not found", name)))?;
-                    let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr = self.builder.build_load(
                         BasicTypeEnum::PointerType(ptr_ty), alloca, &format!("{}_deref_ptr", name)
                     ).map_err(|e| CompileError::LlvmError(format!("shared deref ptr load: {}", e)))?.into_pointer_value();
@@ -98,16 +98,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Ok(val);
                     }
                     // Handle Option<shared T>.deref(): extract payload from Option struct, load value
-                    if let BasicTypeEnum::StructType(st) = ty {
+                    if let BasicTypeEnum::StructType(_st) = ty {
                         let option_val = self.builder.build_load(ty, alloca, &format!("{}_opt", name))
                             .map_err(|e| CompileError::LlvmError(format!("option load: {}", e)))?;
-                        let disc_val = self.builder.build_extract_value(option_val.into_struct_value(), 0, "disc")
+                        let _disc_val = self.builder.build_extract_value(option_val.into_struct_value(), 0, "disc")
                             .map_err(|e| CompileError::LlvmError(format!("extract disc: {}", e)))?;
                         let payload_int = self.builder.build_extract_value(option_val.into_struct_value(), 1, "payload_int")
                             .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
                         let payload_ptr = self.builder.build_int_to_ptr(
                             payload_int.into_int_value(),
-                            self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "payload_ptr",
                         ).map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
                         let i64_ty = self.context.i64_type();
@@ -125,10 +125,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         if method_name == "upgrade" {
             if let Expr::Ident(name) = obj {
                 if self.shared_var_names.contains(name.as_str()) {
-                    let &(alloca, val_ty) = vars.get(name)
+                    let &(alloca, _val_ty) = vars.get(name)
                         .ok_or_else(|| CompileError::LlvmError(format!("weak variable '{}' not found", name)))?;
-                    let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
-                    let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr = self.builder.build_load(
                         BasicTypeEnum::PointerType(ptr_ty), alloca, "weak_heap_ptr"
                     ).map_err(|e| CompileError::LlvmError(format!("weak heap ptr load: {}", e)))?.into_pointer_value();
@@ -240,13 +240,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // 1.7. Cap method dispatch: split() for capability types
-        if self.cap_type_names.contains(&obj_type) {
-            if method_name == "split" {
-                // For now, return a dummy i64 value.
-                // The result is not used in current tests; a proper runtime
-                // mimi_cap_split function would be needed for real usage.
-                return Ok(self.context.i64_type().const_int(0, false).into());
-            }
+        if self.cap_type_names.contains(&obj_type) && method_name == "split" {
+            // For now, return a dummy i64 value.
+            // The result is not used in current tests; a proper runtime
+            // mimi_cap_split function would be needed for real usage.
+            return Ok(self.context.i64_type().const_int(0, false).into());
         }
 
         // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
@@ -306,9 +304,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(idx) = method_idx {
                     // Get the vtable struct type (clone to avoid borrow conflict)
                     let vtable_ty = self.vtable_types.get(trait_name)
-                        .map(|s| *s).ok_or("no vtable type for trait")?;
+                        .copied().ok_or("no vtable type for trait")?;
                     // Fat pointer layout: { i8* data, i8* vtable }
-                    let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let fat_ty = self.context.struct_type(&[
                         BasicTypeEnum::PointerType(i8_ptr_ty),
                         BasicTypeEnum::PointerType(i8_ptr_ty),
@@ -371,7 +369,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // Cast fn_ptr i8* to the right function pointer type
                             let fn_ptr_cast = self.builder.build_pointer_cast(
                                 fn_ptr,
-                                fn_type.ptr_type(inkwell::AddressSpace::default()),
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
                                 "fn_cast"
                             ).map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
                             // Compile additional args (start with data ptr as self)

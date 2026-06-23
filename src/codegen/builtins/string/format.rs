@@ -37,7 +37,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Build {i8*, i64} struct from the buffer
                         let str_ty = self.context.struct_type(&[
                             BasicTypeEnum::PointerType(
-                                self.context.i8_type().ptr_type(inkwell::AddressSpace::default())
+                                self.context.ptr_type(inkwell::AddressSpace::default())
                             ),
                             BasicTypeEnum::IntType(self.context.i64_type()),
                         ], false);
@@ -90,7 +90,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Build {i8*, i64} struct from the buffer
                         let str_ty = self.context.struct_type(&[
                             BasicTypeEnum::PointerType(
-                                self.context.i8_type().ptr_type(inkwell::AddressSpace::default())
+                                self.context.ptr_type(inkwell::AddressSpace::default())
                             ),
                             BasicTypeEnum::IntType(self.context.i64_type()),
                         ], false);

@@ -8,7 +8,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// The canonical Mimi list struct type: `{ i64 len, i8* data }`.
     pub(in crate::codegen) fn list_struct_type(&self) -> StructType<'ctx> {
         let i64_ty = self.context.i64_type();
-        let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(AddressSpace::default());
         self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(i64_ty),
@@ -47,7 +47,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         list_ptr: PointerValue<'ctx>,
     ) -> MimiResult<PointerValue<'ctx>> {
         let list_struct_ty = self.list_struct_type();
-        let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(AddressSpace::default());
         let data_gep = self
             .gep()
             .build_struct_gep(list_struct_ty, list_ptr, 1, "list_data")
@@ -70,7 +70,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_bit_cast(
                 data_i8,
-                self.context.i64_type().ptr_type(AddressSpace::default()),
+                self.context.ptr_type(AddressSpace::default()),
                 "list_data_i64",
             )
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
@@ -133,7 +133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("oob msg: {}", e)))?;
         let abort_fn = self.module.get_function("mimi_runtime_abort")
             .unwrap_or_else(|| {
-                let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(AddressSpace::default());
                 let ty = self.context.void_type().fn_type(&[
                     inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
                 ], false);

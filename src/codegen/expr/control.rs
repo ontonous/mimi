@@ -148,7 +148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let elem_size = i64_ty.const_int(8, false);
         let byte_offset = self.builder.build_int_mul(start_idx, elem_size, "slice_offset")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let data_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr, "data_as_i8")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
                 let new_data_i8 = {

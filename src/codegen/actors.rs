@@ -135,7 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         
         // Build function type: self (ptr to actor struct) + params -> ret
         let actor_ptr_ty = match actor_ty {
-            BasicTypeEnum::StructType(sty) => BasicTypeEnum::PointerType(sty.ptr_type(inkwell::AddressSpace::default())),
+            BasicTypeEnum::StructType(_) => BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
             _ => return Err(CompileError::ActorNotStruct(actor.name.to_string())),
         };
         
@@ -225,7 +225,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.adjust_int_val(val, self.current_fn_ret_type())?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
-                        self.compile_contract_assert(ensures_expr, &vars, &format!("ensures violation"))?;
+                        self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
                     }
                     self.builder.build_return(Some(&val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
@@ -237,7 +237,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.pop_cap_scope();
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
-                        self.compile_contract_assert(ensures_expr, &vars, &format!("ensures violation"))?;
+                        self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
                     }
                     self.builder.build_return(None).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
                     return Ok(());
@@ -407,7 +407,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_block(block, &mut vars)?;
                 }
                 Stmt::SharedLet { kind, name, ty, init } => {
-                    self.compile_shared_let_stmt(&kind, name, &ty, init, &mut vars)?;
+                    self.compile_shared_let_stmt(kind, name, ty, init, &mut vars)?;
                 }
                 Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _) | Stmt::Math(_) => {}
                 Stmt::Block(block) => {
@@ -426,7 +426,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.block_has_terminator() {
             let ensures = self.ensures_stmts.clone();
             for ensures_expr in &ensures {
-                self.compile_contract_assert(ensures_expr, &vars, &format!("ensures violation"))?;
+                self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
             }
             let last_val = self.adjust_int_val(last_val, ret_type)?;
             self.builder.build_return(Some(&last_val)).map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;

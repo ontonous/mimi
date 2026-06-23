@@ -128,32 +128,29 @@ pub fn map_rule_contracts(file: &mut File) {
     }
 }
 
-fn transform_rules_in_block(stmts: &mut Vec<Stmt>) {
+fn transform_rules_in_block(stmts: &mut [Stmt]) {
     let mut i = 0;
     while i < stmts.len() {
         // Phase 1: Transform Stmt::Rule (needs separate handling due to borrow rules)
-        match &stmts[i] {
-            Stmt::Rule(text, span) => {
-                let span = *span;
-                let text = text.clone();
-                match map_rule_text(&text, span) {
-                    Some(contract_stmt) => stmts[i] = contract_stmt,
-                    None => stmts[i] = Stmt::Desc(format!("rule: {}", text), span),
-                }
+        if let Stmt::Rule(text, span) = &stmts[i] {
+            let span = *span;
+            let text = text.clone();
+            match map_rule_text(&text, span) {
+                Some(contract_stmt) => stmts[i] = contract_stmt,
+                None => stmts[i] = Stmt::Desc(format!("rule: {}", text), span),
             }
-            _ => {}
         }
 
         // Phase 2: Recurse into inner blocks (uses &mut to pass to recursive call)
         match &mut stmts[i] {
             Stmt::Block(block) | Stmt::While { body: block, .. }
             | Stmt::For { body: block, .. } => {
-                transform_rules_in_block(block);
+                transform_rules_in_block(block.as_mut_slice());
             }
             Stmt::If { then_, else_, .. } => {
-                transform_rules_in_block(then_);
+                transform_rules_in_block(then_.as_mut_slice());
                 if let Some(else_) = else_ {
-                    transform_rules_in_block(else_);
+                    transform_rules_in_block(else_.as_mut_slice());
                 }
             }
             _ => {}

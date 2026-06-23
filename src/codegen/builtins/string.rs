@@ -23,7 +23,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(iv) => iv,
                     _ => return Err(CompileError::TypeMismatch("str_char_at: second arg must be integer index".to_string())),
                 };
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 // Allocate 2 bytes: char + null terminator
                 let malloc_fn = self.module.get_function("malloc")
                     .ok_or_else(|| "malloc not declared".to_string())?;
@@ -115,13 +115,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("str_parse_int: first arg must be string, int, or float".to_string())),
                 };
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 // strtol(s, NULL, 10)
                 let strtol_fn = self.module.get_function("strtol")
                     .or_else(|| {
                         let ty = self.context.i64_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
-                            BasicMetadataTypeEnum::PointerType(i8_ptr.ptr_type(inkwell::AddressSpace::default())),
+                            BasicMetadataTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                             BasicMetadataTypeEnum::IntType(self.context.i32_type()),
                         ], false);
                         Some(self.module.add_function("strtol", ty, Some(inkwell::module::Linkage::External)))
@@ -133,10 +133,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::IntValue(self.context.i32_type().const_int(10, false)),
                 ], "strtol_call")
                     .map_err(|e| CompileError::LlvmError(format!("strtol error: {}", e)))?;
-                Ok(self.expect_basic_value(&call, "strtol")?)
-
-    }
-    pub(super) fn compile_str_parse_float(
+                self.expect_basic_value(&call, "strtol")
+ 
+     }
+     pub(super) fn compile_str_parse_float(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
@@ -158,13 +158,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("str_parse_float: first arg must be string, int, or float".to_string())),
                 };
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 // strtod(s, NULL)
                 let strtod_fn = self.module.get_function("strtod")
                     .or_else(|| {
                         let ty = self.context.f64_type().fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
-                            BasicMetadataTypeEnum::PointerType(i8_ptr.ptr_type(inkwell::AddressSpace::default())),
+                            BasicMetadataTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                         ], false);
                         Some(self.module.add_function("strtod", ty, Some(inkwell::module::Linkage::External)))
                     }).ok_or_else(|| "failed to get or create strtod function".to_string())?;
@@ -174,7 +174,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(null_ptr),
                 ], "strtod_call")
                     .map_err(|e| CompileError::LlvmError(format!("strtod error: {}", e)))?;
-                Ok(self.expect_basic_value(&call, "strtod")?)
-
-    }
+                self.expect_basic_value(&call, "strtod")
+ 
+     }
 }

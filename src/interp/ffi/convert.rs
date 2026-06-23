@@ -13,6 +13,7 @@ use std::sync::Arc;
 impl<'a> Interpreter<'a> {
     /// Convert a single Mimi value into a C ABI argument according to the
     /// argument's FFI contract.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn value_to_ffi_arg(
         &self,
         arg: &Value,

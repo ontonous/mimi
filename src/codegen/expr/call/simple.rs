@@ -48,7 +48,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let indirect_fn_type = ret_type.fn_type(&all_meta, false);
                         let fn_ptr_typed = self.builder.build_pointer_cast(
                             fn_ptr,
-                            indirect_fn_type.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "fn_typed",
                         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
                         let call_args: Vec<_> = compiled_args.iter().map(|arg| {
@@ -71,8 +71,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Check if this is a closure variable call
-                if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
-                    if let BasicTypeEnum::StructType(st) = ty {
+                if let Some(&(alloca, BasicTypeEnum::StructType(st))) = vars.get(name.as_str()) {
                         if st.get_field_types().len() == 2 {
                             // Closure struct {fn_ptr, env_ptr} — do indirect call
                             let closure_val = self.builder.build_load(
@@ -90,7 +89,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             for arg in args {
                                 compiled_args.push(self.compile_expr(arg, vars)?);
                             }
-                            let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                             let env_meta = BasicMetadataTypeEnum::PointerType(i8_ptr);
                             let mut all_meta = vec![env_meta];
                             for arg in &compiled_args {
@@ -108,7 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let indirect_fn_type = ret_type.fn_type(&all_meta, false);
                             let fn_ptr_typed = self.builder.build_pointer_cast(
                                 fn_ptr,
-                                indirect_fn_type.ptr_type(inkwell::AddressSpace::default()),
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
                                 "fn_typed",
                             ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
                             let mut call_args = vec![BasicMetadataValueEnum::PointerValue(env_ptr)];
@@ -130,7 +129,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.context.i64_type().const_int(0, false).into()
                             ));
                         }
-                    }
                 }
                 self.compile_call(name, args, vars)
             }
@@ -187,13 +185,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("extract fn_ptr error: {}", e)))?.into_pointer_value();
                 let env_ptr = self.builder.build_extract_value(sv, 1, "env_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("extract env_ptr error: {}", e)))?.into_pointer_value();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let fn_type = i64_ty.fn_type(&[
                     BasicMetadataTypeEnum::PointerType(i8_ptr),
                     BasicMetadataTypeEnum::IntType(i64_ty),
                 ], false);
                 let fn_typed = self.builder.build_pointer_cast(
-                    fn_ptr, fn_type.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
+                    fn_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
                 ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
                 let call = self.builder.build_indirect_call(
                     fn_type, fn_typed, &[
@@ -218,8 +216,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 let closure_struct_ty = self.context.struct_type(&[
-                    BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
-                    BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
                 let loaded = self.builder.build_load(BasicTypeEnum::StructType(closure_struct_ty), pv, "closure_loaded")
                     .map_err(|e| CompileError::LlvmError(format!("load closure error: {}", e)))?.into_struct_value();
@@ -227,13 +225,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("extract fn_ptr error: {}", e)))?.into_pointer_value();
                 let env_ptr = self.builder.build_extract_value(loaded, 1, "env_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("extract env_ptr error: {}", e)))?.into_pointer_value();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let fn_type = i64_ty.fn_type(&[
                     BasicMetadataTypeEnum::PointerType(i8_ptr),
                     BasicMetadataTypeEnum::IntType(i64_ty),
                 ], false);
                 let fn_typed = self.builder.build_pointer_cast(
-                    fn_ptr, fn_type.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
+                    fn_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
                 ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
                 let call = self.builder.build_indirect_call(
                     fn_type, fn_typed, &[
@@ -287,7 +285,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ).map_err(|e| CompileError::LlvmError(format!("store env_ptr: {}", e)))?;
                             self.pending_callback_tls.push(thunk_entry.fn_ptr_global.as_pointer_value());
                             self.pending_callback_tls.push(thunk_entry.env_ptr_global.as_pointer_value());
-                            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let thunk_ptr = thunk_entry.thunk_fn.as_global_value().as_pointer_value();
                             let casted = self.builder.build_pointer_cast(thunk_ptr, i8_ptr_ty, "thunk_i8")
                                 .map_err(|e| CompileError::LlvmError(format!("bitcast thunk: {}", e)))?;
@@ -374,7 +372,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
             // Clear callback TLS globals after the call to prevent stale data
             // from being read by re-entrant callbacks or subsequent calls.
-            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let null_i8 = i8_ptr_ty.const_null();
             for tls_ptr in self.pending_callback_tls.drain(..) {
                 self.builder.build_store(tls_ptr, null_i8)

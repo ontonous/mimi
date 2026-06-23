@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Wrap a raw C string pointer into a Mimi string struct `{ ptr, i64 }`.
     /// Calls `strlen` to compute the length, then builds the struct.
     fn wrap_c_string(&self, raw_ptr: inkwell::values::PointerValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let string_struct_ty = self.context.struct_type(&[
             BasicTypeEnum::PointerType(i8_ptr_ty),
             BasicTypeEnum::IntType(self.context.i64_type()),
@@ -70,7 +70,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_unary_expr(
         &mut self,
         op: UnOp,
-        inner: &Box<Expr>,
+        inner: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let v = self.compile_expr(inner, vars)?;
@@ -125,7 +125,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             UnOp::Deref => {
                 if let BasicValueEnum::PointerValue(ptr) = v {
                     // Try to determine the pointee type from the inner expression's variable entry
-                    let pointee_ty = match inner.as_ref() {
+                    let pointee_ty = match inner {
                         Expr::Ident(name) => {
                             if let Some(&(_, ty)) = vars.get(name) {
                                 ty
@@ -381,8 +381,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ], "pow_i64_call")
                         .map_err(|e| CompileError::LlvmError(format!("pow error: {}", e)))?
                         .try_as_basic_value_opt()
-                        .ok_or("pow returned void")?
-                        .into())
+                        .ok_or("pow returned void")?)
                 }
                 (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
                     let pow_fn = self.module.get_function("llvm.pow.f64")
@@ -393,8 +392,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ], "pow_f64")
                         .map_err(|e| CompileError::LlvmError(format!("pow error: {}", e)))?
                         .try_as_basic_value_opt()
-                        .ok_or("pow returned void")?
-                        .into())
+                        .ok_or("pow returned void")?)
                 }
                 _ => Err("pow requires matching numeric types".into()),
             },

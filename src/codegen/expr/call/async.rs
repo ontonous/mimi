@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::{BTreeMap, HashMap};
 
@@ -38,8 +38,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let empty_defined = std::collections::HashSet::new();
         self.collect_free_vars_expr(expr, &empty_defined, vars, &mut free_vars);
         
-        let i8_ty = self.context.i8_type();
-        let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ty = self.context.i8_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let wrapper_fn_type = i8_ptr.fn_type(
             &[BasicMetadataTypeEnum::PointerType(i8_ptr)], false
         );
@@ -59,7 +59,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let env_struct_type = self.context.struct_type(&env_field_types, false);
             let env_struct_ptr = self.builder.build_pointer_cast(
                 env_ptr_param,
-                env_struct_type.ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "spawn_env",
             ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
             for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {
@@ -97,13 +97,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let result_llvm_ty = result.get_type();
         let result_ptr_ty = match result_llvm_ty {
-            BasicTypeEnum::IntType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::FloatType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::PointerType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::StructType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::ArrayType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::VectorType(t) => t.ptr_type(inkwell::AddressSpace::default()),
-            BasicTypeEnum::ScalableVectorType(t) => t.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::IntType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::FloatType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::PointerType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::StructType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::ArrayType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::VectorType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
+            BasicTypeEnum::ScalableVectorType(_) => self.context.ptr_type(inkwell::AddressSpace::default()),
         };
         let result_typed_ptr = self.builder.build_pointer_cast(
             result_storage_ptr,
@@ -243,7 +243,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_call(executor_run, &[], "executor_run")
                     .map_err(|e| CompileError::LlvmError(format!("executor_run error: {}", e)))?;
 
-                let i8_ty = self.context.i8_type();
+        let i8_ty = self.context.i8_type();
                 let i64_ty = self.context.i64_type();
 
                 // Load result from future_ptr + 8 (skip completed flag)
@@ -253,7 +253,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let result_typed_ptr = self.builder.build_pointer_cast(
                     result_data_ptr,
-                    result_type.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "result_typed",
                 ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
                 let result_val = self.builder.build_load(
@@ -280,10 +280,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn compile_await_pthread(
         &mut self,
         handle: inkwell::values::IntValue<'ctx>,
-        expr: &Expr,
-        vars: &HashMap<String, VarEntry<'ctx>>,
+        _expr: &Expr,
+        _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let retval_storage = self.builder.build_alloca(i8_ptr, "retval_ptr")
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
         self.builder.build_store(retval_storage, i8_ptr.const_null())
@@ -329,7 +329,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let result_typed = self.builder.build_pointer_cast(
             result_ptr,
-            result_type.ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
             "result_typed_ptr"
         ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
         let result_val = self.builder.build_load(

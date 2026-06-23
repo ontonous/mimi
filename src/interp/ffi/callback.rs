@@ -36,8 +36,10 @@ use std::sync::Mutex;
 /// This global store keeps closures alive so the trampoline can still find
 /// them from any thread. Entries persist until explicitly deregistered via
 /// `mimi_callback_deregister`.
+#[allow(clippy::type_complexity)]
 static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<Mutex<HashMap<i64, (Value, bool, Vec<bool>)>>> = std::sync::OnceLock::new();
 
+#[allow(clippy::type_complexity)]
 fn global_callback_store() -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>)>> {
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -191,6 +193,7 @@ impl<'a> Interpreter<'a> {
     /// F8: Convert a Mimi closure value to a C-compatible callback function pointer.
     /// Registers the closure with the global callback table and creates a
     /// dynamically generated trampoline via libffi.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn value_to_ffi_callback(
         &self,
         arg: &Value,
@@ -223,7 +226,7 @@ impl<'a> Interpreter<'a> {
                 } else {
                     FfiType::i64()
                 };
-                let cif = Cif::new(cif_arg_types.into_iter(), cif_ret);
+                let cif = Cif::new(cif_arg_types, cif_ret);
 
                 // Register with CALLBACK_TABLE so the trampoline can find it
                 // Use a dummy invoker (the real invocation is via thread-local ctx)
@@ -269,7 +272,7 @@ impl<'a> Interpreter<'a> {
                 // code_ptr_ref is &unsafe extern "C" fn() — a reference to the generated
                 // trampoline function pointer. We convert it to a raw i64 address.
                 let fn_ptr_val: unsafe extern "C" fn() = *code_ptr_ref;
-                let fn_ptr = fn_ptr_val as i64;
+                let fn_ptr = fn_ptr_val as usize as i64;
 
                 // Keep the closure and its userdata alive for the duration of the C call
                 ffi_guards.push(FfiGuard::CallbackClosure {

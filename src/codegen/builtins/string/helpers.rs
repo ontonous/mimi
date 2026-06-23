@@ -26,7 +26,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("c_str_to_string: argument must be a raw C string pointer".to_string())),
                 };
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr_ty),
                     BasicTypeEnum::IntType(self.context.i64_type()),

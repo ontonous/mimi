@@ -26,7 +26,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             None => BasicTypeEnum::IntType(self.context.i64_type()),
         };
 
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         // Function type: fn(env_ptr: i8*, params...) -> ret_type
         let mut param_types_llvm = vec![BasicTypeEnum::PointerType(i8_ptr)];
         for p in params {
@@ -65,7 +65,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let env_struct_type = self.context.struct_type(&env_field_types, false);
             let env_struct_ptr = self.builder.build_pointer_cast(
                 env_ptr_param,
-                env_struct_type.ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "env_struct",
             ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
             for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {

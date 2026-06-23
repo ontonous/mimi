@@ -19,7 +19,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_repeat: second arg must be integer count".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // strlen(s)
                 let strlen_fn = self.module.get_function("strlen")
@@ -132,7 +132,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_trim: first arg must be string".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // strlen(s)
                 let strlen_fn = self.module.get_function("strlen")
@@ -300,7 +300,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_to_upper: first arg must be string".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // strlen, malloc copy + toupper each char
                 let strlen_fn = self.module.get_function("strlen")
@@ -407,7 +407,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_to_lower: first arg must be string".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;
@@ -517,7 +517,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_substring: third arg must be integer end".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // len = end - start
                 let sub_len = self.builder.build_int_sub(end, start, "sub_len")
@@ -596,13 +596,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 // MimiList* is {i64 len, const char** data} — same layout as our list struct
                 let i64_ty = self.context.i64_type();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let list_struct_ty = self.context.struct_type(&[
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(i8_ptr),
                 ], false);
                 let list_ptr = self.builder.build_bit_cast(result_ptr,
-                    list_struct_ty.ptr_type(inkwell::AddressSpace::default()), "list_ptr")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "list_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 let len_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 0, "len")
@@ -643,7 +643,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("str_join: second arg must be string".to_string())),
                 };
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 // Bitcast list pointer to i8* for C function
                 let c_list_ptr = self.builder.build_bit_cast(list_ptr,
                     i8_ptr, "c_list_ptr")

@@ -23,7 +23,6 @@
 // When compiled directly with rustc (--cfg standalone), provide our own POSIX FFI declarations.
 // When compiled via cargo, the real `libc` crate is used from Cargo.toml.
 
-
 #[cfg(standalone)]
 #[allow(non_camel_case_types, dead_code)]
 mod libc {
@@ -2017,11 +2016,12 @@ mod no_panic {
         libc::SIGILL, libc::SIGFPE,
     ];
 
+    #[allow(dead_code)]
     fn sig_index(sig: i32) -> Option<usize> {
         SIGS.iter().position(|&s| s == sig)
     }
 
-    #[allow(clashing_extern_declarations)]
+    #[allow(clashing_extern_declarations, dead_code)]
     extern "C" {
         fn sigsetjmp(env: *mut SigJmpBuf, savemask: i32) -> i32;
         fn siglongjmp(env: *mut SigJmpBuf, val: i32) -> !;

@@ -58,7 +58,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("malloc returned void")?
             .into_pointer_value();
         let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
-            self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
             "data_ptr_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
@@ -135,7 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_comprehension_expr(
         &mut self,
         expr: &Expr,
-        var: &String,
+        var: &str,
         iter: &Expr,
         guard: &Option<Box<Expr>>,
         vars: &HashMap<String, VarEntry<'ctx>>,
@@ -147,7 +147,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::PointerValue(pv) => pv,
             _ => return Err("comprehension iter must be a list pointer".into()),
         };
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(&[
             BasicTypeEnum::IntType(i64_ty),
@@ -163,7 +163,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
         let data_ptr = self.builder.build_bit_cast(data_i8,
-            i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+            self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
         // Allocate output array (same max size as input)
         let elem_size = i64_ty.const_int(8, false);
@@ -178,7 +178,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("malloc returned void")?.into_pointer_value();
         let out_i64 = self.builder.build_bit_cast(out_ptr,
-            i64_ty.ptr_type(inkwell::AddressSpace::default()), "out_i64")
+            self.context.ptr_type(inkwell::AddressSpace::default()), "out_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
         // Loop: for i in 0..len
         let function = self.current_function().ok_or_else(|| "codegen: no current function for comprehension".to_string())?;
@@ -215,7 +215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
         self.builder.build_store(elem_alloca, elem)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        comp_vars.insert(var.clone(), (elem_alloca, BasicTypeEnum::IntType(i64_ty)));
+        comp_vars.insert(var.to_string(), (elem_alloca, BasicTypeEnum::IntType(i64_ty)));
         // Check guard
         let include = if let Some(g) = guard {
             let g_val = self.compile_expr(g, &comp_vars)?;

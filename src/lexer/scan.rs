@@ -361,6 +361,7 @@ impl<'a> super::Lexer<'a> {
             }
             // real content
             if self.mode == LexerMode::Sketch {
+                #[allow(clippy::incompatible_msrv)]
                 if !spaces.is_multiple_of(4) {
                     return Err(indent_not_multiple_of_four(self.line, self.col));
                 }

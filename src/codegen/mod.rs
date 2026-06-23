@@ -15,7 +15,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, ValueKind};
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
@@ -90,7 +90,7 @@ pub struct CodeGenerator<'ctx> {
     /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
     /// Uses RefCell for interior mutability since builtins take &self.
     heap_allocs: std::cell::RefCell<Vec<Vec<HeapEntry<'ctx>>>>,
-    ensures_stmts: Vec<Box<Expr>>,
+    ensures_stmts: Vec<Expr>,
     old_snapshots: HashMap<String, VarEntry<'ctx>>,
     /// Names of comptime functions declared in the current file.
     /// Used for better error messages and unused-comptime warnings.
@@ -105,7 +105,6 @@ pub struct CodeGenerator<'ctx> {
     callback_thunk_counter: u64,
     /// G1b: Cache of generated callback thunks, keyed by signature fingerprint.
     callback_thunks: HashMap<String, CallbackThunkEntry<'ctx>>,
-    spawn_result_types: HashMap<String, BasicTypeEnum<'ctx>>,
     pending_spawn_type: Option<BasicTypeEnum<'ctx>>,
     /// Maps variable names to the inner result type of Future<T> for async fn calls.
     /// Set when compiling `let f = async_fn()` and used when compiling `await f`.
@@ -146,7 +145,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         builtins::register_runtime(&module, context);
-        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, shared: false, verify_contracts: true, target_triple: None, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], weak_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), old_snapshots: HashMap::new(), comptime_func_names: std::collections::HashSet::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new(), extern_param_types: HashMap::new(), callback_thunk_counter: 0, callback_thunks: HashMap::new(), spawn_result_types: HashMap::new(), pending_spawn_type: None, async_var_inner_types: HashMap::new(), record_type_names: std::collections::HashSet::new(), repr_c_record_names: std::collections::HashSet::new(), tuple_type_stack: Vec::new(), pending_len_is_string: false, fn_ptr_var_names: std::collections::HashSet::new(), extern_func_defs: HashMap::new(), extern_block_abis: HashMap::new(), pending_callback_tls: Vec::new() }
+        Self { context, module, builder, loop_break: None, loop_continue: None, type_defs: HashMap::new(), type_llvm: HashMap::new(), cap_vars: vec![HashMap::new()], cap_type_names: std::collections::HashSet::new(), type_map: HashMap::new(), func_defs: HashMap::new(), var_type_names: HashMap::new(), spawn_counter: 0, strict: false, no_std: false, shared: false, verify_contracts: true, target_triple: None, compensation_blocks: Vec::new(), comp_scope_stack: Vec::new(), shared_release_vars: vec![Vec::new()], weak_release_vars: vec![Vec::new()], shared_var_names: std::collections::HashSet::new(), heap_allocs: std::cell::RefCell::new(vec![Vec::new()]), ensures_stmts: Vec::new(), old_snapshots: HashMap::new(), comptime_func_names: std::collections::HashSet::new(), in_parasteps: false, parasteps_thread_ids: Vec::new(), trait_defs: HashMap::new(), type_impls: HashMap::new(), vtable_globals: HashMap::new(), vtable_types: HashMap::new(), extern_param_types: HashMap::new(), callback_thunk_counter: 0, callback_thunks: HashMap::new(), pending_spawn_type: None, async_var_inner_types: HashMap::new(), record_type_names: std::collections::HashSet::new(), repr_c_record_names: std::collections::HashSet::new(), tuple_type_stack: Vec::new(), pending_len_is_string: false, fn_ptr_var_names: std::collections::HashSet::new(), extern_func_defs: HashMap::new(), extern_block_abis: HashMap::new(), pending_callback_tls: Vec::new() }
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
@@ -192,10 +191,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn cg_err<T>(&self, _code: &str, msg: impl Into<String>) -> Result<T, CompileError> {
-        Err(CompileError::LlvmError(msg.into()))
-    }
-
     pub fn emit_ir(&self) -> String {
         self.module.print_to_string().to_string()
     }
@@ -206,11 +201,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         val: BasicValueEnum<'ctx>,
         alloca: inkwell::values::PointerValue<'ctx>,
-        ty: BasicTypeEnum<'ctx>,
+        _ty: BasicTypeEnum<'ctx>,
     ) -> Result<(), CompileError> {
         if self.shared_var_names.contains(name) {
             // Shared variable: load the heap pointer, store new value at that location
-            let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let heap_ptr = self.builder.build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))
                 .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load error: {}", e)))?
                 .into_pointer_value();
@@ -255,7 +250,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ptr = match entry {
                     HeapEntry::Ptr(p) => p,
                     HeapEntry::Slot(gep) => {
-                        let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let loaded = self.builder.build_load(ptr_ty, gep, "heap_slot")
                             .map_err(|e| CompileError::LlvmError(format!("heap slot load error: {}", e)))?;
                         loaded.into_pointer_value()
@@ -351,7 +346,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         init: &Expr,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Track type name for downstream field access / inference
         if let Some(decl_ty) = ty {
@@ -376,7 +371,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let &(src_alloca, val_ty) = vars.get(src_name)
                         .ok_or_else(|| CompileError::LlvmError(
                             format!("weak source '{}' not found", src_name)))?;
-                    let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr_typed = self.builder.build_load(
                         BasicTypeEnum::PointerType(ptr_ty), src_alloca,
                         &format!("{}_weak_load", name),
@@ -415,7 +410,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // actual data on the heap, not a stack pointer.
         let llvm_ty = if let BasicValueEnum::PointerValue(pv) = val {
             let ty_name = self.var_type_names.get(name.as_str())
-                .or_else(|| {
+                .or({
                     if let Expr::Record { ty: Some(tn), .. } = init { Some(tn) } else { None }
                 });
             let pointee_ty = ty_name.and_then(|tn| self.type_llvm.get(tn)).cloned()
@@ -442,7 +437,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let heap_raw_ptr = heap_raw.into_pointer_value();
         let heap_ptr = self.builder.build_pointer_cast(
             heap_raw_ptr,
-            llvm_ty.ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
             &format!("{}_heap", name))
             .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
 
@@ -450,7 +445,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
 
         let alloca = self.builder.build_alloca(
-            llvm_ty.ptr_type(inkwell::AddressSpace::default()), name)
+            self.context.ptr_type(inkwell::AddressSpace::default()), name)
             .map_err(|e| CompileError::LlvmError(format!("shared handle alloca error: {}", e)))?;
         self.builder.build_store(alloca, heap_ptr)
             .map_err(|e| CompileError::LlvmError(format!("shared handle store error: {}", e)))?;
@@ -509,10 +504,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         src_name: &str,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
-        let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let &(src_alloca, val_ty) = vars.get(src_name)
             .ok_or_else(|| CompileError::LlvmError(format!("shared source '{}' not found", src_name)))?;
-        let ptr_ty = val_ty.ptr_type(inkwell::AddressSpace::default());
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // 1. Load the T* heap pointer from the source's alloca
         let heap_ptr_typed = self.builder.build_load(

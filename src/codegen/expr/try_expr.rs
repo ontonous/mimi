@@ -32,7 +32,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Expr::Ident(fname) = callee.as_ref() {
                     self.func_defs.get(fname)
                         .and_then(|f| f.ret.as_ref())
-                        .map(|ret_ty| crate::core::fmt_type(ret_ty))
+                        .map(crate::core::fmt_type)
                 } else {
                     None
                 }
@@ -117,7 +117,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // the actual error message instead of a numeric pointer value.
         let is_string_err = is_result && inner_type_name.as_ref()
             .map(|tn| {
-                tn.rsplitn(2, ',').next()
+                tn.rsplit(',').next()
                     .map(|last| last.trim_end_matches('>').trim() == "string")
                     .unwrap_or(false)
             })
@@ -127,13 +127,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             // String error: the i64 slot contains a ptrtoint-encoded pointer
             // to a heap-allocated string struct {i8*, i64}.
             // Decode it back and call mimi_try_exit_str(ptr, len).
-            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let string_struct_ty = self.context.struct_type(&[
                 BasicTypeEnum::PointerType(i8_ptr_ty),
                 BasicTypeEnum::IntType(i64_ty),
             ], false);
             let err_ptr = self.builder.build_int_to_ptr(
-                err_val.into_int_value(), string_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                err_val.into_int_value(), self.context.ptr_type(inkwell::AddressSpace::default()),
                 "err_str_ptr",
             ).map_err(|e| CompileError::LlvmError(format!("inttoptr error: {}", e)))?;
             let str_ptr_ptr = self.gep().build_struct_gep(

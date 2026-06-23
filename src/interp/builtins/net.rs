@@ -79,7 +79,7 @@ impl<'a> Interpreter<'a> {
         let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_port = (port as u16).to_be();
-        addr.sin_addr.s_addr = libc::INADDR_ANY as u32;
+        addr.sin_addr.s_addr = libc::INADDR_ANY;
         let ret = unsafe { libc::bind(fd as i32, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32) };
         Ok(Value::Int(ret as i64))
     }

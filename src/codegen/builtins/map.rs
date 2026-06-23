@@ -188,7 +188,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err("map_from_list: first arg must be list pointer".into()),
                 };
                 let i64_ty = self.context.i64_type();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let list_struct_ty = self.context.struct_type(&[
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -202,7 +202,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "map_from_list_data_val")
                     .map_err(|e| format!("load error: {}", e))?.into_pointer_value();
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "map_from_list_data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "map_from_list_data_i64")
                     .map_err(|e| format!("bitcast error: {}", e))?
                     .into_pointer_value();
                 let sizeof_pair = i64_ty.const_int(16, false);
@@ -225,11 +225,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let keys_ptr = self.builder.build_bit_cast(keys_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "keys_ptr_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "keys_ptr_i64")
                     .map_err(|e| format!("bitcast error: {}", e))?
                     .into_pointer_value();
                 let values_ptr = self.builder.build_bit_cast(values_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "values_ptr_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "values_ptr_i64")
                     .map_err(|e| format!("bitcast error: {}", e))?
                     .into_pointer_value();
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for map_from_list loop".to_string())?;

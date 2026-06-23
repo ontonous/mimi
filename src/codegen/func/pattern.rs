@@ -42,8 +42,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let bool_ty = self.context.bool_type();
                 let assert_fn = self.module.get_function("mimi_runtime_assert")
                     .unwrap_or_else(|| {
-                        let i8_ty = self.context.i8_type();
-                        let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                        let _i8_ty = self.context.i8_type();
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let fn_ty = self.context.void_type().fn_type(&[
                             inkwell::types::BasicMetadataTypeEnum::IntType(bool_ty),
                             inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
@@ -146,7 +146,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                     .into_pointer_value();
                 let data_i64 = self.builder.build_bit_cast(data_ptr,
-                    self.context.i64_type().ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 for (i, sub_pat) in sub_patterns.iter().enumerate() {

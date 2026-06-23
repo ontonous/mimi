@@ -20,7 +20,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let elem = args[1];
 
                 let i64_ty = self.context.i64_type();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let list_struct_ty = self.list_struct_type();
 
                 // Load current len and data
@@ -70,7 +70,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Bitcast i8* to i64* for store
                 let idx_ptr_i64 = self.builder.build_bit_cast(
                     idx_ptr,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "idx_ptr_i64",
                 ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
 
@@ -107,7 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
 
                 let i64_ty = self.context.i64_type();
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let list_struct_ty = self.list_struct_type();
 
                 // Load current len and data
@@ -153,7 +153,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let elem_ptr_i64 = self.builder.build_bit_cast(
                     elem_ptr,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "elem_ptr_i64",
                 ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
                 let elem_val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr_i64, "elem_val")
@@ -223,7 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let new_data_i64 = self.builder.build_bit_cast(new_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // Copy elements in reverse order
@@ -373,7 +373,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(done_bb);
                 let data_void = self.builder.build_bit_cast(
                     data_ptr,
-                    self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "sort_data_void",
                 ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
                 let result_alloca = self.alloc_list_result(list_len, data_void.into_pointer_value())?;

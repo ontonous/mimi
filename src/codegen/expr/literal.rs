@@ -32,7 +32,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         parts: &[crate::ast::FStringPart],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let _i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
 
         if parts.is_empty() {

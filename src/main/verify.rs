@@ -22,10 +22,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         file
     };
 
-    let mut verifier = match Verifier::new() {
-        Ok(v) => v,
-        Err(e) => return Err(e),
-    };
+    let mut verifier = Verifier::new()?;
 
     // Dump Z3 assertions before verification if --dump-z3 is set
     if dump_z3 {

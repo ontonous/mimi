@@ -19,7 +19,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_contains: second arg must be string".to_string())),
                 };
                 // strstr(s, sub) -> i8* (or NULL if not found)
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let strstr_fn = self.module.get_function("strstr")
                     .or_else(|| {
                         let ty = i8_ptr.fn_type(&[
@@ -56,8 +56,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("str_starts_with: second arg must be string".to_string())),
                 };
-                let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let _i8_ty = self.context.i8_type();
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 // Call C helper: strncmp(s, prefix, strlen(prefix)) == 0
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;
@@ -108,7 +108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => return Err(CompileError::TypeMismatch("str_ends_with: second arg must be string".to_string())),
                 };
                 let i8_ty = self.context.i8_type();
-                let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // s_len = strlen(s), suffix_len = strlen(suffix)
                 let strlen_fn = self.module.get_function("strlen")
@@ -283,7 +283,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(pv) => pv,
                     _ => return Err(CompileError::TypeMismatch("str_index_of: second arg must be string".to_string())),
                 };
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 // strstr(s, sub) -> pointer or NULL
                 let strstr_fn = self.module.get_function("strstr")

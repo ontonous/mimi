@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::codegen::CallSiteValueExt;
 use crate::error::CompileError;
 
-use inkwell::types::BasicType;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -93,7 +92,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if self.shared_var_names.contains(name.as_str()) {
                 // Shared variable: the alloca stores a T* pointer to heap memory.
                 // First load the pointer, then load the value from the heap.
-                let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let heap_ptr = self.builder.build_load(ptr_ty, alloca, name)
                     .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load error: {}", e)))?;
                 let heap_pointer = heap_ptr.into_pointer_value();

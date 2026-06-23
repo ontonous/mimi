@@ -155,7 +155,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     data_gep, "data").map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 let i64_ty = self.context.i64_type();
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
@@ -190,7 +190,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     data_gep, "data").map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 let i64_ty = self.context.i64_type();
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
                 // Bind prefix elements
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
@@ -323,7 +323,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             data_gep, "data",
         ).map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?.into_pointer_value();
         let data_ptr = self.builder.build_bit_cast(data_i8,
-            i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+            self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?.into_pointer_value();
         let mut agg: Option<inkwell::values::IntValue<'ctx>> = None;
         for (j, pat) in inner_pats.iter().enumerate() {
@@ -411,7 +411,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }).ok_or_else(|| CompileError::LlvmError("cannot determine payload struct type".to_string()))?;
             let ptr = self.builder.build_int_to_ptr(
                 payload_int,
-                self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "payload_ptr",
             ).map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
             let loaded_struct = self.builder.build_load(data_ty, ptr, "payload_struct")

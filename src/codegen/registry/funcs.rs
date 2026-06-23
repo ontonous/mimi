@@ -18,19 +18,6 @@ fn is_simple_reprc_record(fields: &[Field]) -> bool {
     fields.iter().all(|f| matches!(&f.ty, crate::ast::Type::Name(n, _) if n == "i32"))
 }
 
-/// Return the C ABI size and alignment for a Mimi type passed through FFI.
-fn c_type_size_align(ty: &crate::ast::Type) -> (u64, u64) {
-    match ty {
-        crate::ast::Type::Name(n, _) => match n.as_str() {
-            "i32" | "f32" => (4, 4),
-            "i64" | "f64" | "usize" => (8, 8),
-            "bool" => (1, 1),
-            _ => (8, 8),
-        },
-        _ => (8, 8),
-    }
-}
-
 impl<'ctx> CodeGenerator<'ctx> {
     fn type_to_llvm_for_extern(&self, ty: &crate::ast::Type) -> MimiResult<BasicTypeEnum<'ctx>> {
         // For user-defined types (Type::Name), prefer the registered type_llvm entry
@@ -44,7 +31,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // not as {fn_ptr, env_ptr} structs. The conversion is done at the call site
         // via get_or_create_callback_thunk + TLS globals.
         if matches!(ty, crate::ast::Type::Func(_, _)) {
-            let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             return Ok(BasicTypeEnum::PointerType(i8_ptr));
         }
         // Explicitly map unit to i64 (zero-size type has no C ABI representation of its own,
@@ -99,7 +86,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Build vtable struct types and global vtable instances for all trait impls.
     /// Called after compile_impl_methods so mangled functions exist.
     pub(in crate::codegen) fn compile_vtables(&mut self) -> MimiResult<()> {
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         // Phase 1: define vtable struct type per trait
         let mut trait_method_list: HashMap<String, Vec<String>> = HashMap::new();
         for (trait_name, trait_def) in &self.trait_defs {
@@ -123,7 +110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let Some(expected_methods) = trait_method_list.get(trait_name) else { continue };
 
                 // Build initializer: one bitcast(function) per method slot
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let mut fn_ptrs: Vec<BasicValueEnum> = Vec::new();
                 for method_name in expected_methods {
                     if methods.iter().any(|m| &m.name == method_name) {
@@ -134,7 +121,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 i8_ptr,
                                 &format!("{}_{}_cast", trait_name, method_name),
                             ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-                            fn_ptrs.push(ptr.into());
+                            fn_ptrs.push(ptr);
                             continue;
                         }
                     }
@@ -158,8 +145,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// G1b: Get or create a callback thunk for a given callback signature.
     /// The thunk is a small LLVM function that:
-    /// 1. Reads fn_ptr and env_ptr from module-level globals
-    /// 2. Calls fn_ptr(env_ptr, args...) with the correct C calling convention
+    ///     1. Reads fn_ptr and env_ptr from module-level globals
+    ///     2. Calls fn_ptr(env_ptr, args...) with the correct C calling convention
     /// Returns the thunk function value and its two global slots.
     pub(in crate::codegen) fn get_or_create_callback_thunk(
         &mut self,
@@ -180,8 +167,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         }
 
-        let i8_type = self.context.i8_type();
-        let i8_ptr = i8_type.ptr_type(inkwell::AddressSpace::default());
+        let _i8_type = self.context.i8_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let id = self.callback_thunk_counter;
         self.callback_thunk_counter += 1;
 
@@ -247,7 +234,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Cast fn_ptr to the correct type: fn(env_ptr, params...) -> ret
         let fn_ptr_typed = self.builder.build_pointer_cast(
             fn_ptr_pv,
-            mimi_fn_ty.ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
             "fn_typed",
         ).map_err(|e| CompileError::LlvmError(format!("pointer cast: {}", e)))?;
 
@@ -353,10 +340,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let list_struct_sty = self.context.struct_type(&[
             BasicTypeEnum::IntType(self.context.i64_type()),
-            BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
+            BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
         ], false);
         let list_struct_ty = BasicTypeEnum::StructType(list_struct_sty);
-        let list_ptr_ty = BasicTypeEnum::PointerType(list_struct_sty.ptr_type(inkwell::AddressSpace::default()));
+        let list_ptr_ty = BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default()));
         let mut param_tys = Vec::new();
         for p in &ef.params {
             let ty = match &p.ty {
@@ -367,7 +354,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             param_tys.push(types::basic_to_metadata(self.context, ty));
         }
-        let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let mut extern_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for p in &ef.params {
             let llvm_ty = match &p.ty {
@@ -425,16 +412,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let extern_ret_ty = match &ef.ret {
             Some(ty) => {
-                if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str()))) {
-                    BasicTypeEnum::PointerType(i8_ptr_ty)
-                // F7: Tuple return — C returns JSON string (i8*)
-                } else if matches!(ty, crate::ast::Type::Tuple(_)) {
-                    BasicTypeEnum::PointerType(i8_ptr_ty)
-                // BUG 1: C functions return string as char* (i8*), but Mimi's
-                // string type is {i8*, i64} (ptr + length). The C call uses i8*
-                // for the return; the wrapper then converts via strlen.
-                // Tests: e2e_extern_strlen, e2e_extern_parse_int_raw_string
-                } else if matches!(ty, crate::ast::Type::Name(n, _) if n == "string") {
+                if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
+                    // F7: Tuple return — C returns JSON string (i8*)
+                    || matches!(ty, crate::ast::Type::Tuple(_))
+                    // BUG 1: C functions return string as char* (i8*), but Mimi's
+                    // string type is {i8*, i64} (ptr + length). The C call uses i8*
+                    // for the return; the wrapper then converts via strlen.
+                    // Tests: e2e_extern_strlen, e2e_extern_parse_int_raw_string
+                    || matches!(ty, crate::ast::Type::Name(n, _) if n == "string")
+                {
                     BasicTypeEnum::PointerType(i8_ptr_ty)
                 // repr(C) records are returned as i64 (packed) to match Rust's C ABI
                 } else if let crate::ast::Type::Name(n, _) = ty {
@@ -625,7 +611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let len_val = self.builder.build_load(self.context.i64_type(), len_gep, &format!("list_len_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                     let data_ptr_val = self.builder.build_load(
-                        self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         data_gep, &format!("list_data_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                     let data_pv = match data_ptr_val {
@@ -706,7 +692,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                                 let cast = self.builder.build_pointer_cast(
                                     f_alloca,
-                                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
                                     &format!("f_cast_{}_{}", i, ei))
                                     .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
                                 self.builder.build_load(i64_ty, cast,
@@ -716,7 +702,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             },
                             BasicValueEnum::PointerValue(pv) => {
                                 // Pointer to i64 (preserve address bits)
-                                let i64_ptr_ty = i64_ty.ptr_type(inkwell::AddressSpace::default());
+                                let i64_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                                 let cast = self.builder.build_pointer_cast(pv, i64_ptr_ty,
                                     &format!("p_cast_{}_{}", i, ei))
                                     .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
@@ -736,7 +722,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                                 let cast = self.builder.build_pointer_cast(
                                     s_alloca,
-                                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
                                     &format!("s_cast_{}_{}", i, ei))
                                     .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
                                 self.builder.build_load(i64_ty, cast,
@@ -772,8 +758,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let serialize_fn = if let Some(f) = self.module.get_function("mimi_tuple_serialize") {
                         f
                     } else {
-                        let i64_ptr_ty = i64_ty.ptr_type(inkwell::AddressSpace::default());
-                        let fn_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default()).fn_type(&[
+                        let i64_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let fn_ty = self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&[
                             BasicMetadataTypeEnum::PointerType(i64_ptr_ty),
                             BasicMetadataTypeEnum::IntType(i64_ty),
                             BasicMetadataTypeEnum::PointerType(i64_ptr_ty),
@@ -900,7 +886,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             let c_ptr = self.builder.build_pointer_cast(
                                                 c_alloca,
-                                                self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                                                self.context.ptr_type(inkwell::AddressSpace::default()),
                                                 &format!("c_struct_ptr_{}", n))
                                                 .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?;
                                             wrapper_args.push(BasicMetadataValueEnum::PointerValue(c_ptr));
@@ -1008,10 +994,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Phase 6: Return
-        let is_tuple_return = ef.ret.as_ref().map_or(false, |ret_ty| {
+        let is_tuple_return = ef.ret.as_ref().is_some_and(|ret_ty| {
             matches!(ret_ty, crate::ast::Type::Tuple(_))
         });
-        let needs_json_deserialize = ef.ret.as_ref().map_or(false, |ret_ty| {
+        let needs_json_deserialize = ef.ret.as_ref().is_some_and(|ret_ty| {
             matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
         }) || is_tuple_return;
         if needs_json_deserialize {
@@ -1059,8 +1045,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let deser_fn = if let Some(f) = self.module.get_function("mimi_tuple_deserialize") {
                     f
                 } else {
-                    let i64_ptr_ty = i64_ty.ptr_type(inkwell::AddressSpace::default());
-                    let i8_p_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                    let i64_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let i8_p_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let fn_ty = i64_ty.fn_type(&[
                         BasicMetadataTypeEnum::PointerType(i8_p_ty),
                         BasicMetadataTypeEnum::IntType(i64_ty),
@@ -1110,7 +1096,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                             let cast = self.builder.build_pointer_cast(
                                 tmp_alloca,
-                                ft.ptr_type(inkwell::AddressSpace::default()),
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
                                 &format!("f_cast_{}", ei))
                                 .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
                             self.builder.build_load(BasicTypeEnum::FloatType(ft), cast,
@@ -1125,7 +1111,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                         },
                         BasicTypeEnum::PointerType(_pt) => {
-                            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let int_to_ptr = self.builder.build_int_to_ptr(raw_i64, i8_ptr_ty,
                                 &format!("ptr_cast_{}", ei))
                                 .map_err(|e| CompileError::LlvmError(format!("int to ptr: {}", e)))?;
@@ -1148,7 +1134,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Original List/Record JSON deserialization
                 let out_len_alloca = self.builder.build_alloca(self.context.i64_type(), "out_len")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let ret_tag = ef.ret.as_ref().map(|ret_ty| elem_type_tag(ret_ty)).unwrap_or(0);
+                let ret_tag = ef.ret.as_ref().map(elem_type_tag).unwrap_or(0);
                 let ret_tag_iv = self.context.i64_type().const_int(ret_tag as u64, false);
                 let deserialize_fn = if let Some(f) = self.module.get_function("mimi_json_deserialize") {
                     f
@@ -1190,7 +1176,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_return(Some(&ret_val))
                     .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
             }
-        } else if ef.ret.as_ref().map_or(false, |t| matches!(t, crate::ast::Type::Name(n, _) if n == "string")) {
+        } else if ef.ret.as_ref().is_some_and(|t| matches!(t, crate::ast::Type::Name(n, _) if n == "string")) {
             // BUG 1: convert char* (i8*) from C to {i8*, i64} Mimi string struct.
             // C FFI returns strings as bare pointers; Mimi represents strings
             // as {ptr, len}. The strlen call computes the missing length field.

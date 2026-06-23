@@ -134,7 +134,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(result)
             }
             "None" => {
-                if compiled_args.len() != 0 {
+                if !compiled_args.is_empty() {
                     return Err("None expects 0 arguments".into());
                 }
                 let bool_ty = self.context.bool_type();

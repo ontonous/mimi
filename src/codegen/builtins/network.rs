@@ -141,7 +141,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 2 { return Err(CompileError::WrongArgCount("recv expects 2 arguments (fd, buf_size)".to_string())); }
                 let fd = match args[0] { BasicMetadataValueEnum::IntValue(iv) => iv, _ => return Err(CompileError::TypeMismatch("recv: fd must be i32".to_string())) };
                 let buf_size = match args[1] { BasicMetadataValueEnum::IntValue(iv) => iv, _ => return Err(CompileError::TypeMismatch("recv: buf_size must be i32".to_string())) };
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 // Allocate an i64 on stack to receive out_len
                 let out_len_alloca = self.builder.build_alloca(self.context.i64_type(), "recv_out_len")
                     .map_err(|e| format!("alloca error: {}", e))?;
@@ -210,7 +210,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 // NOTE: not registered — returned value owns the allocation
                 // Build Mimi string struct {i8*, i64}
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr_ty),
                     BasicTypeEnum::IntType(self.context.i64_type()),
@@ -256,7 +256,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 // NOTE: not registered — returned value owns the allocation
                 // Build Mimi string struct {i8*, i64}
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr_ty),
                     BasicTypeEnum::IntType(self.context.i64_type()),

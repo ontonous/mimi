@@ -3,7 +3,7 @@ use crate::codegen::types;
 use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use std::collections::HashMap;
 
@@ -17,12 +17,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Shared variable fast path: obj is a shared var, load heap ptr directly
         if let Expr::Ident(name) = obj {
             if self.shared_var_names.contains(name.as_str()) {
-                if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
+                if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
                     let obj_type = self.infer_object_type(obj, vars);
                     if let Some(td) = self.type_defs.get(&obj_type) {
                         if let TypeDefKind::Record(fields) = &td.kind {
                             if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
-                                let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                                 let heap_ptr = self.builder.build_load(
                                     BasicTypeEnum::PointerType(ptr_ty), alloca,
                                     &format!("{}_heap_ptr", name),
@@ -58,7 +58,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(format!("[E0707] cannot access field on type '{}'", obj_type).into());
                 }
             }
-            _ => return Err(CompileError::Generic(format!("field access requires a struct or actor type, got {}", obj_val.get_type().to_string()))),
+            _ => return Err(CompileError::Generic(format!("field access requires a struct or actor type, got {}", obj_val.get_type()))),
         };
         let sty = match self.type_llvm.get(&obj_type) {
             Some(BasicTypeEnum::StructType(s)) => *s,
@@ -120,7 +120,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                         .into_pointer_value();
                     let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
-                        self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         "data_i64")
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                         .into_pointer_value();
@@ -159,7 +159,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     data_gep, "data",
                 ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
-                    self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "data_i64",
                 ).map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?.into_pointer_value();
                 let elem_ptr = {

@@ -59,7 +59,7 @@ extern "C" fn ffi_crash_signal_handler(sig: i32) {
     FFI_CRASH_JUMP_BUF.with(|cell| {
         let buf = cell.load(std::sync::atomic::Ordering::Relaxed);
         if !buf.is_null() {
-            unsafe { siglongjmp(buf, sig as i32); }
+            unsafe { siglongjmp(buf, sig); }
         }
     });
 }

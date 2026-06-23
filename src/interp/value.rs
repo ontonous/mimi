@@ -244,7 +244,7 @@ pub enum Value {
 ///    but cannot reach here without passing (1).
 /// 4. `check_expr_parasteps_safe` also descends into Expr::Lambda bodies.
 #[derive(Debug, Clone)]
-pub(crate) struct LocalSharedInner(pub Rc<RefCell<Value>>);
+pub struct LocalSharedInner(pub Rc<RefCell<Value>>);
 
 // SAFETY: LocalSharedInner wraps Rc<RefCell<Value>> which is !Send/!Sync by default.
 // Safety relies on the type-level E0305 rejection of local_shared in parallel blocks,
@@ -276,7 +276,7 @@ impl LocalSharedInner {
 
 /// Wrapper around RcWeak<RefCell<Value>> for WeakLocal.
 #[derive(Debug, Clone)]
-pub(crate) struct WeakLocalInner(pub RcWeak<RefCell<Value>>);
+pub struct WeakLocalInner(pub RcWeak<RefCell<Value>>);
 
 // SAFETY: WeakLocalInner wraps RcWeak<RefCell<Value>> which is !Send/!Sync by default,
 // but all accesses are single-threaded (only used within the interpreter which is
@@ -301,7 +301,7 @@ pub enum AllocatorKind {
 }
 
 /// C buffer wrapper that automatically frees memory on drop
-pub(crate) struct CBufferInner {
+pub struct CBufferInner {
     pub ptr: *mut u8,
     pub size: usize,
 }

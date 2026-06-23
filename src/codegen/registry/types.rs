@@ -112,16 +112,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     ], "payload_malloc")
                                         .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?;
                                     let malloc_result = crate::codegen::call_try_basic_value(&malloc_call)
-                                        .ok_or_else(|| "malloc returned void")?
+                                        .ok_or("malloc returned void")?
                                         .into_pointer_value();
                                     let typed_ptr = self.builder.build_pointer_cast(
                                         malloc_result,
-                                        payload_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                                        self.context.ptr_type(inkwell::AddressSpace::default()),
                                         "typed_ptr",
                                     ).map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?;
                                     self.builder.build_store(typed_ptr, payload_struct)
                                         .map_err(|e| CompileError::LlvmError(format!("store struct: {}", e)))?;
-                                    let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                                     let ptr_to_i8 = self.builder.build_pointer_cast(
                                         malloc_result, i8_ptr, "ptr_i8"
                                     ).map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?;

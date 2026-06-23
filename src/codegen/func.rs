@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::types;
 use std::collections::HashMap;
 
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::AddressSpace;
 
@@ -11,11 +11,11 @@ use crate::error::{CompileError, MimiResult};
 
 /// Recursively collect all Stmt::Ensures from a list of statements,
 /// descending into nested blocks (if, while, for, parasteps, lambda, expr block).
-fn collect_ensures(stmts: &[Stmt]) -> Vec<Box<Expr>> {
+fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
     let mut result = Vec::new();
     for s in stmts {
         match s {
-            Stmt::Ensures(expr, _) => result.push(Box::new(expr.clone())),
+            Stmt::Ensures(expr, _) => result.push(expr.clone()),
             Stmt::If { then_, else_, .. } => {
                 result.extend(collect_ensures(then_));
                 if let Some(eb) = else_ {
@@ -72,8 +72,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compile_func(&body_func)?;
 
         let result_ty = func.ret.as_ref()
-            .map(|t| self.llvm_type_for(t))
-            .flatten()
+            .and_then(|t| self.llvm_type_for(t))
             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
         let result_size = self.llvm_type_size_bytes(result_ty);
         let aligned_result = result_size.max(8);
@@ -94,7 +93,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // i8 pointer type
         let i8_ty = self.context.i8_type();
-        let i8_ptr_ty = i8_ty.ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
 
         // ── Step 2a: Generate poll function ──
@@ -129,7 +128,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let arg_typed_ptr = self.builder.build_pointer_cast(
                     arg_ptr_i8,
-                    ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     &format!("poll_arg_typed_{}", param_idx),
                 ).map_err(|e| CompileError::LlvmError(format!("poll arg cast: {}", e)))?;
                 let arg_val = self.builder.build_load(ty, arg_typed_ptr,
@@ -162,7 +161,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             let result_typed_ptr = self.builder.build_pointer_cast(
                 result_ptr_i8,
-                result_ty.ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "poll_result_typed",
             ).map_err(|e| CompileError::LlvmError(format!("poll result cast: {}", e)))?;
             self.builder.build_store(result_typed_ptr, poll_body_result)
@@ -226,7 +225,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], "future_alloc")
             .map_err(|e| CompileError::LlvmError(format!("future_alloc error: {}", e)))?
             .try_as_basic_value_opt()
-            .and_then(|v: BasicValueEnum<'ctx>| Some(v.into_pointer_value()))
+            .map(|v: BasicValueEnum<'ctx>| v.into_pointer_value())
             .ok_or_else(|| CompileError::LlvmError("future_alloc returned non-pointer".into()))?;
 
         // Store args in future at args_offset
@@ -247,7 +246,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let arg_slot_typed = self.builder.build_pointer_cast(
                     arg_slot_i8,
-                    ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     &format!("arg_slot_typed_{}", param_idx),
                 ).map_err(|e| CompileError::LlvmError(format!("arg slot cast: {}", e)))?;
                 self.builder.build_store(arg_slot_typed, val)
@@ -524,7 +523,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(data_alloca, concrete_val)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let data_ptr = self.builder.build_pointer_cast(
                             data_alloca, i8_ptr, &format!("{}_data_i8", name)
                         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
@@ -802,7 +801,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 Stmt::SharedLet { kind, name, ty, init } => {
-                    self.compile_shared_let_stmt(&kind, name, &ty, init, &mut vars)?;
+                    self.compile_shared_let_stmt(kind, name, ty, init, &mut vars)?;
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit
@@ -845,7 +844,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Null out field at index 1 (data pointer) to prevent free_heap_allocs from freeing
                 // the heap data that's now owned by the caller via the returned struct value.
                 if st.get_field_types().len() > 1 {
-                    let null_ptr = self.context.i8_type().ptr_type(AddressSpace::default()).const_null();
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
                     if let Ok(data_gep) = self.gep().build_struct_gep(st, pv, 1, "ret_data_null") {
                         let _ = self.builder.build_store(data_gep, null_ptr);
                     }
@@ -1004,7 +1003,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let loaded = self.builder.build_load(BasicTypeEnum::StructType(st), pv, "ret_load")
                     .map_err(|e| CompileError::LlvmError(format!("load return struct: {}", e)))?;
                 if st.get_field_types().len() > 1 {
-                    let null_ptr = self.context.i8_type().ptr_type(AddressSpace::default()).const_null();
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
                     if let Ok(data_gep) = self.gep().build_struct_gep(st, pv, 1, "ret_data_null") {
                         let _ = self.builder.build_store(data_gep, null_ptr);
                     }

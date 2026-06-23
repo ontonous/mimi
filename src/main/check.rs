@@ -32,7 +32,7 @@ pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, 
                     eprint!("{}", strip_ansi(&formatted));
                 }
             }
-            if parse_errors.iter().all(|e| e.span.as_ref().is_none_or(|s| s.start_line > 0)) {
+            if parse_errors.iter().all(|e| e.span.as_ref().map_or(true, |s| s.start_line > 0)) {
                 // All errors have valid positions, continue to type checking
             } else {
                 return Err(format!("{} parse error(s)", parse_errors.len()));

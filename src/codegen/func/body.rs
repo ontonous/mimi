@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use std::collections::HashMap;
 
@@ -129,7 +129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             self.builder.position_at_end(merge_bb);
         } else {
-            let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let list_ptr = match iterable_val {
                 BasicValueEnum::PointerValue(pv) => pv,
                 BasicValueEnum::StructValue(sv) => {
@@ -307,8 +307,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Check if obj is a shared variable — use heap pointer directly
         if let Expr::Ident(name) = obj {
             if self.shared_var_names.contains(name.as_str()) {
-                if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
-                    let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr = self.builder.build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))
                         .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load: {}", e)))?
                         .into_pointer_value();
@@ -437,7 +437,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         let data_ptr_i64 = self.builder.build_bit_cast(data_ptr,
-            self.context.i64_type().ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
             "data_i64")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
@@ -459,8 +459,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Check if inner is a shared variable — use heap pointer directly
         if let Expr::Ident(name) = inner {
             if self.shared_var_names.contains(name.as_str()) {
-                if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
-                    let ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
+                if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr = self.builder.build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))
                         .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load: {}", e)))?
                         .into_pointer_value();
@@ -474,7 +474,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ptr = match ptr_val {
             BasicValueEnum::PointerValue(pv) => pv,
             BasicValueEnum::IntValue(iv) => {
-                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 self.builder.build_int_to_ptr(iv, i8_ptr_ty, "ptr_cast")
                     .map_err(|e| CompileError::LlvmError(format!("int_to_ptr error: {}", e)))?
             }

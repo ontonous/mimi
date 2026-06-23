@@ -1,5 +1,4 @@
 use crate::ast::*;
-use crate::codegen::types;
 use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
@@ -8,7 +7,6 @@ use crate::span::Span;
 use super::CodeGenerator;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine};
-use inkwell::types::BasicTypeEnum;
 use inkwell::OptimizationLevel;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -32,12 +30,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|k| crate::ast::GenericParam { name: k.clone(), bounds: vec![] })
             .collect();
         crate::core::subst_type_params(ty, &generics, &self.type_map)
-    }
-
-    /// Resolve a type to its LLVM representation, applying generic substitution
-    pub(super) fn resolve_type_llvm(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
-        let resolved = self.resolve_type(ty);
-        types::mimi_type_to_llvm(self.context, &resolved)
     }
 
     /// Apply a handler to every item in `items`, recursing into modules.

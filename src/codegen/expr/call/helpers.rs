@@ -12,8 +12,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         strings: &[String],
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let i8_ty = self.context.i8_type();
-        let i8_ptr = i8_ty.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ty = self.context.i8_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let count = strings.len() as u64;
 
@@ -177,7 +177,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Build string literal: { i8*, i64 }
                 let global = self.builder.build_global_string_ptr(&type_str, "type_name")
                     .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr),
                     BasicTypeEnum::IntType(self.context.i64_type()),
@@ -275,7 +275,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .ok_or("malloc returned void")?
                                 .into_pointer_value();
                             let values_data_i64 = self.builder.build_bit_cast(values_data,
-                                i64_ty.ptr_type(inkwell::AddressSpace::default()), "values_data_i64")
+                                self.context.ptr_type(inkwell::AddressSpace::default()), "values_data_i64")
                                 .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                                 .into_pointer_value();
                             let record_ptr = match self.compile_expr(&args[0], vars)? {
@@ -352,7 +352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let fn_llvm = self.module.get_function(&fn_name)
                     .ok_or_else(|| format!("map/filter: function '{}' not compiled", fn_name))?;
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(&[
                     BasicTypeEnum::IntType(i64_ty),
@@ -368,7 +368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // Build result list: allocate {i64 len, i8* data}
@@ -392,7 +392,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let out_i64 = self.builder.build_bit_cast(out_ptr,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "out_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "out_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // Loop: for i in 0..len
@@ -507,7 +507,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let init_val = self.compile_expr(&args[2], vars)?;
                 let fn_llvm = self.module.get_function(&fn_name)
                     .ok_or_else(|| format!("reduce: function '{}' not compiled", fn_name))?;
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(&[
                     BasicTypeEnum::IntType(i64_ty),
@@ -522,7 +522,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 let acc_alloca = self.builder.build_alloca(i64_ty, "acc")

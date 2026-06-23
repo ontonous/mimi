@@ -209,7 +209,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(key_ptr),
                 ], "json_get_int_call")
                     .map_err(|e| format!("json_get_int error: {}", e))?;
-                Ok(self.expect_basic_value(&result, "json_get_int")?)
+                self.expect_basic_value(&result, "json_get_int")
 
     }
 

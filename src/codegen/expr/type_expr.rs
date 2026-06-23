@@ -10,17 +10,17 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(in crate::codegen) fn compile_typeof_expr(
         &mut self,
-        inner: &Box<Expr>,
+        inner: &Expr,
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // type_name(x): resolve type name at compile time
-        let type_str = match inner.as_ref() {
+        let type_str = match inner {
             Expr::Ident(var_name) => self.var_type_names.get(var_name)
                 .cloned().unwrap_or_else(|| "unknown".to_string()),
             _ => "unknown".to_string(),
         };
         // Build string literal struct { i8*, i64 }
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let global = self.builder.build_global_string_ptr(&type_str, "typename")
             .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;

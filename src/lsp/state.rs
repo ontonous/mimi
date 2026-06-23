@@ -148,8 +148,7 @@ impl LspServer {
         let func_body_lines = func.pos.1.saturating_sub(func.pos.0).max(1);
         let param_count = func.params.len();
         let dynamic_timeout = (func_body_lines * 50 + param_count * 100)
-            .max(200)
-            .min(5000) as u64;
+            .clamp(200, 5000) as u64;
 
         // Lazily initialize the Z3 verifier with dynamic timeout
         let verifier = self.verifier.get_or_insert(match Verifier::with_timeout(dynamic_timeout) {

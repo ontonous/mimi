@@ -28,8 +28,8 @@ pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
     let end_line = find_func_end_line(text, func.pos.0);
     let lines: Vec<&str> = text.lines().collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for i in func.pos.0..=end_line.min(lines.len().saturating_sub(1)) {
-        lines[i].hash(&mut hasher);
+    for line in lines.iter().take(end_line.min(lines.len().saturating_sub(1)) + 1).skip(func.pos.0) {
+        line.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -42,8 +42,8 @@ pub(crate) fn find_func_end_line(text: &str, start_line: usize) -> usize {
     }
     let mut depth = 0;
     let mut started = false;
-    for i in start_line..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line) in lines.iter().enumerate().skip(start_line) {
+        for ch in line.chars() {
             match ch {
                 '{' => {
                     depth += 1;

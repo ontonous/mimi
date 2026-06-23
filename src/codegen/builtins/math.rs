@@ -56,7 +56,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     });
                 let call = self.builder.build_call(sqrt_fn, args, "sqrt_call")
                     .map_err(|e| format!("sqrt error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "sqrt")?)
+                self.expect_basic_value(&call, "sqrt")
 
     }
 
@@ -110,7 +110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     });
                 let call = self.builder.build_call(c_fn, args, &format!("{}_call", fn_name))
                     .map_err(|e| format!("{} error: {}", fn_name, e))?;
-                Ok(self.expect_basic_value(&call, fn_name)?)
+                self.expect_basic_value(&call, fn_name)
 
     }
 
@@ -149,7 +149,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::FloatValue(b),
                 ], "pow_call")
                     .map_err(|e| format!("pow error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "pow")?)
+                self.expect_basic_value(&call, "pow")
 
     }
 

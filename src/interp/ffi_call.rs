@@ -224,6 +224,7 @@ impl<'a> Interpreter<'a> {
                 // The C call runs on the same thread and callbacks only execute
                 // during the C function's execution, which is within the scope
                 // of `self`.
+                #[allow(clippy::unnecessary_cast)]
                 let static_ptr = interp_ptr as *const Interpreter<'static>;
                 super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();

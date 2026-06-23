@@ -437,6 +437,10 @@ pub extern "C" fn mimi_value_free(ptr: *const Value) {
 }
 
 /// Free a raw string that was obtained via `string.into_raw()`.
+///
+/// # Safety
+/// `c_str` must be a non-null pointer previously returned by `mimi_string_into_raw` or a valid
+/// `CString::into_raw()` result. After this call, the pointer is invalidated.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {
     if !c_str.is_null() {
@@ -451,6 +455,10 @@ pub unsafe extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {
 /// The caller must NOT free the returned pointer — use `mimi_string_as_c_str_free`
 /// to release it when done. Each call allocates a new CString that the caller
 /// must eventually free. Returns null if the pointer is invalid or not a string.
+///
+/// # Safety
+/// `mimi_string` must be either null or a valid pointer to a heap-allocated `Value` previously
+/// obtained via `Box::into_raw` or `mimi_value_*` functions.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_string_as_c_str(mimi_string: *const Value) -> *const std::ffi::c_char {
     if mimi_string.is_null() {
@@ -506,6 +514,10 @@ thread_local! {
 /// Returns null if the pointer is invalid or the string contains interior null bytes.
 /// On success, the original Mimi string is cleared (ownership transferred).
 /// On failure (null return), the original Mimi string is NOT modified.
+///
+/// # Safety
+/// `mimi_string` must be either null or a valid, exclusive pointer to a heap-allocated `Value`
+/// obtained via `Box::into_raw`. The caller transfers ownership of the string content.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut std::ffi::c_char {
     if mimi_string.is_null() {
@@ -539,6 +551,10 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
 /// The caller should NOT free the original C string after this call.
 /// Returns a new Mimi Value (caller takes ownership).
 /// Note: This function allocates a new Value on the heap.
+///
+/// # Safety
+/// `c_str` must be a non-null pointer previously obtained via `CString::into_raw()`. Ownership
+/// of the C string is transferred to this function; the caller must not use the pointer afterward.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *mut Value {
     if c_str.is_null() {
@@ -691,6 +707,7 @@ impl Drop for MimiThreadPool {
     }
 }
 
+#[allow(clippy::incompatible_msrv)]
 static MIMI_POOL: LazyLock<MimiThreadPool> = LazyLock::new(|| {
     let size = thread::available_parallelism()
         .map(|n| n.get())

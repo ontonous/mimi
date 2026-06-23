@@ -20,8 +20,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicValueEnum::PointerValue(pv) => {
                 let closure_struct_ty = self.context.struct_type(&[
-                    BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
-                    BasicTypeEnum::PointerType(self.context.i8_type().ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
                 let loaded = self.builder.build_load(BasicTypeEnum::StructType(closure_struct_ty), pv, "closure_loaded")
                     .map_err(|e| CompileError::LlvmError(format!("load closure error: {}", e)))?.into_struct_value();
@@ -33,13 +33,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => return Err(CompileError::Generic("expected a closure".into())),
         };
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_type = i64_ty.fn_type(&[
             BasicMetadataTypeEnum::PointerType(i8_ptr),
             BasicMetadataTypeEnum::IntType(i64_ty),
         ], false);
         let fn_typed = self.builder.build_pointer_cast(
-            fn_ptr, fn_type.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
+            fn_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "fn_typed"
         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
         let call = self.builder.build_indirect_call(
             fn_type, fn_typed, &[

@@ -77,7 +77,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let outer_len = self.load_list_len(list_ptr)?;
                 let data_i8 = self.load_list_data_raw(list_ptr)?;
                 let data_ptr = self.builder.build_bit_cast(data_i8,
-                    list_struct_ty.ptr_type(inkwell::AddressSpace::default()), "data_list_ptr")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "data_list_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // First pass: count total elements
@@ -136,7 +136,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let new_data_i64 = self.builder.build_bit_cast(new_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "new_data_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 // Second pass: copy elements
@@ -242,7 +242,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let result_data_i64 = self.builder.build_bit_cast(result_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "enum_result_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "enum_result_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for enumerate loop".to_string())?;
@@ -321,7 +321,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 let result_data_i64 = self.builder.build_bit_cast(result_data,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()), "zip_result_i64")
+                    self.context.ptr_type(inkwell::AddressSpace::default()), "zip_result_i64")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                     .into_pointer_value();
                 let function = self.current_function().ok_or_else(|| "codegen: no current function for zip loop".to_string())?;

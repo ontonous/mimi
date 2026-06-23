@@ -37,9 +37,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| "codegen: mimi_now not declared".to_string())?;
                 let call = self.builder.build_call(fn_val, &[], "now_call")
                     .map_err(|e| format!("now error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "now")?)
+                self.expect_basic_value(&call, "now")
 
-    }
+     }
 
     pub(super) fn compile_now_ms(
         &self,
@@ -50,9 +50,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| "codegen: mimi_now_ms not declared".to_string())?;
                 let call = self.builder.build_call(fn_val, &[], "now_ms_call")
                     .map_err(|e| format!("now_ms error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "now_ms")?)
+                self.expect_basic_value(&call, "now_ms")
 
-    }
+     }
 
     pub(super) fn compile_sleep(
         &self,
@@ -61,7 +61,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 { return Err("sleep expects 1 argument (milliseconds)".into()); }
                 let fn_val = self.module.get_function("mimi_sleep")
                     .ok_or_else(|| "codegen: mimi_sleep not declared".to_string())?;
-                self.builder.build_call(fn_val, &args, "sleep_call")
+                self.builder.build_call(fn_val, args, "sleep_call")
                     .map_err(|e| format!("sleep error: {}", e))?;
                 Ok(self.context.i64_type().const_int(0, false).into())
 
@@ -74,14 +74,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 { return Err("getenv expects 1 argument (name)".into()); }
                 let getenv_fn = self.module.get_function("mimi_getenv")
                     .ok_or_else(|| "codegen: mimi_getenv not declared".to_string())?;
-                let call = self.builder.build_call(getenv_fn, &args, "getenv_call")
+                let call = self.builder.build_call(getenv_fn, args, "getenv_call")
                     .map_err(|e| format!("getenv error: {}", e))?;
                 let ptr = match call_try_basic_value(&call) {
                     Some(BasicValueEnum::PointerValue(pv)) => pv,
                     _ => return Err("getenv should return a pointer".into()),
                 };
                 // Check if NULL (env var not set); return {null, 0} instead of calling strlen(NULL)
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let string_ty = self.context.struct_type(&[
                     BasicTypeEnum::PointerType(i8_ptr),
                     BasicTypeEnum::IntType(self.context.i64_type()),
@@ -142,7 +142,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| "codegen: mimi_args_count not declared".to_string())?;
                 let call = self.builder.build_call(count_fn, &[], "args_count_call")
                     .map_err(|e| format!("args error: {}", e))?;
-                Ok(self.expect_basic_value(&call, "args")?)
+                self.expect_basic_value(&call, "args")
 
     }
 

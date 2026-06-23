@@ -10,7 +10,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             "f64" => Some(BasicTypeEnum::FloatType(ctx.f64_type())),
             "bool" => Some(BasicTypeEnum::IntType(ctx.bool_type())),
             "string" => {
-                let i8_ptr = ctx.i8_type().ptr_type(AddressSpace::default());
+                let i8_ptr = ctx.ptr_type(AddressSpace::default());
                 let i64 = ctx.i64_type();
                 let fields = [BasicTypeEnum::PointerType(i8_ptr), BasicTypeEnum::IntType(i64)];
                 Some(BasicTypeEnum::StructType(ctx.struct_type(&fields, false)))
@@ -27,7 +27,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
                 Some(BasicTypeEnum::StructType(ctx.struct_type(&[disc, inner], false)))
             }
             "List" => {
-                let i8_ptr = ctx.i8_type().ptr_type(AddressSpace::default());
+                let i8_ptr = ctx.ptr_type(AddressSpace::default());
                 let i64 = ctx.i64_type();
                 Some(BasicTypeEnum::StructType(ctx.struct_type(&[
                     BasicTypeEnum::IntType(i64),
@@ -59,18 +59,18 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         Type::Shared(_) | Type::LocalShared(_) | Type::Weak(_) | Type::WeakLocal(_)
             | Type::CShared(_) | Type::CBorrow(_) | Type::CBorrowMut(_)
             | Type::RawPtr(_) | Type::RawPtrMut(_) =>
-            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default()))),
+            Some(BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default()))),
         Type::RawString => {
-            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
+            Some(BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())))
         }
         Type::Infer => None,
         Type::ExternFunc(_, _) => {
             // Function pointer - represented as void* in LLVM
-            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
+            Some(BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())))
         }
         Type::CBuffer(_) => {
             // CBuffer - represented as void* in LLVM
-            Some(BasicTypeEnum::PointerType(ctx.i8_type().ptr_type(AddressSpace::default())))
+            Some(BasicTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())))
         }
         Type::Cap(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::Newtype(_, inner) => mimi_type_to_llvm(ctx, inner),
@@ -123,7 +123,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
         Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::DynTrait(_) => {
             // Fat pointer: { data: i8*, vtable: i8* }
-            let i8_ptr = ctx.i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr = ctx.ptr_type(inkwell::AddressSpace::default());
             Some(BasicTypeEnum::StructType(ctx.struct_type(&[
                 BasicTypeEnum::PointerType(i8_ptr),
                 BasicTypeEnum::PointerType(i8_ptr),
@@ -176,7 +176,7 @@ pub fn mimi_type_to_llvm_extern<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<B
 
 /// Closure struct type: {fn_ptr: i8*, env_ptr: i8*}
 pub fn closure_struct_type<'ctx>(ctx: &'ctx Context) -> StructType<'ctx> {
-    let i8_ptr = ctx.i8_type().ptr_type(AddressSpace::default());
+    let i8_ptr = ctx.ptr_type(AddressSpace::default());
     let fields = [
         BasicTypeEnum::PointerType(i8_ptr),
         BasicTypeEnum::PointerType(i8_ptr),

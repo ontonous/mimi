@@ -20,6 +20,7 @@ pub struct CallbackHandle {
     pub ref_count: Arc<AtomicI64>,
     /// C-compatible invoker function.
     /// Signature: fn(callback_id: i64, args: &[i64]) -> i64
+    #[allow(clippy::type_complexity)]
     pub invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
 }
 
@@ -45,6 +46,7 @@ impl CallbackTable {
 
     /// Register a callback and return its ID.
     /// The `invoker` is a closure that knows how to call the Mimi closure.
+    #[allow(clippy::type_complexity)]
     pub fn register(
         &self,
         invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
@@ -99,6 +101,7 @@ pub fn with_callback_table<R, F: FnOnce(&CallbackTable) -> R>(f: F) -> R {
 }
 
 /// Register a callback in the global callback table.
+#[allow(clippy::type_complexity)]
 pub fn callback_table_register(
     invoker: Option<Box<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>>,
 ) -> i64 {
@@ -117,6 +120,10 @@ pub fn callback_table_remove(id: i64) -> bool {
 
 /// Standard trampoline: 2 args + userdata pattern.
 /// C calls this with (callback_id, arg1, arg2, userdata).
+///
+/// # Safety
+/// `userdata` must be null or a valid pointer to a `i64` callback ID.
+/// The global callback table must contain a handle for `callback_id`.
 pub unsafe extern "C" fn callback_trampoline(
     callback_id: i64,
     arg1: i64,
@@ -137,6 +144,9 @@ pub unsafe extern "C" fn callback_trampoline(
 /// C calls this with (a_ptr, b_ptr, userdata_ptr_to_callback_id).
 /// The two element pointers are passed as raw i64 values so the callback
 /// can cast them back to typed pointers as needed.
+///
+/// # Safety
+/// `a`, `b`, and `userdata` must be valid pointers. `userdata` must point to a valid `i64` callback ID.
 pub unsafe extern "C" fn qsort_trampoline(
     a: *const std::ffi::c_void,
     b: *const std::ffi::c_void,

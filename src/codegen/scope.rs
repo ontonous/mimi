@@ -21,8 +21,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
         // Join any threads not yet awaited
-        let i8_type = self.context.i8_type();
-        let i8_ptr = i8_type.ptr_type(inkwell::AddressSpace::default());
+        let _i8_type = self.context.i8_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let join_fn = self.module.get_function("pthread_join");
         if let Some(join_fn) = join_fn {
             for &(thread_id, _) in &self.parasteps_thread_ids {
@@ -96,7 +96,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
         let abort_fn = self.module.get_function("mimi_runtime_abort")
             .unwrap_or_else(|| {
-                let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let ty = self.context.void_type().fn_type(&[
                     BasicMetadataTypeEnum::PointerType(i8_ptr),
                 ], false);

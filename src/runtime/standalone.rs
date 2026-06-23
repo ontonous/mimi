@@ -8,6 +8,8 @@
 //!       -o libmimi_runtime.a src/runtime/standalone.rs
 //! ```
 
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 // The implementation is shared with the main crate's `src/runtime/mod.rs`.
 // This avoids code duplication while allowing both in-crate and standalone builds.
 include!("mod.rs");

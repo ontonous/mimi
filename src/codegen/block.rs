@@ -91,7 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
                         self.builder.build_store(data_alloca, concrete_val)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let data_ptr = self.builder.build_pointer_cast(
                             data_alloca, i8_ptr, &format!("{}_data_i8", name)
                         ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
@@ -165,7 +165,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.var_type_names.insert(name.clone(), tn.clone());
                         } else if self.expr_is_string(init) {
                             self.var_type_names.insert(name.clone(), "string".to_string());
-                        } else if let Expr::Record { ty: Some(tn), .. } = init {
+                        } else if let Expr::Record { ty: Some(_), .. } = init {
                             self.var_type_names.insert(name.clone(), "string".to_string());
                         } else if let Expr::Record { ty: Some(tn), .. } = init {
                             self.var_type_names.insert(name.clone(), tn.clone());
@@ -251,7 +251,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         vars.insert(name.clone(), (alloca, llvm_ty));
                     } else {
                         return Err(CompileError::LlvmError(
-                            format!("'let' with no initializer requires a simple variable pattern").to_string()
+                            "'let' with no initializer requires a simple variable pattern".to_string()
                         ));
                     }
                 }
@@ -336,7 +336,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_expr(expr, vars)?;
                 }
                 Stmt::SharedLet { kind, name, ty, init } => {
-                    self.compile_shared_let_stmt(&kind, name, &ty, init, vars)?;
+                    self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
                 }
                 Stmt::OnFailure(block) => {
                     // Register compensation block for LIFO execution on error exit
@@ -379,7 +379,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Call @llvm.stacksave() to capture the current stack pointer for arena region management
     pub(super) fn build_stacksave(&self) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_type = i8_ptr.fn_type(&[], false);
         let fn_val = self.module.get_function("llvm.stacksave")
             .unwrap_or_else(|| self.module.add_function(
@@ -400,7 +400,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Call @llvm.stackrestore(i8*) to restore the stack pointer, freeing arena allocations
     pub(super) fn build_stackrestore(&self, saved: inkwell::values::PointerValue<'ctx>) -> MimiResult<()> {
         let i8_ptr_meta = BasicMetadataTypeEnum::PointerType(
-            self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+            self.context.ptr_type(inkwell::AddressSpace::default()),
         );
         let fn_type = self.context.void_type().fn_type(&[i8_ptr_meta], false);
         let fn_val = self.module.get_function("llvm.stackrestore")

@@ -62,6 +62,7 @@ fn target_linker_flags(target: Option<&str>) -> Vec<&'static str> {
     flags
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build(path: Option<&Path>, output: Option<&Path>, emit_ir: bool, strict: bool, no_std: bool, verify_contracts: bool, verify_ffi: bool, shared: bool, target: Option<&str>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
