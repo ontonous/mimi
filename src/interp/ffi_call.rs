@@ -93,7 +93,12 @@ impl<'a> Interpreter<'a> {
         let result = {
             // Clear errno before call to avoid stale errno
             if contract.check_errno {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
                 unsafe { *libc::__errno_location() = 0; }
+                #[cfg(target_os = "macos")]
+                unsafe { extern "C" { fn __error() -> *mut libc::c_int; } *__error() = 0; }
+                #[cfg(target_os = "windows")]
+                unsafe { /* No POSIX errno on Windows — GetLastError is separate */ }
             }
 
             // Build libffi type descriptors for arguments
@@ -286,9 +291,11 @@ impl<'a> Interpreter<'a> {
         };
 
         // Priority 2: Capture errno after C call if enabled
+        // Uses std::io::Error::last_os_error() which calls the platform-specific
+        // errno accessor (__errno_location on glibc, __error on macOS, GetLastError
+        // on Windows), avoiding a direct dependency on glibc internal symbols.
         let errno_value = if contract.check_errno {
-            // SAFETY: libc::__errno_location returns a valid pointer to thread-local errno; dereferencing it is safe after an FFI call.
-            Some(unsafe { *libc::__errno_location() })
+            Some(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
         } else {
             None
         };
