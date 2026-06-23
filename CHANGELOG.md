@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.13.0
+## [Unreleased] — 0.14.0
 
 ### Added
 - (none yet)
@@ -10,6 +10,27 @@
 
 ### Security
 - (none yet)
+
+## [0.13.0] - 2026-06-23
+
+### Added
+- P1.1: Lambda/Comprehension/Spawn/Await Z3 编码 (verify_spawn_await_*)
+- P1.2: Z3 字符串理论映射：str_eq, str_contains, str_at, char_at
+- LSP 悬停增强：显示 requires/ensures/invariant
+- LSP Code Lens：验证状态（✓/✗/?）和提示
+- Z3 求解器健壮性：f64 真值判定 + Unknown 状态机加固
+- ADR 文档：内存模型、合约系统、并发模型、双后端架构
+
+### Fixed
+- 补全 verifier 编码路径，spawn/await 函数体不再降级为 Unknown/假阳性
+- Z3 字符串理论一致性约束：s.length() == string_len[s], (s != "") == string_nonempty[s]
+- 合约 parse 错误收集到诊断消息而非静默忽略
+- FFI 违反预条件使用真实 span 而非 Span::single(0,0)
+- LSP 验证缓存：跨文件唯一 key (uri:func) + LRU 淘汰
+
+### Tests
+- 新增 13 个 verifier 测试 + 9 个 LSP 测试
+- 基线：2,006 passed, 0 failed, 34 ignored
 
 ## [0.12.0] - 2026-06-23
 
