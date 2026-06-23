@@ -494,7 +494,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "push" | "pop" | "sqrt" | "floor" | "ceil" | "round"
         | "int_to_string" | "float_to_string" | "string_to_int"
         | "exit" | "lexer" | "parse" | "ast_eval"
-        | "input" | "file_exists" | "read_file" | "write_file" | "str_char_at"
+        | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
@@ -554,6 +554,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "read_file" => self.compile_read_file(args),
             "write_file" => self.compile_write_file(args),
             "to_string" | "int_to_string" | "float_to_string" => self.compile_to_string(args),
+            "char_code" => self.compile_char_code(args),
+            "chr" => self.compile_chr(args),
             "str_char_at" => self.compile_str_char_at(args),
             "str_contains" => self.compile_str_contains(args),
             "str_starts_with" => self.compile_str_starts_with(args),

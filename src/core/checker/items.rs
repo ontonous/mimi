@@ -132,6 +132,18 @@ impl<'a> Checker<'a> {
                 }
                 let generic_names: Vec<String> = t.generics.iter().map(|g| g.name.clone()).collect();
                 self.generic_scope.extend(generic_names.iter().cloned());
+                // For Record/Union/Enum (structural types), insert into self.types before
+                // checking fields to allow recursive self-references (e.g. type Expr { Call(name: string, args: List<Expr>) }).
+                // Alias and Newtype are checked by check_alias_cycles instead.
+                let allow_recursive = matches!(&t.kind,
+                    TypeDefKind::Record(_) | TypeDefKind::Union(_) | TypeDefKind::Enum(_)
+                );
+                if allow_recursive {
+                    self.types.insert(t.name.clone(), t.clone());
+                    if !t.generics.is_empty() {
+                        self.type_generics.insert(t.name.clone(), t.generics.clone());
+                    }
+                }
                 match &t.kind {
                     TypeDefKind::Alias(ty) => {
                         let resolved = self.resolve_type(ty);
@@ -177,10 +189,12 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.generic_scope.truncate(self.generic_scope.len() - generic_names.len());
-                self.types.insert(t.name.clone(), t.clone());
-                // Store generic parameters for type definitions
-                if !t.generics.is_empty() {
-                    self.type_generics.insert(t.name.clone(), t.generics.clone());
+                if !allow_recursive {
+                    self.types.insert(t.name.clone(), t.clone());
+                    // Store generic parameters for type definitions
+                    if !t.generics.is_empty() {
+                        self.type_generics.insert(t.name.clone(), t.generics.clone());
+                    }
                 }
             }
             Item::Module(m) => {

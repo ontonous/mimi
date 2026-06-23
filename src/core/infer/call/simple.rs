@@ -708,6 +708,29 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            "char_code" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "char_code expects 2 arguments (string, index)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("i64".into(), vec![]);
+            }
+            "chr" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "chr expects 1 argument (code point)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             "str_char_at" => {
                 if args.len() != 2 {
                     self.emit_code(

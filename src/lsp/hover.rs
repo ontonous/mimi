@@ -217,6 +217,8 @@ impl LspServer {
             ("file_exists", "fn file_exists(path: string) -> bool"),
             ("to_int", "fn to_int(val) -> i64"),
             ("to_float", "fn to_float(val) -> f64"),
+            ("char_code", "fn char_code(s: string, i: i64) -> i64"),
+            ("chr", "fn chr(code: i64) -> string"),
             ("str_char_at", "fn str_char_at(s: string, i: i64) -> string"),
             ("str_substring", "fn str_substring(s: string, start: i64, len: i64) -> string"),
             ("str_parse_int", "fn str_parse_int(s: string) -> (bool, i64)"),

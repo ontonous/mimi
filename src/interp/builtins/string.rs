@@ -202,6 +202,35 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_char_code(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 { return Err(InterpError::new("char_code expects 2 arguments (string, index)")); }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::Int(idx)) => {
+                let i = *idx as usize;
+                s.chars().nth(i)
+                    .map(|c| Value::Int(c as i64))
+                    .ok_or_else(|| InterpError::new(format!("char_code: index {} out of bounds (len {})", i, s.chars().count())))
+            }
+            _ => Err(InterpError::new("char_code expects (string, int)")),
+        }
+    }
+
+    pub(crate) fn builtin_chr(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 { return Err(InterpError::new("chr expects 1 argument (code point)")); }
+        match &args[0] {
+            Value::Int(code) => {
+                if *code < 0 || *code > 0x10FFFF {
+                    return Err(InterpError::new(format!("chr: code point {} out of range (0-0x10FFFF)", code)));
+                }
+                match char::from_u32(*code as u32) {
+                    Some(c) => Ok(Value::String(c.to_string())),
+                    None => Err(InterpError::new(format!("chr: invalid Unicode code point {}", code))),
+                }
+            }
+            _ => Err(InterpError::new("chr expects an integer")),
+        }
+    }
+
     pub(crate) fn builtin_str_index_of(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 { return Err(InterpError::new("str_index_of expects 2 arguments")); }
         match (&args[0], &args[1]) {

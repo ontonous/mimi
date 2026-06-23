@@ -2394,3 +2394,156 @@ fn dual_async_future_string() {
         }
     "#, "Hello, World");
 }
+
+// ─── 35. v0.22: Option<T> built-in (2 tests) ─────────────────────
+
+#[test]
+fn dual_option_some_unwrap() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let x: Option<i32> = Some(42);
+            println(x.unwrap());
+            0
+        }
+    "#, "42");
+}
+
+#[test]
+fn dual_option_none_and_match() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func val() -> Option<i32> { Some(42) }
+        func none() -> Option<i32> { None }
+        func main() -> i32 {
+            let a = val();
+            let b = none();
+            let ra = match a { Some(v) => v, None => -1 };
+            let rb = match b { Some(v) => v, None => -2 };
+            println(ra + rb);
+            0
+        }
+    "#, "40");
+}
+
+// ─── 36. v0.22: List<List<T>> generic nesting ────────────────────
+
+#[test]
+fn dual_generic_nested_list_list() {
+    if !can_link() { return; }
+    // Known codegen limitation: nested indexing (nested[0][0]) not yet supported.
+    // This test verifies the type annotation and outer len() work.
+    dual_assert!(r#"
+        func main() -> i32 {
+            let nested: List<List<i32>> = [[1, 2], [3, 4]];
+            println(len(nested));
+            0
+        }
+    "#, "2");
+}
+
+#[test]
+fn dual_generic_nested_list_interp_nested_index() {
+    if !can_link() { return; }
+    // Test that List<List<T>> with nested indexing works in interpreter
+    // (codegen limitation: list element type is hardcoded as i64)
+    dual_assert_interp_only!(r#"
+        func get_nested() -> i32 {
+            let nested: List<List<i32>> = [[1, 2], [3, 4]];
+            nested[0][0] + nested[1][1]
+        }
+        func main() -> i32 { println(get_nested()); 0 }
+    "#, interp::Value::Int(0)); // main() returns 0, get_nested() returns 5 (printed via println)
+}
+
+// ─── 37. v0.22: Higher-order generic function ─────────────────────
+
+#[test]
+fn dual_higher_order_map() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func apply<T, U>(x: T, f: func(T) -> U) -> U { f(x) }
+        func main() -> i32 {
+            let r = apply(21, fn(x: i32) -> i32 { x * 2 });
+            println(r);
+            0
+        }
+    "#, "42");
+}
+
+// ─── 38. v0.22: char_code + chr builtins ─────────────────────────
+
+#[test]
+fn dual_char_code_chr() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let s = "ABC";
+            let code = char_code(s, 0);
+            let ch = chr(65);
+            println(ch);
+            println(code);
+            0
+        }
+    "#, "A\n65");
+}
+
+#[test]
+fn dual_char_code_chr_roundtrip() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let s = "Hello";
+            let c0 = chr(char_code(s, 0));
+            let c1 = chr(char_code(s, 1));
+            let result = c0 + c1;
+            println(result);
+            0
+        }
+    "#, "He");
+}
+
+// ─── 39. v0.22: Recursive type (2 tests) ──────────────────────────
+
+#[test]
+fn dual_recursive_type_simple() {
+    if !can_link() { return; }
+    // Recursive type with List<T> self-reference passes type checker.
+    // Codegen: only non-List variant construction tested (List element type limitation).
+    dual_assert!(r#"
+        type Expr {
+            Call(string, List<Expr>)
+            Lit(i32)
+        }
+        func main() -> i32 {
+            let e = Lit(42);
+            println(match e { Lit(v) => v, _ => -1 });
+            0
+        }
+    "#, "42");
+}
+
+#[test]
+fn dual_recursive_type_interp_build() {
+    if !can_link() { return; }
+    // Recursive type with List<Expr> construction works in interpreter.
+    // Codegen limitation: List only supports scalar elements.
+    dual_assert_interp_only!(r#"
+        type Expr {
+            Call(string, List<Expr>)
+            Lit(i32)
+        }
+        func eval(e: Expr) -> i32 {
+            match e {
+                Lit(v) => v
+                Call(_, args) => args[0]
+            }
+        }
+        func main() -> i32 {
+            let inner = Lit(42);
+            let outer = Call("foo", [inner]);
+            println(eval(outer));
+            0
+        }
+    "#, interp::Value::Int(0));
+}

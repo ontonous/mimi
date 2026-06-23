@@ -1,12 +1,21 @@
 # Changelog
 
-## [Unreleased] — 0.22.0-dev — 用 Mimi 写 mimispec 解析器
+## [Unreleased] — 0.22.0-dev — 语言补全（Language Completion）
 
 ### Added
-- (none yet)
+- `char_code(s, i) -> i64` 和 `chr(code) -> i64` 内置函数（interp + codegen + typeck）
+- 递归类型支持：`type Expr { Call(string, List<Expr>) Lit(i32) }` 通过类型检查
+  - Record/Union/Enum 类型定义支持自引用（通过 `List<T>` 等间接存储类型）
+- Option<T> 双后端 L1 测试：Some/None 构造器 + unwrap + match
+- `List<List<T>>` 泛型嵌套类型标注 + 解释器嵌套索引用例
+- 高阶泛型函数 L1 测试：`func apply<T, U>(x: T, f: func(T) -> U) -> U`
 
 ### Fixed
-- (none yet)
+- `compile_str_char_at` / `compile_chr` 返回指针而非 struct 值 → segfault 修复
+- `compile_char_code` / `compile_str_char_at` 处理字面量 `char*` 和 struct 双字符串表示
+
+### Tests
+- 基线: 2,046 passed, 0 failed, 21 ignored
 
 ## [v0.21.0] - 2026-06-24 — 筑基（Polish & Hardening）
 

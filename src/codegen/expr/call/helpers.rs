@@ -79,7 +79,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     matches!(name.as_str(),
                         "to_string" | "int_to_string" | "float_to_string"
                         | "input" | "read_file"
-                        | "str_char_at" | "str_substring" | "str_trim"
+                        | "chr" | "str_char_at" | "str_substring" | "str_trim"
                         | "str_to_upper" | "str_to_lower" | "str_repeat"
                         | "str_replace" | "str_join"
                         | "type_name" | "from_json" | "c_str_to_string"

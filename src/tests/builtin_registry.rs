@@ -21,6 +21,8 @@ mod tests {
         ("to_string", true, true, true),
         ("to_int", true, true, true),
         ("to_float", true, true, true),
+        ("char_code", true, true, true),
+        ("chr", true, true, true),
         ("str_char_at", true, true, true),
         ("str_contains", true, true, true),
         ("str_starts_with", true, true, true),
