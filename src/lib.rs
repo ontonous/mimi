@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![allow(unexpected_cfgs)]
 
 pub mod ast;
 pub mod codegen;

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::lexer;
 use crate::parser;
 use crate::codegen;
@@ -24,24 +22,7 @@ fn compile_to_object(src: &str, module_name: &str, obj_path: &std::path::Path) {
 
 /// Link an object file + Rust runtime into a shared library.
 fn link_shared(obj_path: &std::path::Path, output_so: &std::path::Path, no_std: bool) {
-    let runtime_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
-    let tmp_dir = output_so.parent().expect("src/tests/build_shared.rs:28 unwrap failed");
-    let runtime_o = tmp_dir.join("mimi_runtime.o");
-
-    let mut rt_cmd = std::process::Command::new("rustc");
-    rt_cmd.arg("--edition").arg("2021");
-    rt_cmd.arg("--crate-type").arg("staticlib");
-    rt_cmd.arg("--cfg").arg("standalone");
-    rt_cmd.arg("--crate-name").arg("mimi_runtime");
-    if no_std {
-        rt_cmd.arg("-C").arg("panic=abort");
-    }
-    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
-    let rt_status = rt_cmd
-        .arg("-o").arg(&runtime_lib)
-        .arg(&runtime_rs)
-        .status().expect("runtime compile");
-    assert!(rt_status.success(), "runtime Rust compile failed");
+    let runtime_lib = crate::tests::cached_runtime_lib().expect("cached_runtime_lib");
 
     let mut cmd = std::process::Command::new("cc");
     cmd.arg("-shared").arg("-fPIC");
@@ -56,8 +37,6 @@ fn link_shared(obj_path: &std::path::Path, output_so: &std::path::Path, no_std: 
         .arg("-o").arg(output_so)
         .status().expect("link");
     assert!(status.success(), "linking should succeed");
-
-    let _ = std::fs::remove_file(&runtime_lib);
 }
 
 #[test]

@@ -91,6 +91,52 @@ pub(crate) mod dual_backend;
 pub(crate) mod benchmarks;
 
 use crate::{core, interp, lexer, parser};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Cache the compiled runtime static library across test cases.
+/// Returns path to a cached `.a` compiled from `standalone.rs`.
+/// The cache key is a hash of `standalone.rs` + `mod.rs` sources.
+pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
+    use std::hash::Hash;
+    use std::io::Read;
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runtime_rs = manifest.join("src/runtime/standalone.rs");
+    let mod_rs = manifest.join("src/runtime/mod.rs");
+
+    let mut hasher = DefaultHasher::new();
+    for path in [&runtime_rs, &mod_rs] {
+        let mut f = std::fs::File::open(path).map_err(|e| format!("open {:?}: {}", path, e))?;
+        let mut buf = Vec::with_capacity(8192);
+        f.read_to_end(&mut buf).map_err(|e| format!("read {:?}: {}", path, e))?;
+        buf.hash(&mut hasher);
+    }
+    let hash = hasher.finish();
+
+    let cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("mkdir cache: {}", e))?;
+    let lib_path = cache_dir.join(format!("libmimi_runtime_{:016x}.a", hash));
+
+    if lib_path.exists() {
+        return Ok(lib_path);
+    }
+
+    let status = std::process::Command::new("rustc")
+        .arg("--edition").arg("2021")
+        .arg("--crate-type").arg("staticlib")
+        .arg("--cfg").arg("standalone")
+        .arg("--crate-name").arg("mimi_runtime")
+        .arg("-o")
+        .arg(&lib_path)
+        .arg(&runtime_rs)
+        .status()
+        .map_err(|e| format!("rustc not found: {}", e))?;
+    if !status.success() {
+        return Err(format!("runtime compilation failed, exit: {:?}", status.code()));
+    }
+    Ok(lib_path)
+}
 
 /// File-based lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
 /// variable. This works across multiple test binaries running in parallel.
@@ -125,32 +171,19 @@ impl Drop for FfiEnvLock {
     }
 }
 
-/// Compile the Rust runtime into a static library for interpreter FFI tests.
-/// Returns the path to the compiled `.a`.
+/// Compile the Rust runtime into a shared library for interpreter FFI tests.
+/// Returns the path to the compiled `.so`.
 /// The caller MUST hold `FfiEnvLock` before calling this and setting `MIMI_FFI_LIB`.
 pub(crate) fn build_interp_ffi_so() -> Result<std::path::PathBuf, String> {
     use std::process::Command;
-    let runtime_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
+
+    // Reuse cached staticlib to avoid recompiling for every test
+    let lib_path = cached_runtime_lib()?;
+
     let tmp_dir = std::env::temp_dir().join(format!("mimi_ffi_so_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
-    let obj_path = tmp_dir.join("mimi_runtime_test.o");
-    let lib_path = tmp_dir.join("libmimi_runtime_test.a");
-    let status = Command::new("rustc")
-        .arg("--edition").arg("2021")
-        .arg("--crate-type").arg("staticlib")
-        .arg("--cfg").arg("standalone")
-        .arg("--crate-name").arg("mimi_runtime_test")
-        .arg("-C").arg("relocation-model=pic")
-        .arg("-o")
-        .arg(&lib_path)
-        .arg(&runtime_rs)
-        .status()
-        .map_err(|e| format!("rustc not found: {}", e))?;
-    if !status.success() {
-        return Err(format!("failed to compile test .a, exit code: {:?}", status.code()));
-    }
 
-    // Now link into a .so with cc (use --whole-archive to force all symbols from .a)
+    // Link the cached .a into a .so (use --whole-archive to force all symbols)
     let so_path = tmp_dir.join("mimi_runtime_test.so");
     let status = Command::new("cc")
         .arg("-shared")
@@ -280,23 +313,11 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
 
     codegen.compile_to_object(&obj_path).map_err(|e| e.to_string())?;
 
-    // Compile the Rust runtime as a static library
-    let runtime_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/standalone.rs");
-    let runtime_lib = tmp_dir.join("libmimi_runtime.a");
-    let mut rt_cmd = Command::new("rustc");
-    rt_cmd.arg("--edition").arg("2021");
-    rt_cmd.arg("--crate-type").arg("staticlib");
-    rt_cmd.arg("--cfg").arg("standalone");
-    rt_cmd.arg("--crate-name").arg("mimi_runtime");
-    let rt_status = rt_cmd
-        .arg("-o").arg(&runtime_lib)
-        .arg(&runtime_rs)
-        .status()
-        .map_err(|e| format!("runtime compile (rustc): {}", e))?;
-    if !rt_status.success() {
+    // Reuse cached runtime static library
+    let runtime_lib = cached_runtime_lib().map_err(|e| {
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(format!("runtime compile failed with exit code {:?}", rt_status.code()));
-    }
+        e
+    })?;
 
     let mut object_files = vec![obj_path.clone(), runtime_lib.clone()];
 

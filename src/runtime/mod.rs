@@ -15,9 +15,9 @@
 //
 // For linking with Mimi-compiled object files, compile `standalone.rs` with:
 // ```sh
-// rustc --edition 2021 --cfg standalone --emit obj --crate-name mimi_runtime \
-//       -o mimi_runtime.o src/runtime/standalone.rs
-// cc -no-pie -o output mimi_codegen.o mimi_runtime.o -lpthread -ldl -lm
+// rustc --edition 2021 --crate-type staticlib --cfg standalone --crate-name mimi_runtime \
+//       -o libmimi_runtime.a src/runtime/standalone.rs
+// cc -no-pie -o output mimi_codegen.o libmimi_runtime.a -lpthread -ldl -lm
 // ```
 
 // When compiled directly with rustc (--cfg standalone), provide our own POSIX FFI declarations.
@@ -640,7 +640,7 @@ impl<'a> JsonParser<'a> {
     fn parse_string(&mut self) -> Option<String> {
         if self.peek() != b'"' { return None; }
         self.advance(); // skip "
-        let start = self.pos;
+        let _start = self.pos;
         let mut result = String::new();
         let mut esc = false;
         loop {
@@ -2021,6 +2021,7 @@ mod no_panic {
         SIGS.iter().position(|&s| s == sig)
     }
 
+    #[allow(clashing_extern_declarations)]
     extern "C" {
         fn sigsetjmp(env: *mut SigJmpBuf, savemask: i32) -> i32;
         fn siglongjmp(env: *mut SigJmpBuf, val: i32) -> !;
@@ -2044,7 +2045,7 @@ mod no_panic {
 
     #[no_mangle]
     pub unsafe extern "C" fn mimi_install_no_panic_handlers() {
-        let handler = no_panic_handler as usize;
+        let handler = no_panic_handler as *const () as usize;
         OLD_HANDLERS.with(|old| {
             let arr = &mut *old.get();
             for (i, &sig) in SIGS.iter().enumerate() {
