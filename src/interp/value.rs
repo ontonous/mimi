@@ -7,6 +7,28 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::{Arc, RwLock, Weak as ArcWeak};
 
+/// Poll-based future state.
+/// For async fn: immediately Ready (body evaluated synchronously).
+/// For actor spawn: Pending with a channel receiver (polled on await).
+pub enum PollFuture {
+    Pending(std::sync::mpsc::Receiver<Result<Value, InterpError>>),
+    Ready(Result<Value, InterpError>),
+}
+
+impl std::fmt::Debug for PollFuture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollFuture::Pending(_) => write!(f, "PollFuture::Pending"),
+            PollFuture::Ready(result) => {
+                match result {
+                    Ok(v) => write!(f, "PollFuture::Ready(Ok({:?}))", v),
+                    Err(e) => write!(f, "PollFuture::Ready(Err({}))", e),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum QuotedAst {
     Literal(Lit),
@@ -80,7 +102,8 @@ pub enum Value {
     Tuple(Vec<Value>),
     Variant(String, Vec<Value>),
     Record(Option<String>, HashMap<String, Value>),
-    Future(std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, InterpError>>>>),
+    /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
+    Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
     Error(String),
     ArenaRef(usize, usize),
     ArenaBlock(usize),

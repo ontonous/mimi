@@ -455,9 +455,9 @@ impl<'a> Interpreter<'a> {
             }
         }
         let mut last_value = None;
-        type SpawnReceiver = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Value, InterpError>>>>;
-        let mut futures: Vec<SpawnReceiver> = Vec::new();
-        let mut spawn_bindings: HashMap<String, SpawnReceiver> = HashMap::new();
+        type SpawnFuture = std::sync::Arc<std::sync::Mutex<crate::interp::value::PollFuture>>;
+        let mut futures: Vec<SpawnFuture> = Vec::new();
+        let mut spawn_bindings: HashMap<String, SpawnFuture> = HashMap::new();
 
         for stmt in block {
             match stmt {
@@ -474,7 +474,9 @@ impl<'a> Interpreter<'a> {
                         let result = interp.eval_expr(&expr);
                         let _ = tx.send(result);
                     });
-                    futures.push(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+                    futures.push(std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::interp::value::PollFuture::Pending(rx)
+                    )));
                 }
                 Stmt::Let { pat, init, .. } => {
                     // Handle let bindings that might contain spawn
@@ -489,12 +491,14 @@ impl<'a> Interpreter<'a> {
                                 let result = interp.eval_expr(&expr);
                                 let _ = tx.send(result);
                             });
-                            let rx_arc = std::sync::Arc::new(std::sync::Mutex::new(rx));
+                            let fut_arc = std::sync::Arc::new(std::sync::Mutex::new(
+                                crate::interp::value::PollFuture::Pending(rx)
+                            ));
                             // Store the future for later await
                             if let Pattern::Variable(name) = pat {
-                                spawn_bindings.insert(name.clone(), rx_arc.clone());
+                                spawn_bindings.insert(name.clone(), fut_arc.clone());
                             }
-                            Value::Future(rx_arc)
+                            Value::Future(fut_arc)
                         }
                         Some(e) => self.eval_expr(e)?,
                         None => Value::Unit,
@@ -518,17 +522,37 @@ impl<'a> Interpreter<'a> {
         }
 
         // Wait for all futures and check for errors
-        for rx in futures {
-            let rx = rx.lock().map_err(|e| InterpError::new(format!("await failed: {}", e)))?;
-            if let Ok(Err(e)) = rx.recv() {
-                return Err(e);
+        for fut in futures {
+            let mut fut = fut.lock()
+                .map_err(|e| InterpError::new(format!("await lock failed: {}", e)))?;
+            match &mut *fut {
+                crate::interp::value::PollFuture::Pending(rx) => {
+                    if let Ok(Err(e)) = rx.recv() {
+                        return Err(e);
+                    }
+                }
+                crate::interp::value::PollFuture::Ready(result) => {
+                    if let Err(e) = result {
+                        return Err(InterpError::new(format!("parasteps error: {}", e)));
+                    }
+                }
             }
         }
 
         // If last_value is a Future, await it
-        if let Some(Value::Future(rx)) = last_value {
-            let rx = rx.lock().map_err(|e| InterpError::new(format!("await failed: {}", e)))?;
-            last_value = Some(rx.recv().map_err(|e| InterpError::new(format!("await failed: {}", e)))??);
+        if let Some(Value::Future(fut)) = last_value {
+            let mut fut = fut.lock()
+                .map_err(|e| InterpError::new(format!("await lock failed: {}", e)))?;
+            match &mut *fut {
+                crate::interp::value::PollFuture::Pending(rx) => {
+                    last_value = Some(rx.recv()
+                        .map_err(|e| InterpError::new(format!("await failed: {}", e)))??);
+                }
+                crate::interp::value::PollFuture::Ready(result) => {
+                    last_value = Some(std::mem::replace(result,
+                        Err(InterpError::new("future already consumed")))?);
+                }
+            }
         }
 
         Ok(last_value)

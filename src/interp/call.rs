@@ -274,9 +274,8 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Evaluate an async function body synchronously and return a Future with the result.
-    /// The future is immediately ready since there is no actual non-blocking I/O yet.
-    /// This replaces the old thread-pool-based approach — async fn is now poll-based.
+    /// Evaluate an async function body synchronously and return a poll-based Future.
+    /// The future is immediately Ready since async fn evaluates synchronously.
     fn call_async_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, InterpError> {
         if func.params.len() != args.len() {
             return Err(InterpError::wrong_arg_count(
@@ -284,27 +283,26 @@ impl<'a> Interpreter<'a> {
             ));
         }
 
-        // Create a channel for the result
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // Evaluate synchronously in a fresh interpreter (same as thread spawn but no thread)
+        // Evaluate synchronously in a fresh interpreter
         let file_clone = self.file.clone();
         let mut interp = Interpreter::new(&file_clone);
         interp.push_scope();
         for (p, a) in func.params.iter().zip(args) {
             if let Err(e) = interp.bind(&p.name, a) {
-                let _ = tx.send(Err(e));
-                return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(rx))));
+                interp.pop_scope();
+                return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::interp::value::PollFuture::Ready(Err(e))
+                ))));
             }
         }
         let block_result = interp.eval_block(&func.body).map(|v| v.unwrap_or(Value::Unit));
         let result = interp.early_return.take()
             .map_or(block_result, Ok);
         interp.pop_scope();
-        let _ = tx.send(result);
 
-        // Return a Future value (result is already in the channel)
-        Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(rx))))
+        Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::interp::value::PollFuture::Ready(result)
+        ))))
     }
 
     pub(crate) fn call_method(&mut self, obj: &Value, method: &str, args: Vec<Value>) -> Result<Value, InterpError> {

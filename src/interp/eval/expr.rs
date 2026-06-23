@@ -603,7 +603,9 @@ impl<'a> Interpreter<'a> {
                         };
                         handle.mailbox.send(msg)
                             .map_err(|_| InterpError::new("actor mailbox send failed"))?;
-                        return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(rx))));
+                        return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
+                            crate::interp::value::PollFuture::Pending(rx)
+                        ))));
                     }
                     _ => {}
                 }
@@ -614,14 +616,28 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(in crate::interp) fn eval_await(&mut self, expr: &Expr) -> Result<Value, InterpError> {
-        // Evaluate expression. For actor methods, call_method now sends through
-        // mailbox and blocks for response (synchronous from caller's perspective).
-        // For non-actor expressions, evaluate normally and await if Future.
+        // Evaluate expression and get the value
         let v = self.eval_expr(expr)?;
         match v {
-            Value::Future(rx) => {
-                let rx = rx.lock().map_err(|e| InterpError::new(format!("await failed: {}", e)))?;
-                rx.recv().map_err(|e| InterpError::new(format!("await failed: {}", e)))?
+            Value::Future(state) => {
+                let mut state = state.lock()
+                    .map_err(|e| InterpError::new(format!("await lock failed: {}", e)))?;
+                match &mut *state {
+                    crate::interp::value::PollFuture::Ready(result) => {
+                        // Clone the result since we need to return it (can't take from Arc<Mutex>)
+                        // but we also need to keep the future valid for multiple awaits.
+                        // For now, take the result (future is consumed on first await).
+                        match std::mem::replace(result, Err(InterpError::new("future already consumed"))) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    crate::interp::value::PollFuture::Pending(rx) => {
+                        // Block on the channel (actor spawn path)
+                        rx.recv()
+                            .map_err(|e| InterpError::new(format!("await recv failed: {}", e)))?
+                    }
+                }
             }
             other => Ok(other),
         }
