@@ -268,8 +268,11 @@ impl FfiRetContract {
                 "List" => FfiRetContract::Json,
                 other => {
                     if record_type_names.contains(other) {
-                        // Interpreter returns Json for all records (struct-by-value return not yet supported)
-                        FfiRetContract::Json
+                        if repr_c_record_names.contains(other) {
+                            FfiRetContract::StructByValue(other.to_string())
+                        } else {
+                            FfiRetContract::Json
+                        }
                     } else {
                         FfiRetContract::Unsupported(other.to_string())
                     }

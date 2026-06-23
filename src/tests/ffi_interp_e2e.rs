@@ -340,3 +340,24 @@ fn interp_ffi_struct_by_value_i64() {
     std::env::remove_var("MIMI_FFI_LIB");
     assert_eq!(result.expect("ffi_interp_e2e.rs:i64 unwrap failed"), interp::Value::Int(300));
 }
+
+#[test]
+fn interp_ffi_struct_return_by_value() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:struct_ret unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result_no_fork(r#"
+        #[repr(C)]
+        type TestPoint { x: i32, y: i32 }
+        extern "C" {
+            func test_make_point(x: i32, y: i32) -> TestPoint
+        }
+        func main() -> i32 {
+            let p = test_make_point(10, 20)
+            p.x + p.y
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(result.expect("ffi_interp_e2e.rs:struct_ret unwrap failed"), interp::Value::Int(30));
+}

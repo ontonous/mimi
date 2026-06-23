@@ -116,10 +116,24 @@ impl<'a> Interpreter<'a> {
             }
 
             // Build libffi type descriptor for return value
+            // Pre-compute struct-by-value return buffer size if needed.
+            let mut struct_ret_size: Option<usize> = None;
             let cif_ret_type = match &contract.ret {
                 FfiRetContract::Unit => FfiType::void(),
                 FfiRetContract::Float => FfiType::f64(),
                 FfiRetContract::String | FfiRetContract::StringOwned | FfiRetContract::Json => FfiType::pointer(),
+                FfiRetContract::StructByValue(type_name) => {
+                    let fields = self.lookup_struct_fields(type_name)
+                        .map_err(|e| Errno::Generic(e))?;
+                    let (total_size, _) = self.struct_size_align(&fields)
+                        .map_err(|e| Errno::Generic(e))?;
+                    struct_ret_size = Some(total_size);
+                    let field_types: Result<Vec<FfiType>, String> = fields.iter()
+                        .map(|f| self.ffi_type_from_mimi_type(&f.ty))
+                        .collect();
+                    let field_types = field_types.map_err(|e| Errno::Generic(e))?;
+                    FfiType::structure(field_types)
+                }
                 _ => FfiType::i64(),
             };
 
@@ -148,11 +162,14 @@ impl<'a> Interpreter<'a> {
                             .map_err(|e| Errno::Generic(e))?;
                         let buffer = self.marshall_record_to_buffer(arg_val, &fields)
                             .map_err(|e| Errno::Generic(e))?;
-                        // Arg points to the struct data in the buffer.
-                        // SAFETY: buffer is kept alive by struct_buffers for the call duration.
-                        let buf_ref = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), buffer.len()) };
-                        ffi_args.push(ffi_arg(buf_ref));
+                        // SAFETY: Buffer heap data is stable (Vec only moves handle).
+                        // Arg::new stores a raw data pointer; struct_buffers keeps
+                        // the buffer alive for the synchronous C call.
+                        let data_ptr = buffer.as_ptr() as *mut std::ffi::c_void;
+                        // Create Arg pointing to the first byte of buffer data.
+                        let arg = unsafe { ffi_arg(&*data_ptr) };
                         struct_buffers.push(buffer);
+                        ffi_args.push(arg);
                         typed_storage.push(Box::new(0i64)); // placeholder
                     }
                     _ => {
@@ -205,7 +222,21 @@ impl<'a> Interpreter<'a> {
             }
 
             // Call via libffi with correct ABI and crash protection
-            let call_result = if self.verify_ffi {
+            // Struct-by-value return uses custom rvalue buffer; other paths use scalar return.
+            let call_result: Result<i64, String> = if let Some(buf_size) = struct_ret_size {
+                // Allocate zeroed buffer for the struct return value.
+                let mut ret_buf = vec![0u8; buf_size];
+                let rvalue = ret_buf.as_mut_ptr() as *mut std::ffi::c_void;
+                // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
+                // with a caller-provided return buffer. No fork isolation for
+                // struct returns (same limitation as raw_string returns).
+                // SAFETY: call_ffi_raw_struct is an unsafe associated function
+                // that uses the low-level ffi_call API with a caller-provided
+                // return buffer. rvalue points to a valid ret_buf allocation.
+                unsafe { Self::call_ffi_raw_struct(&cif, code_ptr, &ffi_args, rvalue); }
+                struct_buffers.push(ret_buf);
+                Ok(0i64) // placeholder; actual result read from buffer below
+            } else if self.verify_ffi {
                 self.call_ffi_with_fork_isolation(&cif, code_ptr, &ffi_args, &contract.ret)
             } else if extern_func.no_panic {
                 self.call_ffi_no_panic(&cif, code_ptr, &ffi_args, &contract.ret)
@@ -238,6 +269,22 @@ impl<'a> Interpreter<'a> {
             call_result?
         };
 
+        // Decode the return value: i64 for scalar/ptr returns; buffer for struct returns.
+        let return_value = if let FfiRetContract::StructByValue(type_name) = &contract.ret {
+            // Read the last buffer pushed to struct_buffers (the struct return buffer).
+            if let Some(ret_buf) = struct_buffers.pop() {
+                let fields = self.lookup_struct_fields(type_name)
+                    .map_err(|e| Errno::Generic(e))?;
+                self.unmarshall_buffer_to_record(&ret_buf, &fields)?
+            } else {
+                return Err(Errno::Generic(
+                    "FFI wrapper: struct return buffer missing".to_string()
+                ));
+            }
+        } else {
+            self.ffi_ret_to_value(result, &contract.ret)?
+        };
+
         // Priority 2: Capture errno after C call if enabled
         let errno_value = if contract.check_errno {
             // SAFETY: libc::__errno_location returns a valid pointer to thread-local errno; dereferencing it is safe after an FFI call.
@@ -245,8 +292,6 @@ impl<'a> Interpreter<'a> {
         } else {
             None
         };
-
-        let return_value = self.ffi_ret_to_value(result, &contract.ret)?;
 
         // Stage 4: Check postcondition (ensures) after the C call
         if self.verify_ffi {
@@ -469,6 +514,68 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Unmarshal a byte buffer (from C struct return) back to a Mimi Record.
+    fn unmarshall_buffer_to_record(
+        &self,
+        buf: &[u8],
+        fields: &[Field],
+    ) -> Result<Value, Errno> {
+        let mut field_vals = std::collections::HashMap::new();
+        let mut current_offset = 0usize;
+        for field in fields {
+            let (size, align) = self.mimi_type_size_align(&field.ty)
+                .map_err(|e| Errno::Generic(e))?;
+            let aligned = (current_offset + align - 1) & !(align - 1);
+            let val = self.read_field_from_buf(buf, &field.ty, aligned)?;
+            field_vals.insert(field.name.clone(), val);
+            current_offset = aligned + size;
+        }
+        Ok(Value::Record(None, field_vals))
+    }
+
+    /// Read a single field value from a byte buffer at the given offset.
+    fn read_field_from_buf(&self, buf: &[u8], ty: &crate::ast::Type, offset: usize) -> Result<Value, Errno> {
+        let type_name = match ty {
+            crate::ast::Type::Name(n, _) => n.as_str(),
+            _ => return Err(Errno::Generic(format!(
+                "StructByValue: cannot read field of type {:?}", ty
+            ))),
+        };
+        match type_name {
+            "i32" => {
+                let mut bytes = [0u8; 4];
+                bytes.copy_from_slice(&buf[offset..offset+4]);
+                Ok(Value::Int(i32::from_le_bytes(bytes) as i64))
+            }
+            "i64" => {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&buf[offset..offset+8]);
+                Ok(Value::Int(i64::from_le_bytes(bytes)))
+            }
+            "f64" => {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&buf[offset..offset+8]);
+                Ok(Value::Float(f64::from_le_bytes(bytes)))
+            }
+            "bool" => {
+                Ok(Value::Bool(buf[offset] != 0))
+            }
+            other => {
+                // Nested #[repr(C)] record
+                if let Some(td) = self.type_defs.get(other) {
+                    if td.attributes.contains(&TypeAttribute::ReprC) {
+                        if let TypeDefKind::Record(fields) = &td.kind {
+                            return self.unmarshall_buffer_to_record(buf, fields);
+                        }
+                    }
+                }
+                Err(Errno::Generic(format!(
+                    "StructByValue: unsupported field type '{}' in record return", other
+                )))
+            }
+        }
     }
 }
 

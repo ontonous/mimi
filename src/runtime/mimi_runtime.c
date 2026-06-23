@@ -2265,6 +2265,13 @@ void   test_segfault(void) { __mimi_extern_test_segfault(); }
 void   test_abort(void) { __mimi_extern_test_abort(); }
 
 int    test_struct_by_val(__mimi_TestPoint p) { return __mimi_extern_test_struct_by_val(p); }
+
+// Struct-by-value return: creates and returns a struct
+__mimi_TestPoint __mimi_extern_test_make_point(int32_t x, int32_t y) {
+    __mimi_TestPoint p = { x, y };
+    return p;
+}
+__mimi_TestPoint test_make_point(int32_t x, int32_t y) { return __mimi_extern_test_make_point(x, y); }
 double test_mixed_struct(__mimi_MixedStruct s) { return __mimi_extern_test_mixed_struct(s); }
 int    test_nested_struct(__mimi_Outer o) { return __mimi_extern_test_nested_struct(o); }
 int64_t test_timespec_sum(__mimi_Timespec t) { return __mimi_extern_test_timespec_sum(t); }

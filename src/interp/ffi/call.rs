@@ -4,6 +4,7 @@ use super::super::*;
 use crate::ffi::FfiRetContract;
 use libffi::middle::{Cif, CodePtr};
 use std::cell::RefCell;
+use std::ffi::c_void;
 
 // sigsetjmp / siglongjmp are not bound in the libc crate, so we declare
 // them directly. The jmp_buf size matches glibc's __jmp_buf_tag on x86_64.
@@ -110,6 +111,32 @@ impl<'a> Interpreter<'a> {
                 val.to_bits() as i64
             }
             _ => cif.call::<i64>(code_ptr, ffi_args),
+        }
+    }
+
+    /// Call a C function that returns a struct by value, writing into a
+    /// caller-provided buffer. Uses the low-level `raw::ffi_call` API to
+    /// supply a custom return-value buffer of the struct's size.
+    /// Call a C function that returns a struct by value, writing into a
+    /// caller-provided buffer. Uses the low-level `raw::ffi_call` API to
+    /// supply a custom return-value buffer of the struct's size.
+    pub(in crate::interp) unsafe fn call_ffi_raw_struct(
+        cif: &Cif,
+        code_ptr: CodePtr,
+        ffi_args: &[libffi::middle::Arg],
+        rvalue: *mut c_void,
+    ) {
+        // SAFETY: rvalue must be a valid, writable buffer of sufficient
+        // size for the struct return type. cif.as_raw_ptr() provides a
+        // valid CIF descriptor for libffi.
+        let fn_ptr = unsafe { *code_ptr.as_safe_fun() };
+        unsafe {
+            libffi::raw::ffi_call(
+                cif.as_raw_ptr(),
+                Some(fn_ptr),
+                rvalue,
+                ffi_args.as_ptr() as *mut *mut c_void,
+            );
         }
     }
 
