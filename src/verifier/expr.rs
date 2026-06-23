@@ -53,6 +53,14 @@ impl crate::verifier::Verifier {
                     .and_then(|e| self.expr_to_z3_int(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
             }
+            Expr::Block(stmts) => {
+                block_tail_expr(stmts)
+                    .and_then(|e| self.expr_to_z3_int(&e, vars))
+            }
+            Expr::Match(expr, arms) => {
+                let matched = self.expr_to_z3_int(expr, vars)?;
+                self.encode_match_int(&matched, arms, vars)
+            }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     // Special-case len(s) — returns the string length variable.
@@ -173,6 +181,14 @@ impl crate::verifier::Verifier {
                     .and_then(|b| block_tail_expr(b))
                     .and_then(|e| self.expr_to_z3_real(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
+            }
+            Expr::Block(stmts) => {
+                block_tail_expr(stmts)
+                    .and_then(|e| self.expr_to_z3_real(&e, vars))
+            }
+            Expr::Match(expr, arms) => {
+                let matched = self.expr_to_z3_real(expr, vars)?;
+                self.encode_match_real(&matched, arms, vars)
             }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
@@ -344,6 +360,14 @@ impl crate::verifier::Verifier {
                     .and_then(|e| self.expr_to_z3_bool(&e, vars))?;
                 Some(cond_z3.ite(&then_z3, &else_z3))
             }
+            Expr::Block(stmts) => {
+                block_tail_expr(stmts)
+                    .and_then(|e| self.expr_to_z3_bool(&e, vars))
+            }
+            Expr::Match(expr, arms) => {
+                let matched = self.expr_to_z3_int(expr, vars)?;
+                self.encode_match_bool(&matched, arms, vars)
+            }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     // Special-case len(s) for string length in bool context.
@@ -395,6 +419,13 @@ impl crate::verifier::Verifier {
                 self.is_real_expr(lhs, vars) || self.is_real_expr(rhs, vars)
             }
             Expr::Unary(_, inner) => self.is_real_expr(inner, vars),
+            Expr::Block(stmts) => {
+                block_tail_expr(stmts).map_or(false, |e| self.is_real_expr(&e, vars))
+            }
+            Expr::Match(expr, arms) => {
+                if self.is_real_expr(expr, vars) { true }
+                else { arms.iter().any(|a| self.is_real_expr(&a.body, vars)) }
+            }
             Expr::Call(callee, args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     if name == "len" {
@@ -426,6 +457,130 @@ impl crate::verifier::Verifier {
     /// decimal that uniquely identifies the float value, then parses it as a
     /// rational (num_str / 10^precision). This avoids i64 overflow from the
     /// previous PRECISION-scaling approach.
+    /// Encode a pattern match condition: returns a Z3 boolean that is true
+    /// when the pattern matches the given encoded matched term.
+    fn pattern_matches_z3(&mut self, matched: &Z3Int, pat: &Pattern, vars: &mut Z3VarMap) -> Option<Z3Bool> {
+        match pat {
+            Pattern::Wildcard => Some(Z3Bool::from_bool(true)),
+            Pattern::Variable(_) => Some(Z3Bool::from_bool(true)),
+            Pattern::Literal(Lit::Int(n)) => Some(matched.eq(&Z3Int::from_i64(*n))),
+            Pattern::Literal(Lit::Bool(b)) => {
+                let b_int = Z3Int::from_i64(if *b { 1 } else { 0 });
+                Some(matched.eq(&b_int))
+            }
+            _ => None, // Constructor, Tuple, etc. not yet supported
+        }
+    }
+
+    /// Build a Z3 ite chain for match expression with int result type.
+    /// Each arm is guarded by its pattern condition, building nested ite.
+    fn encode_match_int(
+        &mut self,
+        matched: &Z3Int,
+        arms: &[MatchArm],
+        vars: &mut Z3VarMap,
+    ) -> Option<Z3Int> {
+        let mut result: Option<Z3Int> = None;
+        for (i, arm) in arms.iter().rev().enumerate() {
+            let arm_val = self.expr_to_z3_int(&arm.body, vars)?;
+            // Last arm in reverse = first match arm (most specific).
+            // If it's a Wildcard, it's also the default — just use its value.
+            if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+                result = Some(arm_val);
+                continue;
+            }
+            let base_cond = self.pattern_matches_z3(matched, &arm.pat, vars)?;
+            let cond = if let Some(ref guard_expr) = arm.guard {
+                if let Some(g) = self.expr_to_z3_bool(guard_expr, vars) {
+                    Z3Bool::and(&[&base_cond, &g])
+                } else {
+                    return None;
+                }
+            } else {
+                base_cond
+            };
+            result = Some(match result {
+                Some(prev) => cond.ite(&arm_val, &prev),
+                None => cond.ite(&arm_val, &Z3Int::from_i64(0)),
+            });
+        }
+        result
+    }
+
+    /// Build a Z3 ite chain for match expression with real result type.
+    fn encode_match_real(
+        &mut self,
+        matched: &Z3Real,
+        arms: &[MatchArm],
+        vars: &mut Z3VarMap,
+    ) -> Option<Z3Real> {
+        let matched_int = Z3Int::from_i64(0);
+        let mut result: Option<Z3Real> = None;
+        for (i, arm) in arms.iter().rev().enumerate() {
+            let arm_val = self.expr_to_z3_real(&arm.body, vars)?;
+            if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+                result = Some(arm_val);
+                continue;
+            }
+            let base_cond = if let Pattern::Literal(Lit::Float(f)) = &arm.pat {
+                if let Some(f_lit) = self.float_to_z3_real(*f) {
+                    matched.eq(&f_lit)
+                } else {
+                    return None;
+                }
+            } else {
+                let int_cond = self.pattern_matches_z3(&matched_int, &arm.pat, vars)?;
+                int_cond
+            };
+            let cond = if let Some(ref guard_expr) = arm.guard {
+                if let Some(g) = self.expr_to_z3_bool(guard_expr, vars) {
+                    Z3Bool::and(&[&base_cond, &g])
+                } else {
+                    return None;
+                }
+            } else {
+                base_cond
+            };
+            result = Some(match result {
+                Some(prev) => cond.ite(&arm_val, &prev),
+                None => cond.ite(&arm_val, &Z3Real::from_int(&Z3Int::from_i64(0))),
+            });
+        }
+        result
+    }
+
+    /// Build a Z3 ite chain for match expression with bool result type.
+    fn encode_match_bool(
+        &mut self,
+        matched: &Z3Int,
+        arms: &[MatchArm],
+        vars: &mut Z3VarMap,
+    ) -> Option<Z3Bool> {
+        let mut result: Option<Z3Bool> = None;
+        for (i, arm) in arms.iter().rev().enumerate() {
+            let arm_val = self.expr_to_z3_bool(&arm.body, vars)?;
+            if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+                result = Some(arm_val);
+                continue;
+            }
+            let base_cond = self.pattern_matches_z3(matched, &arm.pat, vars)?;
+            let cond = if let Some(ref guard_expr) = arm.guard {
+                if let Some(g) = self.expr_to_z3_bool(guard_expr, vars) {
+                    Z3Bool::and(&[&base_cond, &g])
+                } else {
+                    return None;
+                }
+            } else {
+                base_cond
+            };
+            result = Some(match result {
+                Some(prev) => cond.ite(&arm_val, &prev),
+                None => cond.ite(&arm_val, &Z3Bool::from_bool(false)),
+            });
+        }
+        result
+    }
+
     fn float_to_z3_real(&self, f: f64) -> Option<Z3Real> {
         if f == 0.0 {
             return Some(Z3Real::from_int(&Z3Int::from_i64(0)));

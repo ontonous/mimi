@@ -774,3 +774,46 @@ func main() -> f64 { 0.0 }
         assert_eq!(c.unwrap().status, VerifStatus::Verified,
             "tiny f64 should verify correctly: {:?}", c.unwrap());
     }
+
+    #[test]
+    fn verify_match_all_arms_positive() {
+        require_z3!();
+        // Match with wildcard: all arms return >= 0, so ensures should hold.
+        let src = r#"
+func categorize(x: i32) -> i32 {
+    ensures: result >= 0
+    match x {
+        1 => 10
+        2 => 20
+        _ => 0
+    }
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: match_all_positive");
+        let f = results.iter().find(|r| r.func_name == "categorize");
+        assert!(f.is_some(), "categorize should be present");
+        assert_ne!(f.unwrap().status, VerifStatus::Failed,
+            "match should not produce false positive: {:?}", f.unwrap());
+    }
+
+    #[test]
+    fn verify_match_violation() {
+        require_z3!();
+        let src = r#"
+func categorize(x: i32) -> i32 {
+    ensures: result > 0
+    match x {
+        1 => 10
+        _ => 0
+    }
+}
+func main() -> i32 { 0 }
+"#;
+        let results = verify_source(src).expect("src/verifier/tests.rs: match_violation");
+        let f = results.iter().find(|r| r.func_name == "categorize");
+        assert!(f.is_some(), "categorize should be present");
+        assert!(f.unwrap().status == VerifStatus::Failed
+            || f.unwrap().status == VerifStatus::Unknown,
+            "match violation should be detected: {:?}", f.unwrap());
+    }
