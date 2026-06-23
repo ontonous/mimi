@@ -24,7 +24,6 @@ impl<'a> Checker<'a> {
         let all_variants = self.get_enum_variants(&subject_ty);
         let mut covered_variants: Vec<String> = Vec::new();
         let mut has_catchall = false;
-        let mut has_guard = false;
         let mut result_ty: Option<Type> = None;
 
         for arm in arms {
@@ -41,7 +40,6 @@ impl<'a> Checker<'a> {
             scopes.push(HashMap::new());
             self.check_pattern(&arm.pat, &subject_ty, scopes);
             if let Some(guard) = &arm.guard {
-                has_guard = true;
                 let gt = self.infer_expr(guard, scopes);
                 if !is_bool(&gt) {
                     self.emit_code(
