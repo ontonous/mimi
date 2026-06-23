@@ -42,73 +42,104 @@ impl<'a> Checker<'a> {
                 }
             }
             UnOp::Ref => {
-                // Check borrow rules: cannot borrow if already mutably borrowed
-                if let Expr::Ident(name) = e.as_ref() {
-                    if let Some(BorrowState::BorrowedMut { span }) = self.lookup_borrow(name) {
-                        let borrow_span = *span;
-                        self.errors.push(
-                            Diagnostic::error_code(
-                                crate::diagnostic::codes::E0302,
-                                format!(
-                                    "cannot borrow '{}' as immutable because it is already mutably borrowed",
-                                    name
+                match e.as_ref() {
+                    Expr::Ident(name) => {
+                        // Whole-variable immutable borrow
+                        if let Some(BorrowState::BorrowedMut { span }) = self.lookup_borrow(name) {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0302,
+                                    format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name),
+                                    Span::single(self.current_line, self.current_col),
+                                ).with_note("mutable borrow occurs here", *span),
+                            );
+                        }
+                        // Check if any field is already mutably borrowed
+                        if self.any_field_borrowed(name) {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0302,
+                                    format!("cannot borrow '{}' as immutable because a field is already mutably borrowed", name),
+                                    Span::single(self.current_line, self.current_col),
                                 ),
-                                Span::single(self.current_line, self.current_col),
-                            )
-                            .with_note("mutable borrow occurs here", borrow_span),
-                        );
+                            );
+                        }
+                        self.set_borrow(name, BorrowState::BorrowedImm { span: Span::single(self.current_line, self.current_col) });
                     }
-                    self.set_borrow(
-                        name,
-                        BorrowState::BorrowedImm {
-                            span: Span::single(self.current_line, self.current_col),
-                        },
-                    );
+                    Expr::Field(obj, field) => {
+                        if let Expr::Ident(var) = obj.as_ref() {
+                            // Field-level immutable borrow: &p.x
+                            if let Some(span) = self.is_field_borrowed(var, field, false) {
+                                self.errors.push(
+                                    Diagnostic::error_code(
+                                        crate::diagnostic::codes::E0302,
+                                        format!("cannot borrow '{}' as immutable because it is already mutably borrowed", field),
+                                        Span::single(self.current_line, self.current_col),
+                                    ).with_note("mutable borrow occurs here", span),
+                                );
+                            }
+                            self.set_field_borrow(var, field, BorrowState::BorrowedImm { span: Span::single(self.current_line, self.current_col) });
+                        }
+                    }
+                    _ => {}
                 }
                 Type::Ref(None, Box::new(t))
             }
             UnOp::RefMut => {
-                // Check borrow rules: cannot &mut if already borrowed (imm or mut)
-                if let Expr::Ident(name) = e.as_ref() {
-                    if let Some(state) = self.lookup_borrow(name) {
-                        match state {
-                            BorrowState::Unborrowed => {}
-                            BorrowState::BorrowedImm { span } => {
-                                let borrow_span = *span;
+                match e.as_ref() {
+                    Expr::Ident(name) => {
+                        // Whole-variable mutable borrow
+                        if let Some(state) = self.lookup_borrow(name) {
+                            match state {
+                                BorrowState::Unborrowed => {}
+                                BorrowState::BorrowedImm { span } => {
+                                    self.errors.push(
+                                        Diagnostic::error_code(
+                                            crate::diagnostic::codes::E0300,
+                                            format!("cannot borrow '{}' as mutable because it is already immutably borrowed", name),
+                                            Span::single(self.current_line, self.current_col),
+                                        ).with_note("immutable borrow occurs here", *span),
+                                    );
+                                }
+                                BorrowState::BorrowedMut { span } => {
+                                    self.errors.push(
+                                        Diagnostic::error_code(
+                                            crate::diagnostic::codes::E0301,
+                                            format!("cannot borrow '{}' as mutable because it is already mutably borrowed", name),
+                                            Span::single(self.current_line, self.current_col),
+                                        ).with_note("mutable borrow occurs here", *span),
+                                    );
+                                }
+                            }
+                        }
+                        // Check if any field is already borrowed
+                        if self.any_field_borrowed(name) {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0300,
+                                    format!("cannot borrow '{}' as mutable because a field is already borrowed", name),
+                                    Span::single(self.current_line, self.current_col),
+                                ),
+                            );
+                        }
+                        self.set_borrow(name, BorrowState::BorrowedMut { span: Span::single(self.current_line, self.current_col) });
+                    }
+                    Expr::Field(obj, field) => {
+                        if let Expr::Ident(var) = obj.as_ref() {
+                            // Field-level mutable borrow: &mut p.x
+                            if let Some(span) = self.is_field_borrowed(var, field, true) {
                                 self.errors.push(
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0300,
-                                        format!(
-                                            "cannot borrow '{}' as mutable because it is already immutably borrowed",
-                                            name
-                                        ),
+                                        format!("cannot mutably borrow '{}' because it is already borrowed", field),
                                         Span::single(self.current_line, self.current_col),
-                                    )
-                                    .with_note("immutable borrow occurs here", borrow_span),
+                                    ).with_note("borrow occurs here", span),
                                 );
                             }
-                            BorrowState::BorrowedMut { span } => {
-                                let borrow_span = *span;
-                                self.errors.push(
-                                    Diagnostic::error_code(
-                                        crate::diagnostic::codes::E0301,
-                                        format!(
-                                            "cannot borrow '{}' as mutable because it is already mutably borrowed",
-                                            name
-                                        ),
-                                        Span::single(self.current_line, self.current_col),
-                                    )
-                                    .with_note("mutable borrow occurs here", borrow_span),
-                                );
-                            }
+                            self.set_field_borrow(var, field, BorrowState::BorrowedMut { span: Span::single(self.current_line, self.current_col) });
                         }
                     }
-                    self.set_borrow(
-                        name,
-                        BorrowState::BorrowedMut {
-                            span: Span::single(self.current_line, self.current_col),
-                        },
-                    );
+                    _ => {}
                 }
                 Type::RefMut(None, Box::new(t))
             }

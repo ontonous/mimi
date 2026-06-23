@@ -215,17 +215,15 @@ func main() -> i32 {
 // Currently the parser or checker rejects them.
 
 #[test]
-#[ignore = "v1.2: no field-level borrow tracking — borrow on p.x borrows entire struct"]
 fn borrow_field_level_disjoint() {
     let src = r#"
-struct Point { x: i32, y: i32 }
-func read(x: &i32) -> i32 { *x }
+type Pair { a: i32, b: i32 }
 func main() -> i32 {
-    let mut p = Point { x: 10, y: 20 };
-    let rx = &p.x;
-    let ry = &mut p.y;
-    *ry = *rx + 5;
-    p.y
+    let mut p = Pair { a: 1, b: 2 };
+    let ra = &p.a;
+    let rb = &mut p.b;
+    println(*ra + *rb);
+    0
 }
 "#;
     assert!(check_source(src).is_ok(), "field-level disjoint borrow should pass");

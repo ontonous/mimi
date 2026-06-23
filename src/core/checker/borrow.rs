@@ -1,18 +1,23 @@
 use crate::ast::*;
 use crate::core::borrow::BorrowState;
+use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
 
 impl<'a> Checker<'a> {
+    // ─── Whole-variable borrow scope management ───────────────
     pub(crate) fn push_borrow_scope(&mut self) {
         self.borrows.push(HashMap::new());
+        self.field_borrows.push(HashMap::new());
     }
 
     pub(crate) fn pop_borrow_scope(&mut self) {
         self.borrows.pop();
+        self.field_borrows.pop();
     }
 
+    // ─── Whole-variable borrow tracking ──────────────────────
     pub(crate) fn lookup_borrow(&self, name: &str) -> Option<&BorrowState> {
         for scope in self.borrows.iter().rev() {
             if let Some(state) = scope.get(name) {
@@ -32,6 +37,61 @@ impl<'a> Checker<'a> {
     pub(crate) fn release_borrow(&mut self, name: &str) {
         if let Some(scope) = self.borrows.last_mut() {
             scope.insert(name.into(), BorrowState::Unborrowed);
+        }
+    }
+
+    // ─── Field-level borrow tracking (path-sensitive) ────────
+
+    /// Check if a specific field path on a variable is borrowed.
+    /// Returns true if the field path (or the whole variable) is borrowed
+    /// in a way that conflicts with `mutable`.
+    pub(crate) fn is_field_borrowed(&self, var: &str, field: &str, mutable: bool) -> Option<Span> {
+        let key = (var.to_string(), vec![field.to_string()]);
+        for scope in self.field_borrows.iter().rev() {
+            if let Some(state) = scope.get(&key) {
+                return match state {
+                    BorrowState::BorrowedMut { span } => Some(*span),
+                    BorrowState::BorrowedImm { span } if mutable => Some(*span),
+                    _ => None,
+                };
+            }
+        }
+        // Also check if the whole variable is borrowed
+        if let Some(state) = self.lookup_borrow(var) {
+            return match state {
+                BorrowState::BorrowedMut { span } => Some(*span),
+                BorrowState::BorrowedImm { span } if mutable => Some(*span),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// Set a borrow on a specific field path.
+    pub(crate) fn set_field_borrow(&mut self, var: &str, field: &str, state: BorrowState) {
+        if let Some(scope) = self.field_borrows.last_mut() {
+            let key = (var.to_string(), vec![field.to_string()]);
+            scope.insert(key, state);
+        }
+    }
+
+    /// Release a borrow on a specific field path.
+    pub(crate) fn release_field_borrow(&mut self, var: &str, field: &str) {
+        if let Some(scope) = self.field_borrows.last_mut() {
+            let key = (var.to_string(), vec![field.to_string()]);
+            scope.insert(key, BorrowState::Unborrowed);
+        }
+    }
+
+    /// Check if any field of a variable is borrowed (for whole-variable borrow checks).
+    /// Returns true if any field is actively borrowed.
+    pub(crate) fn any_field_borrowed(&self, var: &str) -> bool {
+        if let Some(scope) = self.field_borrows.last() {
+            scope.iter().any(|((v, _), state)| {
+                v == var && !matches!(state, BorrowState::Unborrowed)
+            })
+        } else {
+            false
         }
     }
 

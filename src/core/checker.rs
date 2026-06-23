@@ -19,6 +19,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) cap_vars: Vec<HashMap<String, bool>>,
     /// Track borrow state of variables: name -> borrow state
     pub(crate) borrows: Vec<HashMap<String, BorrowState>>,
+    /// Track field-level borrow state: (var_name, field_path) -> borrow state
+    pub(crate) field_borrows: Vec<HashMap<(String, Vec<String>), BorrowState>>,
     /// Track trait definitions: trait_name -> list of method names
     pub(crate) traits: HashMap<String, Vec<String>>,
     /// Track trait generic params: trait_name -> list of generic param names
@@ -74,6 +76,7 @@ impl<'a> Checker<'a> {
             newtypes: HashMap::new(),
             cap_vars: vec![HashMap::new()],
             borrows: vec![HashMap::new()],
+            field_borrows: vec![HashMap::new()],
             traits: HashMap::new(),
             trait_generics: HashMap::new(),
             impls: HashMap::new(),
