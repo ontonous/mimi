@@ -1,52 +1,30 @@
 # Mimi 语言
 
-**Mimi** 是一门带契约验证、结构化并发和线性能力的系统编程语言，是 MimiSpec 意图描述的编译后端。
+**Mimi** 是一门带合约验证、结构化并发和线性能力的系统编程语言，是 MimiSpec 意图描述的生产编译后端。
 
-Mimi 把函数契约（`requires`/`ensures`）、并行步骤（`parasteps`/`on failure`）和线性能力（`cap`）作为一等语言构造，通过双后端（解释器 + LLVM codegen）+ Z3 验证器保障程序正确性。
+基于双后端架构（**解释器** + **LLVM codegen**）和 **Z3 定理证明器**，Mimi 将函数契约（`requires`/`ensures`）、并行步骤（`parasteps`/`on failure`）和线性能力（`cap`）作为一等语言构造，保障程序正确性。
 
----
-
-## 特性一览
-
-| 特性 | 状态 | 说明 |
-|------|------|------|
-| 基本类型 | ✅ | `i32`, `i64`, `f64`, `bool`, `string`, `unit`, `nothing` |
-| 函数与闭包 | ✅ | `func` 命名函数, `fn` 匿名闭包, 一等函数 |
-| ADT + 模式匹配 | ✅ | 枚举、记录、元组, `match` 穷尽性检查 |
-| 泛型 | ✅ | `<T>` 类型参数, where 约束, Turbofish |
-| Move 语义 | ✅ | Copy trait, use-after-move 检测 |
-| 借用检查 | ✅ | `&T` / `&mut T` 类型检查层面的借用规则 |
-| `newtype` | ✅ | 强类型隔离包装 |
-| `type A = B` | ✅ | 透明类型别名 |
-| Actor 并发 | ✅ | 轻量任务调度, 同步方法调用 |
-| `parasteps` 并发 | ✅ | `spawn` / `await`, 线程池并行 |
-| `on failure` 补偿 | ✅ | LIFO 逆序执行补偿块 |
-| `requires` / `ensures` | ✅ | 运行时契约断言, `result` 变量 |
-| `cap` 线性能力 | ✅ | 类型检查层面的能力追踪 |
-| 复合赋值运算符 | ✅ | `+=`, `-=`, `*=`, `/=` |
-| 字符串操作 | ✅ | 拼接 `+`, `len()`, `to_string()`, `contains()` |
-| 内置函数 | ✅ | `abs`, `min`/`max`, `push`/`pop`, `range`, `sqrt`, `input` |
-| `pub` 可见性 | ✅ | 函数、类型、Actor 的公开标记 |
-| `old()` in ensures | ✅ | 函数入口变量快照语义 |
-| `trait` / `impl` | ✅ | 基础 trait 系统与静态分派 |
-| `where` 约束 | ✅ | 泛型类型约束语法 |
-| `extern "C"` | ✅ | FFI 块声明外部函数 |
-| 标准库 | ✅ | prelude, io, fs, strings, collections, mymath, net, maps, json, time, datetime, env, testing, random, text, result |
+- **合约验证**：编译期 Z3 形式化验证 + 运行时断言
+- **结构化并发**：`parasteps` 并行 + `on failure` 补偿
+- **线性能力**：`cap` 类型级别资源追踪
+- **双后端**：解释器快速开发 + LLVM 原生编译
+- **FFI 零开销**：`extern "C"` 跨语言调用，`repr(C)` 结构体直传
+- **包管理**：`mimi.toml` + registry + git 依赖
 
 ---
 
 ## 快速开始
 
-### 安装
+### 从源码构建
 
 ```bash
+git clone https://github.com/ontonous/mimi
 cd mimi
-cargo build --release
+bash scripts/setup-llvm-wrapper.sh
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
 ```
 
-### 编写 Mimi 程序
-
-创建 `hello.mimi`:
+### Hello World
 
 ```mimi
 func greet(name: string) -> string {
@@ -59,128 +37,32 @@ func main() -> i32 {
 }
 ```
 
-### 运行
-
 ```bash
-# 类型检查
-./target/release/mimi check hello.mimi
-
-# 运行
 ./target/release/mimi run hello.mimi
 ```
 
 ---
 
-## 语法示例
+## 特性
 
-### 函数与闭包
-
-```mimi
-func add(a: i32, b: i32) -> i32 {
-    requires: a > 0
-    ensures: result == a + b
-    a + b
-}
-
-func main() -> i32 {
-    let double = fn(x: i32) -> i32 { x * 2 };
-    let values = [1, 2, 3, 4, 5];
-    let mut sum = 0;
-    for v in values {
-        sum += double(v);
-    }
-    sum
-}
-```
-
-### 泛型
-
-```mimi
-pub func find<T>(xs: List<T>, target: T) -> (bool, i32) {
-    for i in range(0, len(xs)) {
-        if xs[i] == target {
-            return (true, i)
-        }
-    }
-    (false, -1)
-}
-
-pub func map_list<T, U>(xs: List<T>, f: func(T) -> U) -> List<U> {
-    reduce(xs, fn(acc: List<U>, x: T) -> List<U> {
-        push(acc, f(x))
-    }, [])
-}
-```
-
-### ADT 与模式匹配
-
-```mimi
-type Shape {
-    Circle(f64)
-    Rectangle(f64, f64)
-    Triangle { a: f64, b: f64, c: f64 }
-}
-
-func area(s: Shape) -> f64 {
-    match s {
-        Circle(r) => 3.14 * r * r,
-        Rectangle(w, h) => w * h,
-        Triangle { a, b, c } => {
-            let s = (a + b + c) / 2.0;
-            (s * (s-a) * (s-b) * (s-c)).sqrt()
-        }
-    }
-}
-```
-
-### 错误处理
-
-```mimi
-func divide(a: i32, b: i32) -> Result<i32, string> {
-    if b == 0 {
-        Err("division by zero")
-    } else {
-        Ok(a / b)
-    }
-}
-
-func safe_calc() -> Result<i32, string> {
-    let result = divide(10, 2)?;
-    Ok(result * 3)
-}
-```
-
-### 并发
-
-```mimi
-func fetch(url: string) -> string { /* ... */ }
-
-func main() -> string {
-    let result = "";
-    parasteps {
-        let a = spawn fetch("api/users");
-        let b = spawn fetch("api/orders");
-        let r1 = await a;
-        let r2 = await b;
-        result = r1 + r2
-    }
-    result
-}
-```
-
-### 补偿
-
-```mimi
-func booking() -> Result<(), string> {
-    let seat = reserve_seat()?;
-    on failure { cancel_seat(seat) }
-
-    let hotel = book_hotel()?;
-    on failure { cancel_hotel(hotel) }
-
-    Ok(())
-}
-```
+| 特性 | 说明 |
+|------|------|
+| 类型系统 | `i32`/`i64`/`f64`/`bool`/`string`/`unit`/`nothing`，泛型 `<T>`，`newtype`，类型别名 |
+| ADT + 模式匹配 | 枚举、记录、元组，`match` 穷尽性检查 |
+| 函数与闭包 | `func` 命名函数，`fn` 匿名闭包，一等函数类型 `func(T) -> U` |
+| 合约 | `requires`/`ensures` 前后置条件，`old()` 入口快照，Z3 形式化验证 |
+| 结构化并发 | `parasteps` + `spawn`/`await`（pthread 线程池），`on failure` LIFO 补偿 |
+| 线性能力 | `cap` 类型级别能力系统，`Allocator` 自定义分配器 |
+| 借用检查 | `&T`/`&mut T`，路径敏感分析，arena 逃逸检测 |
+| 引用计数 | `shared`/`local_shared`/`weak` 所有权模型 |
+| Move 语义 | Copy trait，use-after-move 检测 |
+| FFI | `extern "C"` 声明，`repr(C)` 结构体直传，回调支持，json 序列化，pybind11/C header 导出 |
+| 错误处理 | `Result<T, E>` + `?` 运算符 |
+| 标准库 | 19 个模块：io、fs、strings、collections、net、json、maps、time、datetime、env、crypto、csv、template 等 |
+| 包管理 | `mimi.toml`，依赖解析，本地 registry，git 依赖 |
+| MimiSpec 集成 | `.mms` 解析、promote、`mms {}` 块、规则一致性检查 |
+| 编译目标 | LLVM 18 原生编译，交叉编译（Windows），no_std，共享库 `.so` |
+| LSP | 语言服务器协议支持，悬停、补全、跳转定义、合约镜头 |
 
 ---
 
@@ -188,20 +70,30 @@ func booking() -> Result<(), string> {
 
 | 命令 | 说明 |
 |------|------|
-| `mimi check <file.mimi>` | 类型检查 `.mimi` 文件 |
-| `mimi run <file.mimi>` | 类型检查并运行 |
-| `mimi build <file.mimi>` | 编译为本地可执行文件 |
-| `mimi build <file.mimi> --verify-contracts` | 编译并验证合约 |
-| `mimi fmt <files...>` | 格式化文件 |
-| `mimi fmt --check <files...>` | 检查格式（不修改） |
+| `mimi check <file>` | 类型检查 |
+| `mimi run <file>` | 类型检查并运行 |
+| `mimi test <file>` | 运行 `test_*` 测试函数 |
+| `mimi build <file>` | 编译为本地可执行文件 |
+| `mimi build <file> --verify-contracts` | 编译并验证合约 |
+| `mimi fmt <files...>` | 格式化 |
 | `mimi lint <files...>` | 静态分析 |
+| `mimi verify <file>` | Z3 合约形式化验证 |
 | `mimi lsp` | 启动 LSP 服务器 |
-| `mimi init` | 初始化新项目 |
+| `mimi init <name>` | 初始化项目 |
 | `mimi add <name>` | 添加依赖 |
+| `mimi remove <name>` | 移除依赖 |
 | `mimi install` | 安装依赖 |
-| `mimi tree` | 显示依赖树 |
+| `mimi update` | 更新依赖 |
 | `mimi list` | 列出依赖 |
+| `mimi tree` | 显示依赖树 |
 | `mimi publish` | 发布到本地 registry |
+| `mimi search <query>` | 搜索包 |
+| `mimi doc <file>` | 生成文档 |
+| `mimi promote <file>` | `.mms` → `.mimi` 提升 |
+| `mimi mms <files>` | 处理 MimiSpec 文件 |
+| `mimi stats <file>` | 使用统计 |
+| `mimi emit-c-headers <file>` | 导出 C 头文件 |
+| `mimi emit-py-bindings <file>` | 导出 Python pybind11 绑定 |
 
 ---
 
@@ -210,105 +102,139 @@ func booking() -> Result<(), string> {
 ```
 mimi/
 ├── src/
-│   ├── main.rs          # CLI 入口
-│   ├── ast.rs           # AST 类型定义
-│   ├── lexer.rs         # 词法分析器
-│   ├── parser/          # 语法分析器
-│   ├── core/            # 类型检查器
-│   ├── interp/          # 解释器
-│   ├── codegen/         # LLVM codegen
-│   │   ├── mod.rs
-│   │   └── builtins.rs
-│   ├── lsp.rs           # LSP 服务器
-│   ├── fmt.rs           # 格式化器
-│   ├── lint.rs          # 静态分析
-│   ├── diagnostic/      # 诊断系统
-│   └── tests/           # 测试套件
-├── std/                 # 标准库
-│   ├── prelude.mimi
-│   ├── io.mimi
-│   ├── fs.mimi
-│   ├── strings.mimi
-│   ├── collections.mimi
-│   ├── mymath.mimi
-│   ├── net.mimi
-│   ├── maps.mimi
-│   ├── json.mimi
-│   ├── time.mimi
-│   ├── env.mimi
-│   └── testing.mimi
-├── examples/            # 示例程序
-└── docs/                # 文档
-    ├── syntax-reference.md   # 语法规范 (★)
-    └── mimi.md               # 语言设计规范
+│   ├── main.rs              # CLI 入口
+│   ├── lib.rs               # 库入口
+│   ├── ast.rs               # AST 类型定义
+│   ├── parser/              # 解析器
+│   ├── lexer/               # 词法分析
+│   ├── core/                # 类型检查
+│   ├── interp/              # 解释器
+│   ├── codegen/             # LLVM codegen
+│   ├── verifier/            # Z3 形式化验证
+│   ├── ffi/                 # FFI 契约系统
+│   ├── diagnostic/          # 诊断系统
+│   ├── lsp/                 # LSP 服务器
+│   ├── fmt.rs               # 格式化器
+│   ├── lint.rs              # 静态分析
+│   ├── contracts.rs         # 合约提取
+│   ├── manifest.rs          # 包清单
+│   ├── loader.rs            # 模块加载
+│   ├── lockfile.rs          # 锁定文件
+│   ├── pkg_registry.rs      # 包注册表
+│   ├── pkg_resolve.rs       # 依赖解析
+│   ├── runtime/             # C 运行时
+│   └── tests/               # 测试套件 (2,011 个)
+├── std/                     # 标准库 (19 模块)
+├── examples/                # 示例程序 (28 个)
+├── demos/                   # 演示程序 (23 个)
+├── devdocs/                 # 内部开发文档
+├── gramma/                  # 语法形式化定义
+├── benches/                 # 基准测试
+├── readme/                  # 详细文档
+├── Cargo.toml
+├── Makefile
+└── LICENSE                  # Apache-2.0
 ```
 
 ---
 
-## 快速上手：5 分钟 FFI 调用
+## 语法示例
 
-调用 C 标准库 `strlen`，从零到运行：
+### 函数与合约
 
 ```mimi
-// 1. 声明外部函数
+pub func divide(a: i32, b: i32) -> i32 {
+    requires: b != 0
+    ensures: result == a / b
+    a / b
+}
+```
+
+### ADT 与模式匹配
+
+```mimi
+type Tree<T> {
+    Leaf(T)
+    Node(Tree<T>, Tree<T>)
+}
+
+func depth<T>(t: Tree<T>) -> i32 {
+    match t {
+        Leaf(_) => 1,
+        Node(l, r) => 1 + max(depth(l), depth(r))
+    }
+}
+```
+
+### 并发与补偿
+
+```mimi
+func process() -> Result<i32, string> {
+    let data = fetch_data()?;
+    on failure { cleanup(data) }
+
+    let result = compute(data)?;
+    on failure { revert(result) }
+
+    Ok(result)
+}
+```
+
+### FFI 调用
+
+```mimi
 extern "C" {
     func strlen(s: string) -> i64;
+    func puts(s: string) -> i32;
 }
 
-// 2. 在主函数中调用
 func main() {
-    let len = strlen("Hello from Mimi FFI!")
-    println("字符串长度:", len)
+    let len = strlen("Hello");
+    puts("Hello from Mimi FFI!");
 }
 ```
-
-```bash
-mimi run demo.mimi   # 输出: 字符串长度: 22
-```
-
-更多 FFI 示例见 [readme/10-ffi.md](readme/10-ffi.md)。
-
----
-
-## 文档导航
-
-| 文档 | 说明 | 适合读者 |
-|------|------|----------|
-| [syntax-reference.md](docs/syntax-reference.md) | **语法规范** — 基于解析器实现 | 所有 Mimi 开发者 |
-| [mimi.md](docs/mimi.md) | 语言设计规范 v1.0 | 语言实现者、贡献者 |
-| [design-decisions.md](docs/design-decisions.md) | 设计决策与语言对比 | 想了解"为什么这样设计"的人 |
-| [future-vision.md](docs/future-vision.md) | 长期愿景 | 核心开发者、架构师 |
-| [ffi-ownership-abi.md](docs/ffi-ownership-abi.md) | **FFI 设计** — 双栈边界、护照类型、实现路线图 | 需要跨语言集成的开发者 |
-| [readme/10-ffi.md](readme/10-ffi.md) | FFI 用户指南 | 快速上手的开发者 |
-| [product-strategy.md](docs/product-strategy.md) | 产品与开源策略 | 项目管理者、投资者 |
-
----
-
-## 设计理念
-
-Mimi 是 [MimiSpec](https://github.com/ontomimi/mimispec) 意图描述语言的生产编译后端：
-
-- **MimiSpec** (`.mms`) 负责渐进开发：$/? 锁定标记、desc/rule 意图描述、结构化约束
-- **Mimi** (`.mimi`) 负责生产编译：合约验证、结构化并发、线性能力、LLVM codegen
-
-两个语言共享契约语法（`requires`/`ensures`/`old()`），通过 `mms {}` 块建立设计→实现的追溯链接。
 
 ---
 
 ## 版本
 
-当前版本: **v0.7.0**
+当前版本: **v0.7.0** | 语言规范: v1.0.0-rc.1
 
-语言规范: v1.0.0-rc.1
+| 版本 | 亮点 |
+|------|------|
+| v0.7 | Z3 验证、FFI 零拷贝、HTTP codegen、标准库扩展 (csv/crypto/template) |
+| v0.6 | Windows 目标、Actor 模型、正则内置函数、字符串合约运行时断言 |
+| v0.5 | Parasteps pthread codegen、合约验证、CI/CD 完整化 |
+| v0.4 | 错误系统 `Diagnostic` 化、Arena 逃逸检测、写-写竞争检测 |
+| v0.3 | 包管理、文档生成管道、双后端基线 |
+| v0.2 | 基础语言特性、LLVM codegen、合约系统 |
+| v0.1 | 初始原型、解释器、类型检查器 |
 
-### 更新日志
+完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
-- **v0.7.0** — Std 补齐, Codegen 修复, 工具链 (fmt/lint), 合约验证, 包管理升级
-- **v0.3.1** — 基础类型、函数、闭包、ADT、模式匹配、错误处理
-- **v0.1.1** — 初始版本
+---
+
+## 开发
+
+```bash
+# 运行测试
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+
+# L1 双后端等价性测试
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
+
+# L2 类型系统健全性测试
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test typecheck::
+
+# 格式化
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
+
+# Lint
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
+```
 
 ---
 
 ## 许可证
 
-MIT
+Apache-2.0

@@ -19,3 +19,30 @@ build/
 
 # Transient null rlib produced by LLVM/no_std experiments
 libnull.rlib
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor temp files
+*.swp
+*.swo
+*~
+.*.swp
+
+# IDE
+.vscode/
+.idea/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Internal development docs (not for public)
+AGENTS.md
+devdocs/
