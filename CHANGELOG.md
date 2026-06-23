@@ -1,15 +1,24 @@
 # Changelog
 
-## [Unreleased] — 0.20.0-dev
+## [0.20.0] - 2026-06-23
 
 ### Added
-- (none yet)
+- 结构化并发：Future/Waker/Executor 运行时 (`mimi_future_alloc/free/set_completed/is_completed`, `mimi_executor_spawn/run`)
+- Poll-based codegen：`async fn` 编译为 poll 函数 + 堆分配 Future 指针，不再使用 pthread
+- Interpreter 对齐：`Value::Future` 从 `mpsc::Receiver` 改为 `PollFuture`（`Deferred`/`Ready`/`Pending`）
+- 协作式多任务：executor 全局任务队列，支持多 future 并发 poll
+- 类型系统：`async fn` 返回类型自动包装为 `Future<T>`
+
+### Changed
+- `async func` 不再生成 `__spawn_wrapper` 和 `pthread_create`，改为 `__poll` + `mimi_executor_spawn`
+- 解释器 `call_async_func` 同步求值（零开销，无线程池切换）
+- 更新 21 个 golden 测试文件
 
 ### Fixed
-- (none yet)
+- 运行时内存管理统一为 Rust allocator（`Box`），消除 libc `malloc`/`free` 混用 UB
 
-### Security
-- (none yet)
+### Removed
+- 移除 `__spawn_wrapper` 和 `pthread_create` 相关 codegen 路径
 
 ## [0.19.0] - 2026-06-23
 

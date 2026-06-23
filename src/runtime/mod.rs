@@ -2173,25 +2173,28 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
 //
 // Future memory layout (managed by codegen):
 //   offset 0: i32 (completed flag: 0=pending, 1=ready)
-//   offset 8: <result> (8-byte aligned, type known to codegen)
+//   offset 4: [padding 4 bytes]
+//   offset 8: <result> (8-byte aligned, up to 64 bytes)
 //
-// Executor: a global queue of (future_ptr, poll_fn) pairs.
-// mimi_executor_spawn submits; mimi_executor_run polls until all done.
+// Uses Box (Rust allocator) for consistent memory management.
 
-extern "C" {
-    fn malloc(size: u64) -> *mut std::ffi::c_void;
-    fn free(ptr: *mut std::ffi::c_void);
+#[repr(C)]
+struct MimiFutureRepr {
+    completed: i32,
+    _pad: [u8; 4],
+    data: [u8; 64],
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_future_alloc(_result_size: u64) -> *mut std::ffi::c_void {
-    unsafe { malloc(72) }
+    let b = Box::new(MimiFutureRepr { completed: 0, _pad: [0; 4], data: [0; 64] });
+    Box::into_raw(b) as *mut std::ffi::c_void
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() { return; }
-    unsafe { free(fut); }
+    unsafe { drop(Box::from_raw(fut as *mut MimiFutureRepr)); }
 }
 
 #[no_mangle]

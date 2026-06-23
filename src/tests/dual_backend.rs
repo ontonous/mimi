@@ -2385,7 +2385,7 @@ fn dual_async_future_cooperative() {
 }
 
 #[test]
-#[ignore = "v0.20 — string return from future needs pointer lifetime tracking"]
+#[ignore = "codegen string concat returns raw C ptr instead of MimiString struct (pre-existing)"]
 fn dual_async_future_string() {
     if !can_link() { return; }
     dual_assert!(r#"
