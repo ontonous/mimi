@@ -28,14 +28,18 @@ pub(in crate::interp) struct FfiCallbackCtx {
     pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>)>,
 }
 
-thread_local! {
-    /// F3: Per-thread fallback store for callbacks.
-    /// When C stores a callback function pointer and invokes it after the
-    /// synchronous FFI call returns, the thread-local context has been cleared.
-    /// This thread-local store keeps closures alive so the trampoline can still
-    /// find them. Entries persist until explicitly deregistered via
-    /// `mimi_callback_deregister` or until thread exit.
-    static CALLBACK_GLOBAL_STORE: RefCell<HashMap<i64, (Value, bool, Vec<bool>)>> = RefCell::new(HashMap::new());
+use std::sync::Mutex;
+
+/// F3: Global fallback store for callbacks — accessible from any thread.
+/// When C stores a callback function pointer and invokes it after the
+/// synchronous FFI call returns, the thread-local context has been cleared.
+/// This global store keeps closures alive so the trampoline can still find
+/// them from any thread. Entries persist until explicitly deregistered via
+/// `mimi_callback_deregister`.
+static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<Mutex<HashMap<i64, (Value, bool, Vec<bool>)>>> = std::sync::OnceLock::new();
+
+fn global_callback_store() -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>)>> {
+    CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// F3: C-ABI function to deregister an async callback and free its resources.
@@ -44,7 +48,9 @@ thread_local! {
 /// Safe to call from any thread.
 #[no_mangle]
 pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
-    CALLBACK_GLOBAL_STORE.with(|store| store.borrow_mut().remove(&callback_id));
+    if let Ok(mut store) = global_callback_store().lock() {
+        store.remove(&callback_id);
+    }
     callback_table_remove(callback_id);
     FFI_CALLBACK_CTX.with(|c| {
         c.borrow_mut().entries.remove(&callback_id);
@@ -92,7 +98,8 @@ unsafe fn callback_trampoline_inner(
     let (closure, ret_is_float, arg_free_mask) = match entry {
         Some(e) => e,
         None => {
-            let entry = CALLBACK_GLOBAL_STORE.with(|store| store.borrow().get(&callback_id).cloned());
+            let entry = global_callback_store().lock().ok()
+                .and_then(|store| store.get(&callback_id).cloned());
             match entry {
                 Some(e) => e,
                 None => {
@@ -117,12 +124,19 @@ unsafe fn callback_trampoline_inner(
     // Call the Mimi closure via interpreter
     let interp_ptr = FFI_CALLBACK_CTX.with(|c| c.borrow().interp);
     if interp_ptr.is_null() {
+        // Cross-thread / async callback: the synchronous FFI call has completed
+        // and the interpreter context has been cleared. Full async evaluation
+        // (dispatching to a worker thread or event loop) is not yet supported.
+        // Return i64::MIN as a distinct error sentinel so the C caller can
+        // detect that the callback could not be evaluated.
         eprintln!(
-            "[mimi] WARNING: callback {} invoked without an interpreter context. \
-             Returning 0. Async/off-thread callback evaluation is not yet supported.",
+            "[mimi] WARNING: callback {} invoked without an interpreter context \
+             (cross-thread or async). Returning i64::MIN. \
+             Async/off-thread callback evaluation is not yet fully supported. \
+             Callbacks during a synchronous FFI call on the same thread work correctly.",
             callback_id,
         );
-        *result = 0;
+        *result = i64::MIN;
         return;
     }
     let interp = &mut *(interp_ptr as *mut Interpreter<'static>);
@@ -223,9 +237,9 @@ impl<'a> Interpreter<'a> {
                     let mut ctx = c.borrow_mut();
                     ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
                 });
-                CALLBACK_GLOBAL_STORE.with(|store| {
-                    store.borrow_mut().insert(cb_id, (closure, ret_is_float, arg_free_mask));
-                });
+                if let Ok(mut store) = global_callback_store().lock() {
+                    store.insert(cb_id, (closure, ret_is_float, arg_free_mask));
+                }
 
                 // Create a libffi Closure that generates a C-compatible function pointer.
                 // The userdata (callback_id) must outlive the closure.
