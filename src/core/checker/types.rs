@@ -28,8 +28,8 @@ impl<'a> Checker<'a> {
                     Type::Name(name.clone(), args.clone())
                 }
             }
-            Type::Ref(_, inner) => Type::Ref(None, Box::new(self.resolve_type(inner))),
-            Type::RefMut(_, inner) => Type::RefMut(None, Box::new(self.resolve_type(inner))),
+            Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve_type(inner))),
+            Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(self.resolve_type(inner))),
             Type::Option(inner) => Type::Option(Box::new(self.resolve_type(inner))),
             Type::Result(ok, err) => Type::Result(
                 Box::new(self.resolve_type(ok)),

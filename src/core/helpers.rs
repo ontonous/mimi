@@ -117,8 +117,8 @@ pub fn subst_type_params(ty: &Type, generics: &[GenericParam], type_map: &HashMa
                 Type::Name(name.clone(), new_args)
             }
         }
-        Type::Ref(_, inner) => Type::Ref(None, Box::new(subst_type_params(inner, generics, type_map))),
-        Type::RefMut(_, inner) => Type::RefMut(None, Box::new(subst_type_params(inner, generics, type_map))),
+        Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(subst_type_params(inner, generics, type_map))),
+        Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(subst_type_params(inner, generics, type_map))),
         Type::Option(inner) => Type::Option(Box::new(subst_type_params(inner, generics, type_map))),
         Type::Result(ok, err) => Type::Result(
             Box::new(subst_type_params(ok, generics, type_map)),
@@ -334,5 +334,82 @@ pub fn fmt_type(t: &Type) -> String {
             format!("extern \"C\" fn({}) -> {}", args_str.join(", "), fmt_type(ret))
         }
         Type::CBuffer(inner) => format!("CBuffer<{}>", fmt_type(inner)),
+    }
+}
+
+/// Collect unique named lifetimes from a type (e.g., from `&'a i32` → collects "a")
+pub(crate) fn collect_lifetimes(ty: &Type) -> Vec<String> {
+    match ty {
+        Type::Ref(Some(lt), inner) | Type::RefMut(Some(lt), inner) => {
+            let mut lifetimes = vec![lt.clone()];
+            lifetimes.extend(collect_lifetimes(inner));
+            lifetimes
+        }
+        Type::Ref(None, inner) | Type::RefMut(None, inner) => collect_lifetimes(inner),
+        Type::Option(inner) => collect_lifetimes(inner),
+        Type::Result(ok, err) => {
+            let mut lifetimes = collect_lifetimes(ok);
+            lifetimes.extend(collect_lifetimes(err));
+            lifetimes
+        }
+        Type::Tuple(elems) => {
+            let mut lifetimes = Vec::new();
+            for elem in elems {
+                lifetimes.extend(collect_lifetimes(elem));
+            }
+            lifetimes
+        }
+        Type::Func(args, ret) => {
+            let mut lifetimes = Vec::new();
+            for arg in args {
+                lifetimes.extend(collect_lifetimes(arg));
+            }
+            lifetimes.extend(collect_lifetimes(ret));
+            lifetimes
+        }
+        Type::Name(_, args) => {
+            let mut lifetimes = Vec::new();
+            for arg in args {
+                lifetimes.extend(collect_lifetimes(arg));
+            }
+            lifetimes
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Check if a type contains any elided lifetime (Ref(None, _) or RefMut(None, _)).
+pub(crate) fn type_contains_elided_lifetime(ty: &Type) -> bool {
+    match ty {
+        Type::Ref(None, _) | Type::RefMut(None, _) => true,
+        Type::Ref(Some(_), inner) | Type::RefMut(Some(_), inner) => type_contains_elided_lifetime(inner),
+        Type::Option(inner) => type_contains_elided_lifetime(inner),
+        Type::Result(ok, err) => type_contains_elided_lifetime(ok) || type_contains_elided_lifetime(err),
+        Type::Tuple(elems) => elems.iter().any(|e| type_contains_elided_lifetime(e)),
+        Type::Func(args, ret) => args.iter().any(|a| type_contains_elided_lifetime(a)) || type_contains_elided_lifetime(ret),
+        Type::Name(_, args) => args.iter().any(|a| type_contains_elided_lifetime(a)),
+        _ => false,
+    }
+}
+
+/// Apply lifetime elision: replace all `Ref(None, _)` with `Ref(Some(lt), _)` in a type.
+pub(crate) fn elide_lifetime(ty: &Type, lt: &str) -> Type {
+    match ty {
+        Type::Ref(None, inner) => Type::Ref(Some(lt.to_string()), Box::new(elide_lifetime(inner, lt))),
+        Type::Ref(Some(name), inner) => Type::Ref(Some(name.clone()), Box::new(elide_lifetime(inner, lt))),
+        Type::RefMut(None, inner) => Type::RefMut(Some(lt.to_string()), Box::new(elide_lifetime(inner, lt))),
+        Type::RefMut(Some(name), inner) => Type::RefMut(Some(name.clone()), Box::new(elide_lifetime(inner, lt))),
+        Type::Option(inner) => Type::Option(Box::new(elide_lifetime(inner, lt))),
+        Type::Result(ok, err) => Type::Result(
+            Box::new(elide_lifetime(ok, lt)),
+            Box::new(elide_lifetime(err, lt)),
+        ),
+        Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| elide_lifetime(e, lt)).collect()),
+        Type::Func(args, ret) => Type::Func(
+            args.iter().map(|a| elide_lifetime(a, lt)).collect(),
+            Box::new(elide_lifetime(ret, lt)),
+        ),
+        Type::Name(name, args) => Type::Name(name.clone(), args.iter().map(|a| elide_lifetime(a, lt)).collect()),
+        other => other.clone(),
     }
 }

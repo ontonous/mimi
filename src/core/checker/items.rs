@@ -61,11 +61,25 @@ impl<'a> Checker<'a> {
                 let generic_names: Vec<String> = f.generics.iter().map(|g| g.name.clone()).collect();
                 self.generic_scope.extend(generic_names.iter().cloned());
                 let params: Vec<Type> = f.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
-                let ret = f
+                let mut ret = f
                     .ret
                     .as_ref()
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                // Lifetime elision: if return type has elided lifetimes (Ref(None, _)) and
+                // exactly one unique named lifetime exists in the parameter types, apply it.
+                let has_elided_lifetime = type_contains_elided_lifetime(&ret);
+                if has_elided_lifetime {
+                    let mut param_lifetimes: Vec<String> = Vec::new();
+                    for p in &params {
+                        param_lifetimes.extend(collect_lifetimes(p));
+                    }
+                    param_lifetimes.sort();
+                    param_lifetimes.dedup();
+                    if param_lifetimes.len() == 1 {
+                        ret = elide_lifetime(&ret, &param_lifetimes[0]);
+                    }
+                }
                 let allow_passport = f.extern_abi.is_some();
                 for (i, p) in f.params.iter().enumerate() {
                     if allow_passport {

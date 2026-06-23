@@ -232,7 +232,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "v1.2: no function boundary borrow inference"]
 fn borrow_fn_return_ref() {
     let src = r#"
 func first(x: &i32, _y: &i32) -> &i32 { x }
@@ -247,7 +246,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "v1.2: no lifetime annotations or inference on fn returns"]
 fn borrow_fn_mut_to_imm_return() {
     let src = r#"
 func mut_to_imm(x: &mut i32) -> &i32 {
