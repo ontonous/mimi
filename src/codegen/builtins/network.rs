@@ -217,11 +217,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let str_alloca = self.builder.build_alloca(string_ty, "http_str")
                     .map_err(|e| format!("alloca error: {}", e))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(ptr_gep, result)
                     .map_err(|e| format!("store error: {}", e))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                let len_gep = self.gep().build_struct_gep(string_ty, str_alloca, 1, "str_len")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;
@@ -263,11 +263,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let str_alloca = self.builder.build_alloca(string_ty, "http_str")
                     .map_err(|e| format!("alloca error: {}", e))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(ptr_gep, result)
                     .map_err(|e| format!("store error: {}", e))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                let len_gep = self.gep().build_struct_gep(string_ty, str_alloca, 1, "str_len")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;

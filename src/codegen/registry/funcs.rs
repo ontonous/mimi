@@ -616,10 +616,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())) => {
                     let list_ptr = param.into_pointer_value();
-                    let len_gep = self.builder.build_struct_gep(
+                    let len_gep = self.gep().build_struct_gep(
                         list_struct_sty, list_ptr, 0, &format!("list_len_gep_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                    let data_gep = self.builder.build_struct_gep(
+                    let data_gep = self.gep().build_struct_gep(
                         list_struct_sty, list_ptr, 1, &format!("list_data_gep_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     let len_val = self.builder.build_load(self.context.i64_type(), len_gep, &format!("list_len_{}", i))
@@ -751,7 +751,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         };
                         // Store value to array via GEP
                         // SAFETY: vals_alloca is a valid alloca; indices are in-bounds constants.
-                        let val_gep = unsafe { self.builder.build_gep(
+                        let val_gep = unsafe { self.gep().build_gep(
                             i64_ty, vals_alloca, &[zero, idx],
                             &format!("tv_gep_{}_{}", i, ei))
                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -761,7 +761,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let tag_val = elem_type_tag(elem_ty);
                         let tag_i64 = i64_ty.const_int(tag_val as u64, false);
                         // SAFETY: tys_alloca is a valid alloca; indices are in-bounds constants.
-                        let ty_gep = unsafe { self.builder.build_gep(
+                        let ty_gep = unsafe { self.gep().build_gep(
                             i64_ty, tys_alloca, &[zero, idx],
                             &format!("tt_gep_{}_{}", i, ei))
                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -891,7 +891,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         raw_val
                                                     }
                                                 };
-                                                let gep = self.builder.build_struct_gep(
+                                                let gep = self.gep().build_struct_gep(
                                                     c_struct_ty, c_alloca, fi as u32,
                                                     &format!("{}_{}_gep", n, f.name))
                                                     .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
@@ -1043,7 +1043,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let tag_i64 = i64_ty.const_int(tag_val as u64, false);
                     let idx = i32_ty.const_int(ei as u64, false);
                     // SAFETY: GEP on struct pointer with correct field index 1 (type tag).
-                    let ty_gep = unsafe { self.builder.build_gep(
+                    let ty_gep = unsafe { self.gep().build_gep(
                         i64_ty, tys_alloca, &[zero, idx],
                         &format!("tuple_ret_ty_gep_{}", ei))
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -1088,7 +1088,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (ei, elem_ty) in elems.iter().enumerate() {
                     let idx = i32_ty.const_int(ei as u64, false);
                     // SAFETY: out_alloca is a valid alloca; indices are in-bounds constants.
-                    let val_gep = unsafe { self.builder.build_gep(
+                    let val_gep = unsafe { self.gep().build_gep(
                         i64_ty, out_alloca, &[zero, idx],
                         &format!("tuple_ret_val_gep_{}", ei))
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))? };
@@ -1133,7 +1133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         },
                         _ => BasicValueEnum::IntValue(raw_i64),
                     };
-                    let field_gep = self.builder.build_struct_gep(
+                    let field_gep = self.gep().build_struct_gep(
                         struct_ty.into_struct_type(), struct_alloca, ei as u32,
                         &format!("tuple_ret_field_{}", ei))
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
@@ -1177,11 +1177,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_alloca = self.builder.build_alloca(list_struct_ty, "list_ret")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_alloca, 0, "list_len_gep")
+                let len_gep = self.gep().build_struct_gep(list_struct_ty, list_alloca, 0, "list_len_gep")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(len_gep, len_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_alloca, 1, "list_data_gep")
+                let data_gep = self.gep().build_struct_gep(list_struct_ty, list_alloca, 1, "list_data_gep")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(data_gep, data_ptr_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -1212,11 +1212,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             let struct_ty = wrapper_ret_ty;
             let alloca = self.builder.build_alloca(struct_ty, "string_ret")
                 .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
-            let ptr_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "str_ptr_gep")
+            let ptr_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "str_ptr_gep")
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
             self.builder.build_store(ptr_gep, raw_ptr)
                 .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-            let len_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "str_len_gep")
+            let len_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "str_len_gep")
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
             self.builder.build_store(len_gep, len)
                 .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;

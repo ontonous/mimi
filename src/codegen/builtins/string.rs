@@ -35,7 +35,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("malloc returned void")?
                     .into_pointer_value();
                 // gep str_ptr + index (indexing into string struct { ptr, len })
-                let data_ptr_gep = self.builder.build_struct_gep(
+                let data_ptr_gep = self.gep().build_struct_gep(
                     self.context.struct_type(&[
                         BasicTypeEnum::PointerType(i8_ptr_ty),
                         BasicTypeEnum::IntType(self.context.i64_type()),
@@ -48,9 +48,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "data_ptr"
                 ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                 // char = data_ptr[index]
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let char_ptr = unsafe {
-                    self.builder.build_gep(
+                                let char_ptr = unsafe {
+                    self.gep().build_gep(
                         BasicTypeEnum::IntType(self.context.i8_type()),
                         data_ptr,
                         &[index],
@@ -65,9 +64,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Store char + null
                 self.builder.build_store(buf, char_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let null_gep = unsafe {
-                    self.builder.build_gep(
+                                let null_gep = unsafe {
+                    self.gep().build_gep(
                         BasicTypeEnum::IntType(self.context.i8_type()),
                         buf,
                         &[self.context.i64_type().const_int(1, false)],
@@ -83,12 +81,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let str_alloca = self.builder.build_alloca(string_ty, "char_str")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ptr_gep, buf)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 self.register_heap_gep(ptr_gep);
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                let len_gep = self.gep().build_struct_gep(string_ty, str_alloca, 1, "str_len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(len_gep, self.context.i64_type().const_int(1, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

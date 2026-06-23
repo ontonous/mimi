@@ -28,7 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             // List struct { i64 len, i8* data }: read first field
                             let list_ty = self.list_struct_type();
-                            let len_gep = self.builder.build_struct_gep(list_ty, pv, 0, "list.len")
+                            let len_gep = self.gep().build_struct_gep(list_ty, pv, 0, "list.len")
                                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                             let len = self.builder.build_load(self.context.i64_type(), len_gep, "len")
                                 .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
@@ -83,9 +83,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_conditional_branch(cmp, body_bb, done_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(body_bb);
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let elem_ptr = unsafe {
-                    self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
+                                let elem_ptr = unsafe {
+                    self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;

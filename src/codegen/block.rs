@@ -112,11 +112,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         );
                         let fat_alloca = self.builder.build_alloca(fat_ty, &name)
                             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                        let data_gep = self.builder.build_struct_gep(fat_ty, fat_alloca, 0, &format!("{}_data_gep", name))
+                        let data_gep = self.gep().build_struct_gep(fat_ty, fat_alloca, 0, &format!("{}_data_gep", name))
                             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         self.builder.build_store(data_gep, data_ptr)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                        let vtable_gep = self.builder.build_struct_gep(fat_ty, fat_alloca, 1, &format!("{}_vtable_gep", name))
+                        let vtable_gep = self.gep().build_struct_gep(fat_ty, fat_alloca, 1, &format!("{}_vtable_gep", name))
                             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         self.builder.build_store(vtable_gep, vtable_ptr)
                             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

@@ -46,7 +46,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Store field values
         for (i, param) in function.get_params().iter().enumerate() {
             if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(&actor.name) {
-                let gep = self.builder.build_struct_gep(*sty, alloca, i as u32, &actor.fields[i].name)
+                let gep = self.gep().build_struct_gep(*sty, alloca, i as u32, &actor.fields[i].name)
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(gep, *param)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -97,7 +97,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let empty_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         if let BasicTypeEnum::StructType(sty) = actor_ty {
             for (i, field) in actor.fields.iter().enumerate() {
-                let gep = self.builder.build_struct_gep(sty, alloca, i as u32, &field.name)
+                let gep = self.gep().build_struct_gep(sty, alloca, i as u32, &field.name)
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let val = if let Some(init) = &field.init {
                     self.compile_expr(init, &empty_vars)?

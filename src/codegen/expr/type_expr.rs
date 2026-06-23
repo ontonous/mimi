@@ -30,11 +30,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], false);
         let alloca = self.builder.build_alloca(string_ty, "type_str")
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self.builder.build_struct_gep(string_ty, alloca, 0, "ptr")
+        let ptr_gep = self.gep().build_struct_gep(string_ty, alloca, 0, "ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(ptr_gep, global.as_pointer_value())
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let len_gep = self.builder.build_struct_gep(string_ty, alloca, 1, "len")
+        let len_gep = self.gep().build_struct_gep(string_ty, alloca, 1, "len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(len_gep, i64_ty.const_int(type_str.len() as u64, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

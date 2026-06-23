@@ -88,9 +88,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let str_alloca = self.builder.build_alloca(string_ty, "getenv_str")
                     .map_err(|e| format!("alloca error: {}", e))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
                     .map_err(|e| format!("gep error: {}", e))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                let len_gep = self.gep().build_struct_gep(string_ty, str_alloca, 1, "str_len")
                     .map_err(|e| format!("gep error: {}", e))?;
                 // Initialize with {null, 0} as default (NULL env var case)
                 let zero_i64 = self.context.i64_type().const_int(0, false);

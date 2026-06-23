@@ -74,9 +74,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(body_bb);
                 let elem_val = self.builder.build_int_add(start, idx, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let elem_ptr = unsafe {
-                    self.builder.build_gep(i64_ty, data_ptr_i64, &[idx], "elem_ptr")
+                                let elem_ptr = unsafe {
+                    self.gep().build_gep(i64_ty, data_ptr_i64, &[idx], "elem_ptr")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(elem_ptr, elem_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

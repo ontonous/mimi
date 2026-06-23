@@ -47,9 +47,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let option_alloca = self.builder.build_alloca(option_ty, "upgrade_opt")
                     .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
-                let disc_gep = self.builder.build_struct_gep(option_ty, option_alloca, 0, "disc_gep")
+                let disc_gep = self.gep().build_struct_gep(option_ty, option_alloca, 0, "disc_gep")
                     .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                let payload_gep = self.builder.build_struct_gep(option_ty, option_alloca, 1, "payload_gep")
+                let payload_gep = self.gep().build_struct_gep(option_ty, option_alloca, 1, "payload_gep")
                     .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 let is_some = self.builder.build_int_compare(
                     IntPredicate::NE, upgraded, i8_ptr.const_null(), "is_some"
@@ -150,9 +150,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ], false);
                     let option_alloca = self.builder.build_alloca(option_ty, "upgrade_opt")
                         .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
-                    let disc_gep = self.builder.build_struct_gep(option_ty, option_alloca, 0, "disc_gep")
+                    let disc_gep = self.gep().build_struct_gep(option_ty, option_alloca, 0, "disc_gep")
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                    let payload_gep = self.builder.build_struct_gep(option_ty, option_alloca, 1, "payload_gep")
+                    let payload_gep = self.gep().build_struct_gep(option_ty, option_alloca, 1, "payload_gep")
                         .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                     let is_some = self.builder.build_int_compare(
                         IntPredicate::NE, upgraded, i8_ptr.const_null(), "is_some"
@@ -323,14 +323,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             _ => return Err("dyn Trait value must be a struct or pointer".into()),
                         };
                         // Extract vtable pointer (field 1)
-                        let vtable_gep = self.builder.build_struct_gep(
+                        let vtable_gep = self.gep().build_struct_gep(
                             BasicTypeEnum::StructType(fat_ty), fat_ptr, 1, "vtable_gep"
                         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let vtable_ptr = self.builder.build_load(
                             BasicTypeEnum::PointerType(i8_ptr_ty), vtable_gep, "vtable_ptr"
                         ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                         // GEP into vtable at method index
-                        let method_gep = self.builder.build_struct_gep(
+                        let method_gep = self.gep().build_struct_gep(
                             BasicTypeEnum::StructType(vtable_ty), vtable_ptr, idx as u32, "method_gep"
                         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         // Load function pointer from vtable slot
@@ -338,7 +338,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::PointerType(i8_ptr_ty), method_gep, "fn_ptr"
                         ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
                         // Extract data pointer (field 0) for passing as self arg
-                        let data_gep = self.builder.build_struct_gep(
+                        let data_gep = self.gep().build_struct_gep(
                             BasicTypeEnum::StructType(fat_ty), fat_ptr, 0, "data_gep"
                         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let data_ptr = self.builder.build_load(

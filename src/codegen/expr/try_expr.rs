@@ -136,13 +136,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 err_val.into_int_value(), string_struct_ty.ptr_type(inkwell::AddressSpace::default()),
                 "err_str_ptr",
             ).map_err(|e| CompileError::LlvmError(format!("inttoptr error: {}", e)))?;
-            let str_ptr_ptr = self.builder.build_struct_gep(
+            let str_ptr_ptr = self.gep().build_struct_gep(
                 BasicTypeEnum::StructType(string_struct_ty), err_ptr, 0, "str_ptr_gep",
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let str_ptr = self.builder.build_load(
                 BasicTypeEnum::PointerType(i8_ptr_ty), str_ptr_ptr, "str_ptr",
             ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
-            let str_len_ptr = self.builder.build_struct_gep(
+            let str_len_ptr = self.gep().build_struct_gep(
                 BasicTypeEnum::StructType(string_struct_ty), err_ptr, 1, "str_len_gep",
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let str_len = self.builder.build_load(

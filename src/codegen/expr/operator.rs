@@ -323,11 +323,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(range_ty, "range")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let start_gep = self.builder.build_struct_gep(range_ty, alloca, 0, "range_start")
+                let start_gep = self.gep().build_struct_gep(range_ty, alloca, 0, "range_start")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(start_gep, start_iv)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let end_gep = self.builder.build_struct_gep(range_ty, alloca, 1, "range_end")
+                let end_gep = self.gep().build_struct_gep(range_ty, alloca, 1, "range_end")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(end_gep, end_iv)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

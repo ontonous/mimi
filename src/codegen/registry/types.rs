@@ -88,13 +88,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder.position_at_end(entry);
                             let alloca = self.builder.build_alloca(struct_ty, &ctor_name)
                                 .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                            let tag_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "tag")
+                            let tag_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "tag")
                                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                             self.builder.build_store(tag_gep, self.context.i32_type().const_int(ordinal as u64, false))
                                 .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                             if v.payload.is_some() {
                                 let payload_arg = ctor.get_nth_param(0).ok_or_else(|| CompileError::LlvmError("missing payload param".to_string()))?;
-                                let payload_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                                let payload_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "payload")
                                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                 if payload_is_struct {
                                     // Struct-typed payload: malloc, store, ptrtoint to i64

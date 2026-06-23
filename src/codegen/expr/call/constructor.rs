@@ -28,15 +28,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(struct_ty, "ok_val")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                let disc_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "disc")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep, disc)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let val_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                let val_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "payload")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(val_gep, val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let err_gep = self.builder.build_struct_gep(struct_ty, alloca, 2, "err_pad")
+                let err_gep = self.gep().build_struct_gep(struct_ty, alloca, 2, "err_pad")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(err_gep, i64_ty.const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -58,11 +58,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(struct_ty, "some_val")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                let disc_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "disc")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep, disc)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let val_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                let val_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "payload")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(val_gep, val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -117,15 +117,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(struct_ty, "err_val")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                let disc_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "disc")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep, disc)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let ok_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "ok_pad")
+                let ok_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "ok_pad")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ok_gep, i64_ty.const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let err_gep = self.builder.build_struct_gep(struct_ty, alloca, 2, "err_payload")
+                let err_gep = self.gep().build_struct_gep(struct_ty, alloca, 2, "err_payload")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(err_gep, err_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -146,11 +146,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(struct_ty, "none_val")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let disc_gep = self.builder.build_struct_gep(struct_ty, alloca, 0, "disc")
+                let disc_gep = self.gep().build_struct_gep(struct_ty, alloca, 0, "disc")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep, disc)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let val_gep = self.builder.build_struct_gep(struct_ty, alloca, 1, "payload")
+                let val_gep = self.gep().build_struct_gep(struct_ty, alloca, 1, "payload")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(val_gep, i64_ty.const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -229,12 +229,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::IntType(i64_ty)
         };
 
-        let disc_gep = self.builder.build_struct_gep(
+        let disc_gep = self.gep().build_struct_gep(
             actual_sty_enum, pv, disc_idx, "disc_gep"
         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let disc = self.builder.build_load(BasicTypeEnum::IntType(i1_ty), disc_gep, "disc")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-        let pay_gep = self.builder.build_struct_gep(
+        let pay_gep = self.gep().build_struct_gep(
             actual_sty_enum, pv, payload_idx, "pay_gep"
         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let payload = self.builder.build_load(payload_ty, pay_gep, "payload")
@@ -315,17 +315,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 // Ok path: disc=1, ok=payload, err=0
                 self.builder.position_at_end(ok_bb);
-                let disc_gep = self.builder.build_struct_gep(
+                let disc_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 0, "disc_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep, self.context.bool_type().const_int(1, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let ok_gep = self.builder.build_struct_gep(
+                let ok_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 1, "ok_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ok_gep, payload)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let err_pad_gep = self.builder.build_struct_gep(
+                let err_pad_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 2, "err_pad_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(err_pad_gep, i64_ty.const_int(0, false))
@@ -334,17 +334,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 // Err path: disc=0, ok=0, err=err_val
                 self.builder.position_at_end(err_bb);
-                let disc_gep2 = self.builder.build_struct_gep(
+                let disc_gep2 = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 0, "disc_gep2"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(disc_gep2, self.context.bool_type().const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let ok_pad_gep = self.builder.build_struct_gep(
+                let ok_pad_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 1, "ok_pad_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ok_pad_gep, i64_ty.const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let err_gep = self.builder.build_struct_gep(
+                let err_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(result_sty), result_alloca, 2, "err_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(err_gep, err_val)
@@ -376,12 +376,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Ok path: call fn(payload), write Ok variant {disc=1, ok=mapped}
                 self.builder.position_at_end(ok_bb);
                 let mapped = self.compile_call_fn_ref(closure_val, &args[0], payload, i64_ty)?;
-                let d_gep_o = self.builder.build_struct_gep(
+                let d_gep_o = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(variant_sty), result_alloca, 0, "d_gep_o"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(d_gep_o, self.context.bool_type().const_int(1, false))
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let o_gep_o = self.builder.build_struct_gep(
+                let o_gep_o = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(variant_sty), result_alloca, 1, "o_gep_o"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(o_gep_o, mapped)
@@ -443,7 +443,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_conditional_branch(disc, ok_bb, done_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(done_bb);
-                let err_gep = self.builder.build_struct_gep(
+                let err_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(variant_sty), pv, 2, "err_gep"
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let err_payload = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), err_gep, "err_payload")
@@ -469,23 +469,23 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CompileError> {
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
-        let d_gep_e = self.builder.build_struct_gep(
+        let d_gep_e = self.gep().build_struct_gep(
             BasicTypeEnum::StructType(variant_sty), result_alloca, 0, "d_gep_e"
         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(d_gep_e, i1_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let o_gep_e = self.builder.build_struct_gep(
+        let o_gep_e = self.gep().build_struct_gep(
             BasicTypeEnum::StructType(variant_sty), result_alloca, 1, "o_gep_e"
         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(o_gep_e, i64_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         if is_result {
-            let src_err_gep = self.builder.build_struct_gep(
+            let src_err_gep = self.gep().build_struct_gep(
                 BasicTypeEnum::StructType(variant_sty), pv, 2, "src_err_gep"
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let err_val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), src_err_gep, "err_val")
                 .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-            let dst_err_gep = self.builder.build_struct_gep(
+            let dst_err_gep = self.gep().build_struct_gep(
                 BasicTypeEnum::StructType(variant_sty), result_alloca, 2, "dst_err_gep"
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.builder.build_store(dst_err_gep, err_val)

@@ -122,7 +122,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Pattern::Variable(name) = inner_pat {
                         let elem_ty = struct_ty.get_field_type_at_index(j as u32)
                             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                        let gep = self.builder.build_struct_gep(
+                        let gep = self.gep().build_struct_gep(
                             struct_ty_enum, scrutinee_ptr, j as u32,
                             &format!("tuple_{}", j),
                         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -148,7 +148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let data_gep = self.builder.build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
+                let data_gep = self.gep().build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_i8 = self.builder.build_load(
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -160,9 +160,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
                         let idx = i64_ty.const_int(j as u64, false);
-                        // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                        let elem_ptr = unsafe {
-                            self.builder.build_gep(i64_ty, data_ptr, &[idx], &format!("arr_{}", j))
+                                                let elem_ptr = unsafe {
+                            self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("arr_{}", j))
                         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("arrv_{}", j))
                             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
@@ -184,7 +183,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let data_gep = self.builder.build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
+                let data_gep = self.gep().build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_i8 = self.builder.build_load(
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -197,9 +196,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
                         let idx = i64_ty.const_int(j as u64, false);
-                        // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                        let elem_ptr = unsafe {
-                            self.builder.build_gep(i64_ty, data_ptr, &[idx], &format!("slc_{}", j))
+                                                let elem_ptr = unsafe {
+                            self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("slc_{}", j))
                         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                         let val = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("slcv_{}", j))
                             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
@@ -279,7 +277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => None,
             };
             if let Some(expected) = lit_val {
-                let elem_ptr = self.builder.build_struct_gep(
+                let elem_ptr = self.gep().build_struct_gep(
                     struct_ty_enum, tuple_ptr, j as u32,
                     &format!("tup_el{}", j),
                 ).map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
@@ -318,7 +316,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::IntType(i64_ty),
             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
         ], false);
-        let data_gep = self.builder.build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
+        let data_gep = self.gep().build_struct_gep(list_ty, scrutinee_ptr, 1, "list_data")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         let data_i8 = self.builder.build_load(
             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -342,7 +340,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let idx = i64_ty.const_int(j as u64, false);
                 // SAFETY: pointer derived from valid list data allocation
                 let elem_ptr = unsafe {
-                    self.builder.build_gep(i64_ty, data_ptr, &[idx], &format!("arr_el{}", j))
+                    self.gep().build_gep(i64_ty, data_ptr, &[idx], &format!("arr_el{}", j))
                 }.map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 let elem_val = self.builder.build_load(
                     BasicTypeEnum::IntType(i64_ty), elem_ptr, &format!("arr_v{}", j),
@@ -461,7 +459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
                 let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
                 let enum_ty = self.context.struct_type(&[i32_ty, i64_ty], false);
-                let tag_gep = self.builder.build_struct_gep(
+                let tag_gep = self.gep().build_struct_gep(
                     BasicTypeEnum::StructType(enum_ty), pv, 0, "tag_gep",
                 ).map_err(|e| CompileError::LlvmError(format!("tag gep: {}", e)))?;
                 let tag = self.builder.build_load(

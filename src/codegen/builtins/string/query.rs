@@ -140,9 +140,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(check_bb);
                 let start_pos = self.builder.build_int_sub(s_len, suffix_len, "start_pos")
                     .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let s_suffix_ptr = unsafe {
-                    self.builder.build_gep(i8_ty, s_ptr, &[start_pos], "s_suffix")
+                                let s_suffix_ptr = unsafe {
+                    self.gep().build_gep(i8_ty, s_ptr, &[start_pos], "s_suffix")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let strncmp_fn = self.module.get_function("strncmp")
                     .or_else(|| {

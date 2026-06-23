@@ -29,17 +29,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, s) in strings.iter().enumerate() {
             let global = self.builder.build_global_string_ptr(s, &format!("str_{}", i))
                 .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
-            let elem_ptr = self.builder.build_struct_gep(
+            let elem_ptr = self.gep().build_struct_gep(
                 BasicTypeEnum::StructType(str_ty),
                 arr_alloca,
                 i as u32,
                 &format!("elem_{}", i),
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let ptr_gep = self.builder.build_struct_gep(str_ty, elem_ptr, 0, "ptr")
+            let ptr_gep = self.gep().build_struct_gep(str_ty, elem_ptr, 0, "ptr")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.builder.build_store(ptr_gep, global.as_pointer_value())
                 .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-            let len_gep = self.builder.build_struct_gep(str_ty, elem_ptr, 1, "len")
+            let len_gep = self.gep().build_struct_gep(str_ty, elem_ptr, 1, "len")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.builder.build_store(len_gep, i64_ty.const_int(s.len() as u64, false))
                 .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -52,11 +52,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], false);
         let list_alloca = self.builder.build_alloca(list_ty, "str_list")
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let len_gep = self.builder.build_struct_gep(list_ty, list_alloca, 0, "len")
+        let len_gep = self.gep().build_struct_gep(list_ty, list_alloca, 0, "len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(len_gep, i64_ty.const_int(count, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let data_gep = self.builder.build_struct_gep(list_ty, list_alloca, 1, "data")
+        let data_gep = self.gep().build_struct_gep(list_ty, list_alloca, 1, "data")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let arr_void_ptr = self.builder.build_pointer_cast(
             arr_alloca,
@@ -184,11 +184,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let alloca = self.builder.build_alloca(string_ty, "type_str")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, alloca, 0, "ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, alloca, 0, "ptr")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ptr_gep, global.as_pointer_value())
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, alloca, 1, "len")
+                let len_gep = self.gep().build_struct_gep(string_ty, alloca, 1, "len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let len = self.context.i64_type().const_int(type_str.len() as u64, false);
                 self.builder.build_store(len_gep, len)
@@ -285,7 +285,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let type_def = self.type_defs.get(&type_name).ok_or_else(|| format!("values: unknown type '{}'", type_name))?;
                             if let TypeDefKind::Record(fields) = &type_def.kind {
                                 for (i, field) in fields.iter().enumerate() {
-                                    let gep = self.builder.build_struct_gep(_struct_ty, record_ptr, i as u32, &field.name)
+                                    let gep = self.gep().build_struct_gep(_struct_ty, record_ptr, i as u32, &field.name)
                                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                     let field_ty = types::mimi_type_to_llvm(self.context, &field.ty)
                                         .unwrap_or(BasicTypeEnum::IntType(i64_ty));
@@ -299,9 +299,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .map_err(|e| CompileError::LlvmError(format!("ptrtoint error: {}", e)))?,
                                         _ => return Err("values: unsupported field type".into()),
                                     };
-                                    // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                                    // SAFETY: values_data_i64 is i64* from malloc; i is in-bounds (small constant index).
-                                    let elem_ptr = unsafe { self.builder.build_gep(i64_ty, values_data_i64, &[i64_ty.const_int(i as u64, false)], "values_elem") }
+                                                                        // SAFETY: values_data_i64 is i64* from malloc; i is in-bounds (small constant index).
+                                    let elem_ptr = unsafe { self.gep().build_gep(i64_ty, values_data_i64, &[i64_ty.const_int(i as u64, false)], "values_elem") }
                                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                     self.builder.build_store(elem_ptr, val_i64)
                                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -312,11 +311,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 ], false);
                                 let result_alloca = self.builder.build_alloca(result_list_ty, "values_result")
                                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                                let result_len_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 0, "values_result_len")
+                                let result_len_gep = self.gep().build_struct_gep(result_list_ty, result_alloca, 0, "values_result_len")
                                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                 self.builder.build_store(result_len_gep, i64_ty.const_int(field_count as u64, false))
                                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                                let result_data_gep = self.builder.build_struct_gep(result_list_ty, result_alloca, 1, "values_result_data")
+                                let result_data_gep = self.gep().build_struct_gep(result_list_ty, result_alloca, 1, "values_result_data")
                                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                                 let values_data_void = self.builder.build_bit_cast(values_data,
                                     self.context.ptr_type(inkwell::AddressSpace::default()), "values_data_void")
@@ -360,11 +359,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false));
                 // Read list length and data pointer
-                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+                let len_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 0, "len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+                let data_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 1, "data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
@@ -420,9 +419,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(body_bb);
                 // Load element
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let elem_ptr = unsafe {
-                    self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
+                                let elem_ptr = unsafe {
+                    self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
@@ -435,9 +433,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("function returned void")?;
                 if is_map {
                     // For map: store result to output array
-                    // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                    let out_elem_ptr = unsafe {
-                        self.builder.build_gep(i64_ty, out_i64, &[idx], "out_elem")
+                                        let out_elem_ptr = unsafe {
+                        self.gep().build_gep(i64_ty, out_i64, &[idx], "out_elem")
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     self.builder.build_store(out_elem_ptr, result)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -456,9 +453,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(store_bb);
                     let wi = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), write_idx, "wi")
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-                    // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                    let out_elem_ptr = unsafe {
-                        self.builder.build_gep(i64_ty, out_i64, &[wi], "out_elem")
+                                        let out_elem_ptr = unsafe {
+                        self.gep().build_gep(i64_ty, out_i64, &[wi], "out_elem")
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     self.builder.build_store(out_elem_ptr, elem)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -485,11 +481,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.build_load(BasicTypeEnum::IntType(i64_ty), write_idx, "out_len")
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                 };
-                let out_len_gep = self.builder.build_struct_gep(result_ty, result_alloca, 0, "out_len")
+                let out_len_gep = self.gep().build_struct_gep(result_ty, result_alloca, 0, "out_len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(out_len_gep, out_len)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let out_data_gep = self.builder.build_struct_gep(result_ty, result_alloca, 1, "out_data")
+                let out_data_gep = self.gep().build_struct_gep(result_ty, result_alloca, 1, "out_data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let out_void = self.builder.build_pointer_cast(out_i64, i8_ptr, "out_void")
                     .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
@@ -517,11 +513,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false));
-                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+                let len_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 0, "len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+                let data_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 1, "data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_pointer_value();
@@ -551,9 +547,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_conditional_branch(loop_cmp, body_bb, done_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(body_bb);
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let elem_ptr = unsafe {
-                    self.builder.build_gep(i64_ty, data_ptr, &[idx], "elem")
+                                let elem_ptr = unsafe {
+                    self.gep().build_gep(i64_ty, data_ptr, &[idx], "elem")
                 }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let elem = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;

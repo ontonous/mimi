@@ -108,14 +108,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let tuple_alloca = self.builder.build_alloca(tuple_ty, "map_get_result")
                     .map_err(|e| format!("alloca error: {}", e))?;
-                let found_gep = self.builder.build_struct_gep(tuple_ty, tuple_alloca, 0, "found_field")
+                let found_gep = self.gep().build_struct_gep(tuple_ty, tuple_alloca, 0, "found_field")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let found_val = self.builder.build_int_z_extend(found_int,
                     self.context.bool_type(), "found_ext")
                     .map_err(|e| format!("zext error: {}", e))?;
                 self.builder.build_store(found_gep, found_val)
                     .map_err(|e| format!("store error: {}", e))?;
-                let value_gep = self.builder.build_struct_gep(tuple_ty, tuple_alloca, 1, "value_field")
+                let value_gep = self.gep().build_struct_gep(tuple_ty, tuple_alloca, 1, "value_field")
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(value_gep, value_handle)
                     .map_err(|e| format!("store error: {}", e))?;
@@ -193,11 +193,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(i64_ty),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let len_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 0, "map_from_list_len")
+                let len_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 0, "map_from_list_len")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let list_len = self.builder.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "map_from_list_len_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                let data_gep = self.builder.build_struct_gep(list_struct_ty, list_ptr, 1, "map_from_list_data")
+                let data_gep = self.gep().build_struct_gep(list_struct_ty, list_ptr, 1, "map_from_list_data")
                     .map_err(|e| format!("gep error: {}", e))?;
                 let data_i8 = self.builder.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "map_from_list_data_val")
                     .map_err(|e| format!("load error: {}", e))?.into_pointer_value();
@@ -252,26 +252,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.position_at_end(body_bb);
                 let idx_2 = self.builder.build_int_add(idx, idx, "map_from_list_idx_2")
                     .map_err(|e| format!("add error: {}", e))?;
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                // SAFETY: data_ptr is i64* from bitcast; idx_2 is in-bounds (validated by loop).
-                let key_ptr_elem = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem") }
+                                // SAFETY: data_ptr is i64* from bitcast; idx_2 is in-bounds (validated by loop).
+                let key_ptr_elem = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[idx_2], "map_from_list_key_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let key_handle = self.builder.build_load(i64_ty, key_ptr_elem, "map_from_list_key_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let key_dest = unsafe { self.builder.build_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest") }
+                                let key_dest = unsafe { self.gep().build_gep(i64_ty, keys_ptr, &[idx], "map_from_list_key_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(key_dest, key_handle)
                     .map_err(|e| format!("store error: {}", e))?;
                 let idx_2_plus_1 = self.builder.build_int_add(idx_2, i64_ty.const_int(1, false), "map_from_list_idx_2_plus_1")
                     .map_err(|e| format!("add error: {}", e))?;
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let val_ptr_elem = unsafe { self.builder.build_gep(i64_ty, data_ptr, &[idx_2_plus_1], "map_from_list_val_elem") }
+                                let val_ptr_elem = unsafe { self.gep().build_gep(i64_ty, data_ptr, &[idx_2_plus_1], "map_from_list_val_elem") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 let val_handle = self.builder.build_load(i64_ty, val_ptr_elem, "map_from_list_val_val")
                     .map_err(|e| format!("load error: {}", e))?.into_int_value();
-                // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                let val_dest = unsafe { self.builder.build_gep(i64_ty, values_ptr, &[idx], "map_from_list_val_dest") }
+                                let val_dest = unsafe { self.gep().build_gep(i64_ty, values_ptr, &[idx], "map_from_list_val_dest") }
                     .map_err(|e| format!("gep error: {}", e))?;
                 self.builder.build_store(val_dest, val_handle)
                     .map_err(|e| format!("store error: {}", e))?;

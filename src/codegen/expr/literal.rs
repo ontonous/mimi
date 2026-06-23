@@ -112,8 +112,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
-                            // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                            let pos = unsafe { self.builder.build_gep(i8_type, buf, &[len], "fstr_pos") }
+                                                        let pos = unsafe { self.gep().build_gep(i8_type, buf, &[len], "fstr_pos") }
                                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                             let ext_iv = if iv.get_type().get_bit_width() < 64 {
                                 self.builder.build_int_z_extend(iv, self.context.i64_type(), &format!("fstr_ext_{}", i))
@@ -137,8 +136,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
                             let i8_type = self.context.i8_type();
-                            // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                            let pos = unsafe { self.builder.build_gep(i8_type, buf, &[len], "fstr_pos") }
+                                                        let pos = unsafe { self.gep().build_gep(i8_type, buf, &[len], "fstr_pos") }
                                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                             let fmt = self.builder.build_global_string_ptr("%f", &format!("fstr_fmt_{}", i))
                                 .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;

@@ -138,7 +138,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
-                let data_gep = self.builder.build_struct_gep(list_ty, list_ptr, 1, "list.data")
+                let data_gep = self.gep().build_struct_gep(list_ty, list_ptr, 1, "list.data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_ptr = self.builder.build_load(
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -151,9 +151,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 for (i, sub_pat) in sub_patterns.iter().enumerate() {
                     let idx = self.context.i64_type().const_int(i as u64, false);
-                    // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-                    let elem_ptr = unsafe {
-                        self.builder.build_gep(self.context.i64_type(), data_i64, &[idx], &format!("pat_elem_{}", i))
+                                        let elem_ptr = unsafe {
+                        self.gep().build_gep(self.context.i64_type(), data_i64, &[idx], &format!("pat_elem_{}", i))
                     }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     let elem = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, &format!("pat_elem_val_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;

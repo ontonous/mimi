@@ -69,7 +69,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "env_struct",
             ).map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
             for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {
-                let field_gep = self.builder.build_struct_gep(
+                let field_gep = self.gep().build_struct_gep(
                     env_struct_type, env_struct_ptr, i as u32, &format!("env_{}_gep", name),
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let field_val = self.builder.build_load(ty, field_gep, &format!("cap_{}", name))
@@ -132,7 +132,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
 
         let fn_ptr = lambda_fn.as_global_value().as_pointer_value();
-        let fn_gep = self.builder.build_struct_gep(
+        let fn_gep = self.gep().build_struct_gep(
             closure_struct_type, closure_alloca, 0, "fn_gep",
         ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(fn_gep, fn_ptr)
@@ -158,13 +158,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
                 let val = self.builder.build_load(ty, var_alloca, &format!("cap_val_{}", name))
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let field_gep = self.builder.build_struct_gep(
+                let field_gep = self.gep().build_struct_gep(
                     env_struct_type, env_heap_ptr, i as u32, &format!("env_{}_gep", name),
                 ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(field_gep, val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
             }
-            let env_gep = self.builder.build_struct_gep(
+            let env_gep = self.gep().build_struct_gep(
                 closure_struct_type, closure_alloca, 1, "env_gep",
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let env_ptr_i8 = self.builder.build_pointer_cast(
@@ -175,7 +175,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_store(env_gep, env_ptr_i8)
                 .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         } else {
-            let env_gep = self.builder.build_struct_gep(
+            let env_gep = self.gep().build_struct_gep(
                 closure_struct_type, closure_alloca, 1, "env_gep",
             ).map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.builder.build_store(env_gep, i8_ptr.const_null())

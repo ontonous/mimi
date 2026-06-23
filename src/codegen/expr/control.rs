@@ -91,11 +91,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], false);
         let alloca = self.builder.build_alloca(range_ty, "range")
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let start_gep = self.builder.build_struct_gep(range_ty, alloca, 0, "range_start")
+        let start_gep = self.gep().build_struct_gep(range_ty, alloca, 0, "range_start")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(start_gep, start_iv)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let end_gep = self.builder.build_struct_gep(range_ty, alloca, 1, "range_end")
+        let end_gep = self.gep().build_struct_gep(range_ty, alloca, 1, "range_end")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(end_gep, end_iv)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -121,11 +121,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::IntType(self.context.i64_type()),
             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
         ], false);
-        let len_gep = self.builder.build_struct_gep(list_ty, target_ptr, 0, "slice_len")
+        let len_gep = self.gep().build_struct_gep(list_ty, target_ptr, 0, "slice_len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let list_len = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), len_gep, "len")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?.into_int_value();
-        let data_gep = self.builder.build_struct_gep(list_ty, target_ptr, 1, "slice_data")
+        let data_gep = self.gep().build_struct_gep(list_ty, target_ptr, 1, "slice_data")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let data_ptr = self.builder.build_load(
             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
@@ -151,9 +151,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
         let data_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr, "data_as_i8")
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
-        // SAFETY: build_gep requires valid pointer and index types; the pointer is derived from a valid LLVM-typed allocation and indices are correctly-typed i64 values.
-        let new_data_i8 = unsafe {
-            self.builder.build_gep(self.context.i8_type(), data_i8, &[byte_offset], "new_data")
+                let new_data_i8 = unsafe {
+            self.gep().build_gep(self.context.i8_type(), data_i8, &[byte_offset], "new_data")
         }.map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let new_data_ptr = self.builder.build_pointer_cast(new_data_i8,
             self.context.ptr_type(inkwell::AddressSpace::default()), "new_data_void")
@@ -161,11 +160,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Build new list struct { new_len, new_data_ptr }
         let result_alloca = self.builder.build_alloca(list_ty, "slice_result")
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let rlen_gep = self.builder.build_struct_gep(list_ty, result_alloca, 0, "rlen")
+        let rlen_gep = self.gep().build_struct_gep(list_ty, result_alloca, 0, "rlen")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(rlen_gep, new_len)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let rdata_gep = self.builder.build_struct_gep(list_ty, result_alloca, 1, "rdata")
+        let rdata_gep = self.gep().build_struct_gep(list_ty, result_alloca, 1, "rdata")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder.build_store(rdata_gep, new_data_ptr)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

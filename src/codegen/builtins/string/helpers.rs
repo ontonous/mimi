@@ -33,11 +33,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 let str_alloca = self.builder.build_alloca(string_ty, "cstr_str")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                let ptr_gep = self.builder.build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+                let ptr_gep = self.gep().build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 self.builder.build_store(ptr_gep, raw_ptr)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                let len_gep = self.builder.build_struct_gep(string_ty, str_alloca, 1, "str_len")
+                let len_gep = self.gep().build_struct_gep(string_ty, str_alloca, 1, "str_len")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let strlen_fn = self.module.get_function("strlen")
                     .ok_or_else(|| "strlen not declared".to_string())?;
