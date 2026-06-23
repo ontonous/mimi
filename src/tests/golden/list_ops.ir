@@ -1,6 +1,10 @@
 ; ModuleID = 'golden_test'
 source_filename = "golden_test"
 
+@oob_msg = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
+@oob_msg.1 = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
+@oob_msg.2 = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
+
 declare i32 @printf(ptr, ...)
 
 declare i32 @puts(ptr)
@@ -163,25 +167,57 @@ entry:
   store ptr %list, ptr %xs, align 8
   %xs3 = load ptr, ptr %xs, align 8
   %list.len_check = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 0
+  %list_len4 = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 0
+  %list_len_val = load i64, ptr %list_len4, align 4
+  %oob = icmp uge i64 0, %list_len_val
+  br i1 %oob, label %bounds_fail, label %bounds_ok
+
+bounds_ok:                                        ; preds = %bounds_fail, %entry
   %list.data = getelementptr inbounds { i64, ptr }, ptr %xs3, i32 0, i32 1
   %data = load ptr, ptr %list.data, align 8
-  %elem4 = getelementptr inbounds i64, ptr %data, i64 0
-  %elem_val = load i64, ptr %elem4, align 4
-  %xs5 = load ptr, ptr %xs, align 8
-  %list.len_check6 = getelementptr inbounds { i64, ptr }, ptr %xs5, i32 0, i32 0
-  %list.data7 = getelementptr inbounds { i64, ptr }, ptr %xs5, i32 0, i32 1
-  %data8 = load ptr, ptr %list.data7, align 8
-  %elem9 = getelementptr inbounds i64, ptr %data8, i64 1
-  %elem_val10 = load i64, ptr %elem9, align 4
-  %add = add i64 %elem_val, %elem_val10
-  %xs11 = load ptr, ptr %xs, align 8
-  %list.len_check12 = getelementptr inbounds { i64, ptr }, ptr %xs11, i32 0, i32 0
-  %list.data13 = getelementptr inbounds { i64, ptr }, ptr %xs11, i32 0, i32 1
+  %elem5 = getelementptr inbounds i64, ptr %data, i64 0
+  %elem_val = load i64, ptr %elem5, align 4
+  %xs6 = load ptr, ptr %xs, align 8
+  %list.len_check7 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 0
+  %list_len8 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 0
+  %list_len_val9 = load i64, ptr %list_len8, align 4
+  %oob12 = icmp uge i64 1, %list_len_val9
+  br i1 %oob12, label %bounds_fail11, label %bounds_ok10
+
+bounds_fail:                                      ; preds = %entry
+  call void @mimi_runtime_abort(ptr @oob_msg)
+  br label %bounds_ok
+
+bounds_ok10:                                      ; preds = %bounds_fail11, %bounds_ok
+  %list.data13 = getelementptr inbounds { i64, ptr }, ptr %xs6, i32 0, i32 1
   %data14 = load ptr, ptr %list.data13, align 8
-  %elem15 = getelementptr inbounds i64, ptr %data14, i64 2
+  %elem15 = getelementptr inbounds i64, ptr %data14, i64 1
   %elem_val16 = load i64, ptr %elem15, align 4
-  %add17 = add i64 %add, %elem_val16
+  %add = add i64 %elem_val, %elem_val16
+  %xs17 = load ptr, ptr %xs, align 8
+  %list.len_check18 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
+  %list_len19 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
+  %list_len_val20 = load i64, ptr %list_len19, align 4
+  %oob23 = icmp uge i64 2, %list_len_val20
+  br i1 %oob23, label %bounds_fail22, label %bounds_ok21
+
+bounds_fail11:                                    ; preds = %bounds_ok
+  call void @mimi_runtime_abort(ptr @oob_msg.1)
+  br label %bounds_ok10
+
+bounds_ok21:                                      ; preds = %bounds_fail22, %bounds_ok10
+  %list.data24 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 1
+  %data25 = load ptr, ptr %list.data24, align 8
+  %elem26 = getelementptr inbounds i64, ptr %data25, i64 2
+  %elem_val27 = load i64, ptr %elem26, align 4
+  %add28 = add i64 %add, %elem_val27
   %heap_slot = load ptr, ptr %list_data, align 8
   call void @free(ptr %heap_slot)
-  ret i64 %add17
+  ret i64 %add28
+
+bounds_fail22:                                    ; preds = %bounds_ok10
+  call void @mimi_runtime_abort(ptr @oob_msg.2)
+  br label %bounds_ok21
 }
+
+declare void @mimi_runtime_abort(ptr)

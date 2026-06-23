@@ -427,6 +427,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::IntType(self.context.i64_type()),
             BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
         ], false);
+        // Bounds check before access
+        self.check_list_bounds(list_ptr, idx_iv, "index assign")?;
         let data_gep = self.gep().build_struct_gep(list_ty, list_ptr, 1, "list.data")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let data_ptr = self.builder.build_load(

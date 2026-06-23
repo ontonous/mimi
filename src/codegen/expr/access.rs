@@ -109,6 +109,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ], false);
                 // Check if this looks like a list struct by trying to GEP field 0 (len)
                 if let Ok(_len_gep) = self.gep().build_struct_gep(list_ty, pv, 0, "list.len_check") {
+                    // Bounds check
+                    self.check_list_bounds(pv, idx_iv, "index read")?;
                     // It's a list struct - load data pointer and index into it
                     let data_gep = self.gep().build_struct_gep(list_ty, pv, 1, "list.data")
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -149,6 +151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(self.context.i64_type()),
                     BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 ], false);
+                self.check_list_bounds(list_alloca, idx_iv, "index read")?;
                 let data_gep = self.gep().build_struct_gep(list_ty, list_alloca, 1, "list.data")
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let data_ptr = self.builder.build_load(
