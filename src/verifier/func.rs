@@ -499,9 +499,14 @@ impl crate::verifier::Verifier {
                 }
             }
         }
-        if violated_indices.is_empty() {
+        if violated_indices.is_empty() && model.is_none() {
+            // No model available and no ensures evaluated as violated.
+            // Conservatively mark all ensures as potentially violated.
             violated_indices = (0..ensures_exprs.len()).collect();
         }
+        // If we have a model but no ensures were violated according to
+        // model evaluation, the model may actually satisfy all ensures.
+        // Keep violated_indices empty in that case to avoid false positives.
 
         let violated: Vec<String> = violated_indices
             .iter()

@@ -134,7 +134,7 @@ impl Verifier {
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
-                std::mem::replace(&mut self.solver, new_solver);
+                let _ = std::mem::replace(&mut self.solver, new_solver);
                 SatResult::Unknown
             }
         }

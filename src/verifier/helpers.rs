@@ -51,7 +51,8 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
             _ => {}
         }
     }
-    // Second pass: look for implicit return (tail expression)
+    // Second pass: look for implicit return (tail expression).
+    // Also skip let/assign statements so `let x = ...; expr` patterns are found.
     for stmt in block.iter().rev() {
         match stmt {
             Stmt::Expr(expr) => return Some(expr.clone()),
@@ -59,7 +60,8 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
                 return extract_if_return(cond, then_, else_);
             }
             Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _) | Stmt::Math(_)
-            | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => continue,
+            | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. }
+            | Stmt::Let { .. } | Stmt::Assign { .. } => continue,
             _ => break,
         }
     }
