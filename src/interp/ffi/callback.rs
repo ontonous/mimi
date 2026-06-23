@@ -46,12 +46,15 @@ fn global_callback_store() -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool
 /// Should be called by C code when the stored function pointer is no longer
 /// needed (e.g., when unregistering an event handler).
 /// Safe to call from any thread.
+/// F-18: Lock ordering: always acquire CALLBACK_TABLE before CALLBACK_GLOBAL_STORE
+/// to match the registration order (callback_table_register → global_callback_store).
+/// This prevents deadlock when multiple threads register/deregister concurrently.
 #[no_mangle]
 pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
+    callback_table_remove(callback_id);
     if let Ok(mut store) = global_callback_store().lock() {
         store.remove(&callback_id);
     }
-    callback_table_remove(callback_id);
     FFI_CALLBACK_CTX.with(|c| {
         c.borrow_mut().entries.remove(&callback_id);
     });

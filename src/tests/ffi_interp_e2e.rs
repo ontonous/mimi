@@ -361,3 +361,90 @@ fn interp_ffi_struct_return_by_value() {
     std::env::remove_var("MIMI_FFI_LIB");
     assert_eq!(result.expect("ffi_interp_e2e.rs:struct_ret unwrap failed"), interp::Value::Int(30));
 }
+
+#[test]
+fn interp_ffi_no_panic_struct_ret_segfault_caught() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let tmp_dir = std::env::temp_dir().join(format!("mimi_ffi_struct_crash_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let c_path = tmp_dir.join("struct_crash.c");
+    let so_path = tmp_dir.join("struct_crash.so");
+    std::fs::write(&c_path, r#"
+        #include <stddef.h>
+        typedef struct { int x; int y; } Point;
+        Point test_struct_crash(void) {
+            volatile int* p = NULL;
+            *p = 42;
+            Point pt = { 1, 2 };
+            return pt;
+        }
+    "#).unwrap();
+    let status = std::process::Command::new("cc")
+        .arg("-shared").arg("-fPIC").arg("-o")
+        .arg(&so_path).arg(&c_path)
+        .status().unwrap();
+    assert!(status.success(), "failed to compile struct crash .so");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result_no_fork(r#"
+        #[repr(C)]
+        type Point { x: i32, y: i32 }
+        #[no_panic]
+        extern "C" {
+            func test_struct_crash() -> Point
+        }
+        func main() -> i32 {
+            let p = test_struct_crash()
+            42
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    assert!(result.is_err(), "struct crash should be caught by #[no_panic]");
+    let err = result.unwrap_err();
+    assert!(err.contains("SIGSEGV") || err.contains("signal 11"),
+        "error should mention SIGSEGV: {}", err);
+}
+
+#[test]
+fn interp_ffi_fork_isolation_struct_ret_segfault_caught() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let tmp_dir = std::env::temp_dir().join(format!("mimi_ffi_struct_crash_fork_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let c_path = tmp_dir.join("struct_crash_fork.c");
+    let so_path = tmp_dir.join("struct_crash_fork.so");
+    std::fs::write(&c_path, r#"
+        #include <stddef.h>
+        typedef struct { int x; int y; } Point;
+        Point test_struct_crash(void) {
+            volatile int* p = NULL;
+            *p = 42;
+            Point pt = { 1, 2 };
+            return pt;
+        }
+    "#).unwrap();
+    let status = std::process::Command::new("cc")
+        .arg("-shared").arg("-fPIC").arg("-o")
+        .arg(&so_path).arg(&c_path)
+        .status().unwrap();
+    assert!(status.success(), "failed to compile struct crash .so");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(r#"
+        #[repr(C)]
+        type Point { x: i32, y: i32 }
+        extern "C" {
+            func test_struct_crash() -> Point
+        }
+        func main() -> i32 {
+            let p = test_struct_crash()
+            42
+        }
+    "#);
+    std::env::remove_var("MIMI_FFI_LIB");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    assert!(result.is_err(), "struct crash should be caught by fork isolation");
+    let err = result.unwrap_err();
+    assert!(err.contains("signal") || err.contains("SIGSEGV") || err.contains("SEGV"),
+        "error should mention signal: {}", err);
+}

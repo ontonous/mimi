@@ -12,6 +12,10 @@ fn can_link() -> bool {
     std::process::Command::new("cc").arg("--version").output().is_ok()
 }
 
+fn can_cc() -> bool {
+    std::process::Command::new("cc").arg("--version").output().is_ok()
+}
+
 macro_rules! dual_assert {
     ($src:expr, $expected:expr) => {{
         // Verify interpreter runs without error
@@ -2216,4 +2220,65 @@ fn dual_regex_replace_no_match() {
         r#"func main() -> i32 { println(regex_replace("abc", "[0-9]+", "X")); 0 }"#,
         "abc"
     );
+}
+
+// ==================== FFI Struct-by-Value Dual Tests ====================
+// Requires: cc compiler, linker, and mimi_runtime.c compiled as .so
+
+#[test]
+#[ignore = "codegen gap: struct-by-value extern params broken (LLVM ABI mismatch)"]
+fn dual_ffi_reprc_struct() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    if !can_link() { eprintln!("SKIP: linker not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    // Build the shared library containing test_struct_by_val
+    let so_path = build_interp_ffi_so().expect("dual_ffi_reprc_struct: build so failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    // Codegen links test_struct_by_val statically from mimi_runtime.c;
+    // interpreter loads it from .so via MIMI_FFI_LIB.
+    let src = r#"
+        #[repr(C)]
+        type TestPoint { x: i32, y: i32 }
+        extern "C" {
+            func test_struct_by_val(p: TestPoint) -> i32
+        }
+        func main() -> i32 {
+            println(test_struct_by_val(TestPoint { x: 10, y: 20 }))
+            0
+        }
+    "#;
+    // Interpreter should run without error
+    let _interp = run_source(src);
+    // Codegen: compile and run, capture stdout
+    let codegen_stdout = compile_and_run(src).expect("codegen failed");
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(codegen_stdout.trim(), "30",
+        "codegen struct-by-value FFI mismatch");
+}
+
+#[test]
+#[ignore = "codegen gap: struct-by-value extern params broken (LLVM ABI mismatch)"]
+fn dual_ffi_struct_multiple_fields() {
+    if !can_cc() { eprintln!("SKIP: cc not available"); return; }
+    if !can_link() { eprintln!("SKIP: linker not available"); return; }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("dual_ffi_struct_multiple: build so failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let src = r#"
+        #[repr(C)]
+        type MixedStruct { id: i32, value: f64, flag: i32 }
+        extern "C" {
+            func test_mixed_struct(s: MixedStruct) -> f64
+        }
+        func main() -> f64 {
+            println(test_mixed_struct(MixedStruct { id: 10, value: 3.5, flag: 1 }))
+            0.0
+        }
+    "#;
+    let _interp = run_source(src);
+    let codegen_stdout = compile_and_run(src).expect("codegen failed");
+    std::env::remove_var("MIMI_FFI_LIB");
+    // 10 + 3.5 + 1 = 14.5 (the C function sums all fields)
+    assert_eq!(codegen_stdout.trim(), "14.5",
+        "codegen mixed struct FFI mismatch");
 }

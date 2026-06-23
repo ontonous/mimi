@@ -146,6 +146,158 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Call a C function returning struct-by-value with full #[no_panic] protection.
+    /// Same signal/crash protection as `call_ffi_no_panic`, but writes the
+    /// result into a caller-provided buffer via `call_ffi_raw_struct`.
+    pub(in crate::interp) fn call_ffi_no_panic_struct(
+        &self,
+        cif: &Cif,
+        code_ptr: CodePtr,
+        ffi_args: &[libffi::middle::Arg],
+        rvalue: *mut c_void,
+    ) -> Result<(), String> {
+        let old_handlers = install_crash_handlers();
+        let jump_buf = Box::new(unsafe { std::mem::zeroed::<SigJmpBuf>() });
+        let buf_ptr = Box::into_raw(jump_buf) as *mut SigJmpBuf;
+        FFI_CRASH_JUMP_BUF.with(|cell| {
+            cell.store(buf_ptr, std::sync::atomic::Ordering::Release);
+        });
+        let sig = unsafe { sigsetjmp_impl(buf_ptr, 1) };
+        if sig != 0 {
+            restore_crash_handlers(&old_handlers);
+            unsafe { let _ = Box::from_raw(buf_ptr); }
+            let sig_name = match sig {
+                6 => "SIGABRT", 11 => "SIGSEGV", 7 => "SIGBUS",
+                4 => "SIGILL", 8 => "SIGFPE", n => {
+                    return Err(format!("FFI safety: C function crashed with signal {}", n));
+                }
+            };
+            return Err(format!("FFI safety: C function crashed with {} (signal {})", sig_name, sig));
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unsafe { Self::call_ffi_raw_struct(cif, code_ptr, ffi_args, rvalue) }
+        }));
+        FFI_CRASH_JUMP_BUF.with(|cell| {
+            cell.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
+        });
+        restore_crash_handlers(&old_handlers);
+        unsafe { let _ = Box::from_raw(buf_ptr); }
+        match result {
+            Ok(()) => Ok(()),
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown cause".to_string()
+                };
+                Err(format!("FFI safety: Rust panic in extern function: {}", msg))
+            }
+        }
+    }
+
+    /// Call a C function returning struct-by-value with crash isolation via fork().
+    /// The ret_buf is allocated in the parent before fork; the child writes the
+    /// struct result and sends it back through a pipe. On crash the parent
+    /// detects the signal and returns Err.
+    ///
+    /// # Async-signal-safety (Item 8)
+    /// Same limitation as `call_ffi_with_fork_isolation`: libffi/child heap
+    /// operations are not async-signal-safe. The buffer is pre-allocated in
+    /// the parent to avoid malloc in the child.
+    pub(in crate::interp) fn call_ffi_with_fork_isolation_struct(
+        &self,
+        cif: &Cif,
+        code_ptr: CodePtr,
+        ffi_args: &[libffi::middle::Arg],
+        ret_buf: &mut [u8],
+    ) -> Result<(), String> {
+        let _guard = ensure_fork_lock().lock()
+            .expect("FFI fork lock poisoned");
+        let mut pipe_fds: [std::ffi::c_int; 2] = [0; 2];
+        let pipe_ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+        if pipe_ret != 0 {
+            return Err("FFI safety: failed to create pipe for crash isolation".to_string());
+        }
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe { libc::close(pipe_fds[0]); }
+            let rvalue = ret_buf.as_mut_ptr() as *mut c_void;
+            unsafe { Self::call_ffi_raw_struct(cif, code_ptr, ffi_args, rvalue); }
+            unsafe {
+                libc::write(pipe_fds[1], ret_buf.as_ptr() as *const libc::c_void, ret_buf.len());
+                libc::close(pipe_fds[1]);
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(pipe_fds[1]); }
+        unsafe {
+            let flags = libc::fcntl(pipe_fds[0], libc::F_GETFL, 0);
+            if flags >= 0 {
+                libc::fcntl(pipe_fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+        let ffi_timeout_ms = std::env::var("MIMI_FFI_TIMEOUT_MS")
+            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(30_000);
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(ffi_timeout_ms))
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let mut status: i32 = 0;
+        loop {
+            let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if ret == pid { break; }
+            if ret == -1 {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::close(pipe_fds[0]); }
+                return Err(format!("FFI safety: waitpid error: {}", err));
+            }
+            if std::time::Instant::now() >= deadline {
+                unsafe { libc::kill(pid, libc::SIGKILL); }
+                unsafe { libc::waitpid(pid, &mut status, 0); }
+                unsafe { libc::close(pipe_fds[0]); }
+                return Err(format!("FFI safety: C function timed out after {}ms", ffi_timeout_ms));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if libc::WIFSIGNALED(status) {
+            let sig = libc::WTERMSIG(status);
+            let sig_name = match sig {
+                6 => "SIGABRT", 11 => "SIGSEGV", 7 => "SIGBUS",
+                4 => "SIGILL", 8 => "SIGFPE", _ => "unknown signal",
+            };
+            unsafe { libc::close(pipe_fds[0]); }
+            return Err(format!("FFI safety: C function crashed with {} (signal {})", sig_name, sig));
+        }
+        let buf_len = ret_buf.len();
+        let mut total_read = 0usize;
+        while total_read < buf_len {
+            let nread = unsafe {
+                libc::read(pipe_fds[0],
+                    ret_buf.as_mut_ptr().add(total_read) as *mut libc::c_void,
+                    buf_len - total_read)
+            };
+            if nread > 0 {
+                total_read += nread as usize;
+            } else if nread == 0 {
+                break;
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                unsafe { libc::close(pipe_fds[0]); }
+                return Err(format!("FFI safety: failed to read struct return: {}", err));
+            }
+        }
+        unsafe { libc::close(pipe_fds[0]); }
+        if total_read != buf_len {
+            return Err("FFI safety: C function exited without producing a struct result".to_string());
+        }
+        Ok(())
+    }
+
     /// Call a C function without crash protection via libffi.
     pub(in crate::interp) fn call_ffi_direct(
         &self,
@@ -191,8 +343,8 @@ impl<'a> Interpreter<'a> {
         //    First call returns 0; siglongjmp returns with sig >= 1
         let sig = unsafe { sigsetjmp_impl(buf_ptr, 1) };
         if sig != 0 {
-            // C crash: signal handler already set handlers to SIG_DFL.
-            // Free the heap-allocated jump buffer.
+            // C crash: after siglongjmp, restore saved handlers and free jump buf.
+            restore_crash_handlers(&old_handlers);
             unsafe { let _ = Box::from_raw(buf_ptr); }
             let sig_name = match sig {
                 6 => "SIGABRT", 11 => "SIGSEGV", 7 => "SIGBUS",
@@ -236,6 +388,17 @@ impl<'a> Interpreter<'a> {
     /// ⚠ SAFETY: fork() is only safe in single-threaded contexts.
     /// The fork lock serializes fork() against concurrent FFI operations,
     /// but async-signal-safety of libffi calls in the child is not guaranteed.
+    ///
+    /// # Async-signal-safety (Item 8)
+    /// After fork(), the child process inherits the parent's memory and
+    /// (potentially) locked mutexes. Only async-signal-safe functions may
+    /// be called in the child. libffi's internal malloc is NOT async-signal-safe.
+    /// However, in practice the child only calls `call_ffi_raw` which is a
+    /// thin wrapper around `ffi_call` — the actual library being called (not
+    /// libffi itself) is the one that may perform allocations. This is a
+    /// documented limitation: users who set `MIMI_FFI_PREFORK` can disable
+    /// fork isolation entirely and use `#[no_panic]` signal-based protection
+    /// instead.
     pub(in crate::interp) fn call_ffi_with_fork_isolation(
         &self,
         cif: &Cif,

@@ -45,6 +45,10 @@ impl<'a> Interpreter<'a> {
         let mut shared_dedup: HashMap<*const (), i64> = HashMap::new();
         let mut callback_ids: Vec<i64> = Vec::new();
         // Buffer for struct-by-value marshalled data; kept alive during the C call.
+        // SAFETY (F-17): Each inner Vec<u8> owns its heap allocation independently.
+        // Pushing to the outer Vec only moves the inner Vec handle (ptr+len+cap),
+        // NOT its heap data. Raw data pointers taken via as_ptr() remain stable
+        // across outer Vec reallocation.
         let mut struct_buffers: Vec<Vec<u8>> = Vec::new();
         for (arg, arg_contract) in args.iter().zip(&contract.args) {
             match arg_contract {
@@ -92,13 +96,14 @@ impl<'a> Interpreter<'a> {
         // Use libffi CIF for correct ABI handling (proper register routing for float/GP args)
         let result = {
             // Clear errno before call to avoid stale errno
+            // Uses platform-specific errno location (libc crate exports
+            // __errno_location on Linux, __error on macOS).
+            // Capturing side reads errno via std::io::Error::last_os_error().
             if contract.check_errno {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 unsafe { *libc::__errno_location() = 0; }
                 #[cfg(target_os = "macos")]
-                unsafe { extern "C" { fn __error() -> *mut libc::c_int; } *__error() = 0; }
-                #[cfg(target_os = "windows")]
-                unsafe { /* No POSIX errno on Windows — GetLastError is separate */ }
+                unsafe { *libc::__error() = 0; }
             }
 
             // Build libffi type descriptors for arguments
@@ -232,13 +237,17 @@ impl<'a> Interpreter<'a> {
                 // Allocate zeroed buffer for the struct return value.
                 let mut ret_buf = vec![0u8; buf_size];
                 let rvalue = ret_buf.as_mut_ptr() as *mut std::ffi::c_void;
-                // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
-                // with a caller-provided return buffer. No fork isolation for
-                // struct returns (same limitation as raw_string returns).
-                // SAFETY: call_ffi_raw_struct is an unsafe associated function
-                // that uses the low-level ffi_call API with a caller-provided
-                // return buffer. rvalue points to a valid ret_buf allocation.
-                unsafe { Self::call_ffi_raw_struct(&cif, code_ptr, &ffi_args, rvalue); }
+                // F-16: Apply crash protection to struct-by-value returns.
+                if self.verify_ffi {
+                    self.call_ffi_with_fork_isolation_struct(&cif, code_ptr, &ffi_args, &mut ret_buf)?;
+                } else if extern_func.no_panic {
+                    self.call_ffi_no_panic_struct(&cif, code_ptr, &ffi_args, rvalue)?;
+                } else {
+                    // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
+                    // with a caller-provided return buffer. rvalue points to a valid
+                    // ret_buf allocation.
+                    unsafe { Self::call_ffi_raw_struct(&cif, code_ptr, &ffi_args, rvalue); }
+                }
                 struct_buffers.push(ret_buf);
                 Ok(0i64) // placeholder; actual result read from buffer below
             } else if self.verify_ffi {

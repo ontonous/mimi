@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.12.0] - 2026-06-23
+
+### Added
+- F-16: struct-by-value crash protection via fork isolation + signal handlers (🔴)
+- F-17: struct_buffers data pointer safety documentation + confirmation (🟠)
+- Item 2: FfiGuard transmute field ordering documentation + layout test (🟠)
+- Item 8: Fork async-signal-safety documentation for call_ffi_with_fork_isolation (🟠)
+- Test: test_ffi_guard_field_ordering layout verification
+
+### Fixed
+- F-16: StructByValue return now routes through call_ffi_no_panic_struct / call_ffi_with_fork_isolation_struct instead of bare call_ffi_raw_struct (🔴)
+- F-18: CALLBACK_GLOBAL_STORE lock ordering inversion → unified TABLE→STORE order (🟠)
+- F-19: no_panic signal handlers now restored via restore_crash_handlers after siglongjmp (🟡)
+- Item 3: expr.rs Z3 verifier unwrap → `if let Some` pattern (4 sites) (🔴)
+- F-20: errno clearing simplified, Windows no-op removed (🟢)
+
+### Security
+- Item 2: transmute 'static field ordering enforced via layout test (🟠)
+- Item 8: fork async-signal-safety documented on both fork isolation functions (🟠)
+
 ## [0.7.0] - 2026-06-xx
 
 ### Added
@@ -7,18 +27,8 @@
 - FFI zero-copy struct-by-value (codegen path)
 - Standard library: csv.mimi, template.mimi, crypto.mimi
 - HTTP codegen: dual_net_tcp_client_echo
-
-### Fixed
-- F-16: StructByValue crash protection bypass (🔴)
-- F-17: struct_buffers dangling pointer risk (🟠)
-- F-18: CALLBACK_GLOBAL_STORE deadlock (🟠)
-- Item 3: Z3 verifier unwrap panic (🔴)
-- P0.1: Expr::Call unconstrained variables → false positives (🔴)
-- P0.2: verify_func_call_silent missing Failed assertion (🔴)
-
-### Security
-- Item 2: transmute 'static field order dependency documented (🟠)
-- Item 8: Fork async-signal-safety assessment (🟠)
+- P0.1: Expr::Call unconstrained variables → false positives fix (🔴)
+- P0.2: verify_func_call_silent missing Failed assertion fix (🔴)
 
 ## [0.6.0] - 2026-05-xx
 

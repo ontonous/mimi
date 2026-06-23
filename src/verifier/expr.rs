@@ -236,10 +236,10 @@ impl crate::verifier::Verifier {
             Expr::Field(obj, field) => {
                 let base = self.field_var_name(obj);
                 let key = format!("{}_{}", base, field);
-                if vars.get_int(&key).is_some() {
-                    Some(vars.get_int(&key).unwrap().ne(&Z3Int::from_i64(0)))
-                } else if vars.get_real(&key).is_some() {
-                    Some(vars.get_real(&key).unwrap().ne(&Z3Real::from_int(&Z3Int::from_i64(0))))
+                if let Some(v) = vars.get_int(&key) {
+                    Some(v.ne(&Z3Int::from_i64(0)))
+                } else if let Some(v) = vars.get_real(&key) {
+                    Some(v.ne(&Z3Real::from_int(&Z3Int::from_i64(0))))
                 } else {
                     let fresh = vars.get_or_create_int(&key);
                     Some(fresh.ne(&Z3Int::from_i64(0)))
@@ -248,10 +248,10 @@ impl crate::verifier::Verifier {
             Expr::TupleIndex(obj, idx) => {
                 let base = self.field_var_name(obj);
                 let key = format!("{}_t{}", base, idx);
-                if vars.get_int(&key).is_some() {
-                    Some(vars.get_int(&key).unwrap().ne(&Z3Int::from_i64(0)))
-                } else if vars.get_real(&key).is_some() {
-                    Some(vars.get_real(&key).unwrap().ne(&Z3Real::from_int(&Z3Int::from_i64(0))))
+                if let Some(v) = vars.get_int(&key) {
+                    Some(v.ne(&Z3Int::from_i64(0)))
+                } else if let Some(v) = vars.get_real(&key) {
+                    Some(v.ne(&Z3Real::from_int(&Z3Int::from_i64(0))))
                 } else {
                     let fresh = vars.get_or_create_int(&key);
                     Some(fresh.ne(&Z3Int::from_i64(0)))
