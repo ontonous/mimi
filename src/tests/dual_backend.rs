@@ -915,17 +915,14 @@ fn dual_contract_old_tautology() {
     "#);
 }
 
-// ─── 24.  Known Codegen Gaps ──────────────────────────────────
-// Tests below document features that work in the interpreter but have
-// incomplete or broken codegen. They are #[ignore]d and serve as:
-//   1. A checklist of known gaps for developers
-//   2. Ready-to-activate regression tests when the gap is fixed
-// When a gap is closed, remove #[ignore] and run: cargo test dual_gap_
+// ─── 24.  Closed Codegen Gaps ──────────────────────────────────
+// These tests were previously known gaps but now pass both backends.
+// See AGENTS.md v0.21 sub-items for tracking.
 // ───────────────────────────────────────────────────────────────
 
-// 24a. Match guard crashes codegen with SIGSEGV (6459fdb: LLVM IR branch target issue)
+// 24a. Match guard
 #[test]
-fn dual_gap_match_guard_basic() {
+fn dual_match_guard_basic() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -941,7 +938,7 @@ fn dual_gap_match_guard_basic() {
 }
 
 #[test]
-fn dual_gap_match_guard_fallback() {
+fn dual_match_guard_fallback() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -957,7 +954,7 @@ fn dual_gap_match_guard_fallback() {
 }
 
 #[test]
-fn dual_gap_match_guard_all_fail() {
+fn dual_match_guard_all_fail() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -973,9 +970,9 @@ fn dual_gap_match_guard_all_fail() {
     "#, "99");
 }
 
-// 24b. Tuple patterns treated as enum structs (6459fdb: compile_match_expr GEP logic)
+// 24b. Tuple patterns
 #[test]
-fn dual_gap_match_tuple_elements() {
+fn dual_match_tuple_elements() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -991,7 +988,7 @@ fn dual_gap_match_tuple_elements() {
 }
 
 #[test]
-fn dual_gap_match_tuple_wildcard() {
+fn dual_match_tuple_wildcard() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -1006,9 +1003,9 @@ fn dual_gap_match_tuple_wildcard() {
     "#, "-1");
 }
 
-// 24c. Enum ordinal determinism (b08855a) — unit variants not constructible in codegen
+// 24c. Enum ordinal determinism
 #[test]
-fn dual_gap_enum_reorder_stable() {
+fn dual_enum_reorder_stable() {
     if !can_link() { return; }
     dual_assert!(r#"
         type Status { Active(i32) Inactive Pending }
@@ -1023,9 +1020,9 @@ fn dual_gap_enum_reorder_stable() {
     "#, "0");
 }
 
-// 24d. Enum match with payload — codegen produces wrong ordinal (tag mismatch)
+// 24d. Enum match with payload
 #[test]
-fn dual_gap_enum_match_payload() {
+fn dual_enum_match_payload() {
     if !can_link() { return; }
     dual_assert!(r#"
         type MyOption { Some(i32) None }
@@ -1040,7 +1037,7 @@ fn dual_gap_enum_match_payload() {
 }
 
 #[test]
-fn dual_gap_enum_match_none() {
+fn dual_enum_match_none() {
     if !can_link() { return; }
     dual_assert!(r#"
         type MyOption { Some(i32) None }
@@ -1054,9 +1051,9 @@ fn dual_gap_enum_match_none() {
     "#, "-1");
 }
 
-// 24e. Push mutation semantics (4cf48e9) — push() mutating list in codegen
+// 24e. Push mutation semantics
 #[test]
-fn dual_gap_push_mut_content() {
+fn dual_push_mut_content() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -1067,9 +1064,9 @@ fn dual_gap_push_mut_content() {
     "#, "10\n20");
 }
 
-// 24f. Contains builtin (5d9add0) — codegen SIGSEGV
+// 24f. Contains builtin
 #[test]
-fn dual_gap_builtin_contains_true() {
+fn dual_builtin_contains_true() {
     if !can_link() { return; }
     dual_assert!(r#"
         func main() -> i32 {
@@ -1079,9 +1076,9 @@ fn dual_gap_builtin_contains_true() {
     "#, "1");
 }
 
-// 24g. Enum bool layout (6459fdb) — bool tag vs i32 tag in codegen
+// 24g. Enum bool layout
 #[test]
-fn dual_gap_enum_bool_variant() {
+fn dual_enum_bool_variant() {
     if !can_link() { return; }
     dual_assert!(r#"
         type Flag { Yes No }
