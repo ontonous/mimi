@@ -1,9 +1,11 @@
 # Changelog
 
-## [Unreleased] — 0.23.0-dev
+## [Unreleased] — 0.24.0-dev
 
 ### Added
-- (placeholder)
+- **A1**: `spawn expr` codegen 从 pthread 改为状态机 + executor 调度
+- **A2**: 清理 codegen 中 `pthread_create`/`pthread_join` 符号引用
+- **A3**: parasteps 保留独立并行 + 补偿 + 静态冲突检测
 
 ## [v0.23.0] — 2026-06-24 — Z3 验证器深度修复
 
