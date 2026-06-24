@@ -92,23 +92,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
         Some(inkwell::module::Linkage::External));
 
-    // pthread support for parasteps
-    // pthread_create(pthread_t*, void*, void* (*)(void*), void*) -> int
-    // We use i8* for the function pointer (cast at call site)
-    module.add_function("pthread_create",
-        i32.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),  // pthread_t*
-            BasicMetadataTypeEnum::PointerType(i8_ptr),  // attr (NULL)
-            BasicMetadataTypeEnum::PointerType(i8_ptr),  // start_routine (as i8*, cast at callsite)
-            BasicMetadataTypeEnum::PointerType(i8_ptr),  // arg
-        ], false),
-        Some(inkwell::module::Linkage::External));
-    module.add_function("pthread_join",
-        i32.fn_type(&[
-            BasicMetadataTypeEnum::PointerType(ctx.ptr_type(AddressSpace::default())),  // pthread_t
-            BasicMetadataTypeEnum::PointerType(i8_ptr),  // retval (NULL)
-        ], false),
-        Some(inkwell::module::Linkage::External));
+    // Future-based spawn/await (replaces old pthread_create/join)
 
     // Map/Record runtime functions
     // MapHandle = i64 (pointer cast)

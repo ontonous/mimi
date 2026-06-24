@@ -2019,7 +2019,8 @@ fn dual_numeric_coercion_i64_f64_mul() {
 // ===== Stage 4: Concurrency — dual-backend equivalence tests =====
 //
 // v1.0 concurrency model:
-// - parasteps: spawn uses real pthread_create/pthread_join (same as standalone)
+// - spawn uses mimi_spawn_future (real thread) + mimi_await_future (spin-wait)
+// - parasteps: same mechanism, tracked via parasteps_future_ptrs
 // - Actor spawn is interpreter-only
 //
 // Known gaps documented in AGENTS.mimi.md §12:
@@ -2082,7 +2083,7 @@ fn dual_parasteps_spawn_await() {
 #[test]
 fn dual_spawn_await_simple() {
     if !can_link() { return; }
-    // Standalone spawn/await (outside parasteps) — uses real pthread_create
+    // Standalone spawn/await (outside parasteps) — uses mimi_spawn_future
     dual_assert!(r#"
         func double(n: i32) -> i32 { n * 2 }
         func main() -> i32 {

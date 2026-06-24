@@ -1488,12 +1488,10 @@ fn codegen_spawn_await_no_zero_placeholder() {
             result
         }
     "#);
-    // The IR should contain pthread_join with a non-null second argument (retval storage)
-    assert!(ir.contains("pthread_join"), "IR should contain pthread_join:\n{}", ir);
-    // The IR should contain free (to free the malloc'd result)
-    assert!(ir.contains("free"), "IR should contain free:\n{}", ir);
-    // The IR should contain malloc (to allocate the result storage)
-    assert!(ir.contains("malloc"), "IR should contain malloc:\n{}", ir);
+    // The IR should contain mimi_spawn_future (replaces old pthread_create)
+    assert!(ir.contains("mimi_spawn_future"), "IR should contain mimi_spawn_future:\n{}", ir);
+    // The IR should contain mimi_future_free (to free the future struct)
+    assert!(ir.contains("mimi_future_free"), "IR should contain mimi_future_free:\n{}", ir);
 }
 
 #[test]

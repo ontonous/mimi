@@ -1656,7 +1656,7 @@ fn e2e_ubsan_shared_basic() {
 fn e2e_valgrind_spawn_basic() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     if !can_valgrind() { eprintln!("SKIP: valgrind not available"); return; }
-    // Spawn + await under Valgrind — verifies pthread_create/join memory safety.
+    // Spawn + await under Valgrind — verifies mimi_spawn_future/await_future memory safety.
     let stdout = compile_and_run_valgrind(r#"
         func id(x: i32) -> i32 { x }
         func main() -> i32 {
@@ -2613,8 +2613,8 @@ fn e2e_datetime_time_constants() {
 // ===== Stage 4: Concurrency — codegen E2E tests =====
 //
 // These tests verify the LLVM codegen's concurrent execution capabilities.
-// Both standalone spawn and spawn inside parasteps use raw
-// pthread_create/pthread_join.
+// Both standalone spawn and spawn inside parasteps use
+// mimi_spawn_future (real thread) + mimi_await_future (spin-wait).
 //
 // Known gaps documented in AGENTS.mimi.md §12:
 // - Actor spawn not supported in codegen
@@ -2639,10 +2639,9 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "flaky in CI: spawned pthread may crash under parallel load"]
 fn e2e_parasteps_spawn_and_await() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    // Spawn inside parasteps uses real pthread_create; await joins the thread.
+    // Spawn inside parasteps uses mimi_spawn_future; await via mimi_await_future.
     let src = r#"
 func double(n: i32) -> i32 { n * 2 }
 func main() -> i32 {
@@ -2663,7 +2662,7 @@ func main() -> i32 {
 #[test]
 fn e2e_spawn_concurrent_tasks() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
-    // Multiple standalone spawns run concurrently via pthread_create.
+    // Multiple standalone spawns run concurrently via mimi_spawn_future.
     // Each computes a sum from 0 to n-1 in a separate thread.
     let src = r#"
 func sum_to(n: i32) -> i32 {
