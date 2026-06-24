@@ -591,6 +591,8 @@ dependencies = [
 [[package]]
 name = "mimispec"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfaa4dc4e24d3dc5d76ae8ca2d44314102d14b1522d9cf7e7586ef060ecaedfd"
 dependencies = [
  "clap",
  "serde",

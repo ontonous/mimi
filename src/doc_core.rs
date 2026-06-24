@@ -278,6 +278,7 @@ fn compare_op_to_str(op: mimispec::ast::CompareOp) -> &'static str {
         CompareOp::Gt => ">",
         CompareOp::Le => "<=",
         CompareOp::Ge => ">=",
+        _ => "?",
     }
 }
 
@@ -296,6 +297,7 @@ fn atom_to_string(atom: &mimispec::ast::Atom) -> String {
                 .collect();
             format!("[{}]", inner.join(", "))
         }
+        _ => "?".to_string(),
     }
 }
 
