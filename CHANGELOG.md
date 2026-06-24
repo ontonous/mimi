@@ -1,11 +1,20 @@
 # Changelog
 
-## [Unreleased] — 0.24.0-dev
+## [v0.24.0] — 2026-06-25 — 并发重构 (spawn→状态机)
 
 ### Added
-- **A1**: `spawn expr` codegen 从 pthread 改为状态机 + executor 调度
-- **A2**: 清理 codegen 中 `pthread_create`/`pthread_join` 符号引用
+- **A1**: `spawn expr` codegen 从 pthread 改为 `mimi_spawn_future` + poll 状态机
+- **A2**: 清理 codegen 中 `pthread_create`/`pthread_join` 符号引用和 builtin 声明
 - **A3**: parasteps 保留独立并行 + 补偿 + 静态冲突检测
+
+### Fixed
+- 类型检查: `spawn expr` 返回 `Future<T>`（带泛型参数），修复 `await` 类型匹配
+- 解释器: `eval_spawn` 返回 Future 而非直接求值（同步包装，env capture 待实现）
+- `e2e_parasteps_spawn_and_await` 解除 `#[ignore]`（future 稳定，不再 flaky）
+
+### Changed
+- `parasteps_thread_ids` → `parasteps_future_ptrs` (重新标注代码生成器字段)
+- 所有 golden IR 文件更新: pthread_create/pthread_join → mimi_spawn_future/await_future/future_free
 
 ## [v0.23.0] — 2026-06-24 — Z3 验证器深度修复
 
