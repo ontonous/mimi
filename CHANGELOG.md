@@ -1,11 +1,24 @@
 # Changelog
 
-## [Unreleased] — 0.22.4-dev
+## [Unreleased] — 0.22.5-dev
 
 ### Added
 - (placeholder)
 
-## [v0.22.3] - 2026-06-24 — Set 集合（Set Collection）
+## [v0.22.4] - 2026-06-24 — 管道符 + loop（Pipe Operator & Loop Keyword）
+
+### Added
+- 管道符 `|>` 语法糖：`a |> f(b)` 脱糖为 `f(a, b)`，链式 `a |> f(b) |> g(c)` → `g(f(a,b), c)`
+- 纯 parser 层脱糖，无需 inference/interpreter/codegen 改动
+- `loop` 关键字：`loop { if cond { break } }` 无限循环
+- `Stmt::Loop(Block)` — 全后端支持（checker/interpreter/codegen/quote）
+
+### Fixed
+- 补全 5 处 `Stmt::Loop` 遗漏的 verifier/rule 匹配（verifier/func.rs, ffi.rs, helpers.rs, core/mod.rs）
+
+### Tests
+- 6 个新测试：pipe_basic / pipe_chain / pipe_ident / loop_basic / loop_break / loop_continue
+- 基线: 2,109 passed, 0 failed, 21 ignored
 
 ### Added
 - Set 集合字面量 `{1, 2, 3}`（逗号分隔，≥2 元素；`{expr}` 保持为 block 向后兼容）
