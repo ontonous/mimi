@@ -39,7 +39,7 @@ default = []
 no_std = []
 
 [build-dependencies]
-cc = "1.0"
+# build.rs is a no-op (runtime is pure Rust since v0.15)
 
 [dev-dependencies]
 proptest = "1"
