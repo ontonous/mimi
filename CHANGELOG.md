@@ -1,14 +1,28 @@
 # Changelog
 
-## [Unreleased] — 0.22.3-dev
+## [Unreleased] — 0.22.4-dev
 
 ### Added
-- Set 集合字面量 `{1, 2, 3}`（逗号分隔，≥2 元素）与操作：`size/len`, `is_empty`, `contains`, `insert`, `remove`, `to_list`
+- (placeholder)
+
+## [v0.22.3] - 2026-06-24 — Set 集合（Set Collection）
+
+### Added
+- Set 集合字面量 `{1, 2, 3}`（逗号分隔，≥2 元素；`{expr}` 保持为 block 向后兼容）
+- Set 操作：`size/len`, `is_empty`, `contains`, `insert`, `remove`, `to_list`
 - `std/set.mimi` — SetExt trait 定义
-- 16 个 Set 测试（字面量/disup/包含/插入/删除/链式操作/字符串元素）
+- `from_json::<T>` 和 `Set<T>` 的 LLVM codegen 全路径实现（替代 stub error）
+  - `from_json::<i32/f64/bool/string>` 通过运行时函数 `mimi_json_as_i64/f64/bool` + `mimi_from_json`
+  - Set 字面量/方法通过运行时 `mimi_set_new/insert/contains/remove/size/to_list`
+  - 运行时新增 `MimiSet` 结构体 + 9 个 C ABI 函数
+
+### Fixed
+- 6 处 clippy warnings（unused var, collapsible if-let, needless borrow, needless closure）
 
 ### Tests
-- 基线: 2,094 passed, 0 failed, 21 ignored
+- 16 个 Set interpreter 测试 + 7 个 codegen e2e 测试
+- 21 个 golden test files 更新（新增运行时函数声明）
+- 基线: 2,103 passed, 0 failed, 21 ignored
 
 ## [v0.22.2] - 2026-06-24 — JSON 类型化（JSON Typed Deserialization）
 
