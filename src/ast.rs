@@ -150,6 +150,7 @@ pub struct Param {
     pub name: String,
     pub ty: Type,
     pub mut_: bool,
+    pub default_value: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +387,8 @@ pub enum Expr {
     },
     /// Set literal: {1, 2, 3}
     SetLiteral(Vec<Expr>),
+    /// Named argument in function call: f(x = 5)
+    NamedArg(String, Box<Expr>),
 }
 
 impl Expr {

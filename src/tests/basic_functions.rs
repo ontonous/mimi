@@ -238,3 +238,78 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(v, interp::Value::String("int=42 float=3.14 str=test".to_string()));
 }
+
+#[test]
+fn interp_default_param_value() {
+    let src = r#"
+func greet(name: string = "world") -> string {
+    "hello " + name
+}
+
+func main() -> string {
+    greet()
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello world".to_string()));
+}
+
+#[test]
+fn interp_default_param_value_override() {
+    let src = r#"
+func greet(name: string = "world") -> string {
+    "hello " + name
+}
+
+func main() -> string {
+    greet("mimi")
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("hello mimi".to_string()));
+}
+
+#[test]
+fn interp_default_param_multi() {
+    let src = r#"
+func add(a: i32 = 10, b: i32 = 20) -> i32 {
+    a + b
+}
+
+func main() -> i32 {
+    add(5)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(25));
+}
+
+#[test]
+fn interp_named_args_basic() {
+    let src = r#"
+func div(a: i32, b: i32) -> i32 {
+    a / b
+}
+
+func main() -> i32 {
+    div(b = 2, a = 10)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(5));
+}
+
+#[test]
+fn interp_named_args_with_defaults() {
+    let src = r#"
+func create_point(x: i32 = 0, y: i32 = 0) -> string {
+    "(" + to_string(x) + "," + to_string(y) + ")"
+}
+
+func main() -> string {
+    create_point(y = 5)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::String("(0,5)".to_string()));
+}

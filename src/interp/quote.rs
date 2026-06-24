@@ -281,6 +281,9 @@ impl<'a> Interpreter<'a> {
                 let v = self.eval_expr(&Expr::SetLiteral(elems.clone()))?;
                 Ok(QuotedAst::Interpolate(Box::new(v)))
             }
+            Expr::NamedArg(name, value) => {
+                Ok(QuotedAst::NamedArg(name.clone(), Box::new(self.quote_expr(value)?)))
+            }
         }
     }
 

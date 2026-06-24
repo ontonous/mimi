@@ -342,7 +342,14 @@ impl LspServer {
                         let params: Vec<String> = f
                             .params
                             .iter()
-                            .map(|p| format!("{}: {:?}", p.name, p.ty))
+                            .map(|p| {
+                                let base = format!("{}: {:?}", p.name, p.ty);
+                                if let Some(ref default_expr) = p.default_value {
+                                    format!("{} = {}", base, crate::lsp::LspServer::format_expr_simple(default_expr))
+                                } else {
+                                    base
+                                }
+                            })
                             .collect();
                         let ret = f
                             .ret
@@ -352,10 +359,20 @@ impl LspServer {
                         signatures.push(serde_json::json!({
                             "label": format!("func {}({}){}", func_name, params.join(", "), ret),
                             "documentation": format!("Function {}", func_name),
-                            "parameters": f.params.iter().map(|p| serde_json::json!({
-                                "label": format!("{}: {:?}", p.name, p.ty),
-                                "documentation": format!("Parameter {}", p.name)
-                            })).collect::<Vec<_>>()
+                            "parameters": f.params.iter().map(|p| {
+                                let label = {
+                                    let base = format!("{}: {:?}", p.name, p.ty);
+                                    if let Some(ref default_expr) = p.default_value {
+                                        format!("{} = {}", base, crate::lsp::LspServer::format_expr_simple(default_expr))
+                                    } else {
+                                        base
+                                    }
+                                };
+                                serde_json::json!({
+                                    "label": label,
+                                    "documentation": format!("Parameter {}", p.name)
+                                })
+                            }).collect::<Vec<_>>()
                         }));
                     }
                 }

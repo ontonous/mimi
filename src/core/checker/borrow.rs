@@ -155,6 +155,7 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_expr(e, uses);
                 }
             }
+            Expr::NamedArg(_, value) => Self::collect_uses_in_expr(value, uses),
         }
     }
 

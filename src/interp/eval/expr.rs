@@ -209,8 +209,66 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(in crate::interp) fn eval_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Value, InterpError> {
+        // Handle named args by resolving them to positional order.
+        // If the call has named args, reorder before evaluating.
+        let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        if has_named {
+            if let Expr::Ident(name) = callee {
+                if let Some(f) = self.find_function(name) {
+                    let mut ordered_exprs: Vec<Expr> = Vec::new();
+                    let mut dest_idx = 0;
+                    // Process positional args
+                    for arg in args {
+                        match arg {
+                            Expr::NamedArg(n, val) => {
+                                // Find position in params
+                                if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
+                                    while ordered_exprs.len() <= pos {
+                                        ordered_exprs.push(Expr::Literal(Lit::Unit));
+                                    }
+                                    ordered_exprs[pos] = *val.clone();
+                                } else {
+                                    // Unknown named arg — push the expr itself (evaluated later)
+                                    ordered_exprs.push(arg.clone());
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                while ordered_exprs.len() <= dest_idx {
+                                    ordered_exprs.push(Expr::Literal(Lit::Unit));
+                                }
+                                ordered_exprs[dest_idx] = arg.clone();
+                                dest_idx += 1;
+                            }
+                        }
+                    }
+                    // Fill in defaults
+                    for (i, p) in f.params.iter().enumerate() {
+                        if i >= ordered_exprs.len() || matches!(ordered_exprs[i], Expr::Literal(Lit::Unit)) {
+                            if let Some(ref default_expr) = p.default_value {
+                                if i >= ordered_exprs.len() {
+                                    ordered_exprs.push(default_expr.clone());
+                                } else {
+                                    ordered_exprs[i] = default_expr.clone();
+                                }
+                            }
+                        }
+                    }
+                    let vals: Result<Vec<_>, _> = ordered_exprs.iter().map(|a| self.eval_expr(a)).collect();
+                    let vals = vals?;
+                    return self.eval_call_dispatch(callee, &vals, args);
+                }
+            }
+        }
+
         let vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
         let vals = vals?;
+        self.eval_call_dispatch(callee, &vals, args)
+    }
+
+    /// Dispatch an evaluated function call — shared by both positional and named-arg paths.
+    fn eval_call_dispatch(&mut self, callee: &Expr, vals: &[Value], args: &[Expr]) -> Result<Value, InterpError> {
+        let vals = vals.to_vec();
         match callee {
             Expr::Ident(name) => {
                 let result = self.call_named(name, vals)?;
@@ -382,6 +440,7 @@ impl<'a> Interpreter<'a> {
                                 name: format!("arg{}", i),
                                 ty: Type::Name("unknown".into(), vec![]),
                                 mut_: false,
+                                default_value: None,
                             }).collect(),
                             ret: None,
                             body: vec![Stmt::Return(Some(Expr::Call(

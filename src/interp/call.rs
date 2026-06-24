@@ -3,7 +3,7 @@ use crate::ffi::FfiContract;
 
 impl<'a> Interpreter<'a> {
     pub(crate) fn call_func(&mut self, func: &FuncDef, args: Vec<Value>) -> Result<Value, InterpError> {
-        if func.params.len() != args.len() {
+        if args.len() > func.params.len() {
             let expected_types: Vec<String> = func.params.iter().map(|p| crate::core::fmt_type(&p.ty)).collect();
             let actual_types: Vec<String> = args.iter().map(|a| crate::interp::value::type_name(a).to_string()).collect();
             return Err(InterpError::wrong_arg_count(
@@ -12,9 +12,25 @@ impl<'a> Interpreter<'a> {
             ));
         }
         
+        // Fill in default values for missing arguments
+        let mut filled_args = args;
+        let has_defaults = filled_args.len() < func.params.len()
+            && func.params[filled_args.len()..].iter().any(|p| p.default_value.is_some());
+        if has_defaults {
+            for i in filled_args.len()..func.params.len() {
+                if let Some(ref default_expr) = func.params[i].default_value {
+                    let val = self.eval_expr(default_expr)?;
+                    filled_args.push(val);
+                } else {
+                    // Missing non-default parameter — let the err below handle it
+                    break;
+                }
+            }
+        }
+        
         // Handle async functions
         if func.is_async {
-            return self.call_async_func(func, args);
+            return self.call_async_func(func, filled_args);
         }
         
         self.push_call(&func.name);
@@ -22,7 +38,7 @@ impl<'a> Interpreter<'a> {
 
         // Snapshot parameters for old() in ensures
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
-        for (p, a) in func.params.iter().zip(args) {
+        for (p, a) in func.params.iter().zip(filled_args) {
             old_snapshots.insert(p.name.clone(), a.clone());
             self.bind(&p.name, a)?;
         }

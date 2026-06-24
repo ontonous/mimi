@@ -405,13 +405,38 @@ impl Parser {
             return Ok(args);
         }
         loop {
-            args.push(self.parse_expr(0)?);
+            // Check for named arg: `ident = expr`
+            if let Some(name) = self.peek_named_arg() {
+                self.expect_ident()?;
+                self.expect(TokenKind::Eq, "`=`")?;
+                let value = self.parse_expr(0)?;
+                args.push(Expr::NamedArg(name, Box::new(value)));
+            } else {
+                args.push(self.parse_expr(0)?);
+            }
             if !self.at(&TokenKind::Comma) {
                 break;
             }
             self.advance();
         }
         Ok(args)
+    }
+
+    /// Peek at the next tokens to detect a named argument pattern: `ident = expr`
+    /// Returns the identifier name if it looks like a named arg, None otherwise.
+    fn peek_named_arg(&mut self) -> Option<String> {
+        let save = self.pos();
+        let tok = self.peek();
+        let name = match &tok.kind {
+            TokenKind::Ident(name) => name.clone(),
+            _ => return None,
+        };
+        // Check if followed by `=`
+        if save + 1 < self.tokens.len() && matches!(&self.tokens[save + 1].kind, TokenKind::Eq) {
+            Some(name)
+        } else {
+            None
+        }
     }
 
     /// Parse `expr[i]` (index) or `expr[start..end]` / `expr[..end]` / `expr[start..]` (slice).

@@ -579,7 +579,13 @@ impl Parser {
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon, "`:`")?;
             let ty = self.parse_type()?;
-            params.push(Param { name, ty, mut_ });
+            let default_value = if self.at(&TokenKind::Eq) {
+                self.advance();
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
+            params.push(Param { name, ty, mut_, default_value });
             if !self.at(&TokenKind::Comma) {
                 break;
             }

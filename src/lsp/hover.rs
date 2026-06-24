@@ -123,7 +123,14 @@ impl LspServer {
                                 let params: Vec<String> = m
                                     .params
                                     .iter()
-                                    .map(|p| format!("{}: {}", p.name, Self::type_display(&p.ty)))
+                            .map(|p| {
+                                let base = format!("{}: {}", p.name, Self::type_display(&p.ty));
+                                if let Some(ref default_expr) = p.default_value {
+                                    format!("{} = {}", base, Self::format_expr_simple(default_expr))
+                                } else {
+                                    base
+                                }
+                            })
                                     .collect();
                                 let ret = m
                                     .ret
@@ -353,6 +360,86 @@ impl LspServer {
                 return format!("[{}]", s.join(", "));
             }
         }.to_string()
+    }
+
+    /// Format an expression as a short display string for hover hints.
+    pub(crate) fn format_expr_simple(expr: &Expr) -> String {
+        match expr {
+            Expr::Literal(l) => crate::lsp::LspServer::format_lit_simple(l),
+            Expr::Ident(name) => name.clone(),
+            Expr::Unary(op, e) => format!("{}{}", Self::format_unop_simple(*op), Self::format_expr_simple(e)),
+            Expr::Binary(op, l, r) => format!("{} {} {}", Self::format_expr_simple(l), Self::format_binop_simple(*op), Self::format_expr_simple(r)),
+            Expr::Call(callee, args) => {
+                let a: Vec<String> = args.iter().map(Self::format_expr_simple).collect();
+                format!("{}({})", Self::format_expr_simple(callee), a.join(", "))
+            }
+            Expr::Field(obj, field) => format!("{}.{}", Self::format_expr_simple(obj), field),
+            Expr::Index(obj, idx) => format!("{}[{}]", Self::format_expr_simple(obj), Self::format_expr_simple(idx)),
+            Expr::Tuple(elems) => {
+                let a: Vec<String> = elems.iter().map(Self::format_expr_simple).collect();
+                format!("({})", a.join(", "))
+            }
+            Expr::List(elems) => {
+                let a: Vec<String> = elems.iter().map(Self::format_expr_simple).collect();
+                format!("[{}]", a.join(", "))
+            }
+            Expr::If { cond, .. } => format!("if {} {{ ... }}", Self::format_expr_simple(cond)),
+            Expr::Block(_) => "{ ... }".to_string(),
+            _ => "...".to_string(),
+        }
+    }
+
+    fn format_lit_simple(lit: &Lit) -> String {
+        match lit {
+            Lit::Int(v) => format!("{}", v),
+            Lit::Float(v) => format!("{}", v),
+            Lit::Bool(v) => format!("{}", v),
+            Lit::String(v) => format!("\"{}\"", v),
+            Lit::FString(parts) => {
+                let s: String = parts.iter().map(|p| match p {
+                    crate::ast::FStringPart::Text(t) => t.clone(),
+                    crate::ast::FStringPart::Interp(_) => "{}".to_string(),
+                }).collect();
+                format!("f\"{}\"", s)
+            }
+            Lit::Unit => "()".to_string(),
+        }
+    }
+
+    fn format_unop_simple(op: UnOp) -> &'static str {
+        match op {
+            UnOp::Neg => "-",
+            UnOp::Not => "!",
+            UnOp::Ref => "&",
+            UnOp::RefMut => "&mut ",
+            UnOp::Deref => "*",
+        }
+    }
+
+    fn format_binop_simple(op: BinOp) -> &'static str {
+        match op {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Pow => "^",
+            BinOp::Assign => "=",
+            BinOp::EqCmp => "==",
+            BinOp::NeCmp => "!=",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::Range => "..",
+        }
     }
 
     /// Format a type for human-readable display

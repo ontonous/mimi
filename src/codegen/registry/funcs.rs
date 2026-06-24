@@ -75,6 +75,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         name: "self".into(),
                         ty: self_ty,
                         mut_: false,
+                        default_value: None,
                     });
                     self.compile_func(&impl_method)?;
                 }

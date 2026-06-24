@@ -418,6 +418,7 @@ impl<'a> Interpreter<'a> {
                                 name: "other".to_string(),
                                 ty: Type::Name(type_name.clone(), vec![]),
                                 mut_: false,
+                                default_value: None,
                             }],
                             ret: Some(Type::Name("bool".into(), vec![])),
                             body: vec![],

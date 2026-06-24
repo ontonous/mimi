@@ -3,7 +3,10 @@
 ## [Unreleased] — 0.22.7-dev
 
 ### Added
-- (placeholder)
+- 默认参数值: `func f(x: i32 = 0) { ... }` 支持带默认值的参数
+- 命名参数调用: `f(y=2, x=1)` 支持按名重排参数
+- LSP hover/signature 显示 `= default` 在参数签名中
+- 5 个测试: default_value, override, multi, named_args, named_with_defaults
 
 ## [v0.22.6] - 2026-06-24 — 诊断质量 + format()（Diagnostics & format() Builtin）
 

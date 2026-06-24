@@ -157,6 +157,7 @@ pub enum QuotedAst {
         kind: AllocKind,
         body: Box<QuotedAst>,
     },
+    NamedArg(String, Box<QuotedAst>),
 }
 
 #[derive(Debug, Clone)]

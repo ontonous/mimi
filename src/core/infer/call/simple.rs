@@ -1155,6 +1155,65 @@ impl<'a> Checker<'a> {
             }
         };
 
+        // Handle named arguments and default values in user function calls
+        let has_named_args = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        if has_named_args || (!args.is_empty() && args.len() != params.len()) {
+            // Check if the function definition has param names (for named args) or defaults
+            let func_def_params: Option<&[Param]> = self.file.items.iter()
+                .filter_map(|item| match item {
+                    Item::Func(f) if f.name == name => Some(f.params.as_slice()),
+                    _ => None,
+                })
+                .next();
+            if let Some(func_params) = func_def_params {
+                if func_params.len() == params.len() {
+                    let mut reordered: Vec<&Expr> = vec![&Expr::Literal(Lit::Unit); params.len()];
+                    let mut seen = vec![false; params.len()];
+                    let mut pos_idx = 0;
+                    for arg in args {
+                        match arg {
+                            Expr::NamedArg(n, val) => {
+                                if let Some(pos) = func_params.iter().position(|p| p.name == *n) {
+                                    reordered[pos] = val;
+                                    seen[pos] = true;
+                                } else {
+                                    self.emit_code(crate::diagnostic::codes::E0401,
+                                        format!("function '{}' has no parameter named '{}'", name, n));
+                                }
+                            }
+                            _ => {
+                                while pos_idx < seen.len() && seen[pos_idx] { pos_idx += 1; }
+                                if pos_idx < seen.len() {
+                                    reordered[pos_idx] = arg;
+                                    seen[pos_idx] = true;
+                                    pos_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                    // Check for extra positional args that were dropped
+                    if !has_named_args && pos_idx < args.len() {
+                        // Some positional args were dropped — let normal arg count check handle it
+                    }
+                    // Fill in default values for parameters that have them
+                    let mut has_missing_defaults = false;
+                    for (i, (seen, p)) in seen.iter().zip(func_params.iter()).enumerate() {
+                        if let Some(ref default_expr) = p.default_value {
+                            if !seen {
+                                reordered[i] = default_expr;
+                                has_missing_defaults = true;
+                            }
+                        }
+                    }
+                    // Only recurse if we actually reordered or filled defaults
+                    if has_named_args || (has_missing_defaults && args.len() < params.len()) {
+                        let reordered_args: Vec<Expr> = reordered.iter().map(|e| (*e).clone()).collect();
+                        return self.check_call(name, &reordered_args, scopes);
+                    }
+                }
+            }
+        }
+
         if args.len() != params.len() {
             self.emit_code(
                 crate::diagnostic::codes::E0257,
