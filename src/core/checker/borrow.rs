@@ -144,6 +144,12 @@ impl<'a> Checker<'a> {
                 Self::collect_uses_in_expr(iter, uses);
                 if let Some(g) = guard { Self::collect_uses_in_expr(g, uses); }
             }
+            Expr::MapLiteral { entries } => {
+                for (k, v) in entries {
+                    Self::collect_uses_in_expr(k, uses);
+                    Self::collect_uses_in_expr(v, uses);
+                }
+            }
         }
     }
 

@@ -318,6 +318,10 @@ impl Parser {
             }
             TokenKind::LBrace => {
                 self.advance();
+                // Try to parse as map literal {"key": value, ...}
+                if let Some(entries) = self.try_parse_map_literal() {
+                    return self.parse_postfix(Expr::MapLiteral { entries });
+                }
                 let block = self.parse_block()?;
                 return self.parse_postfix(Expr::Block(block));
             }
@@ -624,6 +628,83 @@ impl Parser {
             self.parse_postfix(Expr::List(elems))
         }
     }
+
+    /// Try to parse a map literal `{expr: expr, ...}` from the current position.
+    /// Returns None if the token stream doesn't start a map literal (fallback to block parsing).
+    fn try_parse_map_literal(&mut self) -> Option<Vec<(Expr, Expr)>> {
+        let saved = self.pos;
+        // Quick first-token check to avoid expensive parsing attempts
+        let first = self.peek_kind().clone();
+        if is_stmt_start_keyword(&first) || matches!(first, TokenKind::RBrace) {
+            return None;
+        }
+        // Save depth state
+        let saved_depth = self.recursion_depth.get();
+        // Try to parse a single expression
+        let first_key = match self.parse_expr(0) {
+            Ok(key) => key,
+            Err(_) => { self.pos = saved; self.recursion_depth.set(saved_depth); return None; }
+        };
+        // The colon after the first expression distinguishes map literal from block
+        if !self.at(&TokenKind::Colon) {
+            self.pos = saved;
+            self.recursion_depth.set(saved_depth);
+            return None;
+        }
+        self.advance(); // consume ':'
+        let first_val = match self.parse_expr(0) {
+            Ok(val) => val,
+            Err(_) => { self.pos = saved; self.recursion_depth.set(saved_depth); return None; }
+        };
+        let mut entries = vec![(first_key, first_val)];
+        // Parse remaining entries
+        loop {
+            self.skip_newlines();
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+                if self.at(&TokenKind::RBrace) {
+                    break; // trailing comma ok
+                }
+                let key = match self.parse_expr(0) {
+                    Ok(k) => k,
+                    Err(_) => { self.pos = saved; self.recursion_depth.set(saved_depth); return None; }
+                };
+                if !self.at(&TokenKind::Colon) {
+                    self.pos = saved;
+                    self.recursion_depth.set(saved_depth);
+                    return None;
+                }
+                self.advance();
+                let val = match self.parse_expr(0) {
+                    Ok(v) => v,
+                    Err(_) => { self.pos = saved; self.recursion_depth.set(saved_depth); return None; }
+                };
+                entries.push((key, val));
+            } else if self.at(&TokenKind::RBrace) {
+                break;
+            } else {
+                self.pos = saved;
+                self.recursion_depth.set(saved_depth);
+                return None;
+            }
+        }
+        self.advance(); // consume '}'
+        Some(entries)
+    }
+}
+
+/// Returns true if the token kind starts a statement (and therefore parsing as block).
+fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
+    matches!(kind,
+        TokenKind::Let | TokenKind::If | TokenKind::While | TokenKind::For |
+        TokenKind::Return | TokenKind::Break | TokenKind::Continue |
+        TokenKind::Match | TokenKind::Arena | TokenKind::Unsafe |
+        TokenKind::Spawn | TokenKind::Await | TokenKind::Alloc |
+        TokenKind::Drop | TokenKind::Steps | TokenKind::Parasteps |
+        TokenKind::Failure | TokenKind::Requires | TokenKind::Ensures |
+        TokenKind::Math | TokenKind::Invariant | TokenKind::Desc | TokenKind::Rule
+    )
 }
 
 /// Delegates to the canonical keyword check in `lexer::keywords`.

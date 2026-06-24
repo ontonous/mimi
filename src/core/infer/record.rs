@@ -99,4 +99,16 @@ impl<'a> Checker<'a> {
         }
         Type::Name("List".into(), vec![elem_ty])
     }
+
+    pub(in crate::core) fn infer_map_literal(
+        &mut self,
+        entries: &[(Expr, Expr)],
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        for (k, v) in entries {
+            self.infer_expr(k, scopes);
+            self.infer_expr(v, scopes);
+        }
+        Type::Name("Record".into(), vec![])
+    }
 }

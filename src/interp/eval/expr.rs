@@ -459,6 +459,17 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Record(ty.clone(), map))
     }
 
+    pub(in crate::interp) fn eval_map_literal(&mut self, entries: &[(Expr, Expr)]) -> Result<Value, InterpError> {
+        let mut map = HashMap::new();
+        for (k, v) in entries {
+            let key = self.eval_expr(k)?;
+            let val = self.eval_expr(v)?;
+            let key_str = key.to_string();
+            map.insert(key_str, val);
+        }
+        Ok(Value::Record(None, map))
+    }
+
     pub(in crate::interp) fn eval_index(&mut self, obj_expr: &Expr, idx_expr: &Expr) -> Result<Value, InterpError> {
         let obj = self.eval_expr(obj_expr)?;
         let idx = self.eval_expr(idx_expr)?;

@@ -1,8 +1,9 @@
 use crate::ast::*;
 use crate::codegen::CallSiteValueExt;
+use crate::codegen::call_try_basic_value;
 use crate::error::CompileError;
 
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue};
 use std::collections::HashMap;
 
 use super::CodeGenerator;
@@ -76,8 +77,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Err("quote { ... } expression encountered in runtime function: quoted AST construction must be resolved before codegen (use `mimi run` to evaluate quote expressions)".into())
             }
             Expr::QuoteInterpolate(_) => {
-                Err("${ ... } interpolation encountered in runtime function: interpolation must be resolved before codegen (use `mimi run` to evaluate interpolated expressions)".into())
+                Err("${ ... } interpolation encountered in runtime function: interpolation must be resolved before codegen (use `mimi run` to evaluate quote expressions)".into())
             }
+            Expr::MapLiteral { entries } => self.compile_map_literal(entries, vars),
             #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
         }
@@ -279,6 +281,78 @@ impl<'ctx> CodeGenerator<'ctx> {
             Lit::Unit => Some(self.context.i64_type().const_int(0, false).into()),
             Lit::FString(_) => None,
         }
+    }
+
+    pub(super) fn compile_map_literal(
+        &mut self,
+        entries: &[(Expr, Expr)],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let map_new = self.module.get_function("mimi_map_new")
+            .ok_or("mimi_map_new not declared")?;
+        let result = self.builder.build_call(map_new, &[], "map_new_call")
+            .map_err(|e| format!("map_new error: {}", e))?;
+        let map_handle = call_try_basic_value(&result)
+            .ok_or("mimi_map_new returned void")?
+            .into_int_value();
+
+        let map_set = self.module.get_function("mimi_map_set")
+            .ok_or("mimi_map_set not declared")?;
+
+        for (key, value) in entries {
+            let key_val = self.compile_expr(key, vars)?;
+            let val_val = self.compile_expr(value, vars)?;
+            // Key must be a string pointer
+            let key_ptr = match &key_val {
+                BasicValueEnum::PointerValue(pv) => *pv,
+                BasicValueEnum::StructValue(sv) => {
+                    self.builder.build_extract_value(*sv, 0, "key_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("extract key str ptr: {}", e)))?
+                        .into_pointer_value()
+                }
+                _ => return Err("map literal key must be a string".into()),
+            };
+            // Value is cast to i64 (ValueHandle) for storage
+            let val_i64 = self.any_value_to_handle(val_val)?;
+            self.builder.build_call(map_set, &[
+                BasicMetadataValueEnum::IntValue(map_handle),
+                BasicMetadataValueEnum::PointerValue(key_ptr),
+                BasicMetadataValueEnum::IntValue(val_i64),
+            ], "map_set_call")
+                .map_err(|e| format!("map_set error: {}", e))?;
+        }
+
+        Ok(BasicValueEnum::IntValue(map_handle))
+    }
+
+    /// Convert any basic value to an i64 ValueHandle for map storage.
+    fn any_value_to_handle(&self, val: BasicValueEnum<'ctx>) -> Result<IntValue<'ctx>, CompileError> {
+        Ok(match val {
+            BasicValueEnum::IntValue(iv) => iv,
+            BasicValueEnum::PointerValue(pv) => {
+                self.builder.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_handle")
+                    .map_err(|e| CompileError::LlvmError(format!("ptr_to_int: {}", e)))?
+            }
+            BasicValueEnum::StructValue(sv) => {
+                // Extract first field (string struct has ptr at 0)
+                let field = self.builder.build_extract_value(sv, 0, "struct_field")
+                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?;
+                match field {
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.builder.build_ptr_to_int(pv, self.context.i64_type(), "struct_ptr_to_handle")
+                            .map_err(|e| CompileError::LlvmError(format!("ptr_to_int: {}", e)))?
+                    }
+                    BasicValueEnum::IntValue(iv) => iv,
+                    _ => return Err("unsupported struct field type for map value handle".into()),
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => {
+                self.builder.build_bit_cast(fv, self.context.i64_type(), "float_to_handle")
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                    .into_int_value()
+            }
+            _ => return Err("unsupported value type for map storage".into()),
+        })
     }
 }
 

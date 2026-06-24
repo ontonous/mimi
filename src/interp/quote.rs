@@ -268,6 +268,11 @@ impl<'a> Interpreter<'a> {
                     vec![q_obj, QuotedAst::Literal(Lit::Int(*idx as i64))],
                 ))
             }
+            Expr::MapLiteral { entries } => {
+                // Evaluate map literal at quote time and interpolate the result
+                let v = self.eval_expr(&Expr::MapLiteral { entries: entries.clone() })?;
+                Ok(QuotedAst::Interpolate(Box::new(v)))
+            }
         }
     }
 

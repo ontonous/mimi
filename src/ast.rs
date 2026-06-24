@@ -378,6 +378,10 @@ pub enum Expr {
     TupleIndex(Box<Expr>, usize),
     /// Arena block expression: arena { stmts; expr }
     Arena(Block),
+    /// Map literal: {"key1": value1, "key2": value2}
+    MapLiteral {
+        entries: Vec<(Expr, Expr)>,
+    },
 }
 
 impl Expr {

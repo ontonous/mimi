@@ -2666,3 +2666,44 @@ fn dual_line_continuation_long_expr() {
         }
     "#, "66");
 }
+
+// ─── 41. v0.22.1: Map literal ─────────────────────────────────
+
+#[test]
+fn dual_map_literal_simple() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let m = {"a": 1, "b": 2};
+            println("created");
+            0
+        }
+    "#, "created");
+}
+
+#[test]
+fn dual_map_literal_size() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let m = {"a": 10, "b": 20, "c": 30};
+            let sz = map_size(m);
+            println(sz);
+            0
+        }
+    "#, "3");
+}
+
+#[test]
+fn dual_map_literal_variable_key() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func main() -> i32 {
+            let key = "x";
+            let m = {key: 42};
+            let sz = map_size(m);
+            println(sz);
+            0
+        }
+    "#, "1");
+}
