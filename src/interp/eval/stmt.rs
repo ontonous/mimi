@@ -150,6 +150,44 @@ impl<'a> Interpreter<'a> {
         Ok(None)
     }
 
+    pub(in crate::interp) fn eval_while_let(&mut self, pat: &Pattern, init: &Expr, body: &Block) -> Result<Option<Value>, InterpError> {
+        loop {
+            let val = self.eval_expr(init)?;
+            let bindings = self.match_pattern(pat, &val);
+            if let Some(bindings) = bindings {
+                self.push_scope();
+                for (name, v) in &bindings {
+                    self.bind(name, v.clone())?;
+                }
+                if self.early_return.is_some() { self.pop_scope(); break; }
+                self.check_invariants(body)?;
+                if let Some(v) = self.eval_block(body)? {
+                    self.pop_scope();
+                    return Ok(Some(v));
+                }
+                if self.early_return.is_some() { self.pop_scope(); break; }
+                match self.loop_action.take() {
+                    Some(LoopAction::Break(val)) => {
+                        self.pop_scope();
+                        if let Some(v) = val {
+                            return Ok(Some(v));
+                        }
+                        break;
+                    }
+                    Some(LoopAction::Continue) => {
+                        self.pop_scope();
+                        continue;
+                    }
+                    None => {}
+                }
+                self.pop_scope();
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
     fn check_invariants(&mut self, block: &Block) -> Result<(), InterpError> {
         for stmt in block {
             if let Stmt::Invariant(expr, _) = stmt {

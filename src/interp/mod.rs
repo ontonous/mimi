@@ -841,4 +841,28 @@ impl<'a> Interpreter<'a> {
             }
         }
     }
+
+    /// Find the numeric discriminant (ordinal) of an enum variant by name.
+    /// Returns 0-based index based on alphabetical ordering of variants.
+    fn find_variant_ordinal(&self, variant_name: &str) -> usize {
+        // Check built-in Result/Option variants
+        match variant_name {
+            "Ok" | "Some" => return 1,
+            "Err" | "None" => return 0,
+            _ => {}
+        }
+        // Scan type definitions for matching enum
+        for td in self.type_defs.values() {
+            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+                sorted.sort_by_key(|v| &v.name);
+                for (i, v) in sorted.iter().enumerate() {
+                    if v.name == variant_name {
+                        return i;
+                    }
+                }
+            }
+        }
+        0
+    }
 }

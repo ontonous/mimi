@@ -361,11 +361,25 @@ impl Parser {
 
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::While, "`while`")?;
-        let cond = self.parse_expr(0)?;
         self.skip_newlines();
-        self.expect(TokenKind::LBrace, "`{`")?;
-        let body = self.parse_block()?;
-        Ok(Stmt::While { cond, body })
+        // Check for while-let: `while let pattern = expr { body }`
+        if self.at(&TokenKind::Let) {
+            self.advance(); // consume 'let'
+            let pat = self.parse_pattern()?;
+            self.skip_newlines();
+            self.expect(TokenKind::Eq, "`=`")?;
+            let init = self.parse_expr(0)?;
+            self.skip_newlines();
+            self.expect(TokenKind::LBrace, "`{`")?;
+            let body = self.parse_block()?;
+            Ok(Stmt::WhileLet { pat, init, body })
+        } else {
+            let cond = self.parse_expr(0)?;
+            self.skip_newlines();
+            self.expect(TokenKind::LBrace, "`{`")?;
+            let body = self.parse_block()?;
+            Ok(Stmt::While { cond, body })
+        }
     }
 
     fn parse_loop(&mut self) -> Result<Stmt, ParseError> {

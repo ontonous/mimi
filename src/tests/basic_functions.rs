@@ -368,3 +368,33 @@ func main() -> i32 {
 "#;
     check_source(src).expect("use with alias should type-check");
 }
+
+#[test]
+fn interp_while_let_some() {
+    let src = r#"
+func main() -> i32 {
+    let mut x: Option<i32> = Some(42)
+    while let Some(v) = x {
+        v
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn interp_while_let_simple() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 42
+    while let v = x {
+        x = 0
+        break
+    }
+    42
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}

@@ -56,6 +56,12 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
+            Stmt::WhileLet { init, body, .. } => {
+                self.check_expr_parasteps_safe(init, scopes);
+                for s in body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
             Stmt::Loop(body) => {
                 for s in body {
                     self.check_stmt_parasteps_safe(s, scopes);
@@ -107,6 +113,9 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::While { body, .. } => {
+                for s in body { self.collect_shared_writes_in_stmt(s, scopes, writes); }
+            }
+            Stmt::WhileLet { body, .. } => {
                 for s in body { self.collect_shared_writes_in_stmt(s, scopes, writes); }
             }
             Stmt::Loop(body) => {
@@ -366,6 +375,15 @@ impl<'a> Checker<'a> {
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+            }
+            Stmt::WhileLet { pat, init, body } => {
+                let it = self.infer_expr(init, scopes);
+                scopes.push(HashMap::new());
+                self.check_pattern(pat, &it, scopes);
+                self.loop_depth += 1;
+                self.check_block(body, ret, scopes);
+                self.loop_depth -= 1;
+                scopes.pop();
             }
             Stmt::Loop(body) => {
                 self.loop_depth += 1;

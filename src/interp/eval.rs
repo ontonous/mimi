@@ -85,6 +85,11 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
+            Stmt::WhileLet { pat, init, body } => {
+                if let Some(v) = self.eval_while_let(pat, init, body)? {
+                    return Ok(Some(v));
+                }
+            }
             Stmt::Loop(body) => {
                 if let Some(v) = self.eval_loop(body)? {
                     return Ok(Some(v));

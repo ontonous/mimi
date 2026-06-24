@@ -51,6 +51,11 @@ impl<'a> Interpreter<'a> {
                 let q_body = Box::new(self.quote_block(body)?);
                 Ok(Some(QuotedAst::While(q_cond, q_body)))
             }
+            Stmt::WhileLet { pat: _, init, body } => {
+                let q_init = Box::new(self.quote_expr(init)?);
+                let q_body = Box::new(self.quote_block(body)?);
+                Ok(Some(QuotedAst::While(q_init, q_body)))
+            }
             Stmt::For { var, iterable, body } => {
                 let q_iter = Box::new(self.quote_expr(iterable)?);
                 let q_body = Box::new(self.quote_block(body)?);

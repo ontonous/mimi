@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased] — 0.22.8-dev
+## [Unreleased] — 0.22.9-dev
+
+### Added
+- `while let pattern = expr { body }` — 条件模式匹配循环（parser/typeck/interp 全路径）
+- `Pattern::Constructor` 支持 `Type::Name("Option"/"Result", ...)` 表示（修复 Option/Result 模式匹配）
+- 测试: interp_while_let_some, interp_while_let_simple
+
+## [v0.22.8] - 2026-06-24
 
 ### Added
 - `assert(cond, msg)` — 断言支持可选自定义消息（typeck/interp/codegen）

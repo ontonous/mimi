@@ -57,34 +57,44 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Constructor(name, pats) => {
-                // Handle built-in Result<T,E> constructors Ok/Err (only for Type::Result subjects)
-                if (name == "Ok" || name == "Err") && matches!(subject, Type::Result(_, _)) {
-                    if let Type::Result(ok_ty, err_ty) = subject {
+                // Handle built-in Option/Result constructors
+                // (support both Type::Option/Result and Type::Name("Option"/"Result", _) representations)
+                if name == "Some" || name == "None" {
+                    let inner_opt: Option<&Type> = match subject {
+                        Type::Option(inner) => Some(inner.as_ref()),
+                        Type::Name(n, args) if n == "Option" && args.len() == 1 => Some(&args[0]),
+                        _ => None,
+                    };
+                    if let Some(inner) = inner_opt {
+                        if name == "Some" {
+                            if pats.len() != 1 {
+                                self.emit_code(crate::diagnostic::codes::E0228,
+                                    format!("'Some' expects 1 argument, got {}", pats.len()));
+                            } else {
+                                self.check_pattern(&pats[0], inner, scopes);
+                            }
+                        } else if !pats.is_empty() {
+                            self.emit_code(crate::diagnostic::codes::E0227, "'None' expects no arguments".to_string());
+                        }
+                        return;
+                    }
+                }
+                if name == "Ok" || name == "Err" {
+                    let ok_err: Option<(&Type, &Type)> = match subject {
+                        Type::Result(ok, err) => Some((ok.as_ref(), err.as_ref())),
+                        Type::Name(n, args) if n == "Result" && args.len() == 2 => Some((&args[0], &args[1])),
+                        _ => None,
+                    };
+                    if let Some((ok_ty, err_ty)) = ok_err {
                         let expected_ty = if name == "Ok" { ok_ty } else { err_ty };
                         if pats.len() != 1 {
-                            self.emit_code(crate::diagnostic::codes::E0228, format!("'{}' expects 1 argument, got {}", name, pats.len()));
+                            self.emit_code(crate::diagnostic::codes::E0228,
+                                format!("'{}' expects 1 argument, got {}", name, pats.len()));
                         } else {
                             self.check_pattern(&pats[0], expected_ty, scopes);
                         }
+                        return;
                     }
-                    return;
-                }
-                // Handle built-in Option<T> constructors (only for Type::Option subjects)
-                if name == "Some" && matches!(subject, Type::Option(_)) {
-                    if let Type::Option(inner) = subject {
-                        if pats.len() != 1 {
-                            self.emit_code(crate::diagnostic::codes::E0228, format!("'Some' expects 1 argument, got {}", pats.len()));
-                        } else {
-                            self.check_pattern(&pats[0], inner, scopes);
-                        }
-                    }
-                    return;
-                }
-                if name == "None" && matches!(subject, Type::Option(_)) {
-                    if !pats.is_empty() {
-                        self.emit_code(crate::diagnostic::codes::E0227, "'None' expects no arguments".to_string());
-                    }
-                    return;
                 }
                 let def = self.types.values().find(|t| {
                     match &t.kind {

@@ -260,6 +260,12 @@ pub enum Stmt {
         cond: Expr,
         body: Block,
     },
+    /// while let pattern = expr { body }
+    WhileLet {
+        pat: Pattern,
+        init: Expr,
+        body: Block,
+    },
     /// Infinite loop: loop { break expr }
     Loop(Block),
     For {

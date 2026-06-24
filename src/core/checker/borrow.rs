@@ -180,6 +180,10 @@ impl<'a> Checker<'a> {
                 Self::collect_uses_in_expr(cond, uses);
                 for s in body { Self::collect_uses_in_stmt(s, uses); }
             }
+            Stmt::WhileLet { init, body, .. } => {
+                Self::collect_uses_in_expr(init, uses);
+                for s in body { Self::collect_uses_in_stmt(s, uses); }
+            }
             Stmt::For { iterable, body, .. } => {
                 Self::collect_uses_in_expr(iterable, uses);
                 for s in body { Self::collect_uses_in_stmt(s, uses); }

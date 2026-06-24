@@ -799,6 +799,11 @@ impl<'a> Interpreter<'a> {
 
                     (_, "to_string") => Ok(Value::String(self.value_to_debug_string(obj))),
 
+                    (_, "discriminant") => {
+                        let ordinal = self.find_variant_ordinal(name);
+                        Ok(Value::Int(ordinal as i64))
+                    }
+
                     _ => Err(InterpError::new(format!("variant '{}' has no method '{}'", name, method))),
                 }
             }
