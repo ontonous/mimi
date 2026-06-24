@@ -102,6 +102,9 @@ use std::hash::{Hash, Hasher};
 pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     use std::hash::Hash;
     use std::io::Read;
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::io::AsRawFd;
 
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest.join("src/runtime/standalone.rs");
@@ -119,25 +122,49 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     let cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("mkdir cache: {}", e))?;
     let lib_path = cache_dir.join(format!("libmimi_runtime_{:016x}.a", hash));
+    let lock_path = cache_dir.join("_build.lock");
 
+    // File lock to serialize runtime compilation across parallel tests
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("create lock: {}", e))?;
+    #[cfg(unix)]
+    unsafe {
+        libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+    }
+
+    // Check again after acquiring lock (another thread may have compiled it)
     if lib_path.exists() {
+        #[cfg(unix)]
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN); }
         return Ok(lib_path);
     }
 
+    // Write a temp file then atomically rename to avoid partial writes
+    let tmp_path = cache_dir.join(format!("libmimi_runtime_{:016x}.tmp", hash));
     let output = std::process::Command::new("rustc")
         .arg("--edition").arg("2021")
         .arg("--crate-type").arg("staticlib")
         .arg("--cfg").arg("standalone")
         .arg("--crate-name").arg("mimi_runtime")
         .arg("-o")
-        .arg(&lib_path)
+        .arg(&tmp_path)
         .arg(&runtime_rs)
         .output()
         .map_err(|e| format!("rustc not found: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        #[cfg(unix)]
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN); }
         return Err(format!("runtime compilation failed, exit: {:?}, stderr: {}", output.status.code(), stderr));
     }
+    std::fs::rename(&tmp_path, &lib_path).map_err(|e| format!("rename: {}", e))?;
+
+    #[cfg(unix)]
+    unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN); }
     Ok(lib_path)
 }
 
