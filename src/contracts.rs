@@ -57,33 +57,40 @@ pub fn extract_contracts_with_span(mms_text: &str, span: Span) -> Contract {
 }
 
 /// Bind extracted contracts to their corresponding functions in the AST
-pub fn bind_contracts(file: &mut File, contracts: HashMap<String, Contract>) {
+/// Returns a list of parse errors encountered during contract expression parsing.
+pub fn bind_contracts(file: &mut File, contracts: HashMap<String, Contract>) -> Vec<String> {
+    let mut errors = Vec::new();
     for item in &mut file.items {
-        bind_item_contracts(item, &contracts);
+        bind_item_contracts(item, &contracts, &mut errors);
     }
+    errors
 }
 
-fn bind_item_contracts(item: &mut Item, contracts: &HashMap<String, Contract>) {
+fn bind_item_contracts(item: &mut Item, contracts: &HashMap<String, Contract>, errors: &mut Vec<String>) {
     match item {
         Item::Func(func) => {
             if let Some(contract) = contracts.get(&func.name) {
-                // Add requires/ensures/math statements to the beginning of the function body
                 let mut prefix = Vec::new();
                 for req in &contract.requires {
-                    // Parse the condition as an expression if possible
-                    if let Ok(expr) = parse_condition(req) {
-                        prefix.push(Stmt::Requires(expr, contract.span));
+                    match parse_condition(req) {
+                        Ok(expr) => prefix.push(Stmt::Requires(expr, contract.span)),
+                        Err(e) => errors.push(format!("parse error in requires for '{}': {}", func.name, e)),
                     }
                 }
                 for ens in &contract.ensures {
-                    if let Ok(expr) = parse_condition(ens) {
-                        prefix.push(Stmt::Ensures(expr, contract.span));
+                    match parse_condition(ens) {
+                        Ok(expr) => prefix.push(Stmt::Ensures(expr, contract.span)),
+                        Err(e) => errors.push(format!("parse error in ensures for '{}': {}", func.name, e)),
                     }
                 }
                 if !contract.math.is_empty() {
-                    let math_exprs: Vec<Expr> = contract.math.iter()
-                        .filter_map(|m| parse_condition(m).ok())
-                        .collect();
+                    let mut math_exprs = Vec::new();
+                    for m in &contract.math {
+                        match parse_condition(m) {
+                            Ok(expr) => math_exprs.push(expr),
+                            Err(e) => errors.push(format!("parse error in math for '{}': {}", func.name, e)),
+                        }
+                    }
                     if !math_exprs.is_empty() {
                         prefix.push(Stmt::Math(math_exprs));
                     }
@@ -95,7 +102,7 @@ fn bind_item_contracts(item: &mut Item, contracts: &HashMap<String, Contract>) {
         }
         Item::Module(m) => {
             for inner in &mut m.items {
-                bind_item_contracts(inner, contracts);
+                bind_item_contracts(inner, contracts, errors);
             }
         }
         _ => {}
@@ -144,8 +151,19 @@ fn transform_rules_in_block(stmts: &mut [Stmt]) {
         // Phase 2: Recurse into inner blocks (uses &mut to pass to recursive call)
         match &mut stmts[i] {
             Stmt::Block(block) | Stmt::While { body: block, .. }
-            | Stmt::For { body: block, .. } => {
+            | Stmt::For { body: block, .. }
+            | Stmt::Loop(block)
+            | Stmt::Arena(block)
+            | Stmt::Unsafe(block)
+            | Stmt::Parasteps(block)
+            | Stmt::OnFailure(block) => {
                 transform_rules_in_block(block.as_mut_slice());
+            }
+            Stmt::WhileLet { body, .. } => {
+                transform_rules_in_block(body.as_mut_slice());
+            }
+            Stmt::Alloc { body, .. } => {
+                transform_rules_in_block(body.as_mut_slice());
             }
             Stmt::If { then_, else_, .. } => {
                 transform_rules_in_block(then_.as_mut_slice());

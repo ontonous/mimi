@@ -5,6 +5,26 @@
 ### Added
 - (placeholder)
 
+## [v0.23.0] — 2026-06-24 — Z3 验证器深度修复
+
+### Fixed
+- **K1** 🔴: Z3 约束静默丢失 — `expr_to_z3_bool`/`expr_to_z3_int`/`expr_to_z3_real` 遇到不支持的表达式（Lambda, Comprehension, SetLiteral, MapLiteral, Pattern::Constructor 等）时返回 None，现在收集到 `parse_errors` 并附加到诊断中。合约不可编码时返回 Unknown+警告，而非静默 Verified。
+- **K2** 🔴: Z3 result 未约束 — 函数体返回值编码失败时，`parse_errors` 记录"could not encode return expression — result may be unconstrained"，不再静默忽略。
+- **K3** 🔴: Z3 求解器崩溃后 panic — `Z3String::from_str("").expect(...)` 替换为 `if let Ok(...) else { continue }`，求解器状态不一致时不 panic。
+- **K4** 🔴: Contracts 解析失败静默 — `parse_condition()` 在 `bind_contracts` 中失败时，收集到 `Vec<String>` 返回给调用方。`check` 命令显示为诊断消息。
+- **K5** 🔴: Type Checker Stmt::Math 未检查 — `Stmt::Math` 从通配分支移出，每个 math 表达式经 `infer_expr` 类型检查。
+- **K6** 🔴: rule 转换遗漏块类型 — `transform_rules_in_block` 补充 Loop, WhileLet, Arena, Unsafe, Alloc, Parasteps, OnFailure 的递归遍历。
+
+## [v0.23.1] — 安全检查 + 验证覆盖（待开发）
+
+### Fixed
+- (H1-H2, H5-H8 待实现)
+
+## [v0.23.2] — Codegen 修复 + 合约绑定 + 错误处理（待开发）
+
+### Fixed
+- (H3-H4, H9-H10, M1-M8 待实现)
+
 ## [v0.22.9] - 2026-06-24 — while let + 模式修复 + codegen缺口关闭
 
 ### Added

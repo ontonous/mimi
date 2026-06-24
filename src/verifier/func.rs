@@ -345,7 +345,9 @@ impl crate::verifier::Verifier {
                     if let Some(len_var) = vars.get_string_len(p.name.as_str()) {
                         self.solver.assert(z3_s.length().eq(len_var));
                     }
-                    let empty = Z3String::from_str("").expect("empty string literal");
+                    let Ok(empty) = Z3String::from_str("") else {
+                        continue;
+                    };
                     let nonempty_check = z3_s.ne(&empty);
                     if let Some(ne_var) = vars.get_string_nonempty(p.name.as_str()) {
                         self.solver.assert(ne_var.eq(&nonempty_check));
@@ -361,7 +363,9 @@ impl crate::verifier::Verifier {
                     if let Some(len_var) = vars.get_string_len(old_name) {
                         self.solver.assert(z3_s.length().eq(len_var));
                     }
-                    let empty = Z3String::from_str("").expect("empty string literal");
+                    let Ok(empty) = Z3String::from_str("") else {
+                        continue;
+                    };
                     let nonempty_check = z3_s.ne(&empty);
                     if let Some(ne_var) = vars.get_string_nonempty(old_name) {
                         self.solver.assert(ne_var.eq(&nonempty_check));
@@ -383,18 +387,24 @@ impl crate::verifier::Verifier {
         for req in &requires_exprs {
             if let Some(z3_bool) = self.expr_to_z3_bool(req, &mut vars) {
                 self.solver.assert(z3_bool);
+            } else {
+                parse_errors.push(format!("could not encode requires: {}", format_expr(req)));
             }
         }
 
         for math in &math_exprs {
             if let Some(z3_bool) = self.expr_to_z3_bool(math, &mut vars) {
                 self.solver.assert(z3_bool);
+            } else {
+                parse_errors.push(format!("could not encode math constraint: {}", format_expr(math)));
             }
         }
 
         for inv in &invariant_exprs {
             if let Some(z3_bool) = self.expr_to_z3_bool(inv, &mut vars) {
                 self.solver.assert(z3_bool);
+            } else {
+                parse_errors.push(format!("could not encode invariant: {}", format_expr(inv)));
             }
         }
 
@@ -422,11 +432,15 @@ impl crate::verifier::Verifier {
                     if let Some(r) = vars.get_real("result") {
                         self.solver.assert(r.eq(&body_z3));
                     }
+                } else {
+                    parse_errors.push("could not encode return expression — result may be unconstrained".into());
                 }
             } else if let Some(body_z3) = self.expr_to_z3_int(return_expr, &mut vars) {
                 if let Some(i) = vars.get_int("result") {
                     self.solver.assert(i.eq(&body_z3));
                 }
+            } else {
+                parse_errors.push("could not encode return expression — result may be unconstrained".into());
             }
         } else if func.ret.is_some() {
             // No return expression found but function has a return type:
@@ -465,16 +479,16 @@ impl crate::verifier::Verifier {
             + num_real_params // old_* equality constraints (real)
             + if body_return.is_some() { 1 } else { 0 };
 
-        let annotate_parse_errors = |diag: Option<Diagnostic>| -> Option<Diagnostic> {
-            if !parse_errors.is_empty() {
+        let annotate_parse_errors = |diag: Option<Diagnostic>, errs: &[String]| -> Option<Diagnostic> {
+            if !errs.is_empty() {
                 let mut d = diag.unwrap_or_else(|| {
                     Diagnostic::error(
-                        format!("contract parse errors in '{}'", func.name),
+                        format!("contract errors in '{}'", func.name),
                         Span::single(func.pos.0, func.pos.1),
                     )
                 });
                 d = d.with_note(
-                    format!("contract parse errors: {}", parse_errors.join("; ")),
+                    format!("contract errors: {}", errs.join("; ")),
                     Span::single(func.pos.0, func.pos.1),
                 );
                 Some(d)
@@ -490,6 +504,8 @@ impl crate::verifier::Verifier {
                     for ens in &ensures_exprs {
                         if let Some(z3_bool) = self.expr_to_z3_bool(ens, &mut vars) {
                             self.solver.assert(z3_bool.not());
+                        } else {
+                            parse_errors.push(format!("could not encode ensures: {}", format_expr(ens)));
                         }
                     }
                     match self.check_safe() {
@@ -499,7 +515,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Verified,
                                 message: "postconditions verified".into(),
-                                diagnostic: annotate_parse_errors(None),
+                                diagnostic: annotate_parse_errors(None, &parse_errors),
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
@@ -521,7 +537,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Failed,
                                 message: diagnostic.message.clone(),
-                                diagnostic: annotate_parse_errors(Some(diagnostic)),
+                                diagnostic: annotate_parse_errors(Some(diagnostic), &parse_errors),
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
@@ -540,7 +556,7 @@ impl crate::verifier::Verifier {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Unknown,
                                 message: msg,
-                                diagnostic: annotate_parse_errors(None),
+                                diagnostic: annotate_parse_errors(None, &parse_errors),
                                 duration_us: elapsed.as_micros() as u64,
                                 constraint_count,
                             }
@@ -551,7 +567,7 @@ impl crate::verifier::Verifier {
                         func_name: func.name.clone(),
                         status: VerifStatus::Verified,
                         message: "preconditions satisfiable, no postconditions".into(),
-                        diagnostic: annotate_parse_errors(None),
+                        diagnostic: annotate_parse_errors(None, &parse_errors),
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count,
                     }
@@ -571,7 +587,7 @@ impl crate::verifier::Verifier {
                     func_name: func.name.clone(),
                     status: VerifStatus::Failed,
                     message: "preconditions are unsatisfiable".into(),
-                    diagnostic: annotate_parse_errors(Some(diagnostic)),
+                    diagnostic: annotate_parse_errors(Some(diagnostic), &parse_errors),
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
                 }
@@ -589,7 +605,7 @@ impl crate::verifier::Verifier {
                     func_name: func.name.clone(),
                     status: VerifStatus::Unknown,
                     message: msg,
-                    diagnostic: annotate_parse_errors(None),
+                    diagnostic: annotate_parse_errors(None, &parse_errors),
                     duration_us: elapsed.as_micros() as u64,
                     constraint_count,
                 }

@@ -72,7 +72,21 @@ pub(crate) fn check(path: Option<&Path>, extract_contracts: bool, strict: bool, 
             }
         }
         // Bind contracts to functions
-        contracts::bind_contracts(&mut file, contracts);
+        let contract_errors = contracts::bind_contracts(&mut file, contracts);
+        if !contract_errors.is_empty() {
+            let use_color = colors_enabled();
+            let src = fs::read_to_string(&path).ok();
+            let src_ref = src.as_deref();
+            for err in &contract_errors {
+                let d = mimi::diagnostic::Diagnostic::error(err.clone(), mimi::span::Span::single(0, 0));
+                let formatted = format_diagnostic(&d, src_ref, &path.display().to_string());
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
+            }
+        }
     }
 
     // Map inline rule statements to structured contracts (independent of mms extraction)

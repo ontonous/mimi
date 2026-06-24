@@ -76,7 +76,8 @@ func main() -> i32 {
     let tokens = crate::lexer::Lexer::new(src).tokenize().expect("src/tests/v1_2_contract_extract.rs:76 unwrap failed");
     let mut file = crate::parser::Parser::new(tokens).parse_file().expect("src/tests/v1_2_contract_extract.rs:77 unwrap failed");
     let contracts_map = extract_contracts_from_file(&file);
-    contracts::bind_contracts(&mut file, contracts_map);
+    let errors = contracts::bind_contracts(&mut file, contracts_map);
+    assert!(errors.is_empty(), "contract binding should not produce errors: {:?}", errors);
     // Should type-check successfully
     let result = crate::core::check(&file);
     assert!(result.is_ok(), "contract binding should not break type checking");

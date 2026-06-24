@@ -689,7 +689,12 @@ impl<'a> Checker<'a> {
                 self.infer_expr(expr, scopes);
                 scopes.pop();
             }
-            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
+            Stmt::Math(exprs) => {
+                for expr in exprs {
+                    self.infer_expr(expr, scopes);
+                }
+            }
+            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
             Stmt::OnFailure(body) => {
                 self.check_block(body, ret, scopes);
             }
