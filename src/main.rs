@@ -30,7 +30,7 @@ use mimi::diagnostic::format::format_simple_error;
 #[path = "main/update.rs"] mod update;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.22.5", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.22.6-dev", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
