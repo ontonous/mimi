@@ -108,6 +108,14 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_sort_f64(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        self.builtin_sort(args)
+    }
+
+    pub(crate) fn builtin_sort_str(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        self.builtin_sort(args)
+    }
+
     pub(crate) fn builtin_reverse(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
             return Err(InterpError::new("reverse expects 1 argument (list)"));

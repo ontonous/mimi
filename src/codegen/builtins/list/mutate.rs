@@ -381,4 +381,17 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     }
 
+    pub(in crate::codegen) fn compile_sort_f64(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+                Err(CompileError::Generic("sort_f64 codegen not yet implemented".to_string()))
+    }
+
+    pub(in crate::codegen) fn compile_sort_str(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+                Err(CompileError::Generic("sort_str codegen not yet implemented".to_string()))
+    }
 }

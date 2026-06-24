@@ -500,7 +500,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
         | "str_index_of" | "str_repeat" | "str_trim"
         | "str_to_upper" | "str_to_lower" | "str_substring"
-        | "contains" | "sum" | "reverse" | "flatten" | "sort" | "zip" | "enumerate"
+        | "contains" | "sum" | "reverse" | "flatten" | "sort" | "sort_f64" | "sort_str" | "zip" | "enumerate"
         | "str_split" | "str_join" | "str_replace"
         | "has_key" | "keys" | "values" | "map_new" | "map_get" | "map_set" | "map_remove" | "map_size" | "map_from_list"
         | "str_to_c_str" | "c_str_to_string"
@@ -601,6 +601,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "reverse" => self.compile_reverse(args),
             "flatten" => self.compile_flatten(args),
             "sort" => self.compile_sort(args),
+            "sort_f64" => self.compile_sort_f64(args),
+            "sort_str" => self.compile_sort_str(args),
             "enumerate" => self.compile_enumerate(args),
             "zip" => self.compile_zip(args),
             "map_new" => self.compile_map_new(args),

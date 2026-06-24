@@ -181,6 +181,8 @@ impl<'a> Interpreter<'a> {
             "filter" => self.builtin_filter(args),
             "reduce" => self.builtin_reduce(args),
             "sort" => self.builtin_sort(args),
+            "sort_f64" => self.builtin_sort_f64(args),
+            "sort_str" => self.builtin_sort_str(args),
             "reverse" => self.builtin_reverse(args),
             "flatten" => self.builtin_flatten(args),
             "zip" => self.builtin_zip(args),

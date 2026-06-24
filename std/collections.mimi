@@ -306,6 +306,16 @@ pub func sort_list(xs: List<i32>) -> List<i32> {
     sort(xs)
 }
 
+// sort_list_f64: Returns a sorted copy of xs (ascending) for f64 lists.
+pub func sort_list_f64(xs: List<f64>) -> List<f64> {
+    sort_f64(xs)
+}
+
+// sort_list_str: Returns a sorted copy of xs (ascending) for string lists.
+pub func sort_list_str(xs: List<string>) -> List<string> {
+    sort_str(xs)
+}
+
 // filter_positives: Filters xs to keep only positive values.
 pub func filter_positives(xs: List<i32>) -> List<i32> {
     filter(xs, fn(fp_x: i32) -> bool { fp_x > 0 })

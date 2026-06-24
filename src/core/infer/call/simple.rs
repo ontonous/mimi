@@ -370,7 +370,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unknown".into(), vec![]);
             }
-            "sort" | "reverse" | "flatten" => {
+            "sort" | "sort_f64" | "sort_str" | "reverse" | "flatten" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
