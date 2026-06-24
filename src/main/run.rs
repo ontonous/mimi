@@ -1,13 +1,22 @@
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::{interp, lexer, loader, parser};
 use crate::{is_production, is_sketch, resolve_path};
 
-pub(crate) fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool, allocator: &str, strict: bool) -> Result<(), String> {
+pub(crate) fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool, allocator: &str, strict: bool, watch: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
+    if watch {
+        run_watch(&path, verify_contracts, verify_ffi, allocator, strict)
+    } else {
+        run_once(&path, verify_contracts, verify_ffi, allocator, strict)
+    }
+}
+
+fn run_once(path: &Path, verify_contracts: bool, verify_ffi: bool, allocator: &str, strict: bool) -> Result<(), String> {
+    let source = fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     if is_sketch(&path) {
         return Err("cannot run a .mms sketch file directly; promote to .mimi first".into());
@@ -77,4 +86,32 @@ pub(crate) fn run(path: Option<&Path>, verify_contracts: bool, verify_ffi: bool,
             std::process::exit(1);
         }
     }
+}
+
+fn run_watch(path: &Path, verify_contracts: bool, verify_ffi: bool, allocator: &str, strict: bool) -> Result<(), String> {
+    println!("Watching {} for changes...", path.display());
+    let mut last_modified = get_mtime(path)?;
+    // Run once first
+    let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict);
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        match get_mtime(path) {
+            Ok(mtime) if mtime != last_modified => {
+                last_modified = mtime;
+                println!("\n--- file changed, re-running ---");
+                print!("\x1B[2J\x1B[H");
+                let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict);
+            }
+            Err(e) => {
+                eprintln!("watch error: {}", e);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn get_mtime(path: &Path) -> Result<SystemTime, String> {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("failed to get file modification time: {}", e))
 }

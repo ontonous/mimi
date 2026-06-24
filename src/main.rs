@@ -69,6 +69,9 @@ enum Command {
         /// Strict mode: only compile $/$$ locked fragments
         #[arg(long)]
         strict: bool,
+        /// Watch mode: re-run on file changes
+        #[arg(long, short)]
+        watch: bool,
     },
     /// Run test functions (functions named test_*)
     Test {
@@ -257,9 +260,9 @@ fn main() {
     let args = Args::parse();
     let result = match args.cmd {
         Command::Check { path, extract_contracts, strict, verify_rules } => check::check(path.as_deref(), extract_contracts, strict, verify_rules),
-        Command::Run { path, verify_contracts, verify_ffi, skip_verify_ffi, allocator, strict } => {
+        Command::Run { path, verify_contracts, verify_ffi, skip_verify_ffi, allocator, strict, watch } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
-            run::run(path.as_deref(), verify_contracts, ffi_check, &allocator, strict)
+            run::run(path.as_deref(), verify_contracts, ffi_check, &allocator, strict, watch)
         }
         Command::Test { path, allocator, filter, verbose, strict } => test::test(path.as_deref(), &allocator, filter.as_deref(), verbose, strict),
         Command::Init { name } => init::init(name.as_deref()),
