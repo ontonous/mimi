@@ -178,6 +178,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expr::Field(obj, _) => self.infer_object_type(obj, vars),
+            Expr::Index(obj, _) => {
+                // Index into a List<T> returns T. Infer the list's element type.
+                let obj_type = self.infer_object_type(obj, vars);
+                if obj_type.starts_with("List<") {
+                    let inner = &obj_type[5..];
+                    let mut depth = 0u32;
+                    for (i, ch) in inner.char_indices() {
+                        match ch {
+                            '<' => depth += 1,
+                            '>' => {
+                                if depth == 0 {
+                                    return inner[..=i].trim().to_string();
+                                }
+                                depth -= 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    inner.trim().to_string()
+                } else {
+                    String::new()
+                }
+            }
             Expr::Block(block) => {
                 block.last().and_then(|last| {
                     if let Stmt::Expr(e) = last {

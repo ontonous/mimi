@@ -30,6 +30,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         Ok(None)
     }
+
+    /// Try to convert a list element from i64 to its proper struct type by
+    /// inferring the element type from the expression's type annotation.
+    fn convert_list_elem_by_type(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        obj_expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let obj_type = self.infer_object_type(obj_expr, vars);
+        if obj_type.is_empty() {
+            return Ok(None);
+        }
+        if let Some(elem_ty) = crate::codegen::extract_list_elem_type(&obj_type) {
+            if let Some(llvm_elem) = types::mimi_type_to_llvm(self.context, &elem_ty) {
+                if let BasicTypeEnum::StructType(sty) = llvm_elem {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let elem_ptr = self.builder.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                    let struct_val = self.builder.build_load(
+                        BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct",
+                    ).map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
+                    return Ok(Some(struct_val));
+                }
+            }
+        }
+        Ok(None)
+    }
     pub(in crate::codegen) fn compile_field_expr(
         &mut self,
         obj: &Expr,
@@ -152,13 +180,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let elem_int = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
                         .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                         .into_int_value();
-                    // Convert i64→struct only when indexing a direct variable
-                    // (not chained indexing like nested[0][0] where the inner list's
-                    // elements are scalars).
+                    // Convert i64→struct when the list element type is a compound type.
+                    // Only use variable-name lookup for direct Ident expressions
+                    // (avoids wrong type inference for nested lists).
                     if let Expr::Ident(var_name) = obj {
                         if let Some(converted) = self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))? {
                             return Ok(converted);
                         }
+                    }
+                    if let Some(converted) = self.convert_list_elem_by_type(elem_int, obj, vars)? {
+                        return Ok(converted);
                     }
                     return Ok(elem_int.into());
                 }
@@ -200,10 +231,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let elem_int = self.builder.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
                     .into_int_value();
+                // For struct-valued lists (from chained indexing), use type
+                // inference to determine if elements are structs or scalars.
                 if let Expr::Ident(var_name) = obj {
                     if let Some(converted) = self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))? {
                         return Ok(converted);
                     }
+                }
+                if let Some(converted) = self.convert_list_elem_by_type(elem_int, obj, vars)? {
+                    return Ok(converted);
                 }
                 Ok(elem_int.into())
             }

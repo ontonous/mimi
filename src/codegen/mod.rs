@@ -40,6 +40,67 @@ pub(crate) trait CallSiteValueExt<'ctx> {
     fn try_as_basic_value_opt(&self) -> Option<BasicValueEnum<'ctx>>;
 }
 
+/// Extract the element type from a "List<T>" type name string.
+pub(super) fn extract_list_elem_type(type_name: &str) -> Option<crate::ast::Type> {
+    if !type_name.starts_with("List<") {
+        return None;
+    }
+    let inner_start = 5;
+    let mut depth = 0u32;
+    let mut inner_end = None;
+    for (i, ch) in type_name[inner_start..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                if depth == 0 {
+                    inner_end = Some(inner_start + i);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let inner_str = inner_end
+        .and_then(|end| {
+            let s = type_name[inner_start..end].trim();
+            if s.is_empty() { None } else { Some(s) }
+        })?;
+    // Parse the inner type, handling nested generics.
+    Some(parse_inner_type(inner_str))
+}
+
+/// Parse a type name string into a Type, supporting generics like List<T>.
+fn parse_inner_type(s: &str) -> crate::ast::Type {
+    let s = s.trim();
+    if let Some(lt) = s.find('<') {
+        if s.ends_with('>') {
+            let base = s[..lt].trim();
+            let args_str = s[lt + 1..s.len() - 1].trim();
+            let mut args = Vec::new();
+            let mut depth = 0u32;
+            let mut start = 0usize;
+            for (i, ch) in args_str.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => depth = depth.saturating_sub(1),
+                    ',' if depth == 0 => {
+                        args.push(parse_inner_type(args_str[start..i].trim()));
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let remaining = args_str[start..].trim();
+            if !remaining.is_empty() {
+                args.push(parse_inner_type(remaining));
+            }
+            return crate::ast::Type::Name(base.to_string(), args);
+        }
+    }
+    crate::ast::Type::Name(s.to_string(), vec![])
+}
+
 impl<'ctx> CallSiteValueExt<'ctx> for CallSiteValue<'ctx> {
     fn try_as_basic_value_opt(&self) -> Option<BasicValueEnum<'ctx>> {
         extract_basic_value(self.try_as_basic_value())
