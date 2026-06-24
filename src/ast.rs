@@ -304,7 +304,7 @@ pub enum Stmt {
     /// mms {} super-comment block containing MimiSpec intent
     MmsBlock {
         content: String,
-        ast: Option<mimispec::ast::File>,
+        ast: Option<crate::core::mms_ast::MmsFile>,
         span: crate::span::Span,
     },
     /// alloc(Kind) { ... } block using a specific allocator

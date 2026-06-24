@@ -234,7 +234,7 @@ impl Parser {
         Ok(Stmt::MmsBlock { content, ast, span })
     }
 
-    fn try_parse_mimispec_with_timeout(content: &str) -> Option<mimispec::ast::File> {
+    fn try_parse_mimispec_with_timeout(content: &str) -> Option<crate::core::mms_ast::MmsFile> {
         use std::sync::mpsc;
         use std::thread;
         use std::time::Duration;
@@ -250,12 +250,63 @@ impl Parser {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(result) => {
                 if result.errors.is_empty() {
-                    Some(result.file)
+                    Some(Self::mms_file_from_mimispec(result.file))
                 } else {
                     None
                 }
             }
             Err(_) => None,
+        }
+    }
+
+    /// Convert mimispec::ast::File → our crate-independent MmsFile.
+    /// This isolates ast.rs from the mimispec crate dependency.
+    fn mms_file_from_mimispec(f: mimispec::ast::File) -> crate::core::mms_ast::MmsFile {
+        use crate::core::mms_ast::{MmsFile, MmsFragment};
+        use mimispec::ast::Fragment;
+        MmsFile {
+            imports: f.imports,
+            fragments: f.fragments.into_iter().map(|frag| match frag {
+                Fragment::Module { module } => MmsFragment::Module {
+                    name: module.name.name,
+                    desc: module.desc.map(|d| d.content.value),
+                    items: module.items.into_iter().map(Self::convert_mms_fragment).collect(),
+                },
+                Fragment::Func { func } => MmsFragment::Func {
+                    name: func.name.name,
+                    desc: func.desc.map(|d| d.content.value),
+                },
+                Fragment::TypeDef { typedef } => MmsFragment::TypeDef {
+                    name: typedef.name.name,
+                    desc: typedef.desc.map(|d| d.content.value),
+                },
+                Fragment::Steps { .. } => MmsFragment::Steps,
+                Fragment::Placeholder { .. } => MmsFragment::Placeholder,
+                other => MmsFragment::Unknown(format!("{other:?}")),
+            }).collect(),
+        }
+    }
+
+    fn convert_mms_fragment(frag: mimispec::ast::Fragment) -> crate::core::mms_ast::MmsFragment {
+        use crate::core::mms_ast::MmsFragment;
+        use mimispec::ast::Fragment;
+        match frag {
+            Fragment::Module { module } => MmsFragment::Module {
+                name: module.name.name,
+                desc: module.desc.map(|d| d.content.value),
+                items: module.items.into_iter().map(Self::convert_mms_fragment).collect(),
+            },
+            Fragment::Func { func } => MmsFragment::Func {
+                name: func.name.name,
+                desc: func.desc.map(|d| d.content.value),
+            },
+            Fragment::TypeDef { typedef } => MmsFragment::TypeDef {
+                name: typedef.name.name,
+                desc: typedef.desc.map(|d| d.content.value),
+            },
+            Fragment::Steps { .. } => MmsFragment::Steps,
+            Fragment::Placeholder { .. } => MmsFragment::Placeholder,
+            other => MmsFragment::Unknown(format!("{other:?}")),
         }
     }
 

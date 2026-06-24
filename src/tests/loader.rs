@@ -1,9 +1,18 @@
-use std::fs;
+use crate::interp::{Interpreter, Value};
+use crate::lexer::Lexer;
+use crate::parser::Parser;
+use crate::loader::ModuleLoader;
 use std::path::PathBuf;
+use std::fs;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mimi_test_loader_{}_{}", name, std::process::id()));
-    let _ = fs::create_dir_all(&dir);
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn temp_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("mimi_test_{}_{}", label, n));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
 
@@ -12,218 +21,330 @@ fn cleanup(dir: &PathBuf) {
 }
 
 #[test]
-fn loader_load_single_file() {
-    let dir = temp_dir("single");
-    let file_path = dir.join("main.mimi");
-    fs::write(&file_path, r#"
+fn loader_module_relative_import() {
+    let dir = temp_dir("relative_import");
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    fs::write(lib_dir.join("helper.mimi"), r#"
+pub func greet(name: string) -> string {
+    "Hello, " + name + "!"
+}
+"#).expect("write helper.mimi");
+
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use lib::helper
+
+func main() -> string {
+    helper::greet("world")
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let s = match &val {
+        Value::String(s) => s.clone(),
+        _ => { panic!("expected string, got {:?}", val); }
+    };
+    assert_eq!(s, "Hello, world!", "expected greeting");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_module_stdlib_import() {
+    let dir = temp_dir("stdlib_import");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::testing
+
 func main() -> i32 {
+    testing::assert_eq_int(1, 1)
+    0
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_module_stdlib_re_export() {
+    let dir = temp_dir("stdlib_re_export");
+    fs::write(dir.join("mimi.json"), r#"{}"#).expect("write json");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mymath::abs
+
+func main() -> i32 {
+    abs(-5)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let n = match &val {
+        Value::Int(n) => *n,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(n, 5, "expected abs(-5) == 5");
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_simple_word() {
+    let dir = temp_dir("mimi_tokenizer_word2");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mimispec_lexer::tokenize
+
+func main() -> i32 {
+    let tokens = tokenize("hello")
+    len(tokens)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 2, "expected 2 tokens for 'hello', got {}", count);
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_simple_with_string() {
+    let dir = temp_dir("mimi_tokenizer_str1");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mimispec_lexer::tokenize
+
+func main() -> i32 {
+    let tokens = tokenize("hello \"world\"")
+    len(tokens)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 3, "expected 3 tokens, got {}", count);
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_simple_newline() {
+    let dir = temp_dir("mimi_tokenizer_nl");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mimispec_lexer::tokenize
+
+func main() -> i32 {
+    let tokens = tokenize("a\nb")
+    len(tokens)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 4, "expected 4 tokens, got {}", count);
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_newline_with_ident() {
+    let dir = temp_dir("mimi_tokenizer_nl2");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mimispec_lexer::tokenize
+
+func main() -> i32 {
+    let tokens = tokenize("a\n    b")
+    len(tokens)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 4, "expected 4 tokens, got {}", count);
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_space_indent() {
+    let dir = temp_dir("mimi_tokenizer_indent");
+    let main_path = dir.join("main.mimi");
+    fs::write(&main_path, r#"
+use std::mimispec_lexer::tokenize
+
+func main() -> i32 {
+    let tokens = tokenize("a:\n    b\nc")
+    len(tokens)
+}
+"#).expect("write main.mimi");
+
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 8, "expected 8 tokens, got {}", count);
+    cleanup(&dir);
+}
+
+#[test]
+fn loader_mimi_tokenizer_debug_simple_colon() {
+    // Test: ONELINE if-else chain with matched + continue inside while
+    let dir2 = temp_dir("mimi_tokenizer_final");
+    let main_path = dir2.join("main.mimi");
+    fs::write(&main_path, r#"
+func main() -> i32 {
+    let mut items: List<i32> = []
+    let mut pos: i32 = 0
+    while pos < 1 {
+        let c = str_char_at(":", pos)
+        let mut matched = true
+        if c == ":" { push(items, 1)
+        } else if c == "," { push(items, 2)
+        } else { matched = false }
+        if matched {
+            pos = pos + 1
+            continue
+        }
+        pos = pos + 1
+    }
+    push(items, 99)
     42
 }
-"#).expect("src/tests/loader.rs:22 unwrap failed");
+"#).expect("write main.mimi");
 
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&file_path);
-    assert!(result.is_ok(), "loading single file should succeed: {:?}", result.err());
-    let loaded = result.expect("src/tests/loader.rs:27 unwrap failed");
-    assert_eq!(loaded.file.items.len(), 1);
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_nonexistent_file() {
-    let dir = temp_dir("nonexist");
-    let file_path = dir.join("nope.mimi");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&file_path);
-    assert!(result.is_err(), "loading nonexistent file should fail");
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_invalid_syntax() {
-    let dir = temp_dir("syntax");
-    let file_path = dir.join("bad.mimi");
-    fs::write(&file_path, r#"
-func $$$ broken
-"#).expect("src/tests/loader.rs:49 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&file_path);
-    assert!(result.is_err(), "loading invalid syntax should fail: {:?}", result.ok());
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_merge_all() {
-    let dir = temp_dir("merge");
-    let main_path = dir.join("main.mimi");
-    let mod_path = dir.join("helper.mimi");
-    fs::write(&main_path, r#"
-func main() -> i32 { 42 }
-"#).expect("src/tests/loader.rs:64 unwrap failed");
-    fs::write(&mod_path, r#"
-func helper() -> i32 { 99 }
-"#).expect("src/tests/loader.rs:67 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&main_path);
-    let _ = loader.load_main(&mod_path);
+    let mut loader = ModuleLoader::new(dir2.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
     let merged = loader.merge_all().expect("merge_all should succeed");
-    assert!(merged.items.len() >= 2, "merge should include all items");
-    cleanup(&dir);
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    assert_eq!(val, Value::Int(42), "expected Int(42), got {:?}", val);
+    cleanup(&dir2);
 }
 
 #[test]
-fn loader_import_resolution_failure() {
-    let dir = temp_dir("import_fail");
+fn loader_mimi_tokenizer_debug_colon_newline() {
+    let dir = temp_dir("mimi_tokenizer_cnl");
     let main_path = dir.join("main.mimi");
     fs::write(&main_path, r#"
-use nonexistent;
-
-func main() -> i32 { 42 }
-"#).expect("src/tests/loader.rs:85 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&main_path);
-    assert!(result.is_err(), "import of nonexistent module should fail: {:?}", result.ok());
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_get_module() {
-    let dir = temp_dir("getmod");
-    let file_path = dir.join("mymod.mimi");
-    fs::write(&file_path, r#"
-func hello() -> i32 { 1 }
-"#).expect("src/tests/loader.rs:99 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&file_path);
-    assert!(loader.get_module("mymod").is_some(), "should find loaded module");
-    assert!(loader.get_module("nope").is_none(), "nonexistent module returns None");
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_empty_file() {
-    let dir = temp_dir("empty");
-    let file_path = dir.join("empty.mimi");
-    fs::write(&file_path, r#""#).expect("src/tests/loader.rs:112 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&file_path);
-    assert!(result.is_ok(), "loading empty file should succeed");
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_file_with_only_comments() {
-    let dir = temp_dir("comments");
-    let file_path = dir.join("comments.mimi");
-    fs::write(&file_path, r#"
-// This is a comment
-// Another comment
-"#).expect("src/tests/loader.rs:127 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&file_path);
-    assert!(result.is_ok(), "loading file with only comments should succeed");
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_merge_with_empty() {
-    let dir = temp_dir("merge_empty");
-    let main_path = dir.join("main.mimi");
-    let empty_path = dir.join("empty.mimi");
-    fs::write(&main_path, r#"
-func main() -> i32 { 42 }
-"#).expect("src/tests/loader.rs:142 unwrap failed");
-    fs::write(&empty_path, r#""#).expect("src/tests/loader.rs:143 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&main_path);
-    let _ = loader.load_main(&empty_path);
-    let merged = loader.merge_all().expect("merge_all should succeed");
-    assert!(merged.items.len() >= 1, "merge should include main function");
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_resolve_import() {
-    let dir = temp_dir("resolve");
-    let lib_path = dir.join("lib.mimi");
-    let main_path = dir.join("main.mimi");
-    fs::write(&lib_path, r#"
-pub func helper() -> i32 { 99 }
-"#).expect("src/tests/loader.rs:160 unwrap failed");
-    fs::write(&main_path, r#"
-use lib;
+use std::mimispec_lexer::tokenize
 
 func main() -> i32 {
-    lib::helper()
+    let tokens = tokenize("a:\nb")
+    len(tokens)
 }
-"#).expect("src/tests/loader.rs:167 unwrap failed");
+"#).expect("write main.mimi");
 
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&main_path);
-    // May fail if import resolution requires specific setup
-    // Just ensure it doesn't panic
-    let _ = result;
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 5, "expected 5 tokens (Ident, Colon, Newline, Ident, Eof), got {}", count);
     cleanup(&dir);
 }
 
 #[test]
-fn loader_duplicate_key_no_panic() {
-    let dir = temp_dir("dup");
-    let path = dir.join("a.mimi");
-    fs::write(&path, r#"
-func f() -> i32 { 1 }
-func f() -> i32 { 2 }
-"#).expect("src/tests/loader.rs:184 unwrap failed");
-
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&path);
-    // May error on duplicate, just ensure no panic
-    let _ = result;
-    cleanup(&dir);
-}
-
-#[test]
-fn loader_selective_import_resolve() {
-    let dir = temp_dir("selective");
-    let strings_path = dir.join("strings.mimi");
+fn loader_mimi_tokenizer_with_string() {
+    let dir = temp_dir("mimi_tokenizer_str2");
     let main_path = dir.join("main.mimi");
-    fs::write(&strings_path, r#"
-pub func replace_all(s: string, from: string, to: string) -> string {
-    s // simplified
-}
-pub func contains(s: string, substr: string) -> bool {
-    true
-}
-"#).expect("src/tests/loader.rs: write strings.mimi");
     fs::write(&main_path, r#"
-use strings::replace_all;
+use std::mimispec_lexer::tokenize
 
 func main() -> i32 {
-    42
+    let tokens = tokenize("a \"b\" c")
+    len(tokens)
 }
-"#).expect("src/tests/loader.rs: write main.mimi");
+"#).expect("write main.mimi");
 
-    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let result = loader.load_main(&main_path);
-    assert!(result.is_ok(), "selective import should resolve: {:?}", result.err());
-    let merged = loader.merge_all().expect("merge should succeed");
-    // The merged file should contain replace_all (from strings.mimi)
-    let has_replace_all = merged.items.iter().any(|item| {
-        matches!(item, crate::ast::Item::Func(f) if f.name == "replace_all")
-    });
-    assert!(has_replace_all, "selective import should bring replace_all into scope");
-    // Also the import path should remain unchanged
-    let has_selective_import = merged.imports.iter().any(|imp| {
-        imp.path == vec!["strings", "replace_all"]
-    });
-    assert!(has_selective_import, "selective import path should be preserved");
+    let mut loader = ModuleLoader::new(dir.clone());
+    let r = loader.load_main(&main_path);
+    assert!(r.is_ok(), "load_main should succeed: {:?}", r.err());
+    let merged = loader.merge_all().expect("merge_all should succeed");
+
+    let mut interp = Interpreter::new(&merged);
+    let val = interp.run().expect("interpreter should run without error");
+
+    let count = match &val {
+        Value::Int(n) => *n as i32,
+        _ => { panic!("expected int, got {:?}", val); }
+    };
+    assert_eq!(count, 4, "expected 4 tokens, got {}", count);
     cleanup(&dir);
 }

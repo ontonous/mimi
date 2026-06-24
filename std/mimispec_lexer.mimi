@@ -1,0 +1,374 @@
+// MimiSpec tokenizer written in Mimi
+// Produces a list of token records consumable by the MimiSpec parser.
+
+type Token {
+    kind: string
+    value: string
+    line: i32
+    col: i32
+}
+
+// Character classification helpers
+func is_digit(c: string) -> bool {
+    c >= "0" && c <= "9"
+}
+
+func is_alpha(c: string) -> bool {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+}
+
+func is_alnum(c: string) -> bool {
+    is_alpha(c) || is_digit(c)
+}
+
+func is_whitespace(c: string) -> bool {
+    c == " " || c == "\t"
+}
+
+func is_newline(c: string) -> bool {
+    c == "\n" || c == "\r"
+}
+
+// Keyword map: identifier → token kind
+func keyword_kind(ident: string) -> string {
+    if ident == "module" { "Module" }
+    else if ident == "type" { "Type" }
+    else if ident == "rule" { "Rule" }
+    else if ident == "func" { "Func" }
+    else if ident == "if" { "If" }
+    else if ident == "else" { "Else" }
+    else if ident == "for" { "For" }
+    else if ident == "while" { "While" }
+    else if ident == "desc" { "Desc" }
+    else if ident == "steps" { "Steps" }
+    else if ident == "math" { "Math" }
+    else if ident == "parasteps" { "Parasteps" }
+    else if ident == "requires" { "Requires" }
+    else if ident == "ensures" { "Ensures" }
+    else if ident == "and" { "And" }
+    else if ident == "or" { "Or" }
+    else if ident == "not" { "Not" }
+    else if ident == "in" { "In" }
+    else if ident == "true" { "True" }
+    else if ident == "false" { "False" }
+    else if ident == "flow" { "Flow" }
+    else if ident == "ui" { "Ui" }
+    else if ident == "parallel" { "Parallel" }
+    else if ident == "stack" { "Stack" }
+    else if ident == "binds" { "Binds" }
+    else if ident == "with" { "With" }
+    else if ident == "on" { "On" }
+    else if ident == "error" { "Error" }
+    else if ident == "done" { "Done" }
+    else if ident == "exit" { "Exit" }
+    else if ident == "import" { "Import" }
+    else { "Ident" }
+}
+
+// Read an identifier
+func read_ident(source: string, start: i32) -> (string, i32) {
+    let mut pos = start
+    let mut result = ""
+    while pos < len(source) {
+        let c = str_char_at(source, pos)
+        if is_alnum(c) || c == "_" {
+            result = result + c
+            pos = pos + 1
+        } else {
+            break
+        }
+    }
+    (result, pos)
+}
+
+// Read a number literal
+func read_number(source: string, start: i32) -> (string, i32) {
+    let mut pos = start
+    let mut result = ""
+    let mut saw_dot = false
+    let mut saw_e = false
+    while pos < len(source) {
+        let c = str_char_at(source, pos)
+        if is_digit(c) {
+            result = result + c
+            pos = pos + 1
+        } else if c == "." && !saw_dot && !saw_e {
+            result = result + c
+            saw_dot = true
+            pos = pos + 1
+        } else if (c == "e" || c == "E") && !saw_e {
+            result = result + c
+            saw_e = true
+            pos = pos + 1
+            if pos < len(source) {
+                let sign = str_char_at(source, pos)
+                if sign == "+" || sign == "-" {
+                    result = result + sign
+                    pos = pos + 1
+                }
+            }
+        } else { break }
+    }
+    (result, pos)
+}
+
+// Read a string literal (pos is after opening quote)
+func read_string(source: string, start: i32) -> (string, i32, string) {
+    let mut pos = start
+    let mut result = ""
+    let mut err = ""
+    while pos < len(source) {
+        let c = str_char_at(source, pos)
+        if c == "\"" {
+            pos = pos + 1
+            return (result, pos, "")
+        } else if c == "\\" {
+            pos = pos + 1
+            if pos >= len(source) {
+                return (result, pos, "unterminated string escape")
+            }
+            let esc = str_char_at(source, pos)
+            if esc == "n" { result = result + "\n" }
+            else if esc == "t" { result = result + "\t" }
+            else if esc == "r" { result = result + "\r" }
+            else if esc == "\\" { result = result + "\\" }
+            else if esc == "\"" { result = result + "\"" }
+            else {
+                return (result, pos, "invalid escape: \\" + esc)
+            }
+            pos = pos + 1
+        } else {
+            result = result + c
+            pos = pos + 1
+        }
+    }
+    (result, pos, "unterminated string")
+}
+
+// Read commitment suffix: ?, ??, $, $$, $?, $$?, $??, $$??
+func read_commitment(source: string, pos: i32) -> (string, i32) {
+    if pos >= len(source) { return ("", pos) }
+    let c = str_char_at(source, pos)
+    let mut result = ""
+    let mut p = pos
+    if c == "$" {
+        result = "$"; p = p + 1
+        if p < len(source) {
+            let c2 = str_char_at(source, p)
+            if c2 == "$" {
+                result = "$$"; p = p + 1
+                if p < len(source) {
+                    let c3 = str_char_at(source, p)
+                    if c3 == "?" {
+                        if p + 1 < len(source) && str_char_at(source, p + 1) == "?" {
+                            result = "$$??"; p = p + 2
+                        } else {
+                            result = "$$?"; p = p + 1
+                        }
+                    }
+                }
+            } else if c2 == "?" {
+                if p + 1 < len(source) && str_char_at(source, p + 1) == "?" {
+                    result = "$??"; p = p + 2
+                } else {
+                    result = "$?"; p = p + 1
+                }
+            }
+        }
+    } else if c == "?" {
+        result = "?"; p = p + 1
+        if p < len(source) && str_char_at(source, p) == "?" {
+            result = "??"; p = p + 1
+        }
+    }
+    (result, p)
+}
+
+// Emit a token record
+func tok(kind: string, value: string, line: i32, col: i32) -> Token {
+    Token { kind: kind, value: value, line: line, col: col }
+}
+
+// Main tokenizer entry point
+pub func tokenize(source: string) -> List<Token> {
+    let mut tokens: List<Token> = []
+    let mut line: i32 = 1
+    let mut col: i32 = 1
+    let mut pos: i32 = 0
+    let src_len = len(source)
+    let mut indent_stack: List<i32> = [0]
+    let mut line_start = true
+    let mut current_indent: i32 = 0
+
+    while pos < src_len {
+        let c = str_char_at(source, pos)
+
+        // Handle newlines
+        if c == "\n" || c == "\r" {
+            if c == "\r" && pos + 1 < src_len && str_char_at(source, pos + 1) == "\n" {
+                pos = pos + 1; col = col + 1
+            }
+            line = line + 1; col = 1; pos = pos + 1
+            line_start = true; current_indent = 0
+            push(tokens, tok("Newline", "\\n", line - 1, 1))
+            continue
+        }
+
+        // Track indentation at line start
+        if line_start {
+            if c == " " {
+                current_indent = current_indent + 1; pos = pos + 1; col = col + 1
+                continue
+            } else if c == "\t" {
+                current_indent = current_indent + 4; pos = pos + 1; col = col + 1
+                continue
+            } else if c == "#" || c == "\n" || c == "\r" {
+                // Comment/empty line: skip indent processing
+            } else {
+                // Process indent/dedent
+                let last_indent = indent_stack[len(indent_stack) - 1]
+                if current_indent > last_indent {
+                    if current_indent % 4 == 0 {
+                        push(indent_stack, current_indent)
+                        push(tokens, tok("Indent", "", line, col))
+                    }
+                } else if current_indent < last_indent {
+                    //while len(indent_stack) > 1 && current_indent < indent_stack[len(indent_stack) - 1] {
+                    //    pop(indent_stack)
+                    //    push(tokens, tok("Dedent", "", line, col))
+                    //}
+                }
+            }
+            line_start = false
+        }
+
+        // Skip inline whitespace
+        if c == " " || c == "\t" {
+            pos = pos + 1; col = col + 1
+            continue
+        }
+
+        // Skip // comments
+        if c == "/" && pos + 1 < src_len && str_char_at(source, pos + 1) == "/" {
+            while pos < src_len {
+                let nc = str_char_at(source, pos)
+                if nc == "\n" || nc == "\r" { break }
+                pos = pos + 1
+            }
+            continue
+        }
+
+        // Single-character tokens
+        let mut matched = true
+        if c == ":" { push(tokens, tok("Colon", ":", line, col))
+        } else if c == "," { push(tokens, tok("Comma", ",", line, col))
+        } else if c == "(" { push(tokens, tok("LParen", "(", line, col))
+        } else if c == ")" { push(tokens, tok("RParen", ")", line, col))
+        } else if c == "[" { push(tokens, tok("LBracket", "[", line, col))
+        } else if c == "]" { push(tokens, tok("RBracket", "]", line, col))
+        } else if c == "{" { push(tokens, tok("LBrace", "{", line, col))
+        } else if c == "}" { push(tokens, tok("RBrace", "}", line, col))
+        } else if c == "+" { push(tokens, tok("Plus", "+", line, col))
+        } else if c == "-" { push(tokens, tok("Minus", "-", line, col))
+        } else if c == "*" {
+            if pos + 1 < src_len && str_char_at(source, pos + 1) == "*" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("Power", "**", line, col - 1))
+            } else {
+                push(tokens, tok("Star", "*", line, col))
+            }
+        } else if c == "/" { push(tokens, tok("Slash", "/", line, col))
+        } else if c == "@" { push(tokens, tok("At", "@", line, col))
+        } else if c == "|" { push(tokens, tok("Pipe", "|", line, col))
+        } else if c == "." { push(tokens, tok("Dot", ".", line, col))
+        } else if c == "=" {
+            if pos + 1 < src_len && str_char_at(source, pos + 1) == "=" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("EqEq", "==", line, col - 1))
+            } else {
+                push(tokens, tok("Assign", "=", line, col))
+            }
+        } else if c == "!" {
+            if pos + 1 < src_len && str_char_at(source, pos + 1) == "=" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("NotEq", "!=", line, col - 1))
+            } else {
+                push(tokens, tok("Bang", "!", line, col))
+            }
+        } else if c == "<" {
+            if pos + 1 < src_len && str_char_at(source, pos + 1) == "=" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("Le", "<=", line, col - 1))
+            } else if pos + 1 < src_len && str_char_at(source, pos + 1) == "<" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("Shl", "<<", line, col - 1))
+            } else {
+                push(tokens, tok("Lt", "<", line, col))
+            }
+        } else if c == ">" {
+            if pos + 1 < src_len && str_char_at(source, pos + 1) == "=" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("Ge", ">=", line, col - 1))
+            } else if pos + 1 < src_len && str_char_at(source, pos + 1) == ">" {
+                pos = pos + 1; col = col + 1
+                push(tokens, tok("Shr", ">>", line, col - 1))
+            } else {
+                push(tokens, tok("Gt", ">", line, col))
+            }
+        } else if c == "&" { push(tokens, tok("BitAnd", "&", line, col))
+        } else if c == "^" { push(tokens, tok("BitXor", "^", line, col))
+        } else if c == "~" { push(tokens, tok("BitNot", "~", line, col))
+        } else if c == "#" { push(tokens, tok("Hash", "#", line, col))
+        } else { matched = false }
+
+        if matched {
+            pos = pos + 1; col = col + 1
+            continue
+        }
+
+        // String literals
+        if c == "\"" {
+            pos = pos + 1; col = col + 1
+            let start_pos = pos
+            let (svalue, end_pos, err) = read_string(source, pos)
+            if err != "" {
+                return []
+            }
+            let (commit, after_commit) = read_commitment(source, end_pos)
+            let sv = if commit == "" { svalue } else { svalue + commit }
+            push(tokens, tok("String", sv, line, col - 1))
+            let consumed_str = after_commit - pos + 1
+            pos = after_commit; col = col + consumed_str
+            continue
+        }
+
+        // Numbers
+        if is_digit(c) {
+            let (num_str, end_pos) = read_number(source, pos)
+            let (commit, after_commit) = read_commitment(source, end_pos)
+            let nv = if commit == "" { num_str } else { num_str + commit }
+            push(tokens, tok("Number", nv, line, col))
+            let consumed_num = after_commit - pos
+            pos = after_commit; col = col + consumed_num
+            continue
+        }
+
+        // Identifiers and keywords
+        if is_alpha(c) {
+            let (ident, end_pos) = read_ident(source, pos)
+            let (commit, after_commit) = read_commitment(source, end_pos)
+            let kind = keyword_kind(ident)
+            let idv = if commit == "" { ident } else { ident + commit }
+            push(tokens, tok(kind, idv, line, col))
+            let consumed_id = after_commit - pos
+            pos = after_commit; col = col + consumed_id
+            continue
+        }
+
+        // Unknown character
+        return []
+    }
+
+    push(tokens, tok("Eof", "", line, col))
+    tokens
+}

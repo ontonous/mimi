@@ -1,0 +1,10 @@
+// Test the MimiSpec tokenizer
+use std::mimispec_lexer::tokenize
+
+func main() -> string {
+    let result = tokenize("func add(x: i32)")
+    match result {
+        Ok(tokens) => "OK: " + to_string(len(tokens)) + " tokens"
+        Err(e) => "ERR: " + e
+    }
+}
