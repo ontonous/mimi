@@ -23,6 +23,7 @@ fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
                 }
             }
             Stmt::While { body, .. } => result.extend(collect_ensures(body)),
+            Stmt::Loop(body) => result.extend(collect_ensures(body)),
             Stmt::For { body, .. } => result.extend(collect_ensures(body)),
             Stmt::Parasteps(body) => result.extend(collect_ensures(body)),
             Stmt::Expr(Expr::Lambda { body, .. }) => result.extend(collect_ensures(body)),
@@ -751,6 +752,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, &mut vars)?;
+                }
+                Stmt::Loop(body) => {
+                    self.compile_loop_stmt(body, &mut vars)?;
                 }
                 Stmt::For { var, iterable, body } => {
                     self.compile_for_stmt(var, iterable, body, &mut vars)?;

@@ -25,6 +25,7 @@ impl Parser {
             }
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
+            TokenKind::Loop => self.parse_loop(),
             TokenKind::For => self.parse_for(),
             TokenKind::Arena => self.parse_arena(),
             TokenKind::Unsafe => self.parse_unsafe(),
@@ -365,6 +366,14 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block()?;
         Ok(Stmt::While { cond, body })
+    }
+
+    fn parse_loop(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::Loop, "`loop`")?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Loop(body))
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {

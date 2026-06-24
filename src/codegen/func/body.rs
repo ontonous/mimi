@@ -53,6 +53,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Shared implementation for Stmt::Loop — infinite loop with break
+    pub(in crate::codegen) fn compile_loop_stmt(
+        &mut self,
+        body: &Block,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for loop".to_string()))?;
+        let loop_bb = self.context.append_basic_block(function, "loop");
+        let body_bb = self.context.append_basic_block(function, "loopbody");
+        let merge_bb = self.context.append_basic_block(function, "loopcont");
+
+        self.builder.build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        // Loop condition block (always true)
+        self.builder.position_at_end(loop_bb);
+        let true_val = self.context.bool_type().const_int(1, false);
+        self.builder.build_conditional_branch(true_val, body_bb, merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        self.builder.position_at_end(body_bb);
+        let old_break = self.loop_break.take();
+        let old_continue = self.loop_continue.take();
+        self.loop_break = Some(merge_bb);
+        self.loop_continue = Some(loop_bb);
+        self.compile_block(body, vars)?;
+        if !self.block_has_terminator() {
+            self.builder.build_unconditional_branch(loop_bb)
+                .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        }
+        self.loop_break = old_break;
+        self.loop_continue = old_continue;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(())
+    }
+
     /// Shared implementation for Stmt::For — used by compile_func and compile_block
     pub(in crate::codegen) fn compile_for_stmt(
         &mut self,

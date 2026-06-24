@@ -1,7 +1,7 @@
 # Mimi 语法参考
 
 > 本文档描述 Mimi 语言的完整语法，可作为自举实现的语法底本。
-> 版本: v0.21
+> 版本: v0.22.4-dev
 > 数据来源: `src/lexer/`, `src/parser/`, `src/ast.rs`
 
 ## 1. 词法
@@ -12,7 +12,7 @@
 // 行注释（到行尾）
 ```
 
-块注释 `/* ... */` 不支持。
+块注释 `/* ... */` 支持嵌套。
 
 ### 1.2 标识符
 
@@ -140,6 +140,7 @@ INDENT   DEDENT   NEWLINE   EOF
 | 外部函数 | `extern "C" fn(i32) -> bool` | C ABI 函数指针 |
 | Option | `i32?` 或 `Option<i32>` | 可选值（`?` 后缀语法糖） |
 | Result | `Result<i32, string>` | 结果类型 |
+| Set | `Set<T>` | 唯一元素集合（字面量 `{1, 2, 3}`） |
 | impl Trait | `impl Clone + Default` | 不透明返回类型 |
 | dyn Trait | `dyn Clone` | 运行时 trait 对象（胖指针） |
 
@@ -285,6 +286,8 @@ false           // 布尔假
 "hello"         // 字符串
 f"x = {x}"      // 格式化字符串（插值）
 [1, 2, 3]       // 列表
+{"a": 1, "b": 2} // Map 字面量（键必为字符串）
+{1, 2, 3}       // Set 字面量（≥2 元素，{expr} 仍为块）
 x               // 变量引用
 ```
 
@@ -324,6 +327,8 @@ fn(x: i32) -> i32 { x + 1 }
 ```
 (1, "hello", true)          // 元组
 [1, 2, 3]                   // 列表字面量
+{"a": 1, "b": 2}           // Map 字面量
+{1, 2, 3}                   // Set 字面量
 Point { x: 1.0, y: 2.0 }    // 记录构造
 Point { x, y }              // 记录构造（字段简写）
 [expr for var in iter]       // 列表推导
@@ -720,6 +725,7 @@ cap_def ::= "cap" ident (
 | crypto | `std/crypto.mimi` |
 | csv | `std/csv.mimi` |
 | template | `std/template.mimi` |
+| set | `std/set.mimi` |
 
 ### 8.2 内置函数
 

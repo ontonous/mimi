@@ -14,6 +14,14 @@ impl Parser {
     fn parse_expr_inner(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_unary()?;
         loop {
+            // Check for pipe operator |> before binary ops
+            // Pipe has lowest precedence (0), so skip if min_prec > 0
+            if self.at(&TokenKind::PipeArrow) && min_prec == 0 {
+                self.advance();
+                let rhs = self.parse_expr(1)?;
+                lhs = self.desugar_pipe(lhs, rhs)?;
+                continue;
+            }
             let (op, prec, right_assoc) = match self.peek_kind() {
                 TokenKind::OrOr => (BinOp::Or, 1, false),
                 TokenKind::AndAnd => (BinOp::And, 2, false),
@@ -54,6 +62,12 @@ impl Parser {
         self.inc_depth();
         let mut lhs = self.parse_unary()?;
         loop {
+            if self.at(&TokenKind::PipeArrow) {
+                self.advance();
+                let rhs = self.parse_expr(1)?;
+                lhs = self.desugar_pipe(lhs, rhs)?;
+                continue;
+            }
             let (op, prec, right_assoc) = match self.peek_kind() {
                 TokenKind::OrOr => (BinOp::Or, 1, false),
                 TokenKind::AndAnd => (BinOp::And, 2, false),
@@ -745,6 +759,31 @@ impl Parser {
         self.advance(); // consume '}'
         Some(elems)
     }
+
+    /// Desugar a |> b into b(a) or b(a, ...).
+    /// If b is a call expression, a is inserted as the first argument.
+    /// If b is an identifier, it becomes a call with a as the only argument.
+    fn desugar_pipe(&mut self, lhs: Expr, rhs: Expr) -> Result<Expr, ParseError> {
+        match rhs {
+            Expr::Call(callee, args) => {
+                let mut new_args = vec![lhs];
+                new_args.extend(args);
+                Ok(Expr::Call(callee, new_args))
+            }
+            Expr::Ident(_) | Expr::Field(_, _) | Expr::Turbofish(_, _, _) => {
+                Ok(Expr::Call(Box::new(rhs), vec![lhs]))
+            }
+            _ => {
+                let line = self.peek().line;
+                let col = self.peek().col;
+                Err(ParseError::new(
+                    "right side of |> must be a function call or name".to_string(),
+                    line,
+                    col,
+                ))
+            }
+        }
+    }
 }
 
 /// Returns true if the token kind starts a statement (and therefore parsing as block).
@@ -756,7 +795,8 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
         TokenKind::Spawn | TokenKind::Await | TokenKind::Alloc |
         TokenKind::Drop | TokenKind::Steps | TokenKind::Parasteps |
         TokenKind::Failure | TokenKind::Requires | TokenKind::Ensures |
-        TokenKind::Math | TokenKind::Invariant | TokenKind::Desc | TokenKind::Rule
+        TokenKind::Math | TokenKind::Invariant | TokenKind::Desc | TokenKind::Rule |
+        TokenKind::Loop
     )
 }
 

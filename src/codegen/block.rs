@@ -373,6 +373,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, vars)?;
                 }
+                Stmt::Loop(body) => {
+                    self.compile_loop_stmt(body, vars)?;
+                }
                 Stmt::For { var, iterable, body } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
                 }
@@ -590,6 +593,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, vars)?;
+                }
+                Stmt::Loop(body) => {
+                    self.compile_loop_stmt(body, vars)?;
                 }
                 Stmt::For { var, iterable, body } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;

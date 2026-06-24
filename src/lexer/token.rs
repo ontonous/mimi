@@ -73,6 +73,7 @@ pub enum TokenKind {
     And,
     Or,
     Not,
+    Loop,
 
     // Types
     Nothing,
@@ -109,6 +110,7 @@ pub enum TokenKind {
     Shr,
     Tilde,
     DollarParen,
+    PipeArrow,
 
     // Punctuation
     LParen,
@@ -252,6 +254,8 @@ impl fmt::Display for TokenKind {
             TokenKind::FatArrow => "=>",
             TokenKind::Question => "?",
             TokenKind::Bang => "!",
+            TokenKind::PipeArrow => "|>",
+            TokenKind::Loop => "loop",
             TokenKind::Ellipsis => "...",
             TokenKind::At => "@",
             TokenKind::Hash => "#",
@@ -382,6 +386,8 @@ impl TokenKind {
             TokenKind::FatArrow => "=>",
             TokenKind::Question => "?",
             TokenKind::Bang => "!",
+            TokenKind::PipeArrow => "|>",
+            TokenKind::Loop => "loop",
             TokenKind::Ellipsis => "...",
             TokenKind::At => "@",
             TokenKind::Hash => "#",

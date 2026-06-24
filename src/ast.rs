@@ -258,6 +258,8 @@ pub enum Stmt {
         cond: Expr,
         body: Block,
     },
+    /// Infinite loop: loop { break expr }
+    Loop(Block),
     For {
         var: String,
         iterable: Expr,

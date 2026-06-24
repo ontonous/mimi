@@ -55,6 +55,11 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
+            Stmt::Loop(body) => {
+                for s in body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
             Stmt::For { iterable, body, .. } => {
                 self.check_expr_parasteps_safe(iterable, scopes);
                 for s in body {
@@ -101,6 +106,9 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::While { body, .. } => {
+                for s in body { self.collect_shared_writes_in_stmt(s, scopes, writes); }
+            }
+            Stmt::Loop(body) => {
                 for s in body { self.collect_shared_writes_in_stmt(s, scopes, writes); }
             }
             Stmt::For { body, .. } => {
@@ -352,6 +360,11 @@ impl<'a> Checker<'a> {
                         fmt_type(&ct)
                     ));
                 }
+                self.loop_depth += 1;
+                self.check_block(body, ret, scopes);
+                self.loop_depth -= 1;
+            }
+            Stmt::Loop(body) => {
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;

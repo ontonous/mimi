@@ -164,6 +164,30 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    pub(in crate::interp) fn eval_loop(&mut self, body: &Block) -> Result<Option<Value>, InterpError> {
+        loop {
+            if self.early_return.is_some() { break; }
+            self.check_invariants(body)?;
+            if let Some(v) = self.eval_block(body)? {
+                return Ok(Some(v));
+            }
+            if self.early_return.is_some() { break; }
+            match self.loop_action.take() {
+                Some(LoopAction::Break(val)) => {
+                    if let Some(v) = val {
+                        return Ok(Some(v));
+                    }
+                    break;
+                }
+                Some(LoopAction::Continue) => {
+                    continue;
+                }
+                None => {}
+            }
+        }
+        Ok(None)
+    }
+
     pub(in crate::interp) fn eval_for(&mut self, var: &str, iterable: &Expr, body: &Block) -> Result<Option<Value>, InterpError> {
         let iter = self.eval_expr(iterable)?;
         let list = match iter {

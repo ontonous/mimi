@@ -96,6 +96,10 @@ impl<'a> Interpreter<'a> {
                     body: Box::new(self.quote_block(body)?),
                 }))
             }
+            Stmt::Loop(body) => {
+                let q_body = Box::new(self.quote_block(body)?);
+                Ok(Some(QuotedAst::Loop(q_body)))
+            }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _) | Stmt::Math(_) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => Ok(None),
         }
     }
@@ -481,6 +485,24 @@ impl<'a> Interpreter<'a> {
             }
             QuotedAst::While(cond, body) => {
                 while is_truthy(&self.eval_quoted_ast(cond)?) {
+                    if self.early_return.is_some() { break; }
+                    self.eval_quoted_ast(body)?;
+                    if self.early_return.is_some() { break; }
+                    match self.loop_action.take() {
+                        Some(LoopAction::Break(val)) => {
+                            if let Some(v) = val {
+                                return Ok(v);
+                            }
+                            break;
+                        }
+                        Some(LoopAction::Continue) => continue,
+                        None => {}
+                    }
+                }
+                Ok(Value::Unit)
+            }
+            QuotedAst::Loop(body) => {
+                loop {
                     if self.early_return.is_some() { break; }
                     self.eval_quoted_ast(body)?;
                     if self.early_return.is_some() { break; }

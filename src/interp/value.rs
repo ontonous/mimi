@@ -140,6 +140,7 @@ pub enum QuotedAst {
     Break(Option<Box<QuotedAst>>),
     Continue,
     While(Box<QuotedAst>, Box<QuotedAst>),
+    Loop(Box<QuotedAst>),
     For(String, Box<QuotedAst>, Box<QuotedAst>),
     Assign(Box<QuotedAst>, Box<QuotedAst>),
     Arena(Box<QuotedAst>),

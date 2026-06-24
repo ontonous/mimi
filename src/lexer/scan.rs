@@ -463,7 +463,7 @@ impl<'a> super::Lexer<'a> {
             '<' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::Le) } else if self.peek() == Some('<') { self.advance(); Ok(TokenKind::Shl) } else { Ok(TokenKind::Lt) } }
             '>' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::Ge) } else if self.peek() == Some('>') { self.advance(); Ok(TokenKind::Shr) } else { Ok(TokenKind::Gt) } }
             '&' => { self.advance(); if self.peek() == Some('&') { self.advance(); Ok(TokenKind::AndAnd) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitAndEq) } else { Ok(TokenKind::BitAnd) } }
-            '|' => { self.advance(); if self.peek() == Some('|') { self.advance(); Ok(TokenKind::OrOr) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitOrEq) } else { Ok(TokenKind::BitOr) } }
+            '|' => { self.advance(); if self.peek() == Some('|') { self.advance(); Ok(TokenKind::OrOr) } else if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitOrEq) } else if self.peek() == Some('>') { self.advance(); Ok(TokenKind::PipeArrow) } else { Ok(TokenKind::BitOr) } }
             '^' => { self.advance(); if self.peek() == Some('=') { self.advance(); Ok(TokenKind::BitXorEq) } else { Ok(TokenKind::BitXor) } }
             '~' => { self.advance(); Ok(TokenKind::Tilde) }
             '$' => { self.advance(); if self.peek() == Some('(') { self.advance(); Ok(TokenKind::DollarParen) } else { Err(unexpected_dollar(line, col)) } }

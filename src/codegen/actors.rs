@@ -375,12 +375,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                     self.builder.position_at_end(loop_bb);
                     let cond_val = self.compile_expr(cond, &vars)?;
-                    let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val { iv } else { return Err(CompileError::TypeMismatch("while condition must be boolean".to_string())); };
+                    let cond_bool = cond_val.into_int_value();
                     self.builder.build_conditional_branch(cond_bool, body_bb, merge_bb)
                         .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                     self.builder.position_at_end(body_bb);
-                    let old_break = self.loop_break.replace(merge_bb);
-                    let old_continue = self.loop_continue.replace(loop_bb);
+                    let old_break = self.loop_break.take();
+                    let old_continue = self.loop_continue.take();
+                    self.loop_break = Some(merge_bb);
+                    self.loop_continue = Some(loop_bb);
+                    self.compile_block(body, &mut vars)?;
+                    if !self.block_has_terminator() {
+                        self.builder.build_unconditional_branch(loop_bb)
+                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+                    }
+                    self.loop_break = old_break;
+                    self.loop_continue = old_continue;
+                    self.builder.position_at_end(merge_bb);
+                }
+                Stmt::Loop(body) => {
+                    let function = self.current_function()
+                        .ok_or_else(|| CompileError::LlvmError("codegen: no current function for loop in actor method".to_string()))?;
+                    let loop_bb = self.context.append_basic_block(function, "loop");
+                    let body_bb = self.context.append_basic_block(function, "loopbody");
+                    let merge_bb = self.context.append_basic_block(function, "loopcont");
+                    self.builder.build_unconditional_branch(loop_bb)
+                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+                    self.builder.position_at_end(loop_bb);
+                    let true_val = self.context.bool_type().const_int(1, false);
+                    self.builder.build_conditional_branch(true_val, body_bb, merge_bb)
+                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+                    self.builder.position_at_end(body_bb);
+                    let old_break = self.loop_break.take();
+                    let old_continue = self.loop_continue.take();
+                    self.loop_break = Some(merge_bb);
+                    self.loop_continue = Some(loop_bb);
                     self.compile_block(body, &mut vars)?;
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(loop_bb)

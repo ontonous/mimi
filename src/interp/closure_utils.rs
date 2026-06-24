@@ -47,6 +47,11 @@ pub(crate) fn collect_stmt_free_vars(
                 collect_stmt_free_vars(s, bound, free, local_bound);
             }
         }
+        Stmt::Loop(body) => {
+            for s in body {
+                collect_stmt_free_vars(s, bound, free, local_bound);
+            }
+        }
         Stmt::For { var, iterable, body } => {
             collect_expr_free_vars(iterable, bound, free);
             let mut inner_bound = local_bound.clone();

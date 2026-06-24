@@ -85,6 +85,11 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
+            Stmt::Loop(body) => {
+                if let Some(v) = self.eval_loop(body)? {
+                    return Ok(Some(v));
+                }
+            }
             Stmt::For { var, iterable, body } => {
                 if let Some(v) = self.eval_for(var, iterable, body)? {
                     return Ok(Some(v));
