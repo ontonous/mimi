@@ -569,7 +569,6 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 name = "mimi"
 version = "0.23.0-dev"
 dependencies = [
- "cc",
  "clap",
  "criterion",
  "either",

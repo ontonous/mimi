@@ -146,7 +146,6 @@ impl LspServer {
                 let mut arg_start_char = line_content[..paren_pos + 1].chars().count();
                 let mut arg_idx = 0;
                 let mut byte_pos = paren_pos + 1;
-                let mut char_pos = line_content[..byte_pos].chars().count();
                 for (_, ch) in line_content[byte_pos..].char_indices() {
                     let ch_byte_len = ch.len_utf8();
                     match ch {
@@ -170,13 +169,12 @@ impl LspServer {
                                 }
                             }
                             arg_start_byte = byte_pos + ch_byte_len;
-                            arg_start_char = char_pos + 1;
+                            arg_start_char = line_content[..byte_pos + ch_byte_len].chars().count();
                             arg_idx += 1;
                         }
                         _ => {}
                     }
                     byte_pos += ch_byte_len;
-                    char_pos += 1;
                 }
                 // Last argument
                 if arg_idx < args.len() && arg_idx < param_names.len() {

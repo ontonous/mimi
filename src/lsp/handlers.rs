@@ -388,7 +388,7 @@ pub(crate) fn handle_message(
                 "result": [{
                     "range": {
                         "start": { "line": 0, "character": 0 },
-                        "end": { "line": (line_count - 1).max(0), "character": last_line_len }
+                        "end": { "line": (line_count - 1), "character": last_line_len }
                     },
                     "newText": formatted
                 }]

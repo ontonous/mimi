@@ -116,7 +116,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Ok(buf.into())
                         } else {
                             // Complex type (List, Record, etc.) — return graceful error
-                            return Err(format!("to_json: complex types not yet supported in codegen").into());
+                            Err("to_json: complex types not yet supported in codegen".into())
                         }
                     }
                 }

@@ -83,8 +83,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Bind regular parameters (params start at index 1)
-        let mut param_idx = 1u32;
-        for p in params.iter() {
+        for (i, p) in params.iter().enumerate() {
+            let param_idx = i as u32 + 1;
             let ty = types::mimi_type_to_llvm(self.context, &p.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
             let alloca = self.builder.build_alloca(ty, &p.name)
@@ -92,7 +92,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_store(alloca, lambda_fn.get_nth_param(param_idx).ok_or_else(|| "codegen: lambda param index out of range".to_string())?)
                 .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
             lambda_vars.insert(p.name.clone(), (alloca, ty));
-            param_idx += 1;
         }
 
         // Compile body

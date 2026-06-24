@@ -129,10 +129,8 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
-                Stmt::Alloc { kind: _, body } => {
-                    if self.block_returns_on_all_paths(body) {
-                        return true;
-                    }
+                Stmt::Alloc { kind: _, body } if self.block_returns_on_all_paths(body) => {
+                    return true;
                 }
                 _ => {}
             }

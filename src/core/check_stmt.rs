@@ -96,7 +96,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_parasteps_safe(e, scopes);
             }
             Stmt::SharedLet { init, .. } => {
-                self.check_expr_parasteps_safe(&init, scopes);
+                self.check_expr_parasteps_safe(init, scopes);
             }
             Stmt::Break(Some(e)) => {
                 self.check_expr_parasteps_safe(e, scopes);
@@ -161,7 +161,7 @@ impl<'a> Checker<'a> {
                 self.collect_shared_writes_in_expr(e, scopes, writes);
             }
             Stmt::SharedLet { init, .. } => {
-                self.collect_shared_writes_in_expr(&init, scopes, writes);
+                self.collect_shared_writes_in_expr(init, scopes, writes);
             }
             Stmt::Requires(expr, _) | Stmt::Ensures(expr, _) | Stmt::Invariant(expr, _) => {
                 self.collect_shared_writes_in_expr(expr, scopes, writes);
@@ -779,11 +779,11 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    TypeDefKind::Enum(variants) => {
-                                        if !variants.iter().any(|v| v.name == *field) {
-                                            let available: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-                                            self.emit_code(crate::diagnostic::codes::E0226, format!("variant '{}' not found in enum '{}' — available: {}", field, name, available.join(", ")));
-                                        }
+                                    TypeDefKind::Enum(variants)
+                                        if !variants.iter().any(|v| v.name == *field) =>
+                                    {
+                                        let available: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+                                        self.emit_code(crate::diagnostic::codes::E0226, format!("variant '{}' not found in enum '{}' — available: {}", field, name, available.join(", ")));
                                     }
                                     _ => {}
                                 }

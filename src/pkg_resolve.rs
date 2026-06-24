@@ -140,13 +140,9 @@ pub fn read_transitive_deps(dst: &Path, visited: &HashSet<String>) -> Vec<manife
 /// Returns `true` if the dep directory exists and its checksum matches.
 pub fn checksum_matches(dst: &Path, expected: Option<&str>) -> bool {
     match expected {
-        Some(cs) => {
-            if dst.exists() {
-                pkg_registry::compute_dir_checksum(dst).ok().as_deref() == Some(cs)
-            } else {
-                false
-            }
+        Some(cs) if dst.exists() => {
+            pkg_registry::compute_dir_checksum(dst).ok().as_deref() == Some(cs)
         }
-        None => false,
+        _ => false,
     }
 }
