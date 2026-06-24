@@ -13,12 +13,19 @@ _A system programming language with contract verification, structured concurrenc
 
 MimiSpec 生产编译后端 · Z3 形式化验证 · LLVM 原生编译 · 解释器 + Codegen 双后端
 
+---
+
+> **⚠️ 开发阶段声明 / Development Status**  
+> Mimi 目前处于 **活跃开发阶段（pre-stable）**，版本号 `0.x` 意味着语言特性、API、标准库和 CLI 界面都可能发生较大变化，**尚不建议用于生产环境**。  
+> 我们非常欢迎早期使用者测试、反馈问题并参与讨论——每一个 Issue、每一条建议都对项目至关重要。
+
 </div>
 
 ---
 
 ## 目录 / Table of Contents
 
+- [参与与社区 / Get Involved](#参与与社区--get-involved)
 - [特性概览 / Features Overview](#特性概览--features-overview)
 - [快速开始 / Quick Start](#快速开始--quick-start)
 - [示例 / Examples](#示例--examples)
@@ -29,6 +36,40 @@ MimiSpec 生产编译后端 · Z3 形式化验证 · LLVM 原生编译 · 解释
 - [开发 / Development](#开发--development)
 - [贡献 / Contributing](#贡献--contributing)
 - [许可证 / License](#许可证--license)
+
+---
+
+## 参与与社区 / Get Involved
+
+Mimi 正在快速演进，我们热切期待社区的反馈。无论你是编程语言爱好者、系统软件开发者，还是仅对合约驱动开发感到好奇，这里都有你的一席之地。
+
+### 当前状态 / Current Status
+
+- **语言核心** / Core language：类型系统、借用检查、并发模型等基础组件已成型，仍在不断打磨。
+- **标准库** / Standard library：21 个模块可用，覆盖常用场景，接口可能还会调整。
+- **工具链** / Toolchain：编译器、LSP、包管理器均可运行，尚未达到 1.0 级稳定性。
+- **验证与编译后端** / Verification & codegen：LLVM 原生编译与 Z3 合约验证持续完善，部分高级验证场景可能还不完整。
+
+### 你可以做什么 / How to Get Involved
+
+| 方式 | 路径 |
+|---|---|
+| **报告 Bug** | 在 [Issues](https://github.com/ontos-hpc/mimi/issues) 中提交，请附上复现步骤、平台信息和最小可复现示例。 |
+| **提出特性请求** | 通过 Issue 描述你的使用场景和期望行为。 |
+| **改进文档** | 语法参考、标准库注释、示例程序——任何能让 Mimi 更易学的改动都欢迎。 |
+| **贡献代码** | 阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，从 `good first issue` 起步。 |
+| **编写示例或教程** | 分享你的 Mimi 程序，帮助后来者理解语言特色。 |
+| **参与讨论** | GitHub Issues & Discussions 区欢迎提问、分享经验或聊聊设计取舍。 |
+
+### 何时稳定？/ When Will It Be Stable？
+
+目前还没有固定的稳定版发布时间表。团队根据内部路线图和社区反馈逐步推进，阶段性目标记录在 [CHANGELOG.md](CHANGELOG.md) 和各版本里程碑中。如果你依赖某个特性或希望 API 尽早冻结，请在 Issue 中告诉我们——使用场景直接影响优先级。
+
+> 💡 **提示**  
+> 即便只是点个 Star，或者告诉朋友你在试用 Mimi，都是对开源社区的支持。
+
+> 💡 **Tip**  
+> Even just starring the repo or telling a friend you're trying Mimi makes a difference.
 
 ---
 
@@ -334,13 +375,16 @@ cargo bench
 
 ## 贡献 / Contributing
 
-欢迎贡献代码、报告问题、完善文档！请参阅：
+我们热切欢迎各种形式的贡献。以下是你可能感兴趣的方式：
 
-- [贡献指南](CONTRIBUTING.md)
-- [安全策略](SECURITY.md)
-- [行为准则](CODE_OF_CONDUCT.md)
+- **试用 & 反馈**：按快速开始构建项目、运行示例，把遇到的困惑或错误提交为 Issue。
+- **文档与翻译**：修正拼写、补充注释、翻译章节，帮助 Mimi 触及更多开发者。
+- **编写测试与示例**：贡献 `examples/` 下的小程序，或为已有特性撰写教程。
+- **代码贡献**：查阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解编码规范与提交流程，从 `good first issue` 起步。
+- **设计讨论**：在 Issue 区参与语言特性、API 设计、错误消息等方面的讨论——你的使用场景就是最好的设计依据。
+- **社区建设**：回答他人提问，在社交媒体上分享项目，帮助构建友好包容的社群。
 
-_Contributions, issues, and documentation improvements are welcome!_
+> 所有参与者须遵守[行为准则](CODE_OF_CONDUCT.md)。安全问题请通过[安全策略](SECURITY.md)私下报告。
 
 ---
 
