@@ -45,7 +45,13 @@ impl LspServer {
 
     /// Parse text with error recovery, returning partial AST even on errors
     pub(crate) fn parse_with_recovery(&self, text: &str) -> Option<crate::ast::File> {
-        let tokens = lexer::Lexer::new(text).tokenize().ok()?;
+        let tokens = match lexer::Lexer::new(text).tokenize() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[mimi lsp] lex error: {}", e);
+                return None;
+            }
+        };
         let (file, _errors) = parser::Parser::new(tokens).parse_file_with_recovery();
         Some(file)
     }

@@ -637,12 +637,14 @@ impl MimiThreadPool {
             .expect("MIMI_POOL pending counter lock poisoned");
         *count += 1;
         if let Some(ref sender) = self.sender {
-            let _ = sender.send(RawTask {
+            if let Err(e) = sender.send(RawTask {
                 func,
                 arg,
                 pending: Arc::clone(&self.pending),
                 completion: Arc::clone(&self.completion),
-            });
+            }) {
+                eprintln!("[mimi ffi] submit_raw: failed to send task: {}", e);
+            }
         }
     }
 
@@ -676,12 +678,14 @@ impl MimiThreadPool {
             .expect("MIMI_POOL pending counter lock poisoned");
         *count += 1;
         if let Some(ref sender) = self.sender {
-            let _ = sender.send(RawTask {
+            if let Err(e) = sender.send(RawTask {
                 func: data_trampoline,
                 arg: data as *mut u8,
                 pending: Arc::clone(&self.pending),
                 completion: Arc::clone(&self.completion),
-            });
+            }) {
+                eprintln!("[mimi ffi] submit: failed to send task: {}", e);
+            }
         }
     }
 
@@ -702,7 +706,9 @@ impl Drop for MimiThreadPool {
         drop(self.sender.take());
         // Join worker threads.
         for handle in self.workers.drain(..) {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                eprintln!("[mimi ffi] worker thread panicked");
+            }
         }
     }
 }

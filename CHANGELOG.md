@@ -25,10 +25,19 @@
 - **H7** 🟠: FFI 路径字符串合约不工作 — `setup_ffi_func_vars` 注册 Z3String 和 string_len 变量，使字符串相等/长度操作在 FFI 路径可编码。
 - **H8** 🟠: 反例非标量不检测 — `eval_expr_on_model` 新增 `resolve_to_string` 辅助函数，EqCmp/NeCmp 分支在 int/f64 失败后备尝试字符串比较；未处理表达式类型保守返回 `true` 避免假阳性。
 
-## [v0.23.2] — Codegen 修复 + 合约绑定 + 错误处理（待开发）
+## [v0.23.2] — 2026-06-24 — Codegen 修复 + 合约绑定 + 错误处理
 
 ### Fixed
-- (H3-H4, H9-H10, M1-M8 待实现)
+- **H3** 🟠: `compile_assert_ne`/`compile_assert_approx_eq` 失败块显示实际值（同 `compile_assert_eq` 模式）。
+- **H4** 🟠: `to_json` 复杂类型静默返回 `"{}"` → 优雅 `CompileError`。
+- **H9** 🟠: `map_rule_contracts` 递归处理嵌套模块内的 `rule` 语句。
+- **H10** 🟠: `split_once(": ")` 固定分隔符 → `text.find(':')` 灵活匹配任意空格。
+- **M2** 🟡: HTTP `write_all` 错误通过 `eprintln!` 记录。
+- **M3** 🟡: FFI 线程池 `sender.send` 和 `handle.join()` 错误通过 `eprintln!` 记录。
+- **M4** 🟡: `map_from_handle`/`set_from_handle` 添加 null handle 校验（`handle == 0` panic）。
+- **M6** 🟡: tuple 类型映射 `panic!()` → `CompileError::TypeMismatch` 优雅错误。
+- **M7** 🟡: `parse_condition_full` 的 `total - 1` 添加 `total > 0` 守卫。
+- **M8** 🟡: LSP lex 错误和 mms 序列化错误通过 `eprintln!` 记录。
 
 ## [v0.22.9] - 2026-06-24 — while let + 模式修复 + codegen缺口关闭
 

@@ -256,6 +256,9 @@ struct MimiMap {
 }
 
 unsafe fn map_from_handle(handle: MapHandle) -> &'static mut MimiMap {
+    if handle == 0 {
+        panic!("map_from_handle: null handle");
+    }
     &mut *(handle as *mut MimiMap)
 }
 
@@ -983,6 +986,9 @@ struct MimiSet {
 }
 
 fn set_from_handle(handle: SetHandle) -> &'static mut MimiSet {
+    if handle == 0 {
+        panic!("set_from_handle: null handle");
+    }
     unsafe { &mut *(handle as *mut MimiSet) }
 }
 
@@ -1484,7 +1490,10 @@ fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
 
     // Send request
     use std::io::Write;
-    stream.write_all(request.as_bytes()).ok()?;
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("[mimi runtime] HTTP write error: {}", e);
+        return None;
+    }
 
     // Read response
     let mut response = Vec::new();

@@ -359,13 +359,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                 self.builder.position_at_end(fail_bb);
-                let fmt_global = self.builder.build_global_string_ptr("assertion failed: values are equal\n", "ane_msg")
-                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 let printf = self.module.get_function("printf")
                     .ok_or_else(|| "printf not declared".to_string())?;
+                // Print "assertion failed: "
+                let prefix = self.builder.build_global_string_ptr("assertion failed: ", "ane_prefix")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 self.builder.build_call(printf, &[
-                    BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
-                ], "ane_printf")
+                    BasicMetadataValueEnum::PointerValue(prefix.as_pointer_value()),
+                ], "ane_prefix_call")
+                    .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                // Print left value
+                self.build_print_value(printf, &a)?;
+                // Print " == "
+                let sep = self.builder.build_global_string_ptr(" == ", "ane_sep")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+                self.builder.build_call(printf, &[
+                    BasicMetadataValueEnum::PointerValue(sep.as_pointer_value()),
+                ], "ane_sep_call")
+                    .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                // Print right value
+                self.build_print_value(printf, &b)?;
+                // Print newline
+                let nl = self.builder.build_global_string_ptr("\n", "ane_nl")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+                self.builder.build_call(printf, &[
+                    BasicMetadataValueEnum::PointerValue(nl.as_pointer_value()),
+                ], "ane_nl_call")
                     .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
                 let exit_fn = self.module.get_function("exit")
                     .ok_or_else(|| "exit not declared".to_string())?;
@@ -424,13 +443,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_conditional_branch(eq, ok_bb, fail_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
                 self.builder.position_at_end(fail_bb);
-                let fmt_global = self.builder.build_global_string_ptr("assertion failed: values not approximately equal\n", "aaeq_msg")
-                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 let printf = self.module.get_function("printf")
                     .ok_or_else(|| "printf not declared".to_string())?;
+                // Print "assertion failed: "
+                let prefix = self.builder.build_global_string_ptr("assertion failed: ", "aaeq_prefix")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 self.builder.build_call(printf, &[
-                    BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
-                ], "aaeq_printf")
+                    BasicMetadataValueEnum::PointerValue(prefix.as_pointer_value()),
+                ], "aaeq_prefix_call")
+                    .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                // Print left value
+                self.build_print_value(printf, &a)?;
+                // Print " !≈ "
+                let sep = self.builder.build_global_string_ptr(" !≈ ", "aaeq_sep")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+                self.builder.build_call(printf, &[
+                    BasicMetadataValueEnum::PointerValue(sep.as_pointer_value()),
+                ], "aaeq_sep_call")
+                    .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                // Print right value
+                self.build_print_value(printf, &b)?;
+                // Print newline
+                let nl = self.builder.build_global_string_ptr("\n", "aaeq_nl")
+                    .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+                self.builder.build_call(printf, &[
+                    BasicMetadataValueEnum::PointerValue(nl.as_pointer_value()),
+                ], "aaeq_nl_call")
                     .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
                 let exit_fn = self.module.get_function("exit")
                     .ok_or_else(|| "exit not declared".to_string())?;

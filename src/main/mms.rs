@@ -57,7 +57,13 @@ pub(crate) fn mms(files: &[PathBuf], show_ast: bool, json: bool, render: bool, l
         let result = mimispec::parse(&source);
         let success = result.errors.is_empty();
         let ast_value = if show_ast || json {
-            serde_json::to_value(&result.file).ok()
+            match serde_json::to_value(&result.file) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("[mimi mms] serialization error: {}", e);
+                    None
+                }
+            }
         } else {
             None
         };

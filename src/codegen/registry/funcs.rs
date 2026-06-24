@@ -402,9 +402,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // F7: Tuple return — wrapper returns the LLVM struct type
                 } else if matches!(ty, crate::ast::Type::Tuple(_)) {
                     types::mimi_type_to_llvm(self.context, ty)
-                        .unwrap_or_else(|| {
-                            panic!("Tuple type '{}' should always map to LLVM struct", crate::core::fmt_type(ty))
-                        })
+                        .ok_or_else(|| {
+                            CompileError::TypeMismatch(format!("Tuple type '{}' could not be mapped to LLVM struct", crate::core::fmt_type(ty)))
+                        })?
                 } else {
                     self.type_to_llvm_for_extern(ty)?
                 }

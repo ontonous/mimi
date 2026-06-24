@@ -125,8 +125,14 @@ pub fn map_rule_contracts(file: &mut File) {
             }
             Item::Module(module) => {
                 for inner in &mut module.items {
-                    if let Item::Func(func) = inner {
-                        transform_rules_in_block(&mut func.body);
+                    match inner {
+                        Item::Func(func) => {
+                            transform_rules_in_block(&mut func.body);
+                        }
+                        Item::Module(_) => {
+                            map_rule_contracts_inner(inner);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -200,11 +206,11 @@ fn map_rule_text(text: &str, span: Span) -> Option<Stmt> {
         }
     }
 
-    // Rule 2: Colon-space separator → second part as ensures expression
-    if let Some((_desc, expr_str)) = text.split_once(": ") {
-        let trimmed = expr_str.trim();
-        if !trimmed.is_empty() {
-            if let Ok((expr, true)) = parse_condition_full(trimmed) {
+    // Rule 2: Colon separator (flexible whitespace) → second part as ensures expression
+    if let Some(colon_idx) = text.find(':') {
+        let expr_str = text[colon_idx + 1..].trim();
+        if !expr_str.is_empty() {
+            if let Ok((expr, true)) = parse_condition_full(expr_str) {
                 return Some(Stmt::Ensures(expr, span));
             }
         }
@@ -212,6 +218,23 @@ fn map_rule_text(text: &str, span: Span) -> Option<Stmt> {
 
     // Rule 4: Unmappable
     None
+}
+
+/// Recursive helper for map_rule_contracts to handle nested modules.
+fn map_rule_contracts_inner(item: &mut Item) {
+    if let Item::Module(module) = item {
+        for inner in &mut module.items {
+            match inner {
+                Item::Func(func) => {
+                    transform_rules_in_block(&mut func.body);
+                }
+                Item::Module(_) => {
+                    map_rule_contracts_inner(inner);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Like parse_condition, but also indicates whether ALL tokens were consumed.
@@ -223,7 +246,7 @@ fn parse_condition_full(text: &str) -> Result<(Expr, bool), String> {
     let mut parser = crate::parser::Parser::new(tokens);
     let expr = parser.parse_expr(0).map_err(|e| format!("parse error: {}", e))?;
     // tokens include EOF; parser stops before EOF
-    let consumed_all = parser.pos() >= total - 1;
+    let consumed_all = total > 0 && parser.pos() >= total - 1;
     Ok((expr, consumed_all))
 }
 

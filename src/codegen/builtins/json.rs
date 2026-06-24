@@ -115,16 +115,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| format!("sprintf error: {}", e))?;
                             Ok(buf.into())
                         } else {
-                            // Complex type (List, Record, etc.) — return stub "{}"
-                            let stub = self.builder.build_global_string_ptr("{}", "json_stub")
-                                .map_err(|e| format!("fmt error: {}", e))?;
-                            // strcpy from known-valid static string to freshly allocated buffer.
-                            self.builder.build_call(strcpy_fn, &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(stub.as_pointer_value()),
-                            ], "json_strcpy_stub")
-                                .map_err(|e| format!("strcpy error: {}", e))?;
-                            Ok(buf.into())
+                            // Complex type (List, Record, etc.) — return graceful error
+                            return Err(format!("to_json: complex types not yet supported in codegen").into());
                         }
                     }
                 }
