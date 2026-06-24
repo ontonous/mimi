@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased] — 0.22.5-dev
+## [Unreleased] — 0.22.6-dev
+
+### Added
+- (placeholder)
+
+## [v0.22.5] - 2026-06-24 — LSP + 导入增强（LSP Completion & Selective Import）
 
 ### Added
 - LSP stdlib completion: auto-scan `std/*.mimi` for `pub func` signatures, shown in "top" and "module" contexts
