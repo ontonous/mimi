@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased] — 0.24.1-dev
+
 ## [v0.24.0] — 2026-06-25 — 并发重构 (spawn→状态机)
 
 ### Added
