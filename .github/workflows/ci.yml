@@ -44,4 +44,4 @@ jobs:
         run: cargo test -- --test-threads=2
 
       - name: Clippy
-        run: cargo clippy --deny warnings
+        run: cargo clippy -- -D warnings
