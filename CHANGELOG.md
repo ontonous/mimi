@@ -5,6 +5,12 @@
 ### Added
 - `while let pattern = expr { body }` — 条件模式匹配循环（parser/typeck/interp 全路径）
 - `Pattern::Constructor` 支持 `Type::Name("Option"/"Result", ...)` 表示（修复 Option/Result 模式匹配）
+- Codegen: `compile_while_let_stmt` + `compile_pattern_check` — WhileLet 全后端支持
+- Codegen: NamedArg 优雅错误（替代通用 `_ => Err`）
+- Codegen: Ellipsis 加入无操作跳过分支（block/func/actors）
+- Checker: OnFailure 体类型检查
+- Checker: ImplTrait trait 名称验证（同 DynTrait）
+- Checker: Map 字面量键类型强制为 string
 - 测试: interp_while_let_some, interp_while_let_simple
 
 ## [v0.22.8] - 2026-06-24

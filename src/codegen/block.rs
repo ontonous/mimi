@@ -1,4 +1,4 @@
-#![allow(dead_code, deprecated)]
+#![allow(dead_code, deprecated, unreachable_patterns)]
 
 use crate::ast::*;
 use crate::codegen::call_try_basic_value;
@@ -205,7 +205,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         Type::Name(tn, _) => {
                                                             self.var_type_names.insert(name.clone(), tn.clone());
                                                         }
-                                                        _ => {}
+                #[allow(unreachable_patterns)]
+                _ => {}
                                                     }
                                                     // For async functions, track the inner result type for await.
                                                     if fdef.is_async {
@@ -364,7 +365,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified)
                     self.compile_block(body, vars)?;
                 }
-                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(_) => {
+                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(_) | Stmt::Ellipsis => {
                     // Skip contract-related statements in codegen
                 }
                 Stmt::Block(block) => {
@@ -372,6 +373,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, vars)?;
+                }
+                Stmt::WhileLet { pat, init, body } => {
+                    self.compile_while_let_stmt(pat, init, body, vars)?;
                 }
                 Stmt::Loop(body) => {
                     self.compile_loop_stmt(body, vars)?;
@@ -593,6 +597,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, vars)?;
+                }
+                Stmt::WhileLet { pat, init, body } => {
+                    self.compile_while_let_stmt(pat, init, body, vars)?;
                 }
                 Stmt::Loop(body) => {
                     self.compile_loop_stmt(body, vars)?;

@@ -169,4 +169,71 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
     }
+
+    /// Return a boolean LLVM value indicating if a pattern matches a value.
+    /// Used by compile_while_let_stmt to determine loop continuation.
+    pub(in crate::codegen) fn compile_pattern_check(
+        &mut self,
+        pat: &Pattern,
+        val: &BasicValueEnum<'ctx>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<inkwell::values::IntValue<'ctx>> {
+        match pat {
+            Pattern::Wildcard | Pattern::Variable(_) => {
+                // Always matches
+                Ok(self.context.bool_type().const_int(1, false))
+            }
+            Pattern::Literal(lit) => {
+                let lit_val = self.compile_literal_expr(lit, vars)
+                    .map_err(|e| CompileError::LlvmError(format!("literal compile: {}", e)))?;
+                match (val, &lit_val) {
+                    (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
+                        self.builder.build_int_compare(inkwell::IntPredicate::EQ, *a, *b, "pat_lit_check")
+                            .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
+                    }
+                    _ => Err(CompileError::LlvmError("literal pattern check: type mismatch".to_string())),
+                }
+            }
+            Pattern::Constructor(name, _) => {
+                // Extract enum tag (i32 at struct index 0) and compare with expected ordinal
+                let val_sv = match val {
+                    BasicValueEnum::StructValue(sv) => *sv,
+                    _ => return Err(CompileError::LlvmError(
+                        "constructor pattern check: expected struct value".to_string())),
+                };
+                let tag = self.builder.build_extract_value(val_sv, 0, "enum_tag")
+                    .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
+                    .into_int_value();
+                let ordinal = self.find_variant_ordinal(name)?;
+                let ord_val = self.context.i32_type().const_int(ordinal, false);
+                self.builder.build_int_compare(inkwell::IntPredicate::EQ, tag, ord_val, "pat_ctor_check")
+                    .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
+            }
+            Pattern::Tuple(sub_pats) => {
+                // All sub-patterns must match
+                let mut result = self.context.bool_type().const_int(1, false);
+                for (i, sub_pat) in sub_pats.iter().enumerate() {
+                    let sub_val = self.extract_struct_field(val, i)?;
+                    let sub_match = self.compile_pattern_check(sub_pat, &sub_val, vars)?;
+                    result = self.builder.build_and(result, sub_match, "pat_tuple_and")
+                        .map_err(|e| CompileError::LlvmError(format!("and: {}", e)))?;
+                }
+                Ok(result)
+            }
+            Pattern::Array(_) | Pattern::Slice(_, _) => {
+                Err(CompileError::Generic("list/slice pattern check in while-let: not yet supported in codegen".to_string()))
+            }
+        }
+    }
+
+    /// Extract a field from a struct-like value by index.
+    fn extract_struct_field(&mut self, val: &BasicValueEnum<'ctx>, index: usize) -> MimiResult<BasicValueEnum<'ctx>> {
+        match val {
+            BasicValueEnum::StructValue(sv) => {
+                self.builder.build_extract_value(*sv, index as u32, &format!("field_{}", index))
+                    .map_err(|e| CompileError::LlvmError(format!("extract field error: {}", e)))
+            }
+            _ => Err(CompileError::Generic(format!("expected struct value, got {:?}", val))),
+        }
+    }
 }

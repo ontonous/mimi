@@ -106,7 +106,12 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         for (k, v) in entries {
-            self.infer_expr(k, scopes);
+            let key_ty = self.infer_expr(k, scopes);
+            if !crate::core::helpers::is_string(&key_ty) {
+                self.emit_code(crate::diagnostic::codes::E0211, format!(
+                    "map literal key must be a string, found {}", crate::core::helpers::fmt_type(&key_ty)
+                ));
+            }
             self.infer_expr(v, scopes);
         }
         Type::Name("Record".into(), vec![])

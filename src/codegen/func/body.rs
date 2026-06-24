@@ -53,6 +53,50 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Shared implementation for Stmt::WhileLet — pattern-matched loop
+    pub(in crate::codegen) fn compile_while_let_stmt(
+        &mut self,
+        pat: &Pattern,
+        init: &Expr,
+        body: &Block,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        let function = self.current_function().ok_or_else(|| CompileError::LlvmError("codegen: no current function for while-let".to_string()))?;
+        let loop_bb = self.context.append_basic_block(function, "while_let_loop");
+        let merge_bb = self.context.append_basic_block(function, "while_let_end");
+        let type_bb = self.context.append_basic_block(function, "while_let_type");
+
+        self.builder.build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch: {}", e)))?;
+
+        // Loop header: evaluate init and check pattern match
+        self.builder.position_at_end(loop_bb);
+        let init_val = self.compile_expr(init, vars)?;
+
+        // Check if pattern matches
+        let matches = self.compile_pattern_check(pat, &init_val, vars)?;
+        self.builder.build_conditional_branch(matches, type_bb, merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch: {}", e)))?;
+
+        // Type-checking block: rebind pattern variables and run body
+        self.builder.position_at_end(type_bb);
+        self.compile_pattern_bind(pat, init_val, vars)?;
+        let old_break = self.loop_break.take();
+        let old_continue = self.loop_continue.take();
+        self.loop_break = Some(merge_bb);
+        self.loop_continue = Some(loop_bb);
+        self.compile_block(body, vars)?;
+        if !self.block_has_terminator() {
+            self.builder.build_unconditional_branch(loop_bb)
+                .map_err(|e| CompileError::LlvmError(format!("branch: {}", e)))?;
+        }
+        self.loop_break = old_break;
+        self.loop_continue = old_continue;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(())
+    }
+
     /// Shared implementation for Stmt::Loop — infinite loop with break
     pub(in crate::codegen) fn compile_loop_stmt(
         &mut self,

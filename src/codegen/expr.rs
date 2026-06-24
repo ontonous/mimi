@@ -81,6 +81,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expr::MapLiteral { entries } => self.compile_map_literal(entries, vars),
             Expr::SetLiteral(elems) => self.compile_set_literal(elems, vars),
+            Expr::NamedArg(name, _) => Err(CompileError::Generic(format!(
+                "named argument '{}' in codegen: named arguments must be resolved before codegen (use positional args or evaluate at comptime)", name
+            ))),
             #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
         }

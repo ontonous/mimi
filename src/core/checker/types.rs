@@ -202,7 +202,12 @@ impl<'a> Checker<'a> {
             Type::Array(inner, _) | Type::Slice(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::ImplTrait(_traits) => {
+            Type::ImplTrait(traits) => {
+                for trait_name in traits {
+                    if !self.traits.contains_key(trait_name) {
+                        self.emit_code(crate::diagnostic::codes::E0406, format!("unknown trait '{}' in impl Trait in {}", trait_name, context));
+                    }
+                }
             }
             Type::DynTrait(traits) => {
                 for trait_name in traits {

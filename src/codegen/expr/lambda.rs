@@ -225,6 +225,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.collect_free_vars_expr(cond, &defined, vars, free_vars);
                     self.collect_free_vars(body, &defined, vars, free_vars);
                 }
+                Stmt::WhileLet { init, body, .. } => {
+                    self.collect_free_vars_expr(init, &defined, vars, free_vars);
+                    self.collect_free_vars(body, &defined, vars, free_vars);
+                }
                 Stmt::Loop(body) => {
                     self.collect_free_vars(body, &defined, vars, free_vars);
                 }

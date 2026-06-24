@@ -392,6 +392,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.loop_continue = old_continue;
                     self.builder.position_at_end(merge_bb);
                 }
+                Stmt::WhileLet { pat, init, body } => {
+                    self.compile_while_let_stmt(pat, init, body, &mut vars)?;
+                }
                 Stmt::Loop(body) => {
                     let function = self.current_function()
                         .ok_or_else(|| CompileError::LlvmError("codegen: no current function for loop in actor method".to_string()))?;
@@ -443,7 +446,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::SharedLet { kind, name, ty, init } => {
                     self.compile_shared_let_stmt(kind, name, ty, init, &mut vars)?;
                 }
-                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _) | Stmt::Math(_) => {}
+                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _) | Stmt::Math(_) | Stmt::Ellipsis => {}
                 Stmt::Block(block) => {
                     self.compile_block(block, &mut vars)?;
                 }

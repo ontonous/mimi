@@ -753,6 +753,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::While { cond, body } => {
                     self.compile_while_stmt(cond, body, &mut vars)?;
                 }
+                Stmt::WhileLet { pat, init, body } => {
+                    self.compile_while_let_stmt(pat, init, body, &mut vars)?;
+                }
                 Stmt::Loop(body) => {
                     self.compile_loop_stmt(body, &mut vars)?;
                 }
@@ -840,7 +843,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
                     self.compile_block(body, &mut vars)?;
                 }
-                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(_) => {
+                Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(_) | Stmt::Ellipsis => {
                     // Skip contract-related statements in codegen
                 }
                 Stmt::Block(block) => {
