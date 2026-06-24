@@ -1,14 +1,16 @@
 # Changelog
 
-## [Unreleased] — 0.22.6-dev
+## [Unreleased] — 0.22.7-dev
+
+### Added
+- (placeholder)
+
+## [v0.22.6] - 2026-06-24 — 诊断质量 + format()（Diagnostics & format() Builtin）
 
 ### Added
 - `format(template, args...)` builtin: `format("x={} y={}", a, b)` returns `"x=42 y=hello"`
 - Error message suggestions: `.with_help()` added to E0209 (type mismatch in `let`, assignment, list element) and E0211 (argument type mismatch)
 - 4 tests for `format()` (basic, multi, no-placeholders, mixed types)
-
-### Fixed
-- (none)
 
 ## [v0.22.5] - 2026-06-24 — LSP + 导入增强（LSP Completion & Selective Import）
 
