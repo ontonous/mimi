@@ -2,6 +2,23 @@
 
 ## [Unreleased] — 0.24.1-dev
 
+### Fixed
+- **R1**: `mod no_panic` ×4 重叠 cfg — 删除 2 个重复空实现模块（macOS 编译错误）
+- **R3**: `sigjmp_buf` 硬编码 128 字节 → 扩容至 256 字节（glibc/macOS/ARM64 安全）
+- **R4**: `__mimi_pow_i64(-2, 3)` 返回 0 — `checked_mul` 替代手动溢出检查
+- **R6**: JSON key 转义序列被替换为 `?` — 完整 escape 解码（`\n \t \\ \"` 等）
+- **R8**: `mimi_json_deserialize` 的 `out_len` 报告 count 而非 idx — 改为实际解析数量
+- **R10**: IPv6 URL `[::1]` 括号被路径分割器破坏 — bracket-aware host 解析
+- **R11**: 网络函数 `fd as i32` 静默截断 — `fd_to_i32()` 安全转换
+- **CG1**: f-string 1024 字节固定缓冲区溢出 — 运行时动态计算总大小
+- **CG2**: if-else 分支未 clone `vars` — 分支独立作用域 + 合并
+- **CG6**: slice `start > end` 产生巨大长度 — `select` clamp 到 0 长度
+- **CG7**: `let x;` 非 int 类型不初始化 — float/pointer 类型零初始化
+
+### Tests
+- 新增 5 个测试: `builtin_pow_negative_base`, `builtin_pow_negative_base_even_exp`, `builtin_pow_zero_exp`, `e2e_json_key_escaped`, `e2e_json_value_escaped`
+- 基线: 2,132 passed, 0 failed, 21 ignored
+
 ## [v0.24.0] — 2026-06-25 — 并发重构 (spawn→状态机)
 
 ### Added
