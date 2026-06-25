@@ -518,6 +518,7 @@ impl<'a> Interpreter<'a> {
                     )))
                 }
             }
+            Value::Newtype(inner) if idx == 0 => Ok(*inner),
             _ => Err(InterpError::new(format!(
                 "cannot index non-tuple value with .{}",
                 idx

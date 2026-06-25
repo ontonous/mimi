@@ -1067,3 +1067,17 @@ func main() -> i32 { 1 }
     )
     .expect("different actors with same method name should not conflict");
 }
+
+// ─── v0.25 D4: Newtype .0 unwrap ─────────────────────────────────────
+
+#[test]
+fn d4_newtype_dot0_typecheck() {
+    check_source(
+        r#"
+newtype UserId = i32
+func get_id(u: UserId) -> i32 { u.0 }
+func main() -> i32 { get_id(UserId(42)) }
+"#,
+    )
+    .expect("newtype .0 should typecheck");
+}

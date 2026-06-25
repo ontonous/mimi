@@ -399,6 +399,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         index: usize,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // D4: newtype .0 — newtypes are transparent in codegen, .0 is identity
+        if index == 0 {
+            if let Some(ty) = self.expr_type_of(tuple_expr, vars) {
+                if matches!(ty, crate::ast::Type::Newtype(_, _)) {
+                    return self.compile_expr(tuple_expr, vars);
+                }
+            }
+        }
         let tuple_val = self.compile_expr(tuple_expr, vars)?;
         match tuple_val {
             BasicValueEnum::PointerValue(pv) => {

@@ -221,6 +221,9 @@ impl<'a> Checker<'a> {
                     Type::Name("unknown".into(), vec![])
                 }
             }
+            Type::Newtype(_, inner) if idx == 0 => {
+                inner.as_ref().clone()
+            }
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0244,

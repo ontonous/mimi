@@ -239,9 +239,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     enum_ty
                 }
             }
-            crate::ast::TypeDefKind::Alias(ty) | crate::ast::TypeDefKind::Newtype(ty) => {
+            crate::ast::TypeDefKind::Alias(ty) => {
                 types::mimi_type_to_llvm(self.context, ty)
                     .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+            }
+            crate::ast::TypeDefKind::Newtype(inner_ty) => {
+                let llvm_ty = types::mimi_type_to_llvm(self.context, inner_ty)
+                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                // Register newtype constructor as identity function: Name(value) -> value
+                if self.module.get_function(&t.name).is_none() {
+                    let meta_ty = types::basic_to_metadata(self.context, llvm_ty);
+                    let fn_type = llvm_ty.fn_type(&[meta_ty], false);
+                    let ctor = self.module.add_function(
+                        &t.name,
+                        fn_type,
+                        Some(inkwell::module::Linkage::Internal),
+                    );
+                    let entry = self.context.append_basic_block(ctor, "entry");
+                    let prev_block = self.builder.get_insert_block();
+                    self.builder.position_at_end(entry);
+                    let arg = ctor.get_nth_param(0).ok_or_else(|| {
+                        CompileError::LlvmError("newtype ctor missing parameter".to_string())
+                    })?;
+                    self.builder.build_return(Some(&arg)).map_err(|e| {
+                        CompileError::LlvmError(format!("newtype ctor return error: {}", e))
+                    })?;
+                    if let Some(prev) = prev_block {
+                        self.builder.position_at_end(prev);
+                    }
+                }
+                llvm_ty
             }
             crate::ast::TypeDefKind::Union(fields) => {
                 // Represent union as a byte array large enough to hold the largest field
