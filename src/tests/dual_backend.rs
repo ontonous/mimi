@@ -715,8 +715,8 @@ fn dual_enum_ctor_interp() {
     if !can_link() {
         return;
     }
-    // codegen match on data variants has known ordinal mismatch + missing unit variant registration
-    dual_assert_interp_only!(
+    // D2: enum constructor match — promoted to dual after ordinal mismatch fix
+    dual_assert!(
         r#"
         type MyOption { Some(i32) None }
         func unwrap(x: MyOption) -> i32 {
@@ -725,9 +725,12 @@ fn dual_enum_ctor_interp() {
                 None => -1
             }
         }
-        func main() -> i32 { unwrap(Some(99)) }
+        func main() -> i32 {
+            println(unwrap(Some(99)));
+            0
+        }
     "#,
-        interp::Value::Int(99)
+        "99"
     );
 }
 
@@ -736,7 +739,8 @@ fn dual_enum_none_interp() {
     if !can_link() {
         return;
     }
-    dual_assert_interp_only!(
+    // D2: enum unit variant match — promoted to dual after unit variant registration fix
+    dual_assert!(
         r#"
         type MyOption { Some(i32) None }
         func unwrap(x: MyOption) -> i32 {
@@ -745,9 +749,12 @@ fn dual_enum_none_interp() {
                 None => -1
             }
         }
-        func main() -> i32 { unwrap(None) }
+        func main() -> i32 {
+            println(unwrap(None));
+            0
+        }
     "#,
-        interp::Value::Int(-1)
+        "-1"
     );
 }
 
