@@ -216,6 +216,10 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
 pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() { return; }
     let hdr = unsafe { rc_header_from_ptr(ptr) };
+    // Guard: don't retain if object is being freed (strong == 0 && weak == 0)
+    let s = hdr.strong.load(Ordering::Relaxed);
+    let w = hdr.weak.load(Ordering::Relaxed);
+    if s == 0 && w == 0 { return; }
     hdr.weak.fetch_add(1, Ordering::Relaxed);
 }
 
