@@ -117,10 +117,15 @@ use std::sync::Mutex;
 
 // Re-export types used by FFI tests and codegen
 // Must match the C layouts exactly.
+// Re-export types used by FFI tests and codegen
+// Must match the C layouts exactly.
 #[repr(C)]
 pub struct MimiList {
     len: i64,
     data: *mut *mut std::ffi::c_char,
+    // FFI-2: Tracks whether data was allocated by Rust (true) or received from C (false).
+    // When true, free(data) uses libc::free. When false, skip free to avoid wrong allocator.
+    owns_data: bool,
 }
 
 pub type ValueHandle = usize;
@@ -160,7 +165,8 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
 }
 
 /// S22: Free a MimiList and optionally its C string elements.
-/// If `free_elements` is true, each data[i] pointer is freed with libc::free.
+/// FFI-2: Only frees data if `owns_data` is true (Rust-allocated).
+/// C-allocated data (owns_data=false) is skipped to avoid wrong-allocator heap corruption.
 #[no_mangle]
 pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     if list.is_null() {
@@ -168,7 +174,10 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     }
     unsafe {
         let list = &*list;
-        if free_elements && !list.data.is_null() {
+        // FFI-2: Only free data if we own it. C may pass lists where data points
+        // into C-allocated memory (e.g., from str_split results), which must NOT be
+        // freed by libc::free if a different allocator was used.
+        if list.owns_data && free_elements && !list.data.is_null() {
             for i in 0..list.len as usize {
                 let elem = *list.data.add(i);
                 if !elem.is_null() {
@@ -260,12 +269,17 @@ unsafe fn rc_header_ref(ptr: *mut std::ffi::c_void) -> &'static RcHeader {
 
 #[no_mangle]
 pub extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
-    let total = std::alloc::Layout::new::<RcHeader>()
-        .extend(std::alloc::Layout::array::<u8>(size as usize).expect("invalid layout"))
-        .expect("layout extension failed")
+    // FFI-1: Reject negative/huge sizes that would cause Layout::array to panic.
+    // abort() is async-signal-safe and the only safe option across FFI boundary.
+    if size <= 0 || size > 0x7fff_ffff {
+        std::process::abort();
+    }
+    let layout = std::alloc::Layout::new::<RcHeader>()
+        .extend(std::alloc::Layout::array::<u8>(size as usize).unwrap_or_else(|_| std::process::abort()))
+        .unwrap_or_else(|_| std::process::abort())
         .0
         .pad_to_align();
-    let ptr = unsafe { std::alloc::alloc(total) };
+    let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -288,11 +302,16 @@ pub extern "C" fn mimi_rc_retain(ptr: *mut std::ffi::c_void) {
 }
 
 /// Helper: build the dealloc Layout from RcHeader's stored alloc_size.
+/// FFI-1: Uses abort instead of panicking if alloc_size is corrupted.
 unsafe fn rc_dealloc_layout(hdr: *mut RcHeader) -> std::alloc::Layout {
     let user_size = (*hdr).alloc_size as usize;
+    // Guard against corrupted alloc_size that would cause Layout::array to panic.
+    if user_size == 0 || user_size > 0x7fff_ffff {
+        std::process::abort();
+    }
     std::alloc::Layout::new::<RcHeader>()
-        .extend(std::alloc::Layout::array::<u8>(user_size).expect("invalid layout"))
-        .expect("layout extension failed")
+        .extend(std::alloc::Layout::array::<u8>(user_size).unwrap_or_else(|_| std::process::abort()))
+        .unwrap_or_else(|_| std::process::abort())
         .0
         .pad_to_align()
 }
@@ -495,6 +514,7 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         let list = Box::new(MimiList {
             len: 0,
             data: std::ptr::null_mut(),
+            owns_data: true, // owns the list struct (even if data is null)
         });
         return Box::into_raw(list);
     }
@@ -504,6 +524,7 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         let list = Box::new(MimiList {
             len: 0,
             data: std::ptr::null_mut(),
+            owns_data: true,
         });
         return Box::into_raw(list);
     }
@@ -521,10 +542,13 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     }
 
     let data_ptr = items.as_mut_ptr();
+    // FFI-2: If collect_values=true, data contains opaque handles (not owned by Rust).
+    // If collect_values=false, data contains alloc_c_string results (owned by Rust).
     std::mem::forget(items);
     let list = Box::new(MimiList {
         len,
         data: data_ptr,
+        owns_data: !collect_values, // only own data when strings are allocated
     });
     Box::into_raw(list)
 }
@@ -593,9 +617,11 @@ pub extern "C" fn mimi_str_split(
     let data_ptr = c_strings.as_mut_ptr();
     std::mem::forget(c_strings);
 
+    // FFI-2: Strings are allocated via alloc_c_string (libc::malloc) — owns_data: true.
     let list = Box::new(MimiList {
         len,
         data: data_ptr,
+        owns_data: true,
     });
     Box::into_raw(list)
 }
@@ -2665,9 +2691,15 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
     sum
 }
 
+
+// FFI-4: The UB trigger __mimi_extern_test_segfault is always compiled into the
+// staticlib. It ALWAYS performs the UB (no cfg gate). The test wrapper
+// test_segfault is gated #[cfg(test)] so only Mimi test code can trigger it.
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_segfault() {
-    // Deliberate null pointer dereference for testing
+    // Deliberate null pointer dereference — used by FFI safety tests to verify
+    // crash handling. In non-test builds this is never called (test_segfault
+    // wrapper is gated #[cfg(test)]).
     unsafe {
         std::ptr::write_volatile(std::ptr::null_mut::<i32>(), 42);
     }
@@ -3037,6 +3069,14 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
 type PollFn = unsafe extern "C" fn(*mut std::ffi::c_void);
 
 /// Wrapper to make *mut c_void Send (needed for Mutex).
+/// FFI-8: Soundness — a raw pointer is Send because:
+/// - Sending a *mut T transfers exclusive ownership of the referent to the receiving thread
+/// - The future pointer is only dereferenced inside `mimi_executor_run` while holding the queue mutex,
+///   guaranteeing exclusive access (no data race)
+/// - The pointer came from `mimi_rc_alloc` (system allocator, not thread-local), so it is safe to
+///   access from any thread after the send
+/// - `Sync` is safe because &SendPtr is never shared across threads (only &mut access via the mutex)
+#[derive(Clone)]
 struct SendPtr(*mut std::ffi::c_void);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}

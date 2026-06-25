@@ -6,6 +6,7 @@ use libffi::low::{self as ffi_low};
 use libffi::middle::{Cif, Type as FfiType};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // F8: Thread-local context for synchronous callback invocation.
 // Set before each FFI call that involves callbacks, cleared after.
@@ -36,12 +37,19 @@ use std::sync::Mutex;
 /// This global store keeps closures alive so the trampoline can still find
 /// them from any thread. Entries persist until explicitly deregistered via
 /// `mimi_callback_deregister`.
+///
+/// FFI-10: Entry includes Arc<AtomicUsize> "active call" counter.
+/// trampoline increments before invoking closure, decrements after.
+/// deregister waits for count == 0 before removing the entry.
 #[allow(clippy::type_complexity)]
-static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<Mutex<HashMap<i64, (Value, bool, Vec<bool>)>>> =
-    std::sync::OnceLock::new();
+static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<
+    Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>>,
+> = std::sync::OnceLock::new();
 
 #[allow(clippy::type_complexity)]
-fn global_callback_store() -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>)>> {
+fn global_callback_store()
+    -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>>
+{
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -49,12 +57,35 @@ fn global_callback_store() -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool
 /// Should be called by C code when the stored function pointer is no longer
 /// needed (e.g., when unregistering an event handler).
 /// Safe to call from any thread.
+/// FFI-10: Waits for any in-flight callback invocation to complete before
+/// removing the entry, preventing the C function pointer from becoming a
+/// dangling pointer while a callback is still running.
 /// F-18: Lock ordering: always acquire CALLBACK_TABLE before CALLBACK_GLOBAL_STORE
 /// to match the registration order (callback_table_register → global_callback_store).
 /// This prevents deadlock when multiple threads register/deregister concurrently.
 #[no_mangle]
 pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
     callback_table_remove(callback_id);
+    // FFI-10: Extract the active-count Arc and wait for in-flight calls to drain.
+    let active_count = {
+        let store = global_callback_store()
+            .lock()
+            .expect("CALLBACK_GLOBAL_STORE lock poisoned");
+        if let Some((_, _, _, count)) = store.get(&callback_id) {
+            Arc::clone(count)
+        } else {
+            return;
+        }
+    };
+    // Spin until no in-flight calls.
+    loop {
+        let n = active_count.load(Ordering::Acquire);
+        if n == 0 {
+            break;
+        }
+        std::hint::spin_loop();
+    }
+    // Now safe to remove.
     if let Ok(mut store) = global_callback_store().lock() {
         store.remove(&callback_id);
     }
@@ -94,6 +125,22 @@ unsafe fn callback_trampoline_inner(
     args: *const *const std::ffi::c_void,
     userdata: &i64,
 ) {
+    // FFI-10: RAII guard — increments active count on creation, decrements on drop.
+    struct ActiveCountGuard(Option<Arc<AtomicUsize>>);
+    impl ActiveCountGuard {
+        fn new(cnt: &Arc<AtomicUsize>) -> Self {
+            cnt.fetch_add(1, Ordering::Acquire);
+            ActiveCountGuard(Some(Arc::clone(cnt)))
+        }
+    }
+    impl Drop for ActiveCountGuard {
+        fn drop(&mut self) {
+            if let Some(cnt) = &self.0 {
+                cnt.fetch_sub(1, Ordering::Release);
+            }
+        }
+    }
+
     let callback_id = *userdata;
     // F3: Fast path — check thread-local context first (synchronous callbacks).
     // If not found, fall back to the global store (async/off-thread callbacks).
@@ -101,23 +148,44 @@ unsafe fn callback_trampoline_inner(
         let ctx = c.borrow();
         ctx.entries.get(&callback_id).cloned()
     });
-    let (closure, ret_is_float, arg_free_mask) = match entry {
-        Some(e) => e,
-        None => {
-            let entry = global_callback_store()
-                .lock()
-                .ok()
-                .and_then(|store| store.get(&callback_id).cloned());
-            match entry {
-                Some(e) => e,
-                None => {
-                    *result = 0;
-                    return;
-                }
-            }
-        }
-    };
 
+    // Look up closure + active guard (bound for RAII Drop semantics)
+    #[allow(unused_variables)]
+    let (closure, ret_is_float, arg_free_mask, active_guard) =
+        match entry {
+            Some((closure, ret_is_float, arg_free_mask)) => {
+                // TLS entry — use no-op active guard (global store count not affected)
+                (
+                    closure,
+                    ret_is_float,
+                    arg_free_mask,
+                    ActiveCountGuard(None),
+                )
+            }
+            None => {
+                // Global store entry — increment and track the count
+                let (closure, ret_is_float, arg_free_mask, cnt) = {
+                    let store = global_callback_store()
+                        .lock()
+                        .expect("CALLBACK_GLOBAL_STORE lock poisoned");
+                    match store.get(&callback_id).cloned() {
+                        Some((c, r, a, cnt)) => (c, r, a, cnt),
+                        None => {
+                            *result = 0;
+                            return;
+                        }
+                    }
+                };
+                (
+                    closure,
+                    ret_is_float,
+                    arg_free_mask,
+                    ActiveCountGuard::new(&cnt),
+                )
+            }
+        };
+
+    // active_guard is live here — if we return early it will be dropped (decremented).
     // Extract C arguments from raw void pointers.
     let nargs = cif.nargs as usize;
     let mut mimi_args: Vec<Value> = Vec::with_capacity(nargs);
@@ -148,6 +216,7 @@ unsafe fn callback_trampoline_inner(
             callback_id,
         );
         *result = i64::MIN;
+        // active_guard dropped here — decrements count
         return;
     }
     let interp = &mut *(interp_ptr as *mut Interpreter<'static>);
@@ -168,6 +237,7 @@ unsafe fn callback_trampoline_inner(
                     Value::Unit => 0,
                     _ => {
                         *result = i64::MIN;
+                        // active_guard dropped here — decrements count
                         return;
                     }
                 };
@@ -177,6 +247,7 @@ unsafe fn callback_trampoline_inner(
             *result = i64::MIN;
         }
     }
+    // active_guard dropped here — decrements count
 
     // F6: Free C-allocated string pointers that Mimi takes ownership of.
     for (i, &should_free) in arg_free_mask.iter().enumerate() {
@@ -265,12 +336,14 @@ impl<'a> Interpreter<'a> {
                 // for synchronous callbacks) and the global store (fallback for async/
                 // off-thread callbacks where TLS has been cleared).
                 let arg_free_mask = compute_arg_free_mask(param_types);
+                // FFI-10: Per-callback active-call counter for deregister race prevention.
+                let active_count = Arc::new(AtomicUsize::new(0));
                 FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
                     ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
                 });
                 if let Ok(mut store) = global_callback_store().lock() {
-                    store.insert(cb_id, (closure, ret_is_float, arg_free_mask));
+                    store.insert(cb_id, (closure, ret_is_float, arg_free_mask, Arc::clone(&active_count)));
                 }
 
                 // Create a libffi Closure that generates a C-compatible function pointer.

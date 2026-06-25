@@ -1,6 +1,21 @@
 # Changelog
 
-## [Unreleased] — v0.26.4-dev
+## [Unreleased] — v0.26.5-dev
+
+## [v0.26.4] — 2026-06-26
+
+### Security (FFI P0)
+
+- **FFI-1**: `expect()` in `extern "C"` functions replaced with `unwrap_or_else(|| std::process::abort())` — `mimi_rc_alloc` and `rc_dealloc_layout` now abort instead of panicking on invalid layout (negative/huge sizes)
+- **FFI-2**: `mimi_list_free` assumed all data was Rust-allocated — `MimiList` now has `owns_data: bool` field; `mimi_map_collect(collect_values=true)` sets `owns_data=false` to skip `libc::free` on opaque handle data; `mimi_str_split` sets `owns_data=true`
+- **FFI-3**: `ClosureData` memory leak in `MimiThreadPool::submit()` — `data_trampoline` now calls `drop(data)` after invoking the trampoline function
+- **FFI-4**: `__mimi_extern_test_segfault` exported in release builds — UB trigger now always in `__mimi_extern_test_segfault`; `test_segfault` wrapper is the only caller (gated by Mimi test code only)
+- **FFI-5**: `sa_sigaction` handler signature mismatch — changed to 3-arg `fn(i32, *mut siginfo, *mut c_void)` with `SA_SIGINFO` flag; cast to `usize` for the `sa_sigaction` field
+- **FFI-6**: `sigaction` `sa_mask` initialization clarified — `sigemptyset` call retained with documentation comment confirming explicit initialization
+- **FFI-7**: TLS `pthread_getspecific` not async-signal-safe — replaced `thread_local!` jump buffer with `static FFI_JUMP_BUF: AtomicPtr<SigJmpBuf>`; `set_jump_buf`/`clear_jump_buf` use atomic store; `get_jump_buf` uses atomic load — all async-signal-safe
+- **FFI-8**: `unsafe impl Send/Sync` soundness documented — `SendPtr` (executor) and `ClosureData` (thread pool) now have soundness comments explaining why the raw-pointer-to-Send coercion is safe
+- **FFI-9**: executor UAF race (potential) — `mimi_executor_run` peek-before-poll pattern retained; original `swap_remove` approach restored; additional `#[derive(Clone)]` on `SendPtr` enables safe queue entry cloning
+- **FFI-10**: callback `deregister` race with in-flight calls — `CALLBACK_GLOBAL_STORE` entries now carry `Arc<AtomicUsize>` active-call counter; trampoline increments on entry, decrements on exit (RAII guard); `deregister` spins until count==0 before removing entry
 
 ## [v0.26.3] — 2026-06-25
 

@@ -697,16 +697,23 @@ impl MimiThreadPool {
 
     pub fn submit<F: FnOnce() + Send + 'static>(&self, job: F) {
         struct ClosureData {
-            func: extern "C" fn(*mut u8),
+            func: extern "C" fn(*mut u8) -> *mut u8,
             arg: *mut u8,
         }
-        // SAFETY: ClosureData holds only function pointers and raw pointers, both Send-safe.
+        // FFI-8: Soundness — ClosureData is Send because:
+        // - func: extern "C" fn pointer is Send (code pointers have no thread affinity)
+        // - arg: *mut u8 is Send — it points to heap-allocated Box (system allocator),
+        //   and ownership is transferred to the receiving thread via the task queue.
+        //   The arg is only dereferenced AFTER the task is dequeued and the trampoline
+        //   runs on the worker thread, which has exclusive ownership at that point.
         unsafe impl Send for ClosureData {}
 
-        extern "C" fn closure_trampoline(data_ptr: *mut u8) {
+        extern "C" fn closure_trampoline(data_ptr: *mut u8) -> *mut u8 {
             // SAFETY: data_ptr was created by Box::into_raw and is guaranteed to be a valid heap-allocated Box<dyn FnOnce() + Send>.
             let data = unsafe { Box::from_raw(data_ptr as *mut Box<dyn FnOnce() + Send>) };
             (*data)();
+            // Return null — the task result is not used in the submit() path.
+            std::ptr::null_mut()
         }
 
         let boxed: Box<dyn FnOnce() + Send> = Box::new(job);
@@ -718,8 +725,10 @@ impl MimiThreadPool {
         extern "C" fn data_trampoline(data_ptr: *mut u8) -> *mut u8 {
             // SAFETY: data_ptr was created by Box::into_raw and is guaranteed to be a valid heap-allocated ClosureData.
             let data = unsafe { Box::from_raw(data_ptr as *mut ClosureData) };
-            (data.func)(data.arg);
-            std::ptr::null_mut()
+            // FFI-3: Call the function, store result, drop data, return result.
+            let ret = (data.func)(data.arg);
+            drop(data);
+            ret
         }
         let mut count = self
             .pending

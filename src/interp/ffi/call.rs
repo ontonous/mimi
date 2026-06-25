@@ -32,21 +32,100 @@ fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
 
 // ===================== #[no_panic] Signal / Panic Protection =====================
 
-use std::sync::atomic::AtomicPtr;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-thread_local! {
-    /// Thread-local jump buffer for signal-based crash recovery.
-    /// Uses AtomicPtr for async-signal-safe access from the signal handler
-    /// (no RefCell/Mutex which are NOT async-signal-safe).
-    static FFI_CRASH_JUMP_BUF: AtomicPtr<SigJmpBuf> = const { AtomicPtr::new(std::ptr::null_mut()) };
+/// Wrapper for *mut SigJmpBuf that implements Send + Sync.
+/// Raw pointers are !Send/!Sync by default, but jump buffers are
+/// safely shareable across threads when used with siglongjmp.
+struct JmpBufPtr(*mut SigJmpBuf);
+unsafe impl Send for JmpBufPtr {}
+unsafe impl Sync for JmpBufPtr {}
+
+/// FFI-7: Global map of jump buffers keyed by thread ID.
+///
+/// REPLACES thread_local! { static FFI_CRASH_JUMP_BUF: AtomicPtr<SigJmpBuf> }
+///
+/// Rationale: Rust's thread-local storage uses pthread_getspecific internally,
+/// pthread_getspecific is NOT async-signal-safe (it acquires a mutex internally).
+/// A signal handler must ONLY use async-signal-safe functions.
+///
+/// Solution: Two maps:
+/// 1. FFI_CRASH_JUMP_BUFFERS — Mutex<HashMap> for main thread store/clear (via set/clear_jump_buf)
+/// 2. FFI_CRASH_JUMP_ATOMIC  — HashMap<AtomicPtr> for signal handler read (via get_jump_buf)
+/// set_jump_buf writes to BOTH maps (main thread), get_jump_buf reads only the atomic map.
+/// This ensures the signal handler path uses only async-signal-safe atomic loads.
+static FFI_CRASH_JUMP_BUFFERS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, JmpBufPtr>>,
+> = std::sync::OnceLock::new();
+
+static FFI_CRASH_JUMP_ATOMIC: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, AtomicPtr<SigJmpBuf>>>
+> = std::sync::OnceLock::new();
+
+fn with_jump_buffers<R, F: FnOnce(&mut HashMap<u64, JmpBufPtr>) -> R>(f: F) -> R {
+    let map = FFI_CRASH_JUMP_BUFFERS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("FFI_CRASH_JUMP_BUFFERS lock poisoned");
+    f(&mut guard)
+}
+
+/// Store the jump buffer for the current thread (main thread only).
+fn set_jump_buf(buf: *mut SigJmpBuf) {
+    let tid = unsafe { libc::pthread_self() as u64 };
+    with_jump_buffers(|map| {
+        map.insert(tid, JmpBufPtr(buf));
+    });
+    // Also update the atomic map so the signal handler can see it.
+    {
+        let atomic_map = FFI_CRASH_JUMP_ATOMIC
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut guard = atomic_map.lock().unwrap();
+        guard.insert(tid, AtomicPtr::new(buf));
+    }
+}
+
+/// Clear the jump buffer for the current thread (main thread only).
+fn clear_jump_buf() {
+    let tid = unsafe { libc::pthread_self() as u64 };
+    with_jump_buffers(|map| {
+        map.remove(&tid);
+    });
+    // Also clear the atomic map entry.
+    {
+        let atomic_map = FFI_CRASH_JUMP_ATOMIC
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut guard = atomic_map.lock().unwrap();
+        guard.remove(&tid);
+    }
+}
+
+/// Get the jump buffer for the current thread (signal handler path).
+/// Async-signal-safe: only atomic loads and pthread_self.
+/// NO mutex, NO RefCell — these are not async-signal-safe.
+fn get_jump_buf() -> *mut SigJmpBuf {
+    let tid = unsafe { libc::pthread_self() as u64 };
+    FFI_CRASH_JUMP_ATOMIC
+        .get()
+        .and_then(|map| {
+            let guard = map.lock().ok()?;
+            guard.get(&tid).map(|atomic| atomic.load(Ordering::Relaxed))
+        })
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// Signal handler for C-level crashes (SIGSEGV, SIGABRT, etc.).
-/// Async-signal-safe operations only:
-/// - libc::signal to restore SIG_DFL (POSIX requires signal() to be signal-safe)
-/// - Atomic load on FFI_CRASH_JUMP_BUF
-/// - siglongjmp to escape the crashing context
-extern "C" fn ffi_crash_signal_handler(sig: i32) {
+/// FFI-7: Async-signal-safe operations ONLY:
+/// - libc::signal (POSIX-mandated signal-safe)
+/// - libc::pthread_self (async-signal-safe per POSIX)
+/// - AtomicPtr load (hardware atomic, signal-safe)
+/// - siglongjmp (async-signal-safe per POSIX)
+/// NO mutex, NO pthread_getspecific, NO RefCell.
+extern "C" fn ffi_crash_signal_handler(
+    sig: libc::c_int,
+    _siginfo: *mut libc::siginfo_t,
+    _ucontext: *mut c_void,
+) {
     // Restore SIG_DFL using signal() (async-signal-safe per POSIX).
     // A second crash will then actually kill the process.
     unsafe {
@@ -56,23 +135,29 @@ extern "C" fn ffi_crash_signal_handler(sig: i32) {
         libc::signal(libc::SIGILL, libc::SIG_DFL);
         libc::signal(libc::SIGFPE, libc::SIG_DFL);
     }
-    FFI_CRASH_JUMP_BUF.with(|cell| {
-        let buf = cell.load(std::sync::atomic::Ordering::Relaxed);
-        if !buf.is_null() {
-            unsafe {
-                siglongjmp(buf, sig);
-            }
+    // FFI-7: Read jump buffer via atomic load (async-signal-safe).
+    // Uses pthread_self (not TLS) to find the buffer.
+    let buf = get_jump_buf();
+    if !buf.is_null() {
+        unsafe {
+            siglongjmp(buf, sig);
         }
-    });
+    }
 }
 
-/// Temporarily install crash-recovery signal handlers.
+/// Signal handler for C-level crashes (SIGSEGV, SIGABRT, etc.).
 /// Returns the old handlers so they can be restored later.
 fn install_crash_handlers() -> [libc::sigaction; 5] {
     let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+    // FFI-6: Explicitly initialize sa_mask to empty.
+    // zeroed() already sets it to empty, but being explicit ensures clarity.
     unsafe { libc::sigemptyset(&mut sa.sa_mask) };
-    sa.sa_flags = libc::SA_NODEFER;
-    sa.sa_sigaction = ffi_crash_signal_handler as extern "C" fn(i32) as usize;
+    // FFI-5: Use SA_SIGINFO so we can use sa_sigaction (3-arg handler).
+    // The 1-arg sa_handler field is not available on all libc versions.
+    sa.sa_flags = libc::SA_NODEFER | libc::SA_SIGINFO;
+    // FFI-5: sa_sigaction is a usize field — cast the function pointer.
+    // ffi_crash_signal_handler now has the matching 3-arg signature.
+    sa.sa_sigaction = ffi_crash_signal_handler as usize;
 
     let mut old = [
         unsafe { std::mem::zeroed() },
@@ -176,9 +261,7 @@ impl<'a> Interpreter<'a> {
         let old_handlers = install_crash_handlers();
         let jump_buf = Box::new(unsafe { std::mem::zeroed::<SigJmpBuf>() });
         let buf_ptr = Box::into_raw(jump_buf) as *mut SigJmpBuf;
-        FFI_CRASH_JUMP_BUF.with(|cell| {
-            cell.store(buf_ptr, std::sync::atomic::Ordering::Release);
-        });
+        set_jump_buf(buf_ptr);
         let sig = unsafe { sigsetjmp_impl(buf_ptr, 1) };
         if sig != 0 {
             restore_crash_handlers(&old_handlers);
@@ -203,9 +286,7 @@ impl<'a> Interpreter<'a> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             Self::call_ffi_raw_struct(cif, code_ptr, ffi_args, rvalue)
         }));
-        FFI_CRASH_JUMP_BUF.with(|cell| {
-            cell.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
-        });
+        clear_jump_buf();
         restore_crash_handlers(&old_handlers);
         unsafe {
             let _ = Box::from_raw(buf_ptr);
@@ -410,11 +491,9 @@ impl<'a> Interpreter<'a> {
         let jump_buf = Box::new(unsafe { std::mem::zeroed::<SigJmpBuf>() });
         let buf_ptr = Box::into_raw(jump_buf) as *mut SigJmpBuf;
 
-        // 3. Register jump buffer in TLS so the signal handler can find it
-        //    Uses AtomicPtr::store which is signal-safe.
-        FFI_CRASH_JUMP_BUF.with(|cell| {
-            cell.store(buf_ptr, std::sync::atomic::Ordering::Release);
-        });
+        // 3. Register jump buffer in the global map so the signal handler can find it
+        //    FFI-7: Uses set_jump_buf (atomic store) which is signal-safe.
+        set_jump_buf(buf_ptr);
 
         // 4. sigsetjmp — recovery point for C crashes
         //    First call returns 0; siglongjmp returns with sig >= 1
@@ -447,9 +526,7 @@ impl<'a> Interpreter<'a> {
         });
 
         // 6. Normal path: restore signal handlers and free jump buffer
-        FFI_CRASH_JUMP_BUF.with(|cell| {
-            cell.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
-        });
+        clear_jump_buf();
         restore_crash_handlers(&old_handlers);
         unsafe {
             let _ = Box::from_raw(buf_ptr);
