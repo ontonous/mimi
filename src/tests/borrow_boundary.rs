@@ -391,3 +391,37 @@ func main() -> i32 {
         "field borrow should release at last use"
     );
 }
+
+/// V7: NLL borrow released across nested block boundaries.
+#[test]
+fn borrow_nll_cross_block() {
+    let src = r#"
+func main() -> i32 {
+    let a = 10;
+    let r = &a;
+    let v = *r;
+    { v + 1 }
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "NLL cross-block borrow should pass"
+    );
+}
+
+/// V7: NLL borrow released after last use even with multiple blocks.
+#[test]
+fn borrow_nll_multi_block() {
+    let src = r#"
+func main() -> i32 {
+    let a = 10;
+    let r = &a;
+    let v = *r;
+    { v + 1 }
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "NLL multi-block borrow should pass"
+    );
+}

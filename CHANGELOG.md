@@ -11,9 +11,15 @@
 
 ### Tests
 - `verify_solver_pop_after_unknown_no_crash` — E1 solver state safety
+- `verify_match_nonexhaustive_no_false_positive` — E2 非穷尽 match 不静默通过 ensures
+- `verify_match_exhaustive_wildcard_passes` — E2 穷尽 match wildcard 正常验证
+- `verify_invariant_assumed_not_preserved` — E3 invariant 作为假设（文档化当前行为）
+- `verify_if_else_body_return` — V1 if-else 返回值提取
+- `verify_nll_cross_block_boundary` — V7 NLL 跨块借用释放
 - `borrow_match_guard_uses_ref` — E4 match guard + borrow NLL
 - `borrow_field_level_nll_release` — E5 field borrow NLL release
-- 基线: 2,137 passed, 0 failed, 21 ignored
+- `borrow_nll_cross_block` / `borrow_nll_multi_block` — V7 NLL 边界测试
+- 基线: 2,144 passed, 0 failed, 21 ignored
 
 ### Fixed
 - **R1**: `mod no_panic` ×4 重叠 cfg — 删除 2 个重复空实现模块（macOS 编译错误）

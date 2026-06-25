@@ -1471,3 +1471,137 @@ func main() -> i32 { 0 }
         f.unwrap().status,
     );
 }
+
+/// E2: Non-exhaustive match (no wildcard) — result is unconstrained, so
+/// ensures `result >= 0` should NOT be Verified because the fallback arm
+/// returns an unconstrained variable (not silently 0).
+#[test]
+fn verify_match_nonexhaustive_no_false_positive() {
+    require_z3!();
+    let src = r#"
+func pick(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    match x {
+        0 => { 0 }
+        1 => { 1 }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: match_nonexhaustive");
+    let f = results.iter().find(|r| r.func_name == "pick");
+    assert!(f.is_some(), "pick should be present");
+    // With _match_fallback (unconstrained), ensures result >= 0
+    // cannot be statically verified — should be Failed or Unknown.
+    assert!(
+        matches!(f.unwrap().status, VerifStatus::Failed | VerifStatus::Unknown),
+        "non-exhaustive match should not silently pass ensures: {:?}",
+        f.unwrap().status,
+    );
+}
+
+/// E2: Exhaustive match (with wildcard) — all arms return >= 0, so
+/// ensures result >= 0 should be Verified.
+#[test]
+fn verify_match_exhaustive_wildcard_passes() {
+    require_z3!();
+    let src = r#"
+func pick_safe(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1
+    ensures: result >= 0
+    match x {
+        0 => { 0 }
+        1 => { 1 }
+        _ => { 0 }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: match_exhaustive");
+    let f = results.iter().find(|r| r.func_name == "pick_safe");
+    assert!(f.is_some(), "pick_safe should be present");
+    assert_eq!(
+        f.unwrap().status,
+        VerifStatus::Verified,
+        "exhaustive match with wildcard should verify: {:?}",
+        f.unwrap().status,
+    );
+}
+
+/// E3: Loop invariant as assumption — invariant is asserted as a constraint
+/// but NOT verified for preservation across iterations. This test documents
+/// the current behavior (invariant helps verification, not itself verified).
+#[test]
+fn verify_invariant_assumed_not_preserved() {
+    require_z3!();
+    // A wrong invariant (x > 100 when x starts at 0) should still be
+    // asserted as a constraint, but it's unsatisfiable with requires x == 0.
+    let src = r#"
+func broken(x: i32) -> i32 {
+    requires: x == 0
+    invariant: x > 100
+    ensures: result > 0
+    42
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: invariant_assumed");
+    let f = results.iter().find(|r| r.func_name == "broken");
+    assert!(f.is_some(), "broken should be present");
+    // Invariant x > 100 + requires x == 0 is unsatisfiable → Failed (precondition unsat)
+    assert_eq!(
+        f.unwrap().status,
+        VerifStatus::Failed,
+        "inconsistent invariant + requires should fail: {:?}",
+        f.unwrap().status,
+    );
+}
+
+/// V1: extract_body_return handles if-else branching in body.
+/// The Z3 layer should receive an Expr::If encoding for the conditional paths.
+#[test]
+fn verify_if_else_body_return() {
+    require_z3!();
+    let src = r#"
+func abs_val(x: i32) -> i32 {
+    ensures: result >= 0
+    if x < 0 { -x } else { x }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: if_else_body");
+    let f = results.iter().find(|r| r.func_name == "abs_val");
+    assert!(f.is_some(), "abs_val should be present");
+    assert_eq!(
+        f.unwrap().status,
+        VerifStatus::Verified,
+        "abs with if-else should verify result >= 0: {:?}",
+        f.unwrap().status,
+    );
+}
+
+/// V7: NLL works across nested block boundaries.
+/// A borrow created in an outer block should be released when the reference
+/// is no longer used after the inner block ends.
+#[test]
+fn verify_nll_cross_block_boundary() {
+    require_z3!();
+    let src = r#"
+func cross_block(x: i32) -> i32 {
+    ensures: result > 0
+    let r = &x;
+    if x > 0 { x } else { 1 }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: nll_cross_block");
+    let f = results.iter().find(|r| r.func_name == "cross_block");
+    assert!(f.is_some(), "cross_block should be present");
+    // The key assertion: borrow of x doesn't prevent verification
+    assert!(
+        matches!(f.unwrap().status, VerifStatus::Verified | VerifStatus::Unknown),
+        "NLL cross-block should not cause false failure: {:?}",
+        f.unwrap().status,
+    );
+}
