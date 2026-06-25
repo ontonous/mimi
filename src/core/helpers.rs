@@ -437,7 +437,8 @@ pub fn fmt_type(t: &Type) -> String {
                 // Primitive type names (int, bool, str, float, unit)
                 Type::Name(n, args) if args.is_empty() => {
                     matches!(n.as_str(), "int" | "bool" | "str" | "float" | "unit" | "u8"
-                        | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize")
+                        | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize"
+                        | "f32" | "f64")
                 }
                 _ => false,
             };

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — v0.25.7-dev
+
+### Fixed
+- **Fix-1**: `operator.rs:333` — replaced `panic!()` with `unreachable!()` for logically unreachable And/Or path
+- **Fix-2**: Added `#[ignore = "..."]` reason strings to 5 valgrind/asan tests (`e2e_valgrind_string_ops`, `e2e_valgrind_list_ops`, `e2e_valgrind_recursion`, `e2e_valgrind_large_struct_return`, `e2e_asan_list_ops`)
+
+### Changed
+- AGENTS.md roadmap updated: v0.26 (C2+C3+C4) marked as shipped in v0.25.5/v0.25.6; v0.25.7 added
+
 ## [v0.25.6] — 2026-06-25
 
 ### Architecture

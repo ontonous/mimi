@@ -330,7 +330,7 @@ impl<'a> Checker<'a> {
                     Type::Name("Range".into(), vec![])
                 }
             }
-            BinOp::And | BinOp::Or => panic!("logical operators should be handled above"),
+            BinOp::And | BinOp::Or => unreachable!("logical operators are handled before infer_binary"),
             BinOp::Assign => {
                 self.emit_code(
                     crate::diagnostic::codes::E0224,

@@ -1850,7 +1850,7 @@ fn can_asan() -> bool {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires valgrind; run with: cargo test e2e_valgrind_string_ops -- --ignored"]
 fn e2e_valgrind_string_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -1876,7 +1876,7 @@ fn e2e_valgrind_string_ops() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires valgrind; run with: cargo test e2e_valgrind_list_ops -- --ignored"]
 fn e2e_valgrind_list_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -1905,7 +1905,7 @@ fn e2e_valgrind_list_ops() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires valgrind; run with: cargo test e2e_valgrind_recursion -- --ignored"]
 fn e2e_valgrind_recursion() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -2522,7 +2522,7 @@ fn e2e_large_struct_return() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires valgrind; run with: cargo test e2e_valgrind_large_struct_return -- --ignored"]
 fn e2e_valgrind_large_struct_return() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -2948,7 +2948,7 @@ fn e2e_asan_string_ops() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires ASAN; run with: cargo test e2e_asan_list_ops -- --ignored"]
 fn e2e_asan_list_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
