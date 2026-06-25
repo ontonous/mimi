@@ -1180,3 +1180,91 @@ func main() -> i32 { 1 }
     let result = core::check(&file);
     assert!(result.is_err(), "transitive alias cycle should be detected");
 }
+
+// ─── v0.26: Unification + Bidirectional + ForAll tests ─────────────
+
+#[test]
+fn v026_unify_let_binding_i32() {
+    // C2: basic unification through let binding
+    check_source(
+        r#"
+func main() -> i32 {
+    let x: i32 = 42;
+    x
+}
+"#,
+    )
+    .expect("i32 let binding should unify");
+}
+
+#[test]
+fn v026_unify_let_binding_generic_func() {
+    // C2: unification through generic function call
+    check_source(
+        r#"
+func identity<T>(x: T) -> T { x }
+func main() -> i32 {
+    identity(42)
+}
+"#,
+    )
+    .expect("generic function call should unify");
+}
+
+#[test]
+fn v026_bidirectional_none_in_option_context() {
+    // C3: None in Option<i32> context
+    check_source(
+        r#"
+func main() -> i32 {
+    let x: Option<i32> = None;
+    0
+}
+"#,
+    )
+    .expect("None in Option context should be accepted");
+}
+
+#[test]
+fn v026_bidirectional_return_type() {
+    // C3: return type propagation
+    check_source(
+        r#"
+func get_value() -> Option<i32> {
+    None
+}
+func main() -> i32 { 0 }
+"#,
+    )
+    .expect("None as Option return should work");
+}
+
+#[test]
+fn v026_unify_nested_option() {
+    // C2: nested Option unification
+    check_source(
+        r#"
+func main() -> i32 {
+    let x: Option<Option<i32>> = Some(Some(42));
+    0
+}
+"#,
+    )
+    .expect("nested Option should unify");
+}
+
+#[test]
+fn v026_newtype_distinct_from_inner() {
+    // C4: newtype should be distinct from inner type
+    let src = r#"
+newtype UserId = i32
+func main() -> i32 {
+    let id: UserId = 42;
+    let x: i32 = id;
+    x
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "newtype should not unify with inner type");
+}

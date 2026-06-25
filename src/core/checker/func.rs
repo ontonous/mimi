@@ -9,6 +9,8 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
+        // C2: reset unification table for each function
+        self.unification.reset();
         let ret = func
             .ret
             .as_ref()
@@ -81,14 +83,15 @@ impl<'a> Checker<'a> {
         self.check_block(&func.body, &ret, &mut scopes);
         // Implicit return type check: last expression must match declared return type
         if let Some(Stmt::Expr(last_expr)) = func.body.last() {
-            let last_ty = self.infer_expr(last_expr, &mut scopes);
+            // C3: use check_expr with return type as expected for implicit return
+            let last_ty = self.check_expr(&ret, last_expr, &mut scopes);
             // Unwrap shared/aliasing wrappers for return type compatibility
             let last_ty_clean = match &last_ty {
                 Type::Shared(i) | Type::LocalShared(i) | Type::CShared(i) => (**i).clone(),
                 _ => last_ty.clone(),
             };
-            let type_ok =
-                same_type(&ret, &last_ty_clean) || is_numeric_coercion(&ret, &last_ty_clean);
+            let coerced = is_numeric_coercion(&ret, &last_ty_clean);
+            let type_ok = coerced || self.unification.unify(&ret, &last_ty_clean).is_ok();
             if !type_ok && !matches!(&ret, Type::Name(n, _) if n == "unit") {
                 self.errors.push(
                     Diagnostic::error_code(

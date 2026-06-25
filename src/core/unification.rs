@@ -36,6 +36,13 @@ pub struct UnificationTable {
 }
 
 impl UnificationTable {
+    /// Reset the unification table for a new function check.
+    pub fn reset(&mut self) {
+        self.parent.clear();
+        self.binding.clear();
+        self.next_var = 0;
+    }
+
     pub fn new() -> Self {
         Self {
             parent: HashMap::new(),
@@ -188,7 +195,28 @@ impl UnificationTable {
             // Name("_") — inference placeholder, compatible with anything
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
+            // Type::Infer — inference placeholder, compatible with anything
+            (Type::Infer, _) | (_, Type::Infer) => Ok(()),
 
+            // Dual representation normalization: Name("Option", [T]) <-> Option(T)
+            (Type::Name(n, args), Type::Option(inner)) if n == "Option" && args.len() == 1 => {
+                self.unify(&args[0], inner)
+            }
+            (Type::Option(inner), Type::Name(n, args)) if n == "Option" && args.len() == 1 => {
+                self.unify(inner, &args[0])
+            }
+            (Type::Name(n, args), Type::Result(ok, err))
+                if n == "Result" && args.len() == 2 =>
+            {
+                self.unify(&args[0], ok)?;
+                self.unify(&args[1], err)
+            }
+            (Type::Result(ok, err), Type::Name(n, args))
+                if n == "Result" && args.len() == 2 =>
+            {
+                self.unify(ok, &args[0])?;
+                self.unify(err, &args[1])
+            }
             // Same constructors — unify structurally
             (Type::Name(na, aa), Type::Name(nb, ab)) if na == nb && aa.len() == ab.len() => {
                 for (a, b) in aa.iter().zip(ab.iter()) {
@@ -269,7 +297,7 @@ impl UnificationTable {
                 "cannot unify {} with {}",
                 crate::core::helpers::fmt_type(&a_resolved),
                 crate::core::helpers::fmt_type(&b_resolved),
-            ))),
+            )))
         }
     }
 }
