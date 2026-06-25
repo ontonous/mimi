@@ -856,22 +856,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Check for unconsumed capabilities before returning
         self.check_unconsumed_caps()?;
         
-        // Convert pointer-to-struct to struct value when return type expects a struct
+        // Convert pointer-to-struct to struct value when return type expects a struct.
         // Must happen BEFORE free_heap_allocs to null out heap data pointers in the original struct,
         // preventing use-after-free on the returned value's heap-allocated data.
+        //
+        // Special case: string literal returns a raw i8* (PointerValue), but the Mimi string
+        // type is {i8*, i64}. We need to wrap the raw pointer into a struct via wrap_c_string.
         let last_val = match (last_val, ret_type) {
             (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
-                let loaded = self.builder.build_load(BasicTypeEnum::StructType(st), pv, "ret_load")
-                    .map_err(|e| CompileError::LlvmError(format!("load return struct: {}", e)))?;
-                // Null out field at index 1 (data pointer) to prevent free_heap_allocs from freeing
-                // the heap data that's now owned by the caller via the returned struct value.
-                if st.get_field_types().len() > 1 {
-                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                    if let Ok(data_gep) = self.gep().build_struct_gep(st, pv, 1, "ret_data_null") {
-                        let _ = self.builder.build_store(data_gep, null_ptr);
+                let field_types = st.get_field_types();
+                // Check if this is the Mimi string struct {ptr, i64} — the pointer is
+                // a raw C string (from literal), not a pointer to an alloca'd struct.
+                let is_string_struct = field_types.len() == 2
+                    && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if is_string_struct {
+                    self.wrap_c_string(pv)?
+                } else {
+                    let loaded = self.builder.build_load(BasicTypeEnum::StructType(st), pv, "ret_load")
+                        .map_err(|e| CompileError::LlvmError(format!("load return struct: {}", e)))?;
+                    // Null out field at index 1 (data pointer) to prevent free_heap_allocs from freeing
+                    // the heap data that's now owned by the caller via the returned struct value.
+                    if field_types.len() > 1 {
+                        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                        if let Ok(data_gep) = self.gep().build_struct_gep(st, pv, 1, "ret_data_null") {
+                            let _ = self.builder.build_store(data_gep, null_ptr);
+                        }
                     }
+                    loaded
                 }
-                loaded
             }
             _ => last_val,
         };

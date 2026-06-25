@@ -1,0 +1,1084 @@
+// MimiSpec Parser — Recursive Descent
+// Converts MimiSpec source tokens into a JSON AST matching Rust serde output.
+
+// ── JSON Builders ──────────────────────────────────────────────────────────
+
+func make_ident(name: string, commitment: string) -> Any {
+    from_list([("name", name), ("commitment", commitment)])
+}
+
+func make_fstring(value: string, commitment: string) -> Any {
+    from_list([("value", value), ("commitment", commitment)])
+}
+
+func make_desc(need_commitment: string, content_value: string, content_commitment: string) -> Any {
+    from_list([("need_commitment", need_commitment), ("content", make_fstring(content_value, content_commitment))])
+}
+
+func make_tagged(kind: string, field: string, inner: Any) -> Any {
+    from_list([("kind", kind), (field, inner)])
+}
+
+func make_to_target(target_name: string, target_commitment: string) -> Any {
+    from_list([("target", make_ident(target_name, target_commitment))])
+}
+
+// ── Token Navigation ───────────────────────────────────────────────────────
+
+func tok_kind(tok: (string, string, i32, i32)) -> string { tok.0 }
+func tok_value(tok: (string, string, i32, i32)) -> string { tok.1 }
+func tok_line(tok: (string, string, i32, i32)) -> i32 { tok.2 }
+
+func peek(tokens: List<(string, string, i32, i32)>, pos: i32) -> (string, string, i32, i32) {
+    if pos < len(tokens) { tokens[pos] } else { ("eof", "", 0, 0) }
+}
+
+func peek_kind(tokens: List<(string, string, i32, i32)>, pos: i32) -> string {
+    if pos < len(tokens) { tok_kind(tokens[pos]) } else { "eof" }
+}
+
+func advance(tokens: List<(string, string, i32, i32)>, pos: i32) -> ((string, string, i32, i32), i32) {
+    (peek(tokens, pos), pos + 1)
+}
+
+func check(tokens: List<(string, string, i32, i32)>, pos: i32, kind: string) -> bool {
+    peek_kind(tokens, pos) == kind
+}
+
+func expect(tokens: List<(string, string, i32, i32)>, pos: i32, kind: string, what: string) -> ((string, string, i32, i32), i32) {
+    if check(tokens, pos, kind) { advance(tokens, pos) }
+    else { (peek(tokens, pos), pos) }
+}
+
+func is_at_end(tokens: List<(string, string, i32, i32)>, pos: i32) -> bool {
+    peek_kind(tokens, pos) == "eof"
+}
+
+func skip_newlines(tokens: List<(string, string, i32, i32)>, pos: i32) -> i32 {
+    let mut p = pos
+    while check(tokens, p, "newline") || check(tokens, p, "dedent") {
+        let (_, np) = advance(tokens, p)
+        p = np
+    }
+    p
+}
+
+func is_line_end(tokens: List<(string, string, i32, i32)>, pos: i32) -> bool {
+    let k = peek_kind(tokens, pos)
+    k == "newline" || k == "dedent" || k == "eof"
+}
+
+// ── Commitment Parsing ─────────────────────────────────────────────────────
+
+func parse_commitment(tokens: List<(string, string, i32, i32)>, pos: i32) -> (string, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "$" { ("$", pos + 1) }
+    else if k == "$$" { ("$$", pos + 1) }
+    else if k == "?" { ("?", pos + 1) }
+    else if k == "??" { ("??", pos + 1) }
+    else { ("none", pos) }
+}
+
+func consume_keyword(tokens: List<(string, string, i32, i32)>, pos: i32, expected: string) -> (string, i32) {
+    let (_, p) = expect(tokens, pos, expected, expected)
+    parse_commitment(tokens, p)
+}
+
+// ── Fuzzy Ident / String Parsing ───────────────────────────────────────────
+
+func is_keyword_ident(k: string) -> bool {
+    k == "ident" || k == "module" || k == "type" || k == "flow" || k == "func" || k == "ui" || k == "steps" || k == "stack" || k == "parallel" || k == "binds" || k == "parasteps" || k == "requires" || k == "ensures" || k == "math" || k == "if" || k == "else" || k == "for" || k == "while" || k == "desc" || k == "on" || k == "with" || k == "error" || k == "and" || k == "or" || k == "not" || k == "in" || k == "done" || k == "exit" || k == "true" || k == "false"
+}
+
+func ident_name(k: string, v: string) -> string {
+    if k == "ident" { v } else { k }
+}
+
+func parse_fuzzy_ident(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if !is_keyword_ident(k) { return (make_ident("?", "none"), pos) }
+    let (tok, p1) = advance(tokens, pos)
+    let (c, p2) = parse_commitment(tokens, p1)
+    (make_ident(ident_name(k, tok_value(tok)), c), p2)
+}
+
+func parse_fuzzy_string(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    if !check(tokens, pos, "string") { return (make_fstring("", "none"), pos) }
+    let (tok, p1) = advance(tokens, pos)
+    let (c, p2) = parse_commitment(tokens, p1)
+    (make_fstring(tok_value(tok), c), p2)
+}
+
+// ── Block Parsing ──────────────────────────────────────────────────────────
+
+func parse_block(tokens: List<(string, string, i32, i32)>, pos: i32,
+    item_fn: func(List<(string, string, i32, i32)>, i32) -> (Any, i32))
+    -> (List<Any>, i32)
+{
+    let mut items: List<Any> = []
+    let mut p = skip_newlines(tokens, pos)
+    if !check(tokens, p, "indent") { (items, p); return (items, p) }
+    let (_, p2) = advance(tokens, p)
+    p = p2
+    loop {
+        p = skip_newlines(tokens, p)
+        if check(tokens, p, "dedent") || is_at_end(tokens, p) { break }
+        let (item, np) = item_fn(tokens, p)
+        p = np
+        push(items, item)
+    }
+    if check(tokens, p, "dedent") { let (_, np) = advance(tokens, p); p = np }
+    (items, p)
+}
+
+// ── Expression Parsing ─────────────────────────────────────────────────────
+
+func op_prec(kind: string) -> (string, i32, bool) {
+    if kind == "or" { ("or", 1, false) }
+    else if kind == "and" { ("and", 2, false) }
+    else if kind == "in" { ("in", 3, false) }
+    else if kind == "==" { ("==", 3, false) }
+    else if kind == "!=" { ("!=", 3, false) }
+    else if kind == "<" { ("<", 3, false) }
+    else if kind == ">" { (">", 3, false) }
+    else if kind == "<=" { ("<=", 3, false) }
+    else if kind == ">=" { (">=", 3, false) }
+    else if kind == "|" { ("|", 4, false) }
+    else if kind == "^" { ("^", 5, false) }
+    else if kind == "&" { ("&", 6, false) }
+    else if kind == "<<" { ("<<", 7, false) }
+    else if kind == ">>" { (">>", 7, false) }
+    else if kind == "+" { ("+", 8, false) }
+    else if kind == "-" { ("-", 8, false) }
+    else if kind == "*" { ("*", 9, false) }
+    else if kind == "/" { ("/", 9, false) }
+    else if kind == "**" { ("**", 10, true) }
+    else { ("", -1, false) }
+}
+
+func cmp_op(kind: string) -> string {
+    if kind == "==" { "Eq" } else if kind == "!=" { "Ne" }
+    else if kind == "<" { "Lt" } else if kind == ">" { "Gt" }
+    else if kind == "<=" { "Le" } else { "Ge" }
+}
+
+func make_binop(lhs: Any, op: string, rhs: Any, kwc: string) -> Any {
+    if op == "or" { from_list([("kind", "Or"), ("left", lhs), ("right", rhs), ("keyword_commitment", kwc)]) }
+    else if op == "and" { from_list([("kind", "And"), ("left", lhs), ("right", rhs), ("keyword_commitment", kwc)]) }
+    else if op == "in" { from_list([("kind", "In"), ("left", lhs), ("right", rhs), ("keyword_commitment", kwc)]) }
+    else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
+        from_list([("kind", "Compare"), ("left", lhs), ("op", cmp_op(op)), ("right", rhs)])
+    }
+    else if op == "+" { from_list([("kind", "Add"), ("left", lhs), ("right", rhs)]) }
+    else if op == "-" { from_list([("kind", "Sub"), ("left", lhs), ("right", rhs)]) }
+    else if op == "*" { from_list([("kind", "Mul"), ("left", lhs), ("right", rhs)]) }
+    else if op == "/" { from_list([("kind", "Div"), ("left", lhs), ("right", rhs)]) }
+    else if op == "**" { from_list([("kind", "Pow"), ("left", lhs), ("right", rhs)]) }
+    else if op == "|" { from_list([("kind", "BitOr"), ("left", lhs), ("right", rhs)]) }
+    else if op == "^" { from_list([("kind", "BitXor"), ("left", lhs), ("right", rhs)]) }
+    else if op == "&" { from_list([("kind", "BitAnd"), ("left", lhs), ("right", rhs)]) }
+    else if op == "<<" { from_list([("kind", "Shl"), ("left", lhs), ("right", rhs)]) }
+    else if op == ">>" { from_list([("kind", "Shr"), ("left", lhs), ("right", rhs)]) }
+    else { from_list([("kind", "Add"), ("left", lhs), ("right", rhs)]) }
+}
+
+func parse_primary(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "not" {
+        let (kwc, p1) = consume_keyword(tokens, pos, "not")
+        let (inner, p2) = parse_expr(tokens, p1, 12)
+        (from_list([("kind", "Not"), ("expr", inner), ("keyword_commitment", kwc)]), p2)
+    }
+    else if k == "-" {
+        let (_, p1) = advance(tokens, pos)
+        let (inner, p2) = parse_expr(tokens, p1, 12)
+        (from_list([("kind", "Neg"), ("expr", inner)]), p2)
+    }
+    else if k == "~" {
+        let (_, p1) = advance(tokens, pos)
+        let (inner, p2) = parse_expr(tokens, p1, 12)
+        (from_list([("kind", "BitNot"), ("expr", inner)]), p2)
+    }
+    else if is_keyword_ident(k) {
+        let (ident, p1) = parse_fuzzy_ident(tokens, pos)
+        parse_postfix(tokens, p1, from_list([("kind", "Ident"), ("value", ident)]))
+    }
+    else if k == "string" {
+        let (s, p1) = parse_fuzzy_string(tokens, pos)
+        (from_list([("kind", "String"), ("value", s)]), p1)
+    }
+    else if k == "number" {
+        let (tok, p1) = advance(tokens, pos)
+        (from_list([("kind", "Number"), ("value", tok_value(tok))]), p1)
+    }
+    else if k == "true" || k == "false" {
+        let (_, p1) = advance(tokens, pos)
+        let (c, p2) = parse_commitment(tokens, p1)
+        (from_list([("kind", "Bool"), ("value", k == "true"), ("keyword_commitment", c)]), p2)
+    }
+    else if k == "(" {
+        let (_, p1) = advance(tokens, pos)
+        let (inner, p2) = parse_expr(tokens, p1, 0)
+        let (_, p3) = expect(tokens, p2, ")", "`)`")
+        (inner, p3)
+    }
+    else if k == "[" {
+        let (_, p1) = advance(tokens, pos)
+        let mut items: List<Any> = []
+        let mut p = p1
+        if !check(tokens, p, "]") {
+            let (item, np) = parse_expr(tokens, p, 0); p = np; push(items, item)
+            while check(tokens, p, ",") {
+                let (_, np) = advance(tokens, p); p = np
+                let (item2, np2) = parse_expr(tokens, p, 0); p = np2; push(items, item2)
+            }
+        }
+        let (_, p2) = expect(tokens, p, "]", "`]`")
+        (from_list([("kind", "List"), ("items", items)]), p2)
+    }
+    else if k == "..." {
+        let (kwc, p1) = consume_keyword(tokens, pos, "...")
+        (from_list([("kind", "Placeholder"), ("keyword_commitment", kwc)]), p1)
+    }
+    else {
+        (from_list([("kind", "Ident"), ("value", make_ident("?", "none"))]), pos)
+    }
+}
+
+func parse_postfix(tokens: List<(string, string, i32, i32)>, pos: i32, lhs: Any) -> (Any, i32) {
+    let mut expr = lhs; let mut p = pos; let mut run = true
+    while run {
+        let k = peek_kind(tokens, p)
+        if k == "." {
+            let (_, p1) = advance(tokens, p)
+            let (field, p2) = parse_fuzzy_ident(tokens, p1)
+            expr = from_list([("kind", "Index"), ("object", expr), ("field", field)])
+            p = p2
+        }
+        else if k == "(" {
+            let (_, p1) = advance(tokens, p)
+            let mut args: List<Any> = []; let mut p2 = p1
+            if !check(tokens, p2, ")") {
+                let (arg, np) = parse_expr(tokens, p2, 0); p2 = np; push(args, arg)
+                while check(tokens, p2, ",") {
+                    let (_, np) = advance(tokens, p2); p2 = np
+                    let (arg2, np2) = parse_expr(tokens, p2, 0); p2 = np2; push(args, arg2)
+                }
+            }
+            if check(tokens, p2, ")") {
+                let (_, p3) = advance(tokens, p2)
+                expr = from_list([("kind", "Call"), ("callee", expr), ("args", args)]); p = p3
+            } else { run = false }
+        }
+        else if k == "[" {
+            let (_, p1) = advance(tokens, p)
+            let mut indices: List<Any> = []; let mut p2 = p1
+            if !check(tokens, p2, "]") {
+                let (idx, np) = parse_expr(tokens, p2, 0); p2 = np; push(indices, idx)
+                while check(tokens, p2, ",") {
+                    let (_, np) = advance(tokens, p2); p2 = np
+                    let (idx2, np2) = parse_expr(tokens, p2, 0); p2 = np2; push(indices, idx2)
+                }
+            }
+            let (_, p3) = expect(tokens, p2, "]", "`]`")
+            expr = from_list([("kind", "Subscript"), ("object", expr), ("indices", indices)]); p = p3
+        }
+        else { run = false }
+    }
+    (expr, p)
+}
+
+func parse_expr(tokens: List<(string, string, i32, i32)>, pos: i32, min_prec: i32) -> (Any, i32) {
+    let (mut lhs, mut p) = parse_primary(tokens, pos)
+    let mut run = true
+    while run {
+        let k = peek_kind(tokens, p)
+        let (op, prec, right_assoc) = op_prec(k)
+        if op == "" || prec < min_prec { run = false; break }
+        let kwc: string
+        if k == "or" || k == "and" || k == "in" {
+            let (c, np) = consume_keyword(tokens, p, k); kwc = c; p = np
+        } else {
+            let (_, np) = advance(tokens, p); kwc = "none"; p = np
+        }
+        let next_min = if right_assoc { prec } else { prec + 1 }
+        let (rhs, np) = parse_expr(tokens, p, next_min); p = np
+        lhs = make_binop(lhs, op, rhs, kwc)
+    }
+    (lhs, p)
+}
+
+// ── Condition Parsing ──────────────────────────────────────────────────────
+
+func parse_condition(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    if check(tokens, pos, "...") {
+        let (kwc, p1) = consume_keyword(tokens, pos, "...")
+        (from_list([("kind", "Structured"), ("expr", from_list([("kind", "Placeholder"), ("keyword_commitment", kwc)]))]), p1)
+    }
+    else if check(tokens, pos, "string") {
+        let (s, p1) = parse_fuzzy_string(tokens, pos)
+        (from_list([("kind", "Natural"), ("text", s)]), p1)
+    }
+    else {
+        let (expr, p1) = parse_expr(tokens, pos, 0)
+        (from_list([("kind", "Structured"), ("expr", expr)]), p1)
+    }
+}
+
+// ── Atom List Parsing ───────────────────────────────────────────────────────
+
+func parse_atoms(tokens: List<(string, string, i32, i32)>, pos: i32, stoppers: List<string>) -> (List<Any>, i32) {
+    let mut atoms: List<Any> = []; let mut p = pos
+    let mut dp = 0; let mut db = 0; let mut da = 0; let mut run = true
+    while run && p < len(tokens) {
+        let k = peek_kind(tokens, p)
+        if dp == 0 && db == 0 && da == 0 {
+            let mut stop = false
+            for si in range(0, len(stoppers)) { if k == stoppers[si] { stop = true; break } }
+            if stop { run = false; break }
+            if k == "newline" || k == "dedent" || k == "eof" { run = false; break }
+            if k == "[" {
+                let (la, np) = parse_atom_list(tokens, p); push(atoms, la); p = np; continue
+            }
+        }
+        if k == "(" { dp = dp + 1 } else if k == ")" { dp = if dp > 0 { dp - 1 } else { 0 } }
+        if k == "[" { db = db + 1 } else if k == "]" { db = if db > 0 { db - 1 } else { 0 } }
+        if k == "<" { da = da + 1 } else if k == ">" { da = if da > 0 { da - 1 } else { 0 } }
+        let (atom, np) = atom_tok(tokens, p); push(atoms, atom); p = np
+    }
+    (atoms, p)
+}
+
+func atom_tok(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "eof" || k == "" { (from_list([("kind", "Symbol"), ("value", "")]), pos); return (from_list([("kind", "Symbol"), ("value", "")]), pos) }
+    let (tok, p1) = advance(tokens, pos); let v = tok_value(tok)
+    if k == "..." {
+        let (c, p2) = parse_commitment(tokens, p1)
+        (from_list([("kind", "Ident"), ("value", make_ident("...", c))]), p2)
+    }
+    else if k == "ident" || k == "module" || k == "type" || k == "flow" || k == "func" || k == "ui" || k == "steps" || k == "stack" || k == "parallel" || k == "binds" || k == "parasteps" || k == "requires" || k == "ensures" || k == "math" || k == "if" || k == "else" || k == "for" || k == "while" || k == "desc" || k == "on" || k == "with" || k == "error" || k == "and" || k == "or" || k == "not" || k == "in" || k == "done" || k == "exit" || k == "true" || k == "false" {
+        let (c, p2) = parse_commitment(tokens, p1)
+        (from_list([("kind", "Ident"), ("value", make_ident(ident_name(k, v), c))]), p2)
+    }
+    else if k == "string" {
+        let (c, p2) = parse_commitment(tokens, p1)
+        (from_list([("kind", "String"), ("value", make_fstring(v, c))]), p2)
+    }
+    else if k == "number" { (from_list([("kind", "Number"), ("value", v)]), p1) }
+    else { (from_list([("kind", "Symbol"), ("value", v)]), p1) }
+}
+
+func parse_atom_list(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (_, p1) = expect(tokens, pos, "[", "`[`")
+    let mut items: List<List<Any>> = []; let mut p = p1
+    if !check(tokens, p, "]") {
+        let mut more = true
+        while more {
+            let (ia, np) = parse_atoms(tokens, p, [",", "]"]); push(items, ia); p = np
+            if check(tokens, p, ",") { let (_, np2) = advance(tokens, p); p = np2 } else { more = false }
+        }
+    }
+    let (_, p2) = expect(tokens, p, "]", "`]`")
+    (from_list([("kind", "List"), ("items", items)]), p2)
+}
+
+// ── Step Parsing ────────────────────────────────────────────────────────────
+
+func parse_step(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "if" { parse_if(tokens, pos) }
+    else if k == "for" { parse_for(tokens, pos) }
+    else if k == "while" { parse_while(tokens, pos) }
+    else if k == "parasteps" { parse_parasteps(tokens, pos) }
+    else if k == "error" { parse_error(tokens, pos) }
+    else if k == "..." { step_placeholder(tokens, pos) }
+    else if k == "desc" { step_desc(tokens, pos) }
+    else { step_action(tokens, pos) }
+}
+
+func step_desc(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (content, p1) = parse_desc_entity(tokens, pos)
+    (from_list([("kind", "Desc"), ("content", content)]), p1)
+}
+
+func step_placeholder(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "...")
+    (from_list([("kind", "Placeholder"), ("keyword_commitment", kwc)]), p1)
+}
+
+func parse_if(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "if")
+    let (cond, p2) = parse_condition(tokens, p1)
+    let (_, p3) = expect(tokens, p2, ":", "`:`")
+    let (then_, p4) = parse_block(tokens, p3, parse_step)
+    let mut p = skip_newlines(tokens, p4)
+    let mut ek = "none"; let mut else_: List<Any> = []
+    if check(tokens, p, "else") {
+        let (e, np) = consume_keyword(tokens, p, "else"); ek = e; p = np
+        let (_, np2) = expect(tokens, p, ":", "`:`"); p = np2
+        let (ei, np3) = parse_block(tokens, p, parse_step); else_ = ei; p = np3
+    }
+    (from_list([("kind", "If"), ("step", from_list([
+        ("cond", cond), ("then_branch", then_), ("else_branch", if len(else_) > 0 { else_ } else { 0 }),
+        ("if_keyword_commitment", kwc), ("else_keyword_commitment", ek)
+    ]))]), p)
+}
+
+func parse_for(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "for")
+    let (var, p2) = parse_fuzzy_ident(tokens, p1)
+    let (_, p3) = expect(tokens, p2, "in", "`in`")
+    let (iterable, p4) = parse_atoms(tokens, p3, [":"])
+    let (_, p5) = expect(tokens, p4, ":", "`:`")
+    let (body, p6) = parse_block(tokens, p5, parse_step)
+    (from_list([("kind", "For"), ("step", from_list([
+        ("var", var), ("iterable", iterable), ("body", body), ("keyword_commitment", kwc)
+    ]))]), p6)
+}
+
+func parse_while(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "while")
+    let (cond, p2) = parse_condition(tokens, p1)
+    let mut d: Any = 0; let mut p = p2
+    if check(tokens, p, "desc") { let (dv, np) = parse_desc_after(tokens, p); d = dv; p = np }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    let (body, p3) = parse_block(tokens, p, parse_step)
+    (from_list([("kind", "While"), ("step", from_list([
+        ("cond", cond), ("desc", d), ("body", body), ("keyword_commitment", kwc)
+    ]))]), p3)
+}
+
+func parse_parasteps(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "parasteps")
+    let mut d: Any = 0; let mut p = p1
+    if check(tokens, p, "string") { let (s, np) = parse_fuzzy_string(tokens, p); d = s; p = np }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    let (body, p2) = parse_block(tokens, p, parse_step)
+    (from_list([("kind", "Parasteps"), ("step", from_list([
+        ("description", d), ("steps", body), ("keyword_commitment", kwc)
+    ]))]), p2)
+}
+
+func parse_error(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "error")
+    let (msg, p2) = parse_fuzzy_string(tokens, p1)
+    let mut to: Any = 0; let mut p = p2
+    if check(tokens, p, ">>>") {
+        let (_, np) = advance(tokens, p); let (t, np2) = parse_fuzzy_ident(tokens, np)
+        to = make_to_target("?", "none"); p = np2
+    }
+    (from_list([("kind", "Error"), ("step", from_list([
+        ("message", msg), ("to", to), ("keyword_commitment", kwc)
+    ]))]), p)
+}
+
+func step_action(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (atoms, p1) = parse_atoms(tokens, pos, ["desc", ">>>", "on", "newline", "dedent", "eof"])
+    let eq = find_eq(atoms)
+    if eq >= 0 {
+        let mut la: List<Any> = []; let mut ra: List<Any> = []
+        for li in range(0, eq) { push(la, atoms[li]) }
+        for ri in range(eq + 1, len(atoms)) { push(ra, atoms[ri]) }
+        let target = target_from(la); let value = simple_from(ra)
+        let (d, _p, t, on, p) = step_tail(tokens, p1)
+        (from_list([("kind", "Assign"), ("step", from_list([
+            ("target", target), ("value", value), ("desc", d), ("to", t), ("on_blocks", on)
+        ]))]), p)
+    } else {
+        let (d, _p, t, on, p) = step_tail(tokens, p1)
+        (from_list([("kind", "Action"), ("step", from_list([
+            ("label", atoms), ("desc", d), ("to", t), ("on_blocks", on)
+        ]))]), p)
+    }
+}
+
+func step_tail(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32, Any, List<Any>, i32) {
+    let mut p = pos; let mut d: Any = 0; let mut t: Any = 0; let mut on: List<Any> = []
+    if check(tokens, p, "desc") { let (dv, np) = parse_desc_after(tokens, p); d = dv; p = np }
+    if check(tokens, p, ">>>") {
+        let (_, np) = advance(tokens, p); let (tg, np2) = parse_fuzzy_ident(tokens, np)
+        t = make_to_target("?", "none"); p = np2
+    }
+    if check(tokens, p, "newline") { let (_, np) = advance(tokens, p); p = np }
+    p = skip_newlines(tokens, p)
+    while check(tokens, p, "on") {
+        let (ob, np) = on_block(tokens, p); push(on, ob); p = np
+        p = skip_newlines(tokens, p)
+    }
+    (d, p, t, on, p)
+}
+
+func on_block(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "on")
+    let (cond, p2) = parse_atoms(tokens, p1, [":"])
+    let (_, p3) = expect(tokens, p2, ":", "`:`")
+    let (steps, p4) = parse_block(tokens, p3, parse_step)
+    (from_list([("condition", cond), ("steps", steps), ("keyword_commitment", kwc)]), p4)
+}
+
+func parse_desc_entity(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "desc")
+    let (content, p2) = parse_fuzzy_string(tokens, p1)
+    (from_list([("need_commitment", kwc), ("content", content)]), p2)
+}
+
+func parse_desc_after(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (c, p1) = parse_commitment(tokens, pos)
+    let (content, p2) = parse_fuzzy_string(tokens, p1)
+    (from_list([("need_commitment", c), ("content", content)]), p2)
+}
+
+// ── Atom Helpers ────────────────────────────────────────────────────────────
+
+func find_eq(atoms: List<Any>) -> i32 {
+    for fi in range(0, len(atoms)) {
+        let s = to_json(atoms[fi])
+        if s == "{\"kind\":\"Symbol\",\"value\":\"=\"}" { return fi }
+    }
+    -1
+}
+
+func target_from(atoms: List<Any>) -> Any {
+    if len(atoms) == 0 { return from_list([("kind", "Ident"), ("value", make_ident("?", "none"))]) }
+    let first_s = to_json(atoms[0]); let js = from_json(first_s)
+    let kind = json_get_string(js, "kind")
+    if kind != "Ident" { return from_list([("kind", "Ident"), ("value", make_ident("?", "none"))]) }
+    let vstr = json_get_string(js, "value"); let vj = from_json(vstr)
+    let n = json_get_string(vj, "name"); let cm = json_get_string(vj, "commitment")
+    let mut expr = from_list([("kind", "Ident"), ("value", make_ident(n, cm))])
+    let mut i = 1; let mut ok = true
+    while ok && i < len(atoms) {
+        let ai_s = to_json(atoms[i]); let ai_js = from_json(ai_s)
+        let ak = json_get_string(ai_js, "kind")
+        if ak != "Symbol" || json_get_string(ai_js, "value") != "." { ok = false; break }
+        i = i + 1
+        if i >= len(atoms) { ok = false; break }
+        let ni_s = to_json(atoms[i]); let ni_js = from_json(ni_s)
+        if json_get_string(ni_js, "kind") != "Ident" { ok = false; break }
+        let nvstr = json_get_string(ni_js, "value"); let nvj = from_json(nvstr)
+        expr = from_list([("kind", "Index"), ("object", expr),
+            ("field", make_ident(json_get_string(nvj, "name"), json_get_string(nvj, "commitment")))])
+        i = i + 1
+    }
+    expr
+}
+
+func simple_from(atoms: List<Any>) -> Any {
+    if len(atoms) == 0 { return from_list([("kind", "Ident"), ("value", make_ident("?", "none"))]) }
+    let first_s = to_json(atoms[0]); let js = from_json(first_s)
+    let kind = json_get_string(js, "kind")
+    if kind == "Ident" {
+        let vstr = json_get_string(js, "value"); let vj = from_json(vstr)
+        from_list([("kind", "Ident"), ("value", make_ident(json_get_string(vj, "name"), json_get_string(vj, "commitment")))])
+    }
+    else if kind == "String" { from_list([("kind", "String"), ("value", atoms[0])]) }
+    else if kind == "Number" { from_list([("kind", "Number"), ("value", json_get_string(js, "value"))]) }
+    else if kind == "List" { from_list([("kind", "List"), ("items", atoms)]) }
+    else { from_list([("kind", "Ident"), ("value", make_ident(kind, "none"))]) }
+}
+
+// ── Fragment Parsing ────────────────────────────────────────────────────────
+
+func parse_fragment(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "module" {
+        let (m, p1) = parse_module(tokens, pos)
+        (make_tagged("Module", "module", m), p1)
+    }
+    else if k == "type" {
+        let (td, p1) = parse_type_def(tokens, pos)
+        (make_tagged("TypeDef", "typedef", td), p1)
+    }
+    else if k == "flow" {
+        let (f, p1) = parse_flow(tokens, pos)
+        (make_tagged("Flow", "flow", f), p1)
+    }
+    else if k == "func" {
+        let (f, p1) = parse_func(tokens, pos)
+        (make_tagged("Func", "func", f), p1)
+    }
+    else if k == "ui" {
+        let (u, p1) = parse_ui(tokens, pos)
+        (make_tagged("Ui", "ui", u), p1)
+    }
+    else if k == "steps" {
+        let (kwc, p1) = consume_keyword(tokens, pos, "steps")
+        let (_, p2) = expect(tokens, p1, ":", "`:`")
+        let (steps, p3) = parse_block(tokens, p2, parse_step)
+        (from_list([("kind", "Steps"), ("keyword_commitment", kwc), ("steps", steps)]), p3)
+    }
+    else if k == "stack" || k == "parallel" {
+        let (node, p1) = parse_ui_node(tokens, pos)
+        (make_tagged("UiNode", "node", node), p1)
+    }
+    else if k == "string" {
+        let (node, p1) = parse_ui_node(tokens, pos)
+        (make_tagged("UiNode", "node", node), p1)
+    }
+    else if k == "..." {
+        let (kwc, p1) = consume_keyword(tokens, pos, "...")
+        (from_list([("kind", "Placeholder"), ("keyword_commitment", kwc)]), p1)
+    }
+    else if k == "if" || k == "for" || k == "while" || k == "parasteps" {
+        let (step, p1) = parse_step(tokens, pos)
+        (from_list([("kind", "Steps"), ("keyword_commitment", "none"), ("steps", [step])]), p1)
+    }
+    else {
+        let (expr, p1) = parse_expr(tokens, pos, 0)
+        if is_line_end(tokens, p1) {
+            (from_list([("kind", "Expr"), ("expr", expr)]), p1)
+        } else {
+            (from_list([("kind", "Placeholder"), ("keyword_commitment", "none")]), p1)
+        }
+    }
+}
+
+// ── Module Parsing ──────────────────────────────────────────────────────────
+
+func parse_module(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "module")
+    let (name, p2) = parse_fuzzy_ident(tokens, p1)
+    let (_, p3) = expect(tokens, p2, ":", "`:`")
+    let (items, p4) = parse_block(tokens, p3, parse_mod_item)
+    (from_list([("name", name), ("rules", []), ("desc", 0), ("math", 0),
+        ("items", items), ("keyword_commitment", kwc)]), p4)
+}
+
+func parse_mod_item(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "desc" { parse_desc_entity(tokens, pos) }
+    else if k == "math" { parse_math(tokens, pos) }
+    else { parse_fragment(tokens, pos) }
+}
+
+// ── TypeDef Parsing ─────────────────────────────────────────────────────────
+
+func parse_type_def(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "type")
+    let (name, p2) = parse_fuzzy_ident(tokens, p1)
+    let (_, p3) = expect(tokens, p2, ":", "`:`")
+
+    let mut is_enum = false; let mut sp = p3
+    while !is_line_end(tokens, sp) {
+        if check(tokens, sp, "|") { is_enum = true; break }
+        let (_, ssp) = advance(tokens, sp); sp = ssp
+    }
+
+    if is_enum {
+        let (variants, p4) = parse_variants(tokens, p3)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("math", 0),
+            ("body", from_list([("kind", "Enum"), ("variants", variants)])),
+            ("keyword_commitment", kwc)]), p4)
+    }
+    else if check(tokens, p3, "...") {
+        let (_, p4) = advance(tokens, p3)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("math", 0),
+            ("body", from_list([("kind", "Record"), ("fields", [])])),
+            ("keyword_commitment", kwc)]), p4)
+    }
+    else {
+        let p = skip_newlines(tokens, p3)
+        let (fields, p4) = parse_block(tokens, p, parse_field)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("math", 0),
+            ("body", from_list([("kind", "Record"), ("fields", fields)])),
+            ("keyword_commitment", kwc)]), p4)
+    }
+}
+
+func parse_variants(tokens: List<(string, string, i32, i32)>, pos: i32) -> (List<Any>, i32) {
+    let mut vs: List<Any> = []
+    let (v1, p1) = parse_fuzzy_ident(tokens, pos); push(vs, v1)
+    let mut p = p1
+    while check(tokens, p, "|") {
+        let (_, np) = advance(tokens, p); p = np
+        let (v, np2) = parse_fuzzy_ident(tokens, p); push(vs, v); p = np2
+    }
+    (vs, p)
+}
+
+func parse_field(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (name, p1) = parse_fuzzy_ident(tokens, pos)
+    let (_, p2) = expect(tokens, p1, ":", "`:`")
+    let (th, p3) = parse_atoms(tokens, p2, ["newline", "dedent", "eof"])
+    (from_list([("name", name), ("rules", []), ("type_hint", th)]), p3)
+}
+
+// ── FuncDef Parsing ─────────────────────────────────────────────────────────
+
+func parse_func(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "func")
+    let (name, p2) = parse_fuzzy_ident(tokens, p1)
+    let mut params: List<Any> = []; let mut p = p2
+    if check(tokens, p, "(") {
+        let (_, np) = advance(tokens, p); p = np
+        let (ps, np2) = parse_params(tokens, p); params = ps; p = np2
+        let (_, np3) = expect(tokens, p, ")", "`)`"); p = np3
+    }
+    let mut caps: List<Any> = []; let mut wkc = "none"
+    if check(tokens, p, "with") {
+        let (wk, np) = consume_keyword(tokens, p, "with"); wkc = wk; p = np
+        let (cs, np2) = parse_caps(tokens, p); caps = cs; p = np2
+    }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    if check(tokens, p, "...") {
+        let (_, p2) = advance(tokens, p)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("params", params),
+            ("capabilities", caps), ("requires", 0), ("ensures", 0), ("math", 0),
+            ("steps", []), ("keyword_commitment", kwc),
+            ("requires_keyword_commitment", "none"), ("ensures_keyword_commitment", "none"),
+            ("with_keyword_commitment", wkc), ("steps_keyword_commitment", "none")]), p2)
+    } else {
+        let p2 = skip_newlines(tokens, p)
+        let (body, p3) = parse_block(tokens, p2, parse_func_item)
+        (build_func(name, params, caps, wkc, kwc, body), p3)
+    }
+}
+
+func parse_func_item(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "desc" { parse_desc_entity(tokens, pos) }
+    else if k == "requires" {
+        let (kwc, p1) = consume_keyword(tokens, pos, "requires")
+        let (_, p2) = expect(tokens, p1, ":", "`:`")
+        let (cond, p3) = parse_condition(tokens, p2)
+        (from_list([("kind", "Requires"), ("expr", cond), ("keyword_commitment", kwc)]), p3)
+    }
+    else if k == "ensures" {
+        let (kwc, p1) = consume_keyword(tokens, pos, "ensures")
+        let (_, p2) = expect(tokens, p1, ":", "`:`")
+        let (cond, p3) = parse_condition(tokens, p2)
+        (from_list([("kind", "Ensures"), ("expr", cond), ("keyword_commitment", kwc)]), p3)
+    }
+    else if k == "math" { parse_math(tokens, pos) }
+    else if k == "steps" {
+        let (kwc, p1) = consume_keyword(tokens, pos, "steps")
+        let (_, p2) = expect(tokens, p1, ":", "`:`")
+        let (st, p3) = parse_block(tokens, p2, parse_step)
+        (from_list([("kind", "Steps"), ("keyword_commitment", kwc), ("steps", st)]), p3)
+    }
+    else { parse_step(tokens, pos) }
+}
+
+func build_func(name: Any, params: List<Any>, caps: List<Any>, wkc: string,
+    kwc: string, body: List<Any>) -> Any
+{
+    let mut d: Any = 0; let mut r: List<Any> = []; let mut rv: Any = 0; let mut rkc = "none"
+    let mut ev: Any = 0; let mut ekc = "none"; let mut mv: Any = 0
+    let mut st: List<Any> = []; let mut skc = "none"
+    for bi in range(0, len(body)) {
+        let item = body[bi]; let s = to_json(item); let js = from_json(s)
+        let kind = json_get_string(js, "kind")
+        if kind == "Desc" {
+            if d == 0 { d = item }
+        }
+        else if kind == "Requires" {
+            let estr = json_get_string(js, "expr")
+            rv = item; rkc = json_get_string(js, "keyword_commitment")
+        }
+        else if kind == "Ensures" {
+            ev = item; ekc = json_get_string(js, "keyword_commitment")
+        }
+        else if kind == "Math" { mv = item }
+        else if kind == "Steps" {
+            skc = json_get_string(js, "keyword_commitment"); st = item
+        }
+        else { push(st, item) }
+    }
+    from_list([("name", name), ("desc", d), ("rules", r), ("params", params),
+        ("capabilities", caps), ("requires", rv), ("ensures", ev), ("math", mv),
+        ("steps", st), ("keyword_commitment", kwc),
+        ("requires_keyword_commitment", rkc), ("ensures_keyword_commitment", ekc),
+        ("with_keyword_commitment", wkc), ("steps_keyword_commitment", skc)])
+}
+
+func parse_params(tokens: List<(string, string, i32, i32)>, pos: i32) -> (List<Any>, i32) {
+    let mut ps: List<Any> = []; let mut p = pos
+    if check(tokens, p, ")") { (ps, p); return (ps, p) }
+    let mut more = true
+    while more {
+        let (name, np) = parse_fuzzy_ident(tokens, p); p = np
+        let mut th: List<Any> = []
+        if check(tokens, p, ":") {
+            let (_, np2) = advance(tokens, p); p = np2
+            let (th2, np3) = parse_atoms(tokens, p, [",", ")", "newline", "eof"]); th = th2; p = np3
+        }
+        push(ps, from_list([("name", name), ("type_hint", th)]))
+        if check(tokens, p, ",") { let (_, np4) = advance(tokens, p); p = np4; more = true }
+        else { more = false }
+    }
+    (ps, p)
+}
+
+func parse_caps(tokens: List<(string, string, i32, i32)>, pos: i32) -> (List<Any>, i32) {
+    let mut cs: List<Any> = []; let mut p = pos; let mut more = true
+    while more {
+        let (name, np) = parse_fuzzy_ident(tokens, p); p = np
+        let (c, np2) = parse_commitment(tokens, p)
+        push(cs, from_list([("name", name), ("commitment", c)])); p = np2
+        if check(tokens, p, ",") { let (_, np3) = advance(tokens, p); p = np3; more = true }
+        else { more = false }
+    }
+    (cs, p)
+}
+
+// ── Math Block Parsing ──────────────────────────────────────────────────────
+
+func parse_math(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "math")
+    let (_, p2) = expect(tokens, p1, ":", "`:`")
+    let (stmts, p3) = parse_block(tokens, p2, parse_math_stmt)
+    (from_list([("statements", stmts), ("keyword_commitment", kwc)]), p3)
+}
+
+func parse_math_stmt(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (expr, p1) = parse_expr(tokens, pos, 0)
+    if check(tokens, p1, "=") {
+        let (_, p2) = advance(tokens, p1)
+        let (val, p3) = parse_expr(tokens, p2, 0)
+        (from_list([("kind", "Define"), ("target", expr), ("value", val)]), p3)
+    } else {
+        (from_list([("kind", "Expr"), ("expr", expr)]), p1)
+    }
+}
+
+// ── Flow Parsing ────────────────────────────────────────────────────────────
+
+func parse_flow(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "flow")
+    let (name, p2) = parse_fuzzy_ident(tokens, p1)
+    let (_, p3) = expect(tokens, p2, ":", "`:`")
+    if check(tokens, p3, "...") {
+        let (_, p4) = advance(tokens, p3)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("entries", []), ("keyword_commitment", kwc)]), p4)
+    } else {
+        let (entries, p4) = parse_block(tokens, p3, parse_flow_entry)
+        (from_list([("name", name), ("desc", 0), ("rules", []), ("entries", entries), ("keyword_commitment", kwc)]), p4)
+    }
+}
+
+func parse_flow_entry(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (state, p1) = parse_fuzzy_ident(tokens, pos)
+    if check(tokens, p1, ">>>") {
+        let (tk, p2) = consume_keyword(tokens, p1, ">>>")
+        let (arm, p3) = flow_arm_to(tokens, p2, tk)
+        (from_list([("state", state), ("rules", []), ("arms", [arm])]), p3)
+    } else {
+        let (_, p2) = expect(tokens, p1, ":", "`:`")
+        let (arms, p3) = parse_block(tokens, p2, parse_flow_arm)
+        (from_list([("state", state), ("rules", []), ("arms", arms)]), p3)
+    }
+}
+
+func parse_flow_arm(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (tk, p1) = consume_keyword(tokens, pos, ">>>")
+    flow_arm_to(tokens, p1, tk)
+}
+
+func flow_arm_to(tokens: List<(string, string, i32, i32)>, pos: i32, tkc: string) -> (Any, i32) {
+    let (to, p1) = parse_fuzzy_ident(tokens, pos)
+    let (_, p2) = expect(tokens, p1, ":", "`:`")
+    let mut rv: Any = 0; let mut rkc = "none"; let mut d: Any = 0; let mut p = p2; let mut run = true
+    while run {
+        if is_line_end(tokens, p) { run = false; break }
+        if check(tokens, p, "requires") {
+            let (rk, np) = consume_keyword(tokens, p, "requires"); rkc = rk; p = np
+            let (_, np2) = expect(tokens, p, ":", "`:`"); p = np2
+            let (c, np3) = parse_condition(tokens, p); rv = c; p = np3
+        }
+        else if check(tokens, p, "desc") {
+            let (dv, np) = parse_desc_after(tokens, p); d = dv; p = np
+        }
+        else { run = false }
+    }
+    (from_list([("to", to), ("requires", rv), ("desc", d), ("rules", []),
+        ("to_keyword_commitment", tkc), ("requires_keyword_commitment", rkc)]), p)
+}
+
+// ── UI Parsing ──────────────────────────────────────────────────────────────
+
+func parse_ui(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "ui")
+    let (name, p2) = parse_fuzzy_ident(tokens, p1)
+    let mut bv: Any = 0; let mut p = p2
+    if check(tokens, p, "binds") {
+        let (_, np) = advance(tokens, p); p = np
+        let (b, np2) = parse_fuzzy_ident(tokens, p); bv = b; p = np2
+    }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    if check(tokens, p, "...") {
+        let (_, p3) = advance(tokens, p)
+        (from_list([("name", name), ("binds", bv),
+            ("root", from_list([("kind", "Stack"), ("stack", from_list([
+                ("description", 0), ("children", []), ("keyword_commitment", "none")]))])),
+            ("keyword_commitment", kwc)]), p3)
+    } else {
+        let p2 = skip_newlines(tokens, p)
+        let (root, p3) = parse_ui_root(tokens, p2)
+        (from_list([("name", name), ("binds", bv), ("root", root), ("keyword_commitment", kwc)]), p3)
+    }
+}
+
+func parse_ui_root(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let p = skip_newlines(tokens, pos)
+    let (_, p2) = expect(tokens, p, "indent", "indented block")
+    let p3 = skip_newlines(tokens, p2)
+    let (node, p4) = parse_ui_node(tokens, p3)
+    if check(tokens, p4, "dedent") { let (_, p5) = advance(tokens, p4); (node, p5) }
+    else { (node, p4) }
+}
+
+func parse_ui_node(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let k = peek_kind(tokens, pos)
+    if k == "stack" { stack_node(tokens, pos) }
+    else if k == "parallel" { parallel_node(tokens, pos) }
+    else if k == "error" { error_node(tokens, pos) }
+    else { ui_leaf(tokens, pos) }
+}
+
+func stack_node(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "stack")
+    let mut d: Any = 0; let mut p = p1
+    if check(tokens, p, "string") { let (s, np) = parse_fuzzy_string(tokens, p); d = s; p = np }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    let (children, p2) = parse_block(tokens, p, parse_ui_node)
+    (from_list([("kind", "Stack"), ("stack", from_list([
+        ("description", d), ("children", children), ("keyword_commitment", kwc)]))]), p2)
+}
+
+func parallel_node(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "parallel")
+    let mut d: Any = 0; let mut p = p1
+    if check(tokens, p, "string") { let (s, np) = parse_fuzzy_string(tokens, p); d = s; p = np }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    let (children, p2) = parse_block(tokens, p, parse_ui_node)
+    (from_list([("kind", "Parallel"), ("parallel", from_list([
+        ("description", d), ("children", children), ("keyword_commitment", kwc)]))]), p2)
+}
+
+func error_node(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (kwc, p1) = consume_keyword(tokens, pos, "error")
+    let (msg, p2) = parse_fuzzy_string(tokens, p1)
+    let mut d: Any = 0; let mut p = p2
+    if check(tokens, p, "desc") { let (dv, np) = parse_desc_after(tokens, p); d = dv; p = np }
+    (from_list([("kind", "Error"), ("error", from_list([
+        ("message", msg), ("desc", d), ("keyword_commitment", kwc)]))]), p)
+}
+
+func ui_leaf(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (content, p1) = parse_fuzzy_string(tokens, pos)
+    let mut d: Any = 0; let mut rv: Any = 0; let mut wc: List<Any> = []; let mut ob: Any = 0
+    let mut p = p1; let mut run = true
+    while run {
+        if is_line_end(tokens, p) { run = false; break }
+        if check(tokens, p, "desc") { let (dv, np) = parse_desc_after(tokens, p); d = dv; p = np }
+        else if check(tokens, p, "requires") {
+            let (_, np) = advance(tokens, p); p = np
+            let (c, np2) = parse_condition(tokens, p); rv = c; p = np2
+        }
+        else if check(tokens, p, "with") {
+            let (_, np) = advance(tokens, p); p = np
+            let (cs, np2) = parse_caps(tokens, p); wc = cs; p = np2
+        }
+        else if check(tokens, p, "on") {
+            let (ob2, np) = on_binding(tokens, p); ob = ob2; p = np
+        }
+        else { run = false }
+    }
+    (from_list([("kind", "Leaf"), ("leaf", from_list([
+        ("content", content), ("desc", d), ("requires", rv), ("with", wc), ("on", ob)]))]), p)
+}
+
+func on_binding(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (_, p1) = advance(tokens, pos)
+    let mut en: Any; let mut p = p1
+    if check(tokens, p, "string") {
+        let (s, np) = parse_fuzzy_string(tokens, p)
+        en = from_list([("kind", "Natural"), ("text", s)]); p = np
+    } else {
+        let (id, np) = parse_fuzzy_ident(tokens, p)
+        en = from_list([("kind", "Ident"), ("value", id)]); p = np
+    }
+    let (_, np) = expect(tokens, p, ":", "`:`"); p = np
+    let (act, p2) = parse_action_expr(tokens, p)
+    (from_list([("event_name", en), ("action", act)]), p2)
+}
+
+func parse_action_expr(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let mut acts: List<Any> = []
+    let (a1, p1) = parse_action(tokens, pos); push(acts, a1); let mut p = p1
+    while check(tokens, p, ",") {
+        let (_, np) = advance(tokens, p); p = np
+        let (a, np2) = parse_action(tokens, p); push(acts, a); p = np2
+    }
+    (from_list([("actions", acts)]), p)
+}
+
+func parse_action(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    if check(tokens, pos, ">>>") {
+        let (_, p1) = advance(tokens, pos)
+        let (target, p2) = parse_fuzzy_ident(tokens, p1)
+        (from_list([("kind", "Navigate"), ("target", target)]), p2)
+    }
+    else if check(tokens, pos, "string") {
+        let (s, p1) = parse_fuzzy_string(tokens, pos)
+        (from_list([("kind", "Natural"), ("text", s)]), p1)
+    }
+    else {
+        let (expr, p1) = parse_expr(tokens, pos, 0)
+        if check(tokens, p1, "=") {
+            let (_, p2) = advance(tokens, p1)
+            let (val, p3) = parse_expr(tokens, p2, 0)
+            (from_list([("kind", "Assign"), ("target", expr), ("value", val)]), p3)
+        } else {
+            (from_list([("kind", "Call"), ("expr", expr)]), p1)
+        }
+    }
+}
+
+// ── Rule Parsing ────────────────────────────────────────────────────────────
+
+func parse_rule_def(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let (tok, _) = peek(tokens, pos); let line = tok_line(tok)
+    let (kwc, p1) = consume_keyword(tokens, pos, "rule")
+    let (content_fs, p2) = parse_fuzzy_string(tokens, p1)
+    (from_list([("desc", from_list([("need_commitment", "none"), ("content", content_fs)])),
+        ("keyword_commitment", kwc), ("line", line)]), p2)
+}
+
+// ── File Parsing ────────────────────────────────────────────────────────────
+
+func parse_file(tokens: List<(string, string, i32, i32)>, pos: i32) -> (Any, i32) {
+    let mut p = skip_newlines(tokens, pos)
+    let mut imports: List<string> = []; let mut fragments: List<Any> = []
+    let mut global_rules: List<Any> = []
+
+    while check(tokens, p, "import") {
+        let (_, p1) = advance(tokens, p)
+        let (tok, p2) = expect(tokens, p1, "string", "string path")
+        push(imports, tok_value(tok))
+        p = skip_newlines(tokens, p2)
+    }
+
+    while !is_at_end(tokens, p) {
+        p = skip_newlines(tokens, p)
+        if is_at_end(tokens, p) { break }
+        if check(tokens, p, "rule") {
+            let (rd, np) = parse_rule_def(tokens, p)
+            push(global_rules, rd); p = np
+        } else {
+            let (frag, p2) = parse_fragment(tokens, p)
+            push(fragments, frag); p = p2
+        }
+    }
+
+    (from_list([("imports", imports), ("rules", global_rules), ("fragments", fragments)]), p)
+}
+
+// ── Main Entry Point ────────────────────────────────────────────────────────
+
+pub func parse_mimispec(source: string) -> string {
+    let tokens = tokenize(source)
+    let (result, _) = parse_file(tokens, 0)
+    to_json(result)
+}

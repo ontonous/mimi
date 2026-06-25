@@ -605,6 +605,24 @@ fn dual_str_neq() {
     dual_assert!("func main() -> i32 { let r = if \"abc\" != \"xyz\" { 1 } else { 0 }; println(r); 0 }", "1");
 }
 
+#[test]
+fn dual_string_literal_return() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func greet() -> string { "hello" }
+        func main() -> i32 { println(greet()); 0 }
+    "#, "hello");
+}
+
+#[test]
+fn dual_string_literal_let_return() {
+    if !can_link() { return; }
+    dual_assert!(r#"
+        func greet() -> string { let s = "hello"; s }
+        func main() -> i32 { println(greet()); 0 }
+    "#, "hello");
+}
+
 // ─── 15.  Arrays/Lists (4 tests) ─────────────────────────────
 
 #[test]

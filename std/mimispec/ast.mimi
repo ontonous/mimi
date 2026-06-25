@@ -1,0 +1,183 @@
+// MimiSpec AST type definitions
+// Defines the abstract syntax tree types for the MimiSpec language.
+// This is the foundational types for the Mimi-implemented mimispec parser.
+
+// ── Token ──────────────────────────────────────────────────────────────────
+
+// Output of the lexer.
+pub type Token {
+    Token { kind: string, value: string, line: i32, col: i32 }
+}
+
+// ── Top-level file ─────────────────────────────────────────────────────────
+
+pub type MmsFile {
+    MmsFile(List<string>, List<RuleDef>, List<Fragment>)
+}
+
+// ── Fragment ───────────────────────────────────────────────────────────────
+
+pub type Fragment {
+    ModuleFrag(Module)
+    TypeDefFrag(TypeDef)
+    FuncDefFrag(FuncDef)
+    FlowFrag(FlowDef)
+    UiFrag(UiDef)
+    StepsFrag(List<Step>)
+    ExprFrag(Expr)
+    UiNodeFrag(UiNode)
+    PlaceholderFrag(bool)
+}
+
+// ── Module ─────────────────────────────────────────────────────────────────
+
+pub type Module {
+    Module(string, string, List<RuleDef>, List<Fragment>)
+}
+
+// ── Rule Definition ────────────────────────────────────────────────────────
+
+pub type RuleDef {
+    RuleDef(string, i32)
+}
+
+// ── Type Definition ────────────────────────────────────────────────────────
+
+pub type TypeBody {
+    EnumType(List<string>)
+    RecordType(List<Field>)
+}
+
+pub type Field {
+    Field(string, List<string>)
+}
+
+pub type TypeDef {
+    TypeDef(string, string, List<RuleDef>, TypeBody)
+}
+
+// ── Function Definition ────────────────────────────────────────────────────
+
+pub type Param {
+    Param(string, List<string>)
+}
+
+pub type Condition {
+    StructuredCond(Expr)
+    NaturalCond(string)
+}
+
+pub type FuncDef {
+    FuncDef(string, string, List<RuleDef>, List<Param>, Condition, bool, Condition, bool, List<Step>)
+}
+
+// ── Expression ─────────────────────────────────────────────────────────────
+
+pub type CompareOp {
+    Eq
+    Ne
+    Lt
+    Gt
+    Le
+    Ge
+}
+
+pub type Expr {
+    IdentExpr(string)
+    StringExpr(string)
+    NumberExpr(string)
+    BoolExpr(bool)
+    ListExpr(List<string>)
+    NotExpr(string)
+    AndExpr(string, string)
+    OrExpr(string, string)
+    CompareExpr(string, CompareOp, string)
+    NegExpr(string)
+    AddExpr(string, string)
+    SubExpr(string, string)
+    MulExpr(string, string)
+    DivExpr(string, string)
+    CallExpr(string, List<string>)
+    IndexExpr(string, string)
+    PlaceholderExpr(bool)
+}
+
+// ── Step ───────────────────────────────────────────────────────────────────
+
+pub type ToTarget {
+    ToTarget(string)
+}
+
+pub type OnBlock {
+    OnBlock(List<string>, List<Step>)
+}
+
+pub type Step {
+    ActionStep(List<string>, string, string, bool, List<OnBlock>)
+    AssignStep(Expr, SimpleValue, string, string, bool, List<OnBlock>)
+    IfStep(Condition, List<Step>, List<Step>, bool)
+    ForStep(string, List<string>, List<Step>)
+    WhileStep(Condition, string, List<Step>)
+    ParastepsStep(string, List<Step>)
+    ErrorStep(string, string, bool)
+    DescStep(string)
+    PlaceholderStep(bool)
+}
+
+// ── Simple Value ───────────────────────────────────────────────────────────
+
+pub type SimpleValue {
+    IdentValue(string)
+    StringValue(string)
+    NumberValue(string)
+    BoolValue(bool)
+    ListValue(List<List<string>>)
+}
+
+// ── Flow ───────────────────────────────────────────────────────────────────
+
+pub type FlowArm {
+    FlowArm(string, Condition, bool, string, List<RuleDef>)
+}
+
+pub type FlowEntry {
+    FlowEntry(string, List<RuleDef>, List<FlowArm>)
+}
+
+pub type FlowDef {
+    FlowDef(string, string, List<RuleDef>, List<FlowEntry>)
+}
+
+// ── UI ─────────────────────────────────────────────────────────────────────
+
+pub type UiLeaf {
+    UiLeaf(string, string, Condition, bool)
+}
+
+pub type UiNode {
+    StackNode(string, List<string>)
+    ParallelNode(string, List<string>)
+    LeafNode(UiLeaf)
+    ErrorNode(string, string)
+}
+
+pub type UiDef {
+    UiDef(string, string, bool, UiNode)
+}
+
+// ── Parse Error ────────────────────────────────────────────────────────────
+
+pub type ParseError {
+    ParseError(string, i32, i32)
+}
+
+// ── Math Block ─────────────────────────────────────────────────────────────
+
+pub type MathStatement {
+    DefineMath(Expr, Expr)
+    ExprMath(Expr)
+}
+
+pub type MathBlock {
+    MathBlock(List<MathStatement>)
+}

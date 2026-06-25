@@ -14,11 +14,12 @@
 - **CG1**: f-string 1024 字节固定缓冲区溢出 — 运行时动态计算总大小
 - **CG2**: if-else 分支未 clone `vars` — 分支独立作用域 + 合并
 - **CG6**: slice `start > end` 产生巨大长度 — `select` clamp 到 0 长度
+- **CG4**: 字符串字面量返回 `i8*` 但 LLVM 类型是 `{i8*, i64}` — `func.rs` 中识别 string struct 类型时调用 `wrap_c_string` 而非 struct-load
 - **CG7**: `let x;` 非 int 类型不初始化 — float/pointer 类型零初始化
 
 ### Tests
-- 新增 5 个测试: `builtin_pow_negative_base`, `builtin_pow_negative_base_even_exp`, `builtin_pow_zero_exp`, `e2e_json_key_escaped`, `e2e_json_value_escaped`
-- 基线: 2,132 passed, 0 failed, 21 ignored
+- 新增 7 个测试: `builtin_pow_negative_base`, `builtin_pow_negative_base_even_exp`, `builtin_pow_zero_exp`, `e2e_json_key_escaped`, `e2e_json_value_escaped`, `dual_string_literal_return`, `dual_string_literal_let_return`
+- 基线: 2,134 passed, 0 failed, 21 ignored
 
 ## [v0.24.0] — 2026-06-25 — 并发重构 (spawn→状态机)
 

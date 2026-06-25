@@ -10,7 +10,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Wrap a raw C string pointer into a Mimi string struct `{ ptr, i64 }`.
     /// Calls `strlen` to compute the length, then builds the struct.
-    fn wrap_c_string(&self, raw_ptr: inkwell::values::PointerValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CompileError> {
+    pub(in crate::codegen) fn wrap_c_string(&self, raw_ptr: inkwell::values::PointerValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let string_struct_ty = self.context.struct_type(&[
             BasicTypeEnum::PointerType(i8_ptr_ty),
