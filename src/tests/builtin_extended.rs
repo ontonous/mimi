@@ -23,6 +23,36 @@ func main() -> i32 {
 }
 
 #[test]
+fn builtin_pow_negative_base() {
+    let src = r#"
+func main() -> i64 {
+    pow(-2, 3)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(-8));
+}
+
+#[test]
+fn builtin_pow_negative_base_even_exp() {
+    let src = r#"
+func main() -> i64 {
+    pow(-2, 4)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(16));
+}
+
+#[test]
+fn builtin_pow_zero_exp() {
+    let src = r#"
+func main() -> i64 {
+    pow(-5, 0)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(1));
+}
+
+#[test]
 fn builtin_floor() {
     let src = r#"
 func main() -> f64 {

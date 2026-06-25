@@ -54,7 +54,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(global.as_pointer_value().into());
         }
 
-        // For f-strings with interpolation: use malloc + strcpy + strcat
+        // For f-strings with interpolation: dynamically compute buffer size, then fill
         let malloc_fn = self.module.get_function("malloc")
             .ok_or_else(|| "malloc not declared".to_string())?;
         let strcpy_fn = self.module.get_function("strcpy")
@@ -66,10 +66,120 @@ impl<'ctx> CodeGenerator<'ctx> {
         let sprintf_fn = self.module.get_function("sprintf")
             .ok_or_else(|| "sprintf not declared".to_string())?;
 
-        // Allocate a 1024-byte buffer for the result
-        let buf_size = i64_ty.const_int(1024, false);
+        // Phase 1: Compile each part and compute total buffer size at runtime
+        enum CompiledPart<'ctx> {
+            Text(String),
+            InterpStr(BasicValueEnum<'ctx>),
+        }
+        let mut compiled_parts: Vec<CompiledPart<'ctx>> = Vec::new();
+        let mut total_size = i64_ty.const_int(1, false);
+        for (i, part) in parts.iter().enumerate() {
+            match part {
+                crate::ast::FStringPart::Text(t) => {
+                    total_size = self.builder.build_int_add(
+                        total_size,
+                        i64_ty.const_int(t.len() as u64 + 1, false),
+                        &format!("fstr_text_sz_{}", i),
+                    ).map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                    compiled_parts.push(CompiledPart::Text(t.clone()));
+                }
+                crate::ast::FStringPart::Interp(expr) => {
+                    let val = self.compile_expr(expr, vars)?;
+                    match val {
+                        BasicValueEnum::IntValue(iv) => {
+                            let ext_iv = if iv.get_type().get_bit_width() < 64 {
+                                self.builder.build_int_z_extend(iv, self.context.i64_type(), &format!("fstr_ext_{}", i))
+                                    .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            } else { iv };
+                            let temp_buf = self.builder.build_call(malloc_fn, &[
+                                BasicMetadataValueEnum::IntValue(i64_ty.const_int(32, false)),
+                            ], &format!("fstr_temp_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("malloc returned void")?
+                                .into_pointer_value();
+                            self.register_heap_alloc(temp_buf);
+                            let fmt = self.builder.build_global_string_ptr("%ld", &format!("fstr_fmt_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
+                            self.builder.build_call(sprintf_fn, &[
+                                BasicMetadataValueEnum::PointerValue(temp_buf),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::IntValue(ext_iv),
+                            ], &format!("fstr_sprintf_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                            let len = self.builder.build_call(strlen_fn, &[
+                                BasicMetadataValueEnum::PointerValue(temp_buf),
+                            ], &format!("fstr_strlen_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            total_size = self.builder.build_int_add(total_size, len, &format!("fstr_isz_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                            compiled_parts.push(CompiledPart::InterpStr(temp_buf.into()));
+                        }
+                        BasicValueEnum::FloatValue(fv) => {
+                            let temp_buf = self.builder.build_call(malloc_fn, &[
+                                BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                            ], &format!("fstr_temp_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("malloc returned void")?
+                                .into_pointer_value();
+                            self.register_heap_alloc(temp_buf);
+                            let fmt = self.builder.build_global_string_ptr("%f", &format!("fstr_fmt_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
+                            self.builder.build_call(sprintf_fn, &[
+                                BasicMetadataValueEnum::PointerValue(temp_buf),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::FloatValue(fv),
+                            ], &format!("fstr_sprintf_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                            let len = self.builder.build_call(strlen_fn, &[
+                                BasicMetadataValueEnum::PointerValue(temp_buf),
+                            ], &format!("fstr_strlen_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            total_size = self.builder.build_int_add(total_size, len, &format!("fstr_isz_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                            compiled_parts.push(CompiledPart::InterpStr(temp_buf.into()));
+                        }
+                        BasicValueEnum::PointerValue(pv) => {
+                            let len = self.builder.build_call(strlen_fn, &[
+                                BasicMetadataValueEnum::PointerValue(pv),
+                            ], &format!("fstr_strlen_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            total_size = self.builder.build_int_add(total_size, len, &format!("fstr_isz_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                            compiled_parts.push(CompiledPart::InterpStr(val));
+                        }
+                        _ => {
+                            let unknown = self.builder.build_global_string_ptr("<unsupported>", &format!("fstr_unsup_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
+                            let len = self.builder.build_call(strlen_fn, &[
+                                BasicMetadataValueEnum::PointerValue(unknown.as_pointer_value()),
+                            ], &format!("fstr_strlen_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            total_size = self.builder.build_int_add(total_size, len, &format!("fstr_isz_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                            compiled_parts.push(CompiledPart::InterpStr(unknown.as_pointer_value().into()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Allocate correctly-sized buffer and fill
         let buf = self.builder.build_call(malloc_fn, &[
-            BasicMetadataValueEnum::IntValue(buf_size),
+            BasicMetadataValueEnum::IntValue(total_size),
         ], "fstr_buf")
             .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
             .try_as_basic_value_opt()
@@ -77,7 +187,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         self.register_heap_alloc(buf);
 
-        // Initialize buffer with empty string
         let empty = self.builder.build_global_string_ptr("", "fstr_empty_init")
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
         self.builder.build_call(strcpy_fn, &[
@@ -86,10 +195,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], "fstr_init")
             .map_err(|e| CompileError::LlvmError(format!("strcpy error: {}", e)))?;
 
-        // Append each part
-        for (i, part) in parts.iter().enumerate() {
+        for (i, part) in compiled_parts.iter().enumerate() {
             match part {
-                crate::ast::FStringPart::Text(t) => {
+                CompiledPart::Text(t) => {
                     if t.is_empty() { continue; }
                     let global = self.builder.build_global_string_ptr(t, &format!("fstr_part_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
@@ -99,72 +207,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ], &format!("fstr_cat_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
                 }
-                crate::ast::FStringPart::Interp(expr) => {
-                    let val = self.compile_expr(expr, vars)?;
-                    // Convert value to string based on type
-                    match val {
-                        BasicValueEnum::IntValue(iv) => {
-                            let len = self.builder.build_call(strlen_fn, &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                            ], "fstr_strlen")
-                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                                .try_as_basic_value_opt()
-                                .ok_or("strlen returned void")?
-                                .into_int_value();
-                            let i8_type = self.context.i8_type();
-                                                        let pos = { self.gep().build_in_bounds_gep(i8_type, buf, &[len], "fstr_pos") }
-                                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                            let ext_iv = if iv.get_type().get_bit_width() < 64 {
-                                self.builder.build_int_z_extend(iv, self.context.i64_type(), &format!("fstr_ext_{}", i))
-                                    .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                            } else { iv };
-                            let fmt = self.builder.build_global_string_ptr("%ld", &format!("fstr_fmt_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                            self.builder.build_call(sprintf_fn, &[
-                                BasicMetadataValueEnum::PointerValue(pos),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(ext_iv),
-                            ], &format!("fstr_sprintf_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
-                        }
-                        BasicValueEnum::FloatValue(fv) => {
-                            let len = self.builder.build_call(strlen_fn, &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                            ], "fstr_strlen")
-                                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-                                .try_as_basic_value_opt()
-                                .ok_or("strlen returned void")?
-                                .into_int_value();
-                            let i8_type = self.context.i8_type();
-                                                        let pos = { self.gep().build_in_bounds_gep(i8_type, buf, &[len], "fstr_pos") }
-                                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                            let fmt = self.builder.build_global_string_ptr("%f", &format!("fstr_fmt_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                            self.builder.build_call(sprintf_fn, &[
-                                BasicMetadataValueEnum::PointerValue(pos),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::FloatValue(fv),
-                            ], &format!("fstr_sprintf_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
-                        }
-                        BasicValueEnum::PointerValue(pv) => {
-                            // String pointer: use strcat
-                            self.builder.build_call(strcat_fn, &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(pv),
-                            ], &format!("fstr_cat_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
-                        }
-                        _ => {
-                            let unknown = self.builder.build_global_string_ptr("<unsupported>", &format!("fstr_unsup_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                            self.builder.build_call(strcat_fn, &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(unknown.as_pointer_value()),
-                            ], &format!("fstr_cat_unsup_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
-                        }
-                    }
+                CompiledPart::InterpStr(pv) => {
+                    let ptr = match pv {
+                        BasicValueEnum::PointerValue(p) => *p,
+                        _ => return Err(CompileError::LlvmError("f-string interp: expected pointer".to_string())),
+                    };
+                    self.builder.build_call(strcat_fn, &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::PointerValue(ptr),
+                    ], &format!("fstr_cat_{}", i))
+                        .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
                 }
             }
         }

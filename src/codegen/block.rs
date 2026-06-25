@@ -253,9 +253,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         };
                         let alloca = self.builder.build_alloca(llvm_ty, name)
                             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                        if let BasicTypeEnum::IntType(ty) = llvm_ty {
-                            self.builder.build_store(alloca, ty.const_int(0, false))
-                                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                        match llvm_ty {
+                            BasicTypeEnum::IntType(ty) => {
+                                self.builder.build_store(alloca, ty.const_int(0, false))
+                                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                            }
+                            BasicTypeEnum::FloatType(ty) => {
+                                self.builder.build_store(alloca, ty.const_float(0.0))
+                                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                            }
+                            BasicTypeEnum::PointerType(ty) => {
+                                self.builder.build_store(alloca, ty.const_null())
+                                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                            }
+                            _ => {}
                         }
                         vars.insert(name.clone(), (alloca, llvm_ty));
                     } else {
@@ -290,7 +301,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
                     self.builder.position_at_end(then_bb);
-                    self.compile_block(then_, vars)?;
+                    let mut then_vars = vars.clone();
+                    self.compile_block(then_, &mut then_vars)?;
+                    for (k, v) in then_vars {
+                        vars.entry(k).or_insert(v);
+                    }
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(merge_bb)
                             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
@@ -298,7 +313,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     self.builder.position_at_end(else_bb);
                     if let Some(else_block) = else_ {
-                        self.compile_block(else_block, vars)?;
+                        let mut else_vars = vars.clone();
+                        self.compile_block(else_block, &mut else_vars)?;
+                        for (k, v) in else_vars {
+                            vars.entry(k).or_insert(v);
+                        }
                     }
                     if !self.block_has_terminator() {
                         self.builder.build_unconditional_branch(merge_bb)

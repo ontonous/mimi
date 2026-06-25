@@ -585,6 +585,34 @@ fn e2e_json_from_json() {
 }
 
 #[test]
+fn e2e_json_key_escaped() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let s = from_json("{\"hello\\nworld\":42}")
+            let v = json_get_int(s, "hello\nworld")
+            println(v)
+            0
+        }
+    "#).expect("json key escape test failed");
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_json_value_escaped() {
+    if !can_link() { eprintln!("SKIP: cc not available"); return; }
+    let stdout = compile_and_run(r#"
+        func main() -> i32 {
+            let s = from_json("{\"key\":\"hello\\tworld\"}")
+            let v = json_get_string(s, "key")
+            println(v)
+            0
+        }
+    "#).expect("json value escape test failed");
+    assert_eq!(stdout.trim(), "hello\tworld");
+}
+
+#[test]
 fn e2e_float_sub() {
     if !can_link() { eprintln!("SKIP: cc not available"); return; }
     let stdout = compile_and_run(r#"

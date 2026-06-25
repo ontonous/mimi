@@ -140,8 +140,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(e) => self.compile_expr(e, vars)?.into_int_value(),
             None => list_len,
         };
-        // Compute new length = end - start
-        let new_len = self.builder.build_int_sub(end_idx, start_idx, "slice_len")
+        // Compute new length = end - start (clamped to 0 if start > end)
+        let start_gt_end = self.builder.build_int_compare(inkwell::IntPredicate::SGT, start_idx, end_idx, "slice_start_gt_end")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let safe_end = self.builder.build_select(start_gt_end, start_idx, end_idx, "slice_safe_end")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?.into_int_value();
+        let new_len = self.builder.build_int_sub(safe_end, start_idx, "slice_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
         // Compute new data pointer: data + start * sizeof(i64)
         let i64_ty = self.context.i64_type();
