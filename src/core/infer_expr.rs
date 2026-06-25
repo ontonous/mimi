@@ -1,6 +1,64 @@
 use super::*;
 
 impl<'a> Checker<'a> {
+    /// C3: Bidirectional type checking — check an expression against an expected type.
+    ///
+    /// When the expected type is known, this propagates context downward, enabling
+    /// inference of `None`/`Ok`/`Err` from context. Falls back to `infer_expr` when
+    /// the expression cannot benefit from the expected type.
+    pub(crate) fn check_expr(
+        &mut self,
+        expected: &Type,
+        expr: &Expr,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        match expr {
+            // C3: None in context of Option<T> → infer Option<T>
+            Expr::Literal(Lit::Unit) if matches!(expected, Type::Option(_)) => {
+                expected.clone()
+            }
+            // C3: bare None (parsed as Ident "None") in Option context
+            Expr::Ident(name) if name == "None" => {
+                if let Type::Option(_) = expected {
+                    expected.clone()
+                } else {
+                    self.infer_expr(expr, scopes)
+                }
+            }
+            // C3: block — check last expression against expected type
+            Expr::Block(block) => {
+                if let Some(Stmt::Expr(e)) = block.last() {
+                    self.check_expr(expected, e, scopes)
+                } else {
+                    self.infer_block_expr(block, scopes)
+                }
+            }
+            // C3: if — check both branches against expected type
+            Expr::If { then_, else_, .. } => {
+                let then_ty = self.infer_block_expr(then_, scopes);
+                if let Some(else_block) = else_ {
+                    let else_ty = self.infer_block_expr(else_block, scopes);
+                    // Unify both branches
+                    if self.unification.unify(&then_ty, &else_ty).is_err() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0214,
+                            format!(
+                                "if/else branches have different types: {} vs {}",
+                                crate::core::helpers::fmt_type(&then_ty),
+                                crate::core::helpers::fmt_type(&else_ty)
+                            ),
+                        );
+                    }
+                    self.unification.resolve(&then_ty)
+                } else {
+                    then_ty
+                }
+            }
+            // For all other expressions, fall back to inference
+            _ => self.infer_expr(expr, scopes),
+        }
+    }
+
     pub(crate) fn infer_expr(
         &mut self,
         expr: &Expr,

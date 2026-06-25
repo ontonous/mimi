@@ -547,7 +547,15 @@ impl<'a> Checker<'a> {
 
                 let init_ty = init
                     .as_ref()
-                    .map(|e| self.infer_expr(e, scopes))
+                    .map(|e| {
+                        // C3: use check_expr when declared type is known
+                        if let Some(d) = ty.as_ref().map(|t| self.resolve_type(t)) {
+                            if !matches!(&d, Type::Infer) {
+                                return self.check_expr(&d, e, scopes);
+                            }
+                        }
+                        self.infer_expr(e, scopes)
+                    })
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 let declared = ty.as_ref().map(|t| self.resolve_type(t));
                 let final_ty = match declared {
@@ -622,7 +630,8 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Return(Some(e)) => {
-                let t = self.infer_expr(e, scopes);
+                // C3: use check_expr with return type as expected
+                let t = self.check_expr(ret, e, scopes);
                 // C2: use unification for return type checking
                 if self.unification.unify(ret, &t).is_err() {
                     self.errors.push(
