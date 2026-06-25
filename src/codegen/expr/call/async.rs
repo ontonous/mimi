@@ -57,6 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
 
         let mut poll_vars = HashMap::new();
+        let mut env_ptr_opt: Option<inkwell::values::PointerValue<'ctx>> = None;
         if !free_vars.is_empty() {
             let env_field_types: Vec<BasicTypeEnum<'ctx>> =
                 free_vars.values().map(|&(_, ty)| ty).collect();
@@ -75,6 +76,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
             let env_ptr = if let BasicValueEnum::PointerValue(pv) = env_ptr_val { pv }
                 else { return Err("spawn poll: env ptr not a pointer".into()); };
+            env_ptr_opt = Some(env_ptr);
 
             // Unpack env struct fields
             for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {
@@ -95,7 +97,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = self.compile_expr(expr, &poll_vars)?;
         let result_type = result.get_type();
 
-        // Store result at future+8
+        // Store result at future+8 (this overwrites the env pointer slot at future+8)
         let result_ptr_i8 = self.gep().build_gep(i8_ty, future_ptr_param,
             &[i64_ty.const_int(8, false)], "spawn_result_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -115,26 +117,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         ], "spawn_set_completed")
             .map_err(|e| CompileError::LlvmError(format!("set_completed error: {}", e)))?;
 
-        // Free env (if any)
-        if !free_vars.is_empty() {
+        // Free env (if any) — use the env_ptr saved BEFORE result overwrote future+8
+        if let Some(env_ptr) = env_ptr_opt {
             let free_fn = self.module.get_function("free")
                 .ok_or_else(|| "free not declared".to_string())?;
-            let env_ptr_slot = self.gep().build_gep(i8_ty, future_ptr_param,
-                &[i64_ty.const_int(8, false)], "env_ptr_slot_free")
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let env_ptr_typed2 = self.builder.build_pointer_cast(
-                env_ptr_slot, self.context.ptr_type(inkwell::AddressSpace::default()),
-                "env_ptr_typed2",
-            ).map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-            let env_ptr_val2 = self.builder.build_load(
-                BasicTypeEnum::PointerType(i8_ptr), env_ptr_typed2, "env_ptr_val2"
-            ).map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-            if let BasicValueEnum::PointerValue(env_p) = env_ptr_val2 {
-                self.builder.build_call(free_fn, &[
-                    BasicMetadataValueEnum::PointerValue(env_p),
-                ], "spawn_free_env")
-                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
-            }
+            self.builder.build_call(free_fn, &[
+                BasicMetadataValueEnum::PointerValue(env_ptr),
+            ], "spawn_free_env")
+                .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
         }
 
         self.builder.build_return(None)

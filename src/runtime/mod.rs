@@ -2353,14 +2353,19 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
 
 #[repr(C)]
 struct MimiFutureRepr {
-    completed: i32,
+    completed: std::sync::atomic::AtomicI32,
     _pad: [u8; 4],
     data: [u8; 64],
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_future_alloc(_result_size: u64) -> *mut std::ffi::c_void {
-    let b = Box::new(MimiFutureRepr { completed: 0, _pad: [0; 4], data: [0; 64] });
+    use std::sync::atomic::AtomicI32;
+    let b = Box::new(MimiFutureRepr {
+        completed: AtomicI32::new(0),
+        _pad: [0; 4],
+        data: [0; 64],
+    });
     Box::into_raw(b) as *mut std::ffi::c_void
 }
 
@@ -2373,13 +2378,21 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
 #[no_mangle]
 pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
     if fut.is_null() { return; }
-    unsafe { std::ptr::write(fut as *mut i32, 1); }
+    use std::sync::atomic::Ordering;
+    unsafe {
+        let rep = &*(fut as *const MimiFutureRepr);
+        rep.completed.store(1, Ordering::Release);
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     if fut.is_null() { return 1; }
-    unsafe { std::ptr::read(fut as *const i32) }
+    use std::sync::atomic::Ordering;
+    unsafe {
+        let rep = &*(fut as *const MimiFutureRepr);
+        rep.completed.load(Ordering::Acquire)
+    }
 }
 
 /// Spawn a future on a real thread (used by codegen `spawn expr`).
@@ -2403,9 +2416,15 @@ pub extern "C" fn mimi_spawn_future(
 #[no_mangle]
 pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     if future.is_null() { return; }
+    use std::sync::atomic::Ordering;
     // Spin until completed (the spawned thread sets completed=1 after poll_fn returns)
-    while unsafe { std::ptr::read(future as *const i32) } == 0 {
-        std::thread::yield_now();
+    // Uses Acquire ordering to synchronize-with the Release store in set_completed,
+    // ensuring result data written before the completed flag is visible.
+    unsafe {
+        let rep = &*(future as *const MimiFutureRepr);
+        while rep.completed.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -2446,7 +2465,11 @@ pub extern "C" fn mimi_executor_run() {
             let mut found = None;
             for i in 0..queue.len() {
                 let (_, future) = &queue[i];
-                let completed = unsafe { std::ptr::read(future.0 as *const i32) };
+                use std::sync::atomic::Ordering;
+                let completed = unsafe {
+                    let rep = &*(future.0 as *const MimiFutureRepr);
+                    rep.completed.load(Ordering::Acquire)
+                };
                 if completed == 0 {
                     found = Some(i);
                     break;
