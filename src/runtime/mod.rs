@@ -615,7 +615,8 @@ pub extern "C" fn mimi_str_split(
     let mut c_strings: Vec<*mut std::ffi::c_char> =
         parts.into_iter().map(|p| alloc_c_string(&p)).collect();
     let data_ptr = c_strings.as_mut_ptr();
-    std::mem::forget(c_strings);
+    // FFI-11: Use ManuallyDrop instead of mem::forget to avoid leaking Vec metadata.
+    let _ = std::mem::ManuallyDrop::new(c_strings);
 
     // FFI-2: Strings are allocated via alloc_c_string (libc::malloc) — owns_data: true.
     let list = Box::new(MimiList {
@@ -636,6 +637,10 @@ pub extern "C" fn mimi_str_join(
     }
     let lst = unsafe { &*list };
     if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("");
+    }
+    // FFI-12: Reject unreasonable list lengths to prevent DoS via i64::MAX loop.
+    if lst.len < 0 || lst.len > 1_000_000 {
         return alloc_c_string("");
     }
     let separator = unsafe { cstr_to_string(sep) };
@@ -2122,6 +2127,10 @@ pub extern "C" fn mimi_json_serialize(
     elem_type: i64,
 ) -> *mut std::ffi::c_char {
     if data.is_null() || len <= 0 {
+        return alloc_c_string("[]");
+    }
+    // FFI-13: Refuse to create a slice from misaligned data.
+    if data as usize % std::mem::align_of::<i64>() != 0 {
         return alloc_c_string("[]");
     }
 

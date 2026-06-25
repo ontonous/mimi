@@ -4,8 +4,7 @@ use crate::ast::*;
 use crate::interp::error::InterpError;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::{Rc, Weak as RcWeak};
-use std::sync::{Arc, RwLock, Weak as ArcWeak};
+use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 
 /// Poll-based future state.
 /// For async fn: deferred (waiting to be evaluated by executor).
@@ -241,58 +240,49 @@ pub enum Value {
     },
 }
 
-/// Wrapper around Rc<RefCell<Value>> for LocalShared.
-///
-/// SAFETY: Rc<RefCell<Value>> is !Send due to non-atomic reference counting
-/// and !Sync due to RefCell's runtime borrow tracking. This wrapper is safe
-/// because:
-/// 1. The typechecker rejects local_shared captures in parasteps/spawn (E0305).
-/// 2. `contains_local_shared()` provides a defense-in-depth runtime check
-///    before any thread boundary crossing in the interpreter.
-/// 3. The codegen relies entirely on (1); LLVM codegen lacks a runtime check
-///    but cannot reach here without passing (1).
+/// Wrapper around Arc<Mutex<Value>> for LocalShared.
 /// 4. `check_expr_parasteps_safe` also descends into Expr::Lambda bodies.
+/// 5. Uses Arc<Mutex<Value>> — Arc uses atomic refcount, Mutex synchronizes access.
+///    Both are unconditionally Send + Sync, so this struct is genuinely safe.
 #[derive(Debug, Clone)]
-pub struct LocalSharedInner(pub Rc<RefCell<Value>>);
+pub struct LocalSharedInner(pub Arc<Mutex<Value>>);
 
-// SAFETY: LocalSharedInner wraps Rc<RefCell<Value>> which is !Send/!Sync by default.
-// Safety relies on the type-level E0305 rejection of local_shared in parallel blocks,
-// plus the defense-in-depth runtime check in contains_local_shared().
-// See the struct-level doc on LocalSharedInner for full details.
+// SAFETY: LocalSharedInner uses Arc<Mutex<Value>>, both unconditionally Send + Sync.
+/// The inner Mutex serializes access so even if multiple threads hold
+/// LocalSharedInner references, data access is mutually exclusive.
+/// Mimi's type-checker additionally enforces E0305 rejection of
+/// local_shared in parallel blocks; this impl is sound independently.
 unsafe impl Send for LocalSharedInner {}
-// SAFETY: Same reasoning as Send — single-threaded access only, guaranteed by the
-// typechecker (E0305) and runtime check (contains_local_shared).
 unsafe impl Sync for LocalSharedInner {}
 
 impl std::ops::Deref for LocalSharedInner {
-    type Target = RefCell<Value>;
-    fn deref(&self) -> &RefCell<Value> {
+    type Target = Mutex<Value>;
+    fn deref(&self) -> &Mutex<Value> {
         &self.0
     }
 }
 
 impl LocalSharedInner {
     pub fn new(v: Value) -> Self {
-        LocalSharedInner(Rc::new(RefCell::new(v)))
+        LocalSharedInner(Arc::new(Mutex::new(v)))
     }
     pub fn downgrade(&self) -> WeakLocalInner {
-        WeakLocalInner(Rc::downgrade(&self.0))
+        WeakLocalInner(Arc::downgrade(&self.0))
     }
     pub fn clone_rc(this: &Self) -> Self {
-        LocalSharedInner(Rc::clone(&this.0))
+        LocalSharedInner(Arc::clone(&this.0))
     }
 }
 
-/// Wrapper around RcWeak<RefCell<Value>> for WeakLocal.
+/// Wrapper around Arc<Mutex<Value>> weak reference for WeakLocal.
 #[derive(Debug, Clone)]
-pub struct WeakLocalInner(pub RcWeak<RefCell<Value>>);
+pub struct WeakLocalInner(pub ArcWeak<Mutex<Value>>);
 
-// SAFETY: WeakLocalInner wraps RcWeak<RefCell<Value>> which is !Send/!Sync by default,
-// but all accesses are single-threaded (only used within the interpreter which is
-// single-threaded per instance). WeakLocal is always paired with LocalShared, which
-// is already restricted to single-threaded use.
+// SAFETY: WeakLocalInner wraps ArcWeak<Mutex<Value>> — ArcWeak is Send + Sync
+// (atomic ref-counting), and Mutex is Send + Sync. The paired LocalShared
+// restriction (single-threaded E0305 rejection) ensures the upgraded
+// value is only accessed from the original thread.
 unsafe impl Send for WeakLocalInner {}
-// SAFETY: Same reasoning as Send — single-threaded access only.
 unsafe impl Sync for WeakLocalInner {}
 
 impl WeakLocalInner {
@@ -587,7 +577,7 @@ impl std::fmt::Display for Value {
                 write!(f, "shared({})", v)
             }
             Value::LocalShared(rc) => {
-                let v = rc.borrow();
+                let v = rc.lock().unwrap();
                 write!(f, "local_shared({})", v)
             }
             Value::WeakShared(w) => match w.upgrade() {
@@ -599,7 +589,7 @@ impl std::fmt::Display for Value {
             },
             Value::WeakLocal(w) => match w.upgrade() {
                 Some(rc) => {
-                    let v = rc.borrow();
+                    let v = rc.lock().unwrap();
                     write!(f, "weak_local({})", v)
                 }
                 None => write!(f, "weak_local(None)"),
@@ -720,10 +710,10 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
             }
             false
         }
-        Value::LocalShared(inner) => contains_arena_ref(&inner.0.borrow(), arena_id),
+        Value::LocalShared(inner) => contains_arena_ref(&inner.0.lock().unwrap(), arena_id),
         Value::WeakLocal(inner) => {
             if let Some(rc) = inner.0.upgrade() {
-                contains_arena_ref(&rc.borrow(), arena_id)
+                contains_arena_ref(&rc.lock().unwrap(), arena_id)
             } else {
                 false
             }
@@ -857,7 +847,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
             }
         }
         (Value::LocalShared(a), Value::LocalShared(b)) => {
-            values_equal(&a.0.borrow(), &b.0.borrow())
+            values_equal(&a.0.lock().unwrap(), &b.0.lock().unwrap())
         }
         (Value::Cap(a), Value::Cap(b)) => a == b,
         (

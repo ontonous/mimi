@@ -452,7 +452,7 @@ impl<'a> Interpreter<'a> {
                         })? = v;
                     }
                     Value::LocalShared(rc) => {
-                        *rc.borrow_mut() = v;
+                        *rc.lock().unwrap() = v;
                     }
                     _ => {
                         return Err(InterpError::new(format!(
@@ -534,7 +534,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     Value::LocalShared(rc) => {
-                        let mut inner = rc.borrow_mut();
+                        let mut inner = rc.lock().unwrap();
                         match &mut *inner {
                             Value::Record(_, fields) => {
                                 if fields.contains_key(field.as_str()) {

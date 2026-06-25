@@ -391,7 +391,7 @@ impl<'a> Interpreter<'a> {
             Value::LocalShared(rc) => match method {
                 "clone" => Ok(Value::LocalShared(LocalSharedInner::clone_rc(rc))),
                 "deref" | "inner" => {
-                    let inner = rc.borrow();
+                    let inner = rc.lock().unwrap();
                     Ok(inner.clone())
                 }
                 _ => Err(InterpError::new(format!(

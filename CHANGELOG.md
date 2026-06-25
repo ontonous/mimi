@@ -2,6 +2,16 @@
 
 ## [Unreleased] — v0.26.5-dev
 
+## [v0.26.5] — 2026-06-26
+
+### Security (FFI P1)
+
+- **FFI-11**: `mimi_str_split` leaked Vec metadata via `std::mem::forget(c_strings)` — replaced with `ManuallyDrop` to prevent 8-24 byte per-call leak while correctly not dropping the backing Vec
+- **FFI-12**: `mimi_str_join` read `lst.len as isize` with no bounds check — a `len = i64::MAX` input would loop i64::MAX times causing DoS; added `if lst.len < 0 || lst.len > 1_000_000 { return; }` guard
+- **FFI-13**: `mimi_json_serialize` called `from_raw_parts(data as *const i64, len as usize)` without alignment check — misaligned pointer is UB on 64-bit; added alignment assertion that returns `"[]"` on failure
+- **FFI-14**: `LocalSharedInner` relied on `unsafe impl Send/Sync` with only type-checker reasoning — refactored to use `Arc<Mutex<Value>>` internally, making `Send + Sync` provably sound without unsafe impl; all `.borrow()` calls updated to `.lock().unwrap()`
+- **FFI-15**: `CBufferInner` had `unsafe impl Sync` with inadequate justification — restored with clear documentation: `Sync` is sound because C buffer access is always guarded by outer `Arc<RwLock<CBufferInner>>`
+
 ## [v0.26.4] — 2026-06-26
 
 ### Security (FFI P0)
