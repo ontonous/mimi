@@ -2,6 +2,11 @@
 
 ## [Unreleased] — v0.26.1-dev
 
+### Fixed
+- **Fix-4**: `runtime/mod.rs` — `map_from_handle`/`set_from_handle` null-handle guard `panic!()` → `std::process::abort()` (aligns with S18 `mimi_try_exit` pattern; panic across FFI boundary is UB)
+
+### Changed
+- **Fix-5**: `codegen/registry/funcs.rs` — `// BUG 1` markers renamed to `// WORKAROUND` (string ABI mismatch char* vs {i8*,i64} is an intentionally-handled case, not an unfixed bug)
 ## [v0.26.0] — 2026-06-25
 
 > v0.26 核心工作（C2+C3+C4）在 v0.25.5/v0.25.6 发布时已全部合入 main，此处补录为正式版本。

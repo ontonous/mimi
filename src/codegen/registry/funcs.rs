@@ -494,7 +494,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
                     // F7: Tuple return — C returns JSON string (i8*)
                     || matches!(ty, crate::ast::Type::Tuple(_))
-                    // BUG 1: C functions return string as char* (i8*), but Mimi's
+                    // WORKAROUND: C functions return string as char* (i8*), but Mimi's
                     // string type is {i8*, i64} (ptr + length). The C call uses i8*
                     // for the return; the wrapper then converts via strlen.
                     // Tests: e2e_extern_strlen, e2e_extern_parse_int_raw_string
@@ -1681,7 +1681,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .as_ref()
             .is_some_and(|t| matches!(t, crate::ast::Type::Name(n, _) if n == "string"))
         {
-            // BUG 1: convert char* (i8*) from C to {i8*, i64} Mimi string struct.
+            // WORKAROUND: convert char* (i8*) from C to {i8*, i64} Mimi string struct.
             // C FFI returns strings as bare pointers; Mimi represents strings
             // as {ptr, len}. The strlen call computes the missing length field.
             // Tests: e2e_extern_strlen, e2e_extern_parse_int_raw_string

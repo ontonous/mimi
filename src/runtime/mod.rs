@@ -386,9 +386,10 @@ struct MimiMap {
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// Callers must dereference within a single scope (no two &mut to same handle).
+/// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
 unsafe fn map_from_handle(handle: MapHandle) -> *mut MimiMap {
     if handle == 0 {
-        panic!("map_from_handle: null handle");
+        std::process::abort();
     }
     handle as *mut MimiMap
 }
@@ -1345,9 +1346,10 @@ struct MimiSet {
 }
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
+/// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
 unsafe fn set_from_handle(handle: SetHandle) -> *mut MimiSet {
     if handle == 0 {
-        panic!("set_from_handle: null handle");
+        std::process::abort();
     }
     handle as *mut MimiSet
 }
