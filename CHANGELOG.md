@@ -14,8 +14,14 @@
 - **CG1**: f-string 1024 字节固定缓冲区溢出 — 运行时动态计算总大小
 - **CG2**: if-else 分支未 clone `vars` — 分支独立作用域 + 合并
 - **CG6**: slice `start > end` 产生巨大长度 — `select` clamp 到 0 长度
+- **CG3**: spawn poll 函数隔离 heap_allocs 作用域 — 防止 builtin 注册条目污染父函数作用域
 - **CG4**: 字符串字面量返回 `i8*` 但 LLVM 类型是 `{i8*, i64}` — `func.rs` 中识别 string struct 类型时调用 `wrap_c_string` 而非 struct-load
 - **CG7**: `let x;` 非 int 类型不初始化 — float/pointer 类型零初始化
+- **CG9**: 闭包 indirect-call ABI 3 处重复合并为统一 `compile_closure_call(closure_val, &[args])` 
+- **C4**: 执行器协调 — 进程隔离 + S11/S12 atomic 修复消除潜在死锁
+
+### Changed
+- `compile_closure_call` 签名改为接受 `&[BasicValueEnum]` 变长参数（替代单 `IntValue`）
 
 ### Tests
 - 新增 7 个测试: `builtin_pow_negative_base`, `builtin_pow_negative_base_even_exp`, `builtin_pow_zero_exp`, `e2e_json_key_escaped`, `e2e_json_value_escaped`, `dual_string_literal_return`, `dual_string_literal_let_return`
