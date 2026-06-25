@@ -1,6 +1,17 @@
 # Changelog
 
-## [Unreleased] — v0.25.2-dev
+## [Unreleased] — v0.25.3-dev
+
+## [v0.25.2] — 2026-06-25
+
+### Added
+- 3 dual-backend tests: newtype `.0`, `List<Record>` field access, int match catch-all
+- 4 typecheck tests: CK1 constructor scoping, CK2 generic enum, CK4 alias cycle, D3 exhaustiveness
+- Promoted `dual_higher_order_nested_generic` to dual backend
+
+### Fixed
+- **D4**: codegen newtype `.0` detection uses `type_defs` registry instead of `expr_type_of`
+- **D1**: `infer_object_type` Index parsing fix (exclude trailing `>` in element type name)
 
 ## [v0.25.1] — 2026-06-25
 
