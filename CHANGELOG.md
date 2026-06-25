@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased] — v0.26.3-dev
+## [Unreleased] — v0.26.4-dev
+
+## [v0.26.3] — 2026-06-25
+
+### Fixed
+- **Arch-1**: `UnificationTable::reset()` confirmation — `check_func` at `checker/func.rs:13` already calls `self.unification.reset()` at function entry; type variable bindings do not leak across function boundaries
+- **Arch-4**: `lookup_var` returned unresolved types — `vars.rs` now calls `self.unification.resolve()` before returning types from scopes and function signatures, preventing unresolved TypeVars from propagating to downstream unify calls
+- **Bug 3**: `infer_if_expr` used `same_type` for branch unification — `infer/helpers.rs` now uses `unify()` instead, enabling bidirectional type inference: `Some(1)` in an `Option<i64>` context can infer i64 from the expected type propagated into if branches
 
 ## [v0.26.2] — 2026-06-25
 

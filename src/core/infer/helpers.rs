@@ -61,9 +61,20 @@ impl<'a> Checker<'a> {
         let then_ty = self.infer_block_expr(then_, scopes);
         if let Some(eb) = else_ {
             let else_ty = self.infer_block_expr(eb, scopes);
-            if same_type(&then_ty, &else_ty) {
-                then_ty
+            // Bug-3: use unify instead of same_type to enable bidirectional type inference.
+            // This allows the expected type to propagate into both branches, so
+            // `Some(1)` in an `Option<i64>` context can infer i64 from the expected type.
+            if self.unification.unify(&then_ty, &else_ty).is_ok() {
+                self.unification.resolve(&then_ty)
             } else {
+                self.emit_code(
+                    crate::diagnostic::codes::E0214,
+                    format!(
+                        "if/else branches have different types: {} vs {}",
+                        fmt_type(&then_ty),
+                        fmt_type(&else_ty)
+                    ),
+                );
                 Type::Name("unknown".into(), vec![])
             }
         } else {
@@ -264,8 +275,4 @@ impl<'a> Checker<'a> {
         }
         result_type
     }
-}
-
-fn same_type(a: &Type, b: &Type) -> bool {
-    crate::core::helpers::same_type(a, b)
 }

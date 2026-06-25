@@ -10,20 +10,25 @@ impl<'a> Checker<'a> {
     pub(crate) fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
-                return t.clone();
+                // Arch-4: resolve TypeVars before returning so downstream unify calls
+                // get concrete types rather than unresolved inference variables
+                return self.unification.resolve(t);
             }
         }
         // Check if it's a module-qualified name via use imports
         for module in &self.use_imports.clone() {
             let qualified = format!("{}::{}", module, name);
             if let Some((params, ret)) = self.funcs.get(&qualified) {
-                return Type::Func(params.clone(), Box::new(ret.clone()));
+                // Arch-4: resolve TypeVars in function signature
+                let ret = self.unification.resolve(&ret);
+                return Type::Func(params.clone(), Box::new(ret));
             }
         }
         // Check if it's a zero-argument constructor (enum variant without payload)
         if let Some((params, ret)) = self.funcs.get(name) {
             if params.is_empty() {
-                return ret.clone();
+                // Arch-4: resolve TypeVars in constructor return type
+                return self.unification.resolve(ret);
             }
         }
 
