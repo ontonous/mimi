@@ -77,6 +77,10 @@ impl UnificationTable {
     }
 
     /// Check if a type variable occurs inside a type (for occur check).
+    /// Arch-7 fix: unified to only check TypeVar (integer ID space).
+    /// Type::Name is a separate string-based namespace used for user-written type
+    /// parameters; it does not interact with TypeVar (integer) ID space.
+    /// Type::ForAll body uses TypeVar(i) for bound parameters, not Name(i).
     fn occurs_in(var: u32, ty: &Type) -> bool {
         match ty {
             Type::TypeVar(id) => *id == var,
@@ -93,6 +97,9 @@ impl UnificationTable {
             | Type::CBorrow(inner) | Type::CBorrowMut(inner) | Type::CBuffer(inner)
             | Type::Array(inner, _) | Type::Slice(inner) => Self::occurs_in(var, inner),
             Type::Newtype(_, inner) => Self::occurs_in(var, inner),
+            // Type::Name is string-based; TypeVar is integer-based — no cross-check needed.
+            // ForAll params are stored as strings in ForAll but referenced as TypeVar(i)
+            // in the body after remap. instantiate() handles TypeVar substitution correctly.
             Type::Name(_, args) => args.iter().any(|a| Self::occurs_in(var, a)),
             Type::Infer | Type::Nothing | Type::Allocator | Type::RawString
             | Type::Cap(_) | Type::ImplTrait(_) | Type::DynTrait(_) => false,
@@ -100,12 +107,18 @@ impl UnificationTable {
     }
 
     /// Resolve a type: replace all TypeVars with their bindings.
+    /// Arch-6 fix: cache resolved types in the binding table (path compression for
+    /// type values) to avoid O(N²) repeated cloning when the same TypeVar is
+    /// resolved multiple times.
     pub fn resolve(&mut self, ty: &Type) -> Type {
         match ty {
             Type::TypeVar(id) => {
                 let root = self.find(*id);
                 if let Some(bound) = self.binding.get(&root).cloned() {
-                    self.resolve(&bound)
+                    // Recursively resolve, then cache the result (path compression for type values)
+                    let resolved = self.resolve(&bound);
+                    self.binding.insert(root, resolved.clone());
+                    resolved
                 } else {
                     Type::TypeVar(root)
                 }

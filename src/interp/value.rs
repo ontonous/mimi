@@ -2,7 +2,6 @@
 
 use crate::ast::*;
 use crate::interp::error::InterpError;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 

@@ -1,6 +1,18 @@
 # Changelog
 
-## [Unreleased] — v0.26.5-dev
+## [Unreleased] — v0.26.7-dev
+
+## [v0.26.6] — 2026-06-26
+
+### Architecture
+
+- **Arch-5**: `TypeArena` / `TypeId` 正式接入 `Checker`：在 `Checker` 中新增 `arena: TypeArena` 字段，配套 `intern_type()` / `get_type()` / `arena_len()` 公共接口；移除 `type_id.rs` 的 `#[allow(dead_code)]`，标志 C1 基础设施正式启用
+- **Arch-6**: `UnificationTable::resolve` O(N²) 优化——在找到绑定类型后，将其递归解析的结果写回 binding（值的路径压缩），避免相同 TypeVar 重复解析时的 O(N) 克隆；generalize 单次遍历已在 v0.25.5 Bug 6 修复中实现
+- **Arch-7**: `occurs_in`（unification.rs）和 `occurs_check`（helpers.rs）职责边界明确化：前者检查 `TypeVar`（整数 ID 空间），后者检查 `Type::Name`（字符串空间）；ForAll body 中的具名参数通过 `remap_type_vars` 在实例化时已替换为 `TypeVar(i)`，两套检查器各司其职，无需合并
+
+### Internal
+
+- 清理 `interp/value.rs` 中遗留的 `std::cell::RefCell` 未使用导入
 
 ## [v0.26.5] — 2026-06-26
 

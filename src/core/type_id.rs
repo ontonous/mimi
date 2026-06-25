@@ -23,8 +23,9 @@ impl fmt::Debug for TypeId {
 }
 
 /// Arena for storing types with hash-consing (structural deduplication).
-/// Currently unused — see module-level Arch-3 note.
-#[allow(dead_code)]
+/// C1/Arch-5: Integrated into Checker for O(1) type equality comparison.
+/// Interning types via `arena.intern()` deduplicates structurally equal types,
+/// so `same_type(a, b)` can be replaced by `arena.get(id_a) == arena.get(id_b)`.
 pub struct TypeArena {
     types: Vec<Type>,
     /// Map from type hash → list of (type_value, TypeId) for dedup

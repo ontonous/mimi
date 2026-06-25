@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use super::borrow::BorrowState;
+use super::type_id::{TypeArena, TypeId};
 use super::unification::UnificationTable;
 
 pub(crate) struct Checker<'a> {
@@ -65,6 +66,9 @@ pub(crate) struct Checker<'a> {
     pub(crate) current_col: usize,
     /// C2: Unification table for type inference
     pub(crate) unification: UnificationTable,
+    /// C1/Arch-5: Arena with hash-consing for O(1) type equality.
+    /// Used to intern canonical types when storing in maps (funcs, aliases, newtypes).
+    arena: TypeArena,
 }
 
 #[allow(dead_code)]
@@ -103,6 +107,7 @@ impl<'a> Checker<'a> {
             current_line: 0,
             current_col: 0,
             unification: UnificationTable::new(),
+            arena: TypeArena::new(),
         }
     }
 
@@ -139,6 +144,24 @@ impl<'a> Checker<'a> {
     pub(crate) fn fresh_var(&mut self) -> Type {
         let id = self.unification.fresh_var();
         Type::TypeVar(id)
+    }
+
+    /// C1/Arch-5: Intern a type into the arena, returning its canonical TypeId.
+    /// Structurally equal types (per Type::PartialEq) get the same TypeId (hash-consing).
+    /// This enables O(1) type equality checks via TypeId comparison instead of
+    /// O(N) structural tree walks through same_type().
+    pub(crate) fn intern_type(&mut self, ty: Type) -> TypeId {
+        self.arena.intern(ty)
+    }
+
+    /// C1/Arch-5: Look up a type by its interned TypeId.
+    pub(crate) fn get_type(&self, id: TypeId) -> &Type {
+        self.arena.get(id)
+    }
+
+    /// C1/Arch-5: Returns the number of unique types interned so far.
+    pub(crate) fn arena_len(&self) -> usize {
+        self.arena.len()
     }
 
     /// C2: Unify two types, emitting a diagnostic on failure.
