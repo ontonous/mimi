@@ -5,6 +5,7 @@
 ### Fixed
 - **Fix-1**: `operator.rs:333` — replaced `panic!()` with `unreachable!()` for logically unreachable And/Or path
 - **Fix-2**: Added `#[ignore = "..."]` reason strings to 5 valgrind/asan tests (`e2e_valgrind_string_ops`, `e2e_valgrind_list_ops`, `e2e_valgrind_recursion`, `e2e_valgrind_large_struct_return`, `e2e_asan_list_ops`)
+- **Fix-3**: `fmt_type` Newtype transparency now includes `f32`/`f64` — `same_type(Name("f64",[]), Newtype("a",Name("f64",[])))` implies equal `fmt_type` output
 
 ### Changed
 - AGENTS.md roadmap updated: v0.26 (C2+C3+C4) marked as shipped in v0.25.5/v0.25.6; v0.25.7 added
