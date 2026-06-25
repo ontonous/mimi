@@ -2,6 +2,10 @@
 
 ## [Unreleased] — v0.25.4-dev
 
+### Fixed
+- **Bug 3**: Expected type propagated through Expr::If branches (C3 bidirectional checking)
+- **Bug 2**: Confirmed resolved by v0.26 unification architecture — reset() called per function
+
 ## [v0.25.3] — 2026-06-25
 
 ### Fixed
@@ -9,12 +13,6 @@
 - **Bug 4**: Double unify in Stmt::Return
 - **Bug 5**: Newtype implicit unwrapping regression
 - **fmt_type**: Newtype wrapping capability/primitive types now formats transparently (aligns with `same_type`)
-
-## [v0.25.4] — Planned
-
-### Fixed
-- **Bug 2**: TypeVar pollution from unify side effects
-- **Bug 3**: Expected type not propagated through Expr::If
 
 ## [v0.25.5] — Planned
 
