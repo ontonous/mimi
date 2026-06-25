@@ -55,7 +55,8 @@ impl<'a> Checker<'a> {
             match &result_ty {
                 None => result_ty = Some(body_ty),
                 Some(rt) => {
-                    if !same_type(rt, &body_ty) {
+                    // C2: use unification for match arm type consistency
+                    if self.unification.unify(rt, &body_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0214,
                             format!(

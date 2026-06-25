@@ -1087,9 +1087,9 @@ impl<'a> Checker<'a> {
                         for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate()
                         {
                             let arg_ty = self.infer_expr(arg, scopes);
-                            if !same_type(&arg_ty, param_ty)
-                                && !is_numeric_coercion(param_ty, &arg_ty)
-                            {
+                            // C2: use unification for argument type checking
+                            let coerced = is_numeric_coercion(param_ty, &arg_ty);
+                            if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -1336,7 +1336,9 @@ impl<'a> Checker<'a> {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
                     let subst_param = subst_type_params(param, &generics, &type_map);
-                    if !same_type(&at, &subst_param) && !is_numeric_coercion(&subst_param, &at) {
+                    // C2: use unification for generic argument type checking
+                    let coerced = is_numeric_coercion(&subst_param, &at);
+                    if !coerced && self.unification.unify(&subst_param, &at).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,
@@ -1364,7 +1366,9 @@ impl<'a> Checker<'a> {
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
-                    if !same_type(&at, param) && !is_numeric_coercion(param, &at) {
+                    // C2: use unification for non-generic argument type checking
+                    let coerced = is_numeric_coercion(param, &at);
+                    if !coerced && self.unification.unify(param, &at).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,

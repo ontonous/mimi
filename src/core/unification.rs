@@ -236,10 +236,7 @@ impl UnificationTable {
             (Type::Slice(a), Type::Slice(b)) => self.unify(a, b),
             (Type::Array(a, na), Type::Array(b, nb)) if na == nb => self.unify(a, b),
             (Type::Newtype(na, a), Type::Newtype(nb, b)) if na == nb => self.unify(a, b),
-            (Type::Newtype(_, inner), other) | (other, Type::Newtype(_, inner)) => {
-                // Newtype is transparent — unify with inner type
-                self.unify(inner, other)
-            }
+            // Newtypes are distinct — different names don't unify (type safety)
             (Type::ImplTrait(a), Type::ImplTrait(b)) | (Type::DynTrait(a), Type::DynTrait(b)) => {
                 if a == b {
                     Ok(())
