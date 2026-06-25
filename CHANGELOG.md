@@ -1,6 +1,35 @@
 # Changelog
 
-## [Unreleased] — v0.25.0-dev
+## [Unreleased] — v0.25.2-dev
+
+## [v0.25.1] — 2026-06-25
+
+### Added
+- **D1**: List non-scalar element codegen — `List<Record>` heap-allocates struct elements
+- **D3**: Exhaustiveness check for int/string literal patterns + non-enum catch-all warning
+
+### Fixed
+- **D1**: `infer_object_type` Index parsing fix (exclude trailing `>` in type name)
+- **D1**: `convert_list_elem_by_type` uses `type_llvm` registry for user-defined types first
+- **D1**: `let` bindings track `List<T>` and `Index` element types in `var_type_names`
+
+## [v0.25.0] — 2026-06-25
+
+### Added
+- **C1**: TypeId Arena infrastructure (`type_id.rs`) with hash-consing + 6 tests
+- **C1**: `Type::TypeVar(u32)` and `Type::ForAll(Vec<String>, Box<Type>)` variants
+- **CK1**: Constructor pattern lookup scoped to subject type
+- **CK2**: Generic enum `self_ty` includes type parameter arguments
+- **CK3**: Variant constructor shadowing emits E0402 diagnostic
+- **CK4**: Alias cycle detection follows nested type names recursively
+- **CK5**: Tuple pattern handles `Type::Name("Tuple")` dual representation
+- **CK6**: List pattern checks element type against `List<T>` inner type
+- **CK7**: Actor method keys namespaced as `Actor::method`
+- **CK8**: Built-in `None` intercept moved after user-type check
+- **CK9**: `loop`/`while`/`for`/`WhileLet` in `block_returns_on_all_paths`
+- **D2**: 2 enum tests promoted from `interp_only` to dual backend
+- **D4**: Newtype `.0` unwrap — checker/interpreter/codegen all support
+- **R5/R9/C5**: Confirmed already safe (two allocation paths, each consistent)
 
 ## [v0.24.3] — 2026-06-25
 
