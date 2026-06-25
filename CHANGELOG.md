@@ -1,10 +1,12 @@
 # Changelog
 
-## [Unreleased] — v0.25.4-dev
+## [v0.25.4] — 2026-06-25
 
 ### Fixed
 - **Bug 3**: Expected type propagated through Expr::If branches (C3 bidirectional checking)
 - **Bug 2**: Confirmed resolved by v0.26 unification architecture — reset() called per function
+
+## [Unreleased] — v0.25.5-dev
 
 ## [v0.25.3] — 2026-06-25
 

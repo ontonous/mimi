@@ -991,3 +991,95 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(2));
 }
+
+// =============================================================================
+// Bug 3: C3 bidirectional if checking — expected type propagates through branches
+// =============================================================================
+
+#[test]
+fn typecheck_if_option_context_bidirectional() {
+    // Bug 3: If expression in Option<i64> context should infer branch types
+    let src = r#"
+func get_or_zero(opt: Option<i64>) -> i64 {
+    let result = if true { Some(42) } else { None };
+    match result {
+        Some(n) => n,
+        None => 0,
+    }
+}
+func main() -> i64 { get_or_zero(Some(1)) }
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn typecheck_if_result_context_bidirectional() {
+    // Bug 3: If expression in Result<i64, str> context should infer branch types
+    let src = r#"
+func get_or_zero(r: Result<i64, str>) -> i64 {
+    match r {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+}
+func main() -> i64 { get_or_zero(Ok(99)) }
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(99));
+}
+
+#[test]
+fn typecheck_if_branches_unify_with_expected() {
+    // Bug 3: Both branches should unify with the expected Option type
+    let src = r#"
+func test() -> Option<i32> {
+    if true {
+        Some(100)
+    } else {
+        Some(200)
+    }
+}
+func main() -> i32 {
+    match test() {
+        Some(n) => n,
+        None => 0,
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(100));
+}
+
+#[test]
+fn typecheck_if_no_else_infers_from_expected() {
+    // Bug 3: if without else should infer from expected type context
+    let src = r#"
+func test(flag: bool) -> Option<i32> {
+    if flag {
+        Some(42)
+    }
+}
+func main() -> i32 {
+    match test(true) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
+fn typecheck_if_mixed_literals_with_expected() {
+    // Bug 3: if expression with numeric literals should unify to expected type
+    let src = r#"
+func test() -> f64 {
+    if true { 1.5 } else { 2.5 }
+}
+func main() -> f64 { test() }
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Float(1.5));
+}
