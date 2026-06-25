@@ -1,14 +1,27 @@
 # Changelog
 
-## [Unreleased] — v0.25.7-dev
+## [Unreleased] — v0.26.1-dev
+
+## [v0.26.0] — 2026-06-25
+
+> v0.26 核心工作（C2+C3+C4）在 v0.25.5/v0.25.6 发布时已全部合入 main，此处补录为正式版本。
+
+### Added
+- **C2**: Unification 引擎 — `UnificationTable` + `unify()` + occurs check + resolve；所有 `same_type` 调用迁移至 unification
+- **C3**: 双向类型检查 — `check_expr(expected, expr)` + `infer_expr(expr)` 双入口；`expected` 正确传播到 if/while/return/match 分支
+- **C4**: Let 泛化 — `ForAll` 量词 + `generalize`/`instantiate`；`let f = fn(x) { x }` 支持多态复用
+
+### Changed
+- `core/unification.rs` 新增 public `find()` 和 `get_binding()` 访问器
+- 类型推断路径重构：match/call/return/switch/while 分支全部基于 unify 而非 same_type
+
+## [v0.25.7] — 2026-06-25
 
 ### Fixed
 - **Fix-1**: `operator.rs:333` — replaced `panic!()` with `unreachable!()` for logically unreachable And/Or path
 - **Fix-2**: Added `#[ignore = "..."]` reason strings to 5 valgrind/asan tests (`e2e_valgrind_string_ops`, `e2e_valgrind_list_ops`, `e2e_valgrind_recursion`, `e2e_valgrind_large_struct_return`, `e2e_asan_list_ops`)
 - **Fix-3**: `fmt_type` Newtype transparency now includes `f32`/`f64` — `same_type(Name("f64",[]), Newtype("a",Name("f64",[])))` implies equal `fmt_type` output
 
-### Changed
-- AGENTS.md roadmap updated: v0.26 (C2+C3+C4) marked as shipped in v0.25.5/v0.25.6; v0.25.7 added
 
 ## [v0.25.6] — 2026-06-25
 
