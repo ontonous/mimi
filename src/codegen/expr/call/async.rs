@@ -93,7 +93,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Evaluate the expression inside the poll function
+        // Push a heap scope to isolate the poll function's allocations from the parent.
+        // Without this, builtins inside the spawn expression would register_heap_gep
+        // into the parent's heap_allocs, causing free() calls with wrong LLVM values.
+        self.push_heap_scope();
+
         let result = self.compile_expr(expr, &poll_vars)?;
         let result_type = result.get_type();
 
@@ -108,6 +112,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
         self.builder.build_store(result_typed_ptr, result)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Discard the poll function's heap scope instead of calling free_heap_allocs.
+        // free_heap_allocs would emit free() calls that free the heap data embedded
+        // in the result struct (e.g., string/list data pointer at future+8).
+        // That data is now owned by the caller via the future, so we must NOT free it.
+        // The entries reference LLVM values in the poll function and must be removed
+        // to prevent contaminating the parent's heap_allocs.
+        self.heap_allocs.borrow_mut().pop();
 
         // Set completed
         let set_c_fn = self.module.get_function("mimi_future_set_completed")
