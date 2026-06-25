@@ -7,12 +7,15 @@
 - **R2**: `weak_retain` 无存活检查 — strong==0 && weak==0 时不递增（UAF 防护）
 - **R3**: `sigjmp_buf` 硬编码 128 字节 → 扩容至 256 字节（glibc/macOS/ARM64 安全）
 - **R4**: `__mimi_pow_i64(-2, 3)` 返回 0 — `checked_mul` 替代手动溢出检查
+- **R5**: `CString::into_raw` 分配器混用（Rust alloc vs libc free）— `alloc_c_string` 统一 libc 分配器（26 处替换）
 - **R6**: JSON key 转义序列被替换为 `?` — 完整 escape 解码（`\n \t \\ \"` 等）
 - **R8**: `mimi_json_deserialize` 的 `out_len` 报告 count 而非 idx — 改为实际解析数量
+- **R9**: `cstr_to_str` 无约束 lifetime — 4 处替换为 `cstr_to_string`，消除悬挂引用
 - **R10**: IPv6 URL `[::1]` 括号被路径分割器破坏 — bracket-aware host 解析
 - **R11**: 网络函数 `fd as i32` 静默截断 — `fd_to_i32()` 安全转换
 - **CG1**: f-string 1024 字节固定缓冲区溢出 — 运行时动态计算总大小
 - **CG2**: if-else 分支未 clone `vars` — 分支独立作用域 + 合并
+- **CG5**: phi 节点从 unreachable block 收值 — func.rs/control.rs 添加 reachability 追踪
 - **CG6**: slice `start > end` 产生巨大长度 — `select` clamp 到 0 长度
 - **CG3**: spawn poll 函数隔离 heap_allocs 作用域 — 防止 builtin 注册条目污染父函数作用域
 - **CG4**: 字符串字面量返回 `i8*` 但 LLVM 类型是 `{i8*, i64}` — `func.rs` 中识别 string struct 类型时调用 `wrap_c_string` 而非 struct-load
