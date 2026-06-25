@@ -1,121 +1,113 @@
 <div align="center">
 
-# 🧬 Mimi 语言
+# 🧬 Mimi Language
 
-**带合约验证、结构化并发与线性能力的系统编程语言**
-
-_A system programming language with contract verification, structured concurrency, and linear capabilities_
+**A system programming language with contract verification, structured concurrency, and linear capabilities**
 
 [![Version](https://img.shields.io/badge/version-0.23.0--dev-blue.svg)](https://github.com/ontos-hpc/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-2127%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-MimiSpec 生产编译后端 · Z3 形式化验证 · LLVM 原生编译 · 解释器 + Codegen 双后端
+MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
 
 ---
 
-> **⚠️ 开发阶段声明 / Development Status**  
-> Mimi 目前处于 **活跃开发阶段（pre-stable）**，版本号 `0.x` 意味着语言特性、API、标准库和 CLI 界面都可能发生较大变化，**尚不建议用于生产环境**。  
-> 我们非常欢迎早期使用者测试、反馈问题并参与讨论——每一个 Issue、每一条建议都对项目至关重要。
+> **⚠️ Development Status**
+> Mimi is under **active pre-stable development**. Version `0.x` means the language, APIs, standard library, and CLI are all subject to change. **Not yet recommended for production use.**
+> Early adopters are warmly welcome to test, report issues, and join the discussion — every issue and every suggestion matters.
 
 </div>
 
 ---
 
-## 目录 / Table of Contents
+## Table of Contents
 
-- [参与与社区 / Get Involved](#参与与社区--get-involved)
-- [特性概览 / Features Overview](#特性概览--features-overview)
-- [快速开始 / Quick Start](#快速开始--quick-start)
-- [示例 / Examples](#示例--examples)
-- [标准库 / Standard Library](#标准库--standard-library)
-- [CLI 命令 / CLI Commands](#cli-命令--cli-commands)
-- [项目结构 / Project Structure](#项目结构--project-structure)
-- [版本历史 / Version History](#版本历史--version-history)
-- [开发 / Development](#开发--development)
-- [贡献 / Contributing](#贡献--contributing)
-- [许可证 / License](#许可证--license)
+- [Get Involved](#get-involved)
+- [Features Overview](#features-overview)
+- [Quick Start](#quick-start)
+- [Examples](#examples)
+- [Standard Library](#standard-library)
+- [CLI Commands](#cli-commands)
+- [Project Structure](#project-structure)
+- [Version History](#version-history)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## 参与与社区 / Get Involved
+## Get Involved
 
-Mimi 正在快速演进，我们热切期待社区的反馈。无论你是编程语言爱好者、系统软件开发者，还是仅对合约驱动开发感到好奇，这里都有你的一席之地。
+Mimi is evolving fast and we'd love your feedback. Whether you're a programming language enthusiast, a systems software developer, or just curious about contract-driven development, there's a place for you here.
 
-### 当前状态 / Current Status
+### Current Status
 
-- **语言核心** / Core language：类型系统、借用检查、并发模型等基础组件已成型，仍在不断打磨。
-- **标准库** / Standard library：21 个模块可用，覆盖常用场景，接口可能还会调整。
-- **工具链** / Toolchain：编译器、LSP、包管理器均可运行，尚未达到 1.0 级稳定性。
-- **验证与编译后端** / Verification & codegen：LLVM 原生编译与 Z3 合约验证持续完善，部分高级验证场景可能还不完整。
+- **Core Language**: Type system, borrow checking, concurrency model — foundational components are in place and continuously refined.
+- **Standard Library**: 21 modules covering common scenarios; interfaces may still evolve.
+- **Toolchain**: Compiler, LSP, and package manager are all functional, though not yet at 1.0 stability.
+- **Verification & Codegen**: LLVM native compilation and Z3 contract verification are improving steadily; some advanced verification scenarios may still be incomplete.
 
-### 你可以做什么 / How to Get Involved
+### How to Get Involved
 
-| 方式 | 路径 |
+| Method | Path |
 |---|---|
-| **报告 Bug** | 在 [Issues](https://github.com/ontos-hpc/mimi/issues) 中提交，请附上复现步骤、平台信息和最小可复现示例。 |
-| **提出特性请求** | 通过 Issue 描述你的使用场景和期望行为。 |
-| **改进文档** | 语法参考、标准库注释、示例程序——任何能让 Mimi 更易学的改动都欢迎。 |
-| **贡献代码** | 阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，从 `good first issue` 起步。 |
-| **编写示例或教程** | 分享你的 Mimi 程序，帮助后来者理解语言特色。 |
-| **参与讨论** | GitHub Issues & Discussions 区欢迎提问、分享经验或聊聊设计取舍。 |
+| **Report Bugs** | Open an [Issue](https://github.com/ontos-hpc/mimi/issues) with reproduction steps, platform info, and a minimal reproducer. |
+| **Feature Requests** | Describe your use case and expected behavior via an Issue. |
+| **Improve Docs** | Syntax reference, standard library comments, example programs — any change that makes Mimi easier to learn is welcome. |
+| **Contribute Code** | Read [CONTRIBUTING.md](CONTRIBUTING.md) and start with a `good first issue`. |
+| **Write Examples & Tutorials** | Share your Mimi programs to help others understand the language. |
+| **Join Discussions** | GitHub Issues & Discussions — ask questions, share experiences, or talk about design trade-offs. |
 
-### 何时稳定？/ When Will It Be Stable？
+### When Will It Be Stable?
 
-目前还没有固定的稳定版发布时间表。团队根据内部路线图和社区反馈逐步推进，阶段性目标记录在 [CHANGELOG.md](CHANGELOG.md) 和各版本里程碑中。如果你依赖某个特性或希望 API 尽早冻结，请在 Issue 中告诉我们——使用场景直接影响优先级。
+There is no fixed release date yet. The team iterates based on internal roadmaps and community feedback, with milestones recorded in [CHANGELOG.md](CHANGELOG.md). If you depend on a specific feature or want API freeze, let us know in an Issue — use cases directly drive priorities.
 
-> 💡 **提示**  
-> 即便只是点个 Star，或者告诉朋友你在试用 Mimi，都是对开源社区的支持。
-
-> 💡 **Tip**  
-> Even just starring the repo or telling a friend you're trying Mimi makes a difference.
+> 💡 Even starring the repo or telling a friend you're trying Mimi makes a difference.
 
 ---
 
-## 特性概览 / Features Overview
+## Features Overview
 
-Mimi 是一套 **MimiSpec** 意图描述语言的生产编译后端，以**合约验证、结构化并发和线性能力**为核心差异化优势。
+Mimi is the production compiler backend for the **MimiSpec** intent-description language, differentiated by **contract verification, structured concurrency, and linear capabilities**.
 
-_Mimi is the production compiler backend for the **MimiSpec** intent-description language, differentiated by **contract verification, structured concurrency, and linear capabilities**._
-
-| 特性 / Feature | 说明 / Description |
+| Feature | Description |
 |---|---|
-| **合约验证** | `requires`/`ensures` 前后置条件 + Z3 形式化验证 + 运行时断言 |
-| **结构化并发** | `parasteps` 并行 + `spawn`/`await` + `on failure` LIFO 补偿 |
-| **线性能力** | `cap` 类型级别资源追踪 + `Allocator` 自定义分配器 |
-| **双后端** | 解释器（快速开发）+ LLVM 18 codegen（原生编译） |
-| **借用检查** | `&T`/`&mut T`, 路径敏感, arena 逃逸检测, 重借用 |
-| **引用计数** | `shared`/`local_shared`/`weak` 所有权模型 |
-| **泛型与生命周期** | `<T: Clone>` 约束, 生命周期 elision, 递归类型 |
-| **Option / Result** | `Option<T>` 全路径 + `Result<T, E>` + `?` 运算符 |
-| **ADT + 模式匹配** | 枚举/记录/元组, `match` 穷尽性检查, `while let` |
-| **FFI** | `extern "C"`, `repr(C)` 结构体直传, 回调, pybind11/C 头导出 |
-| **async** | `async fn` → Future 状态机 + Executor 协作式调度 |
-| **LSP** | 语言服务器: 补全、悬停、跳转、合约验证镜头 |
-| **包管理** | `mimi.toml` + registry + git 依赖 + 依赖树 |
-| **标准库** | 21 模块: io, fs, net, json, csv, crypto, regex, template 等 |
-| **MimiSpec 集成** | `.mms` 解析, `mms{}` 占位符, 规则一致性检查 |
-| **编译目标** | 原生 x86_64, 交叉编译 Windows, 共享库 `.so` |
+| **Contract Verification** | `requires`/`ensures` pre/post conditions + Z3 formal verification + runtime assertions |
+| **Structured Concurrency** | `parasteps` parallelism + `spawn`/`await` + `on failure` LIFO compensation |
+| **Linear Capabilities** | `cap` type-level resource tracking + `Allocator` custom allocators |
+| **Dual Backend** | Interpreter (rapid dev) + LLVM 18 codegen (native compilation) |
+| **Borrow Checking** | `&T`/`&mut T`, path-sensitive, arena escape detection, reborrowing |
+| **Reference Counting** | `shared`/`local_shared`/`weak` ownership model |
+| **Generics & Lifetimes** | `<T: Clone>` bounds, lifetime elision, recursive types |
+| **Option / Result** | `Option<T>` full path + `Result<T, E>` + `?` operator |
+| **ADT & Pattern Matching** | Enums/records/tuples, `match` exhaustiveness, `while let` |
+| **FFI** | `extern "C"`, `repr(C)` struct-by-value, callbacks, pybind11/C header export |
+| **async** | `async fn` → Future state machine + Executor cooperative scheduling |
+| **LSP** | Language server: completion, hover, goto-definition, contract lens |
+| **Package Management** | `mimi.toml` + registry + git dependencies + dependency tree |
+| **Standard Library** | 21 modules: io, fs, net, json, csv, crypto, regex, template, and more |
+| **MimiSpec Integration** | `.mms` parsing, `mms{}` placeholders, rule consistency checking |
+| **Compile Targets** | Native x86_64, cross-compilation to Windows, shared library `.so` |
 
 ---
 
-## 快速开始 / Quick Start
+## Quick Start
 
-### 从源码构建 / Build from Source
+### Build from Source
 
 ```bash
-# 克隆 / Clone
+# Clone
 git clone https://github.com/ontos-hpc/mimi
 cd mimi
 
-# 设置 LLVM 18 环境 / Setup LLVM 18
+# Setup LLVM 18
 bash scripts/setup-llvm-wrapper.sh
 
-# 编译 / Build
+# Build
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
 
-# 验证 / Verify
+# Verify
 ./target/release/mimi --version
 ```
 
@@ -127,17 +119,17 @@ func greet(name: string) -> string {
 }
 
 func main() -> i32 {
-    println(greet("世界"));
+    println(greet("World"));
     0
 }
 ```
 
 ```bash
 ./target/release/mimi run hello.mimi
-# => Hello, 世界!
+# => Hello, World!
 ```
 
-### 运行测试 / Run Tests
+### Run Tests
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
@@ -146,21 +138,21 @@ LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
 
 ---
 
-## 示例 / Examples
+## Examples
 
-### 函数与合约 / Function with Contracts
+### Function with Contracts
 
 ```mimi
 pub func divide(a: i32, b: i32) -> i32 {
-    requires: b != 0          // 前置条件: 除数不为零
-    ensures:  result == a / b // 后置条件: 结果正确
+    requires: b != 0          // divisor must not be zero
+    ensures:  result == a / b // result must be correct
     a / b
 }
 ```
 
-通过 `mimi build --verify-contracts` 启用 Z3 形式化验证。
+Enable Z3 formal verification with `mimi build --verify-contracts`.
 
-### ADT 与模式匹配 / ADT & Pattern Matching
+### ADT & Pattern Matching
 
 ```mimi
 type Tree<T> {
@@ -176,7 +168,7 @@ func depth<T>(t: Tree<T>) -> i32 {
 }
 ```
 
-### 并发与补偿 / Concurrency & Compensation
+### Concurrency & Compensation
 
 ```mimi
 func process() -> Result<i32, string> {
@@ -190,7 +182,7 @@ func process() -> Result<i32, string> {
 }
 ```
 
-### FFI 调用 / FFI Calls
+### FFI Calls
 
 ```mimi
 extern "C" {
@@ -204,192 +196,192 @@ func main() {
 }
 ```
 
-> 更多示例见 [`examples/`](examples/) 目录（29 个 `.mimi` 程序）。
+> More examples in [`examples/`](examples/) (29 `.mimi` programs).
 
 ---
 
-## 标准库 / Standard Library
+## Standard Library
 
-| 模块 | 文件 | 功能 |
+| Module | File | Description |
 |---|---|---|
-| `io` | `io.mimi` | 输入输出: `print_line`, `input_line` |
-| `fs` | `fs.mimi` | 文件系统: `read`, `write`, `exists` |
-| `strings` | `strings.mimi` | 字符串: `split`, `join`, `replace_all` |
-| `collections` | `collections.mimi` | 集合操作: `sort`, `map`, `filter`, `reduce` |
-| `maps` | `maps.mimi` | Map 操作: `get`, `set`, `merge`, `pick` |
-| `set` | `set.mimi` | Set 操作: `contains`, `insert`, `remove` |
-| `json` | `json.mimi` | JSON: `to_json`, `from_json`, 类型化反序列化 |
-| `net` | `net.mimi` | 网络: TCP socket, HTTP fetch |
-| `csv` | `csv.mimi` | CSV 解析与序列化 |
-| `crypto` | `crypto.mimi` | 加密: SHA256, base64, hex |
-| `template` | `template.mimi` | 字符串模板渲染 |
-| `regex` | (builtins) | 正则匹配/查找/替换 |
-| `time` / `datetime` | `time.mimi` / `datetime.mimi` | 时间戳/日期工具 |
-| `env` | `env.mimi` | 环境变量/命令行参数 |
-| `mymath` | `mymath.mimi` | 数学函数: gcd, lcm, is_prime |
-| `random` | `random.mimi` | 随机数工具 |
-| `text` | `text.mimi` | 文本: slugify, indent, wrap |
-| `result` | `result.mimi` | Result 组合子 |
-| `prelude` | `prelude.mimi` | 基础工具: clamp, pipe, compose |
-| `testing` | `testing.mimi` | 测试断言 |
+| `io` | `io.mimi` | I/O: `print_line`, `input_line` |
+| `fs` | `fs.mimi` | Filesystem: `read`, `write`, `exists` |
+| `strings` | `strings.mimi` | Strings: `split`, `join`, `replace_all` |
+| `collections` | `collections.mimi` | Collections: `sort`, `map`, `filter`, `reduce` |
+| `maps` | `maps.mimi` | Map ops: `get`, `set`, `merge`, `pick` |
+| `set` | `set.mimi` | Set ops: `contains`, `insert`, `remove` |
+| `json` | `json.mimi` | JSON: `to_json`, `from_json`, typed deserialization |
+| `net` | `net.mimi` | Networking: TCP socket, HTTP fetch |
+| `csv` | `csv.mimi` | CSV parsing and serialization |
+| `crypto` | `crypto.mimi` | Crypto: SHA256, base64, hex |
+| `template` | `template.mimi` | String template rendering |
+| `regex` | (builtins) | Regex match/find/replace |
+| `time` / `datetime` | `time.mimi` / `datetime.mimi` | Timestamp / datetime utilities |
+| `env` | `env.mimi` | Env vars / CLI arguments |
+| `mymath` | `mymath.mimi` | Math: gcd, lcm, is_prime |
+| `random` | `random.mimi` | Random number utilities |
+| `text` | `text.mimi` | Text: slugify, indent, wrap |
+| `result` | `result.mimi` | Result combinators |
+| `prelude` | `prelude.mimi` | Utilities: clamp, pipe, compose |
+| `testing` | `testing.mimi` | Test assertions |
 
 ---
 
-## CLI 命令 / CLI Commands
+## CLI Commands
 
-| 命令 | 说明 | Description |
-|---|---|---|
-| `mimi check <file>` | 类型检查 | Type check |
-| `mimi run <file>` | 运行（类型检查 + 解释执行） | Run (type check + interpret) |
-| `mimi build <file>` | 编译为原生可执行 | Compile to native binary |
-| `mimi build --verify-contracts` | 编译并启用合约断言 | Build with contract assertions |
-| `mimi test <file>` | 运行 `test_*` 函数 | Run test functions |
-| `mimi fmt <files>` | 格式化代码 | Format code |
-| `mimi lint <files>` | 静态分析 | Lint |
-| `mimi verify <file>` | Z3 合约形式化验证 | Z3 formal verification |
-| `mimi lsp` | 启动 LSP 服务器 | LSP server |
-| `mimi init <name>` | 初始化项目 | Init project |
-| `mimi add <name>` | 添加依赖 | Add dependency |
-| `mimi remove <name>` | 移除依赖 | Remove dependency |
-| `mimi install` | 安装依赖 | Install dependencies |
-| `mimi update` | 更新依赖 | Update dependencies |
-| `mimi list` | 列出依赖 | List dependencies |
-| `mimi tree` | 显示依赖树 | Dependency tree |
-| `mimi publish` | 发布到本地 registry | Publish to local registry |
-| `mimi search <query>` | 搜索包 | Search packages |
-| `mimi doc <file>` | 生成文档 | Generate docs |
-| `mimi promote <file>` | `.mms` → `.mimi` 提升 | Promote MMS to Mimi |
-| `mimi mms <files>` | 处理 MimiSpec | Process MimiSpec files |
-| `mimi stats <file>` | 使用统计 | Usage stats |
-| `mimi emit-c-headers <file>` | 导出 C 头文件 | Emit C headers |
-| `mimi emit-py-bindings <file>` | 导出 Python 绑定 | Emit Python bindings |
+| Command | Description |
+|---|---|
+| `mimi check <file>` | Type check |
+| `mimi run <file>` | Run (type check + interpret) |
+| `mimi build <file>` | Compile to native binary |
+| `mimi build --verify-contracts` | Build with contract assertions |
+| `mimi test <file>` | Run `test_*` functions |
+| `mimi fmt <files>` | Format code |
+| `mimi lint <files>` | Lint |
+| `mimi verify <file>` | Z3 formal verification |
+| `mimi lsp` | Start LSP server |
+| `mimi init <name>` | Initialize project |
+| `mimi add <name>` | Add dependency |
+| `mimi remove <name>` | Remove dependency |
+| `mimi install` | Install dependencies |
+| `mimi update` | Update dependencies |
+| `mimi list` | List dependencies |
+| `mimi tree` | Show dependency tree |
+| `mimi publish` | Publish to local registry |
+| `mimi search <query>` | Search packages |
+| `mimi doc <file>` | Generate docs |
+| `mimi promote <file>` | `.mms` → `.mimi` promotion |
+| `mimi mms <files>` | Process MimiSpec files |
+| `mimi stats <file>` | Usage statistics |
+| `mimi emit-c-headers <file>` | Emit C headers |
+| `mimi emit-py-bindings <file>` | Emit Python bindings |
 
 ---
 
-## 项目结构 / Project Structure
+## Project Structure
 
 ```
 mimi/
-├── src/                   # Rust 源代码 (~88k 行, 285 文件)
-│   ├── main.rs            # CLI 入口
-│   ├── lib.rs             # 库入口
-│   ├── ast.rs             # AST 定义
-│   ├── parser/            # 解析器
-│   ├── lexer/             # 词法分析
-│   ├── core/              # 类型检查 & 推断
-│   ├── interp/            # 解释器后端
-│   ├── codegen/           # LLVM codegen 后端
-│   ├── verifier/          # Z3 形式化验证器
-│   ├── ffi/               # FFI 系统
-│   ├── lsp/               # LSP 服务器
-│   ├── contracts.rs       # 合约提取
-│   ├── runtime/           # Rust 运行时 (~2.2k 行)
-│   ├── fmt.rs             # 格式化器
-│   ├── lint.rs            # 静态分析
-│   ├── manifest.rs        # 包清单
-│   ├── loader.rs          # 模块加载
-│   └── tests/             # 测试套件
-├── std/                   # 标准库 (21 模块)
-├── examples/              # 示例 (29 个)
-├── docs/                  # 文档
-│   ├── adr/               # 架构决策记录
+├── src/                   # Rust source code (~88k lines, 285 files)
+│   ├── main.rs            # CLI entry point
+│   ├── lib.rs             # Library entry point
+│   ├── ast.rs             # AST definitions
+│   ├── parser/            # Parser
+│   ├── lexer/             # Lexer
+│   ├── core/              # Type checking & inference
+│   ├── interp/            # Interpreter backend
+│   ├── codegen/           # LLVM codegen backend
+│   ├── verifier/          # Z3 formal verifier
+│   ├── ffi/               # FFI system
+│   ├── lsp/               # LSP server
+│   ├── contracts.rs       # Contract extraction
+│   ├── runtime/           # Rust runtime (~2.2k lines)
+│   ├── fmt.rs             # Formatter
+│   ├── lint.rs            # Linter
+│   ├── manifest.rs        # Package manifest
+│   ├── loader.rs          # Module loader
+│   └── tests/             # Test suite
+├── std/                   # Standard library (21 modules)
+├── examples/              # Examples (29 programs)
+├── docs/                  # Documentation
+│   ├── adr/               # Architecture Decision Records
 │   ├── syntax-reference.md
 │   └── ...
-├── scripts/               # 构建/测试脚本
-├── benches/               # 基准测试
-├── CHANGELOG.md           # 完整更新日志
-├── CONTRIBUTING.md        # 贡献指南
-├── CODE_OF_CONDUCT.md     # 行为准则
-├── SECURITY.md            # 安全策略
+├── scripts/               # Build/test scripts
+├── benches/               # Benchmarks
+├── CHANGELOG.md           # Full changelog
+├── CONTRIBUTING.md        # Contributing guide
+├── CODE_OF_CONDUCT.md     # Code of conduct
+├── SECURITY.md            # Security policy
 └── LICENSE                # Apache-2.0
 ```
 
 ---
 
-## 版本历史 / Version History
+## Version History
 
-| 版本 | 亮点 | Highlight |
-|---|---|---|
-| **v0.23** 🔨 | Z3 深度修复 + 深度审查 | Z3 deep fix + internal audit |
-| **v0.22** | 语言补全: Option/泛型嵌套/loop/管道符/LSP 增强 | Language completion |
-| **v0.21** | Clippy 清零 + Codegen 缺口关闭 + 文档补齐 | Clippy zero + gap closure |
-| **v0.20** | 结构化并发: Future/Waker/Executor/poll codegen | Structured concurrency |
-| **v0.19** | 路径敏感 Borrow + 重借用 + 条件返回 | Path-sensitive borrow |
-| **v0.18** | 泛型约束 + 生命周期 elision + 内置 trait | Generic bounds + lifetimes |
-| **v0.17** | GEP 安全抽象 + 62 处 unsafe 消除 | GEP safety abstraction |
-| **v0.16** | FFI 修复 + 效果系统 + 模式匹配穷尽 | FFI fix + effect system |
-| **v0.15** | C runtime → Rust 运行时重写 | C runtime → Rust rewrite |
-| **v0.14** | 诊断: 错误码 + Z3 调试输出 | Diagnostics: error codes + Z3 output |
-| **v0.13** | 验证覆盖: 闭包/spawn/await/字符串 | Verification coverage |
-| **v0.12** | FFI 零拷贝 + 加密/CSV/模板标准库 | FFI zero-copy + stdlib |
-| **v0.11** | Windows 目标 + 网络标准库 | Windows target + net stdlib |
-| **v0.10** | 后端对齐 + CI/CD | Backend alignment + CI/CD |
-| **v0.9** | 安全: Arena 逃逸/写竞争检测 | Safety: arena/race detection |
-| **v0.8** | 包管理 + 文档管道 | Package management + docs |
-| **v0.7** | Z3 验证 + FFI codegen | Z3 verification + FFI codegen |
+| Version | Highlight |
+|---|---|
+| **v0.23** 🔨 | Z3 deep fix + internal audit |
+| **v0.22** | Language completion: Option/nested generics/loop/pipe/LSP |
+| **v0.21** | Clippy zero + codegen gap closure + docs |
+| **v0.20** | Structured concurrency: Future/Waker/Executor/poll codegen |
+| **v0.19** | Path-sensitive borrow + reborrow + conditional return |
+| **v0.18** | Generic bounds + lifetime elision + built-in traits |
+| **v0.17** | GEP safety abstraction + 62 unsafe removals |
+| **v0.16** | FFI fix + effect system + pattern exhaustiveness |
+| **v0.15** | C runtime → Rust runtime rewrite |
+| **v0.14** | Diagnostics: error codes + Z3 debug output |
+| **v0.13** | Verification coverage: closure/spawn/await/string |
+| **v0.12** | FFI zero-copy + crypto/CSV/template stdlib |
+| **v0.11** | Windows target + net stdlib |
+| **v0.10** | Backend alignment + CI/CD |
+| **v0.9** | Safety: arena escape/race detection |
+| **v0.8** | Package management + docs pipeline |
+| **v0.7** | Z3 verification + FFI codegen |
 
-> 完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+> Full changelog in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-## 开发 / Development
+## Development
 
-### 环境要求 / Prerequisites
+### Prerequisites
 
 - **Rust** 1.75+
-- **LLVM 18**（可用 `scripts/setup-llvm-wrapper.sh` 自动配置）
-- **libffi**（FFI 支持）
-- **Z3**（合约验证，`cargo build` 自动处理）
+- **LLVM 18** (auto-configure via `scripts/setup-llvm-wrapper.sh`)
+- **libffi** (FFI support)
+- **Z3** (contract verification; handled by `cargo build`)
 
-### 命令速查 / Command Quick Reference
+### Command Quick Reference
 
 ```bash
-# 运行全量测试 / Run all tests
+# Run all tests
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
 
-# L1 双后端等价性测试 / Dual-backend equivalence
+# L1 dual-backend equivalence
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
 
-# L2 类型系统健全性测试 / Type system soundness
+# L2 type system soundness
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test typecheck::
 
-# Clippy（零警告门禁）
+# Clippy (zero-warnings gate)
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
 
-# 格式化 / Format
+# Format
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
 
-# 基准测试 / Benchmarks
+# Benchmarks
 cargo bench
 ```
 
-### 开发原则 / Principles
+### Development Principles
 
-| 层级 | 测试类别 | 含义 |
+| Tier | Test Category | Meaning |
 |---|---|---|
-| **L1** | 双后端等价性 | 解释器与 codegen 输出一致 |
-| **L2** | 类型系统健全性 | 错误代码被正确拒绝 |
-| **L3** | 内存安全 | Valgrind/ASan 零警告 |
+| **L1** | Dual-backend equivalence | Interpreter and codegen produce identical results |
+| **L2** | Type system soundness | Invalid code is correctly rejected |
+| **L3** | Memory safety | Zero Valgrind/ASan warnings |
 
 ---
 
-## 贡献 / Contributing
+## Contributing
 
-我们热切欢迎各种形式的贡献。以下是你可能感兴趣的方式：
+We warmly welcome all forms of contribution:
 
-- **试用 & 反馈**：按快速开始构建项目、运行示例，把遇到的困惑或错误提交为 Issue。
-- **文档与翻译**：修正拼写、补充注释、翻译章节，帮助 Mimi 触及更多开发者。
-- **编写测试与示例**：贡献 `examples/` 下的小程序，或为已有特性撰写教程。
-- **代码贡献**：查阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解编码规范与提交流程，从 `good first issue` 起步。
-- **设计讨论**：在 Issue 区参与语言特性、API 设计、错误消息等方面的讨论——你的使用场景就是最好的设计依据。
-- **社区建设**：回答他人提问，在社交媒体上分享项目，帮助构建友好包容的社群。
+- **Try it & give feedback**: Build the project, run the examples, and file Issues for anything confusing or broken.
+- **Documentation & translation**: Fix typos, add comments, translate sections — help Mimi reach more developers.
+- **Write tests & examples**: Contribute programs under `examples/` or write tutorials for existing features.
+- **Code contributions**: See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and the submission process. Start with a `good first issue`.
+- **Design discussions**: Participate in Issues on language features, API design, error messages — your use case is the best design input.
+- **Community building**: Answer questions, share the project on social media, and help build a welcoming community.
 
-> 所有参与者须遵守[行为准则](CODE_OF_CONDUCT.md)。安全问题请通过[安全策略](SECURITY.md)私下报告。
+> All participants must adhere to the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately via the [Security Policy](SECURITY.md).
 
 ---
 
-## 许可证 / License
+## License
 
 [Apache License 2.0](LICENSE)
 
-版权所有 © 2026 ontonous
+Copyright © 2026 ontonous
