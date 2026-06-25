@@ -27,10 +27,6 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Built-in bare None constructor
-        if name == "None" {
-            return Type::Option(Box::new(Type::Infer));
-        }
         // Check if it's a type name (actor/record or enum)
         if let Some(tdef) = self.types.get(name) {
             if matches!(
@@ -39,6 +35,15 @@ impl<'a> Checker<'a> {
             ) {
                 // This is a type name - return it as a type
                 return Type::Name(name.into(), vec![]);
+            }
+        }
+        // Built-in bare None constructor (only if no user-defined None variant exists)
+        if name == "None" {
+            let has_user_none = self.types.values().any(|t| {
+                matches!(&t.kind, TypeDefKind::Enum(variants) if variants.iter().any(|v| v.name == "None"))
+            });
+            if !has_user_none {
+                return Type::Option(Box::new(Type::Infer));
             }
         }
         // Collect all known names for "did you mean?" suggestions

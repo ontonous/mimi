@@ -7,6 +7,7 @@ pub(crate) use std::collections::HashMap;
 mod borrow;
 mod checker;
 mod helpers;
+pub mod type_id;
 
 mod check_stmt;
 mod infer;

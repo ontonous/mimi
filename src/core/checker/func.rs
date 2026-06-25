@@ -145,6 +145,26 @@ impl<'a> Checker<'a> {
                 Stmt::Alloc { kind: _, body } if self.block_returns_on_all_paths(body) => {
                     return true;
                 }
+                Stmt::Loop(body) => {
+                    if self.block_returns_on_all_paths(body) {
+                        return true;
+                    }
+                }
+                Stmt::While { body, .. } => {
+                    if self.block_returns_on_all_paths(body) {
+                        return true;
+                    }
+                }
+                Stmt::WhileLet { body, .. } => {
+                    if self.block_returns_on_all_paths(body) {
+                        return true;
+                    }
+                }
+                Stmt::For { body, .. } => {
+                    if self.block_returns_on_all_paths(body) {
+                        return true;
+                    }
+                }
                 _ => {}
             }
         }

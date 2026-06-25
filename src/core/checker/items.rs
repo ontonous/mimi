@@ -46,15 +46,65 @@ impl<'a> Checker<'a> {
         name: &str,
         visited: &std::collections::HashSet<String>,
     ) -> bool {
-        if let Some(Type::Name(target, _)) = self.aliases.get(name) {
-            if visited.contains(target) {
-                return true;
+        if let Some(target) = self.aliases.get(name) {
+            // Extract all named type references from the alias target
+            let names = Self::extract_type_names(target);
+            for target_name in names {
+                if visited.contains(&target_name) {
+                    return true;
+                }
+                if self.aliases.contains_key(&target_name) {
+                    let mut new_visited = visited.clone();
+                    new_visited.insert(target_name.clone());
+                    if self.follows_alias_cycle(&target_name, &new_visited) {
+                        return true;
+                    }
+                }
             }
-            let mut new_visited = visited.clone();
-            new_visited.insert(target.clone());
-            return self.follows_alias_cycle(target, &new_visited);
         }
         false
+    }
+
+    /// Extract all top-level type names referenced in a type (recursing into containers).
+    fn extract_type_names(ty: &Type) -> Vec<String> {
+        match ty {
+            Type::Name(name, args) => {
+                let mut names = vec![name.clone()];
+                for a in args {
+                    names.extend(Self::extract_type_names(a));
+                }
+                names
+            }
+            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
+            | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
+            | Type::WeakLocal(inner) | Type::Array(inner, _) | Type::Slice(inner)
+            | Type::RawPtr(inner) | Type::RawPtrMut(inner) | Type::CShared(inner)
+            | Type::CBorrow(inner) | Type::CBorrowMut(inner) | Type::CBuffer(inner) => {
+                Self::extract_type_names(inner)
+            }
+            Type::Result(ok, err) => {
+                let mut names = Self::extract_type_names(ok);
+                names.extend(Self::extract_type_names(err));
+                names
+            }
+            Type::Tuple(elems) => {
+                let mut names = Vec::new();
+                for e in elems {
+                    names.extend(Self::extract_type_names(e));
+                }
+                names
+            }
+            Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+                let mut names = Vec::new();
+                for a in args {
+                    names.extend(Self::extract_type_names(a));
+                }
+                names.extend(Self::extract_type_names(ret));
+                names
+            }
+            Type::Newtype(_, inner) => Self::extract_type_names(inner),
+            _ => Vec::new(),
+        }
     }
 
     pub(crate) fn collect_item_decls(&mut self, item: &Item) {
@@ -198,8 +248,19 @@ impl<'a> Checker<'a> {
                         self.funcs.insert(t.name.clone(), (vec![inner], self_ty));
                     }
                     TypeDefKind::Enum(variants) => {
-                        let self_ty = Type::Name(t.name.clone(), vec![]);
+                        // CK2: Build self_ty with generic args for proper substitution
+                        let generic_args: Vec<Type> = t.generics.iter()
+                            .map(|g| Type::Name(g.name.clone(), vec![]))
+                            .collect();
+                        let self_ty = Type::Name(t.name.clone(), generic_args);
                         for v in variants {
+                            // CK3: Check constructor doesn't shadow existing function
+                            if self.funcs.contains_key(&v.name) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0402,
+                                    format!("variant constructor '{}' shadows existing function '{}'", v.name, v.name),
+                                );
+                            }
                             let ret = self_ty.clone();
                             let params = match &v.payload {
                                 None => vec![],
@@ -279,10 +340,11 @@ impl<'a> Checker<'a> {
 
                 // Collect actor methods as functions
                 for method in &actor.methods {
-                    if self.funcs.contains_key(&method.name) {
+                    let qualified = format!("{}::{}", actor.name, method.name);
+                    if self.funcs.contains_key(&qualified) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
-                            format!("duplicate function definition '{}'", method.name),
+                            format!("duplicate function definition '{}' in actor '{}'", method.name, actor.name),
                         );
                         return;
                     }
@@ -310,7 +372,7 @@ impl<'a> Checker<'a> {
                     );
                     self.generic_scope
                         .truncate(self.generic_scope.len() - generic_names.len());
-                    self.funcs.insert(method.name.clone(), (params, ret));
+                    self.funcs.insert(format!("{}::{}", actor.name, method.name), (params, ret));
                 }
             }
             Item::Cap(c) => {

@@ -111,7 +111,9 @@ fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
         | Type::Allocator
         | Type::Infer
         | Type::ImplTrait(_)
-        | Type::DynTrait(_) => false,
+        | Type::DynTrait(_)
+        | Type::TypeVar(_)
+        | Type::ForAll(_, _) => false,
     }
 }
 
@@ -214,6 +216,11 @@ pub fn subst_type_params(
         Type::Slice(inner) => Type::Slice(Box::new(subst_type_params(inner, generics, type_map))),
         Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
         Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
+        Type::TypeVar(_) => ty.clone(),
+        Type::ForAll(params, body) => Type::ForAll(
+            params.clone(),
+            Box::new(subst_type_params(body, generics, type_map)),
+        ),
     }
 }
 
@@ -302,6 +309,10 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::CShared(a), Type::CShared(b)) => same_type(a, b),
         (Type::CBorrow(a), Type::CBorrow(b)) => same_type(a, b),
         (Type::CBorrowMut(a), Type::CBorrowMut(b)) => same_type(a, b),
+        (Type::TypeVar(a), Type::TypeVar(b)) => a == b,
+        (Type::ForAll(p1, b1), Type::ForAll(p2, b2)) => {
+            p1 == p2 && same_type(b1, b2)
+        }
         _ => false,
     }
 }
@@ -432,6 +443,10 @@ pub fn fmt_type(t: &Type) -> String {
             )
         }
         Type::CBuffer(inner) => format!("CBuffer<{}>", fmt_type(inner)),
+        Type::TypeVar(id) => format!("?T{}", id),
+        Type::ForAll(params, body) => {
+            format!("forall {}. {}", params.join(", "), fmt_type(body))
+        }
     }
 }
 

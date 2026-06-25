@@ -63,6 +63,10 @@ fn type_to_string(ty: &Type) -> String {
         Type::CBorrowMut(inner) => format!("c_borrow_mut<{}>", type_to_string(inner)),
         Type::RawString => "raw_string".to_string(),
         Type::Infer => "_".to_string(),
+        Type::TypeVar(id) => format!("?T{}", id),
+        Type::ForAll(params, body) => {
+            format!("forall {}. {}", params.join(", "), type_to_string(body))
+        }
     }
 }
 

@@ -500,7 +500,7 @@ pub enum UnOp {
     Deref,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Name(String, Vec<Type>),
     /// Reference type: &'lt T (lifetime is optional)
@@ -553,6 +553,10 @@ pub enum Type {
     RawString,
     /// Inferred type: `_` — let the compiler determine the type
     Infer,
+    /// Type inference variable (for unification engine)
+    TypeVar(u32),
+    /// Polymorphic type: forall T. Body
+    ForAll(Vec<String>, Box<Type>),
 }
 
 /// Kind of allocator for alloc blocks

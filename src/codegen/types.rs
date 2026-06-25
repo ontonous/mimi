@@ -181,6 +181,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             ))
         }
         Type::Nothing => None,
+        Type::TypeVar(_) | Type::ForAll(_, _) => None,
         Type::ImplTrait(_) => Some(BasicTypeEnum::IntType(ctx.i64_type())),
         Type::DynTrait(_) => {
             // Fat pointer: { data: i8*, vtable: i8* }

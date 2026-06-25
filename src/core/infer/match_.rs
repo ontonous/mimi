@@ -134,11 +134,14 @@ impl<'a> Checker<'a> {
                 (vec![name.clone()], false)
             }
             Pattern::Tuple(pats) => {
-                // Tuple pattern - for enum matching, this doesn't directly cover variants
-                // but we need to handle nested tuple patterns that might contain constructors
+                // Tuple pattern - handle both Type::Tuple and Type::Name("Tuple", args)
                 let mut covered = Vec::new();
-                // For tuple patterns matching against enum types, we need the tuple element types
-                if let Type::Tuple(elem_types) = subject_ty {
+                let elem_types_opt = match subject_ty {
+                    Type::Tuple(ts) => Some(ts.as_slice()),
+                    Type::Name(n, args) if n == "Tuple" => Some(args.as_slice()),
+                    _ => None,
+                };
+                if let Some(elem_types) = elem_types_opt {
                     for (i, p) in pats.iter().enumerate() {
                         if i < elem_types.len() {
                             let (vars, _) = self.pattern_covers_variants(p, &elem_types[i]);

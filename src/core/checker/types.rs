@@ -67,6 +67,11 @@ impl<'a> Checker<'a> {
             Type::Infer => Type::Infer,
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
+            Type::TypeVar(_) => ty.clone(),
+            Type::ForAll(params, body) => Type::ForAll(
+                params.clone(),
+                Box::new(self.resolve_type(body)),
+            ),
         }
     }
 
@@ -127,6 +132,7 @@ impl<'a> Checker<'a> {
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
             Type::Nothing | Type::Allocator | Type::Infer => false,
+            Type::TypeVar(_) | Type::ForAll(_, _) => false,
         }
     }
 
@@ -279,6 +285,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Type::TypeVar(_) => {}
+            Type::ForAll(_, body) => {
+                self.check_type_well_formed_inner(body, context, allow_passport);
+            }
         }
     }
 
@@ -317,6 +327,8 @@ impl<'a> Checker<'a> {
             Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer => false,
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
+            Type::TypeVar(_) => false,
+            Type::ForAll(_, body) => Self::type_contains_passport(body),
         }
     }
 

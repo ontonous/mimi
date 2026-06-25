@@ -224,7 +224,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             | Type::Infer
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
-            | Type::RawString => false,
+            | Type::RawString
+            | Type::TypeVar(_)
+            | Type::ForAll(_, _) => false,
         }
     }
     pub(in crate::codegen) fn compile_builtin_intrinsic(

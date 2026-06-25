@@ -937,3 +937,133 @@ func main() -> i32 {
     )
     .expect("i32 should satisfy Copy, i32 should satisfy Default");
 }
+
+// ─── v0.25 CK bug fix tests ──────────────────────────────────────────
+
+#[test]
+fn ck9_loop_returns_on_all_paths() {
+    // CK9: loop with return in body should satisfy return-on-all-paths
+    check_source(
+        r#"
+func main() -> i32 {
+    loop {
+        return 42
+    }
+}
+"#,
+    )
+    .expect("loop with return should satisfy all-paths-return");
+}
+
+#[test]
+fn ck9_while_returns_on_all_paths() {
+    check_source(
+        r#"
+func main() -> i32 {
+    let mut i = 0;
+    while i < 10 {
+        i = i + 1;
+        return i
+    }
+    0
+}
+"#,
+    )
+    .expect("while with return should satisfy all-paths-return");
+}
+
+#[test]
+fn ck9_for_returns_on_all_paths() {
+    check_source(
+        r#"
+func main() -> i32 {
+    for x in [1, 2, 3] {
+        return x
+    }
+    0
+}
+"#,
+    )
+    .expect("for with return should satisfy all-paths-return");
+}
+
+#[test]
+fn ck6_list_pattern_element_type_check() {
+    // CK6: [1, "hi"] should fail for List<i32>
+    let src = r#"
+func check(xs: List<i32>) -> i32 {
+    match xs {
+        [1, "hi"] => 1
+        _ => 0
+    }
+}
+func main() -> i32 { check([1, 2]) }
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "List<i32> pattern with string element should fail");
+}
+
+#[test]
+fn ck5_tuple_pattern_dual_representation() {
+    // CK5: tuple pattern should work with both Type::Tuple and Type::Name("Tuple")
+    check_source(
+        r#"
+func main() -> i32 {
+    let t = (1, 2);
+    match t {
+        (a, b) => a + b
+    }
+}
+"#,
+    )
+    .expect("tuple pattern should work");
+}
+
+#[test]
+fn ck3_constructor_shadow_warning() {
+    // CK3: variant constructor shadowing a function should produce an error
+    let src = r#"
+type MyBool { True False }
+func True() -> i32 { 1 }
+func main() -> i32 { 1 }
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "Constructor shadowing function should produce error");
+}
+
+#[test]
+fn ck8_user_defined_none_not_shadowed() {
+    // CK8: user-defined None variant should not be shadowed by built-in
+    check_source(
+        r#"
+type MyOption { Some(i32) None }
+func unwrap(x: MyOption) -> i32 {
+    match x {
+        Some(v) => v
+        None => -1
+    }
+}
+func main() -> i32 { unwrap(Some(99)) }
+"#,
+    )
+    .expect("user-defined None should work");
+}
+
+#[test]
+fn ck7_actor_methods_isolated() {
+    // CK7: different actors can have same method names
+    check_source(
+        r#"
+actor Foo {
+    func handle() -> i32 { 1 }
+}
+actor Bar {
+    func handle() -> i32 { 2 }
+}
+func main() -> i32 { 1 }
+"#,
+    )
+    .expect("different actors with same method name should not conflict");
+}

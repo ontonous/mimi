@@ -114,11 +114,21 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 }
-                let def = self.types.values().find(|t| match &t.kind {
-                    TypeDefKind::Enum(variants) => variants.iter().any(|v| v.name == *name),
-                    TypeDefKind::Newtype(_) => t.name == *name,
-                    _ => false,
-                });
+                // CK1: Scope constructor lookup to subject type when known
+                let def = match subject {
+                    Type::Name(type_name, _) => {
+                        self.types.get(type_name).filter(|t| match &t.kind {
+                            TypeDefKind::Enum(variants) => variants.iter().any(|v| v.name == *name),
+                            TypeDefKind::Newtype(_) => t.name == *name,
+                            _ => false,
+                        })
+                    }
+                    _ => self.types.values().find(|t| match &t.kind {
+                        TypeDefKind::Enum(variants) => variants.iter().any(|v| v.name == *name),
+                        TypeDefKind::Newtype(_) => t.name == *name,
+                        _ => false,
+                    }),
+                };
                 match def {
                     Some(tdef) => match &tdef.kind {
                         TypeDefKind::Enum(variants) => {
@@ -271,9 +281,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    Type::Name(n, _) if n == "List" => {
-                        // List pattern: check each element against the element type
-                        // For now, just check against the inner type if available
+                    Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                        let elem_ty = &args[0];
+                        for p in pats {
+                            self.check_pattern(p, elem_ty, scopes);
+                        }
                     }
                     _ => {
                         self.emit_code(

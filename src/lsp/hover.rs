@@ -622,6 +622,10 @@ impl LspServer {
             Type::Nothing => "!".to_string(),
             Type::Allocator => "Allocator".to_string(),
             Type::Infer => "_".to_string(),
+            Type::TypeVar(id) => format!("?T{}", id),
+            Type::ForAll(params, body) => {
+                format!("forall {}. {}", params.join(", "), Self::type_display(body))
+            }
         }
     }
 }
