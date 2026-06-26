@@ -105,8 +105,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self.current_function().ok_or_else(|| {
             CompileError::LlvmError("codegen: no current function for contract assert".to_string())
         })?;
-        let pass_bb = self.context.append_basic_block(function, "contract_pass");
-        let fail_bb = self.context.append_basic_block(function, "contract_fail");
+        // QUAL-5 fix: use unique BB names to avoid conflicts when multiple
+        // contract asserts exist in the same function (e.g., multiple ensures clauses).
+        let id = self.contract_bb_counter;
+        self.contract_bb_counter += 1;
+        let pass_bb = self.context.append_basic_block(function, &format!("contract_pass_{}", id));
+        let fail_bb = self.context.append_basic_block(function, &format!("contract_fail_{}", id));
 
         self.builder
             .build_conditional_branch(cond_bool, pass_bb, fail_bb)

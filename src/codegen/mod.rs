@@ -15,7 +15,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, ValueKind};
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
@@ -183,9 +183,15 @@ pub struct CodeGenerator<'ctx> {
     repr_c_record_names: std::collections::HashSet<String>,
     /// Stack of tuple struct types for TupleIndex codegen.
     tuple_type_stack: Vec<inkwell::types::StructType<'ctx>>,
+    /// Counter for unique contract assertion BasicBlock naming.
+    /// Prevents BB name conflicts when multiple ensures/requires exist in one function.
+    contract_bb_counter: u64,
     /// Flag: when true, the next `compile_len("len", ...)` call should use strlen (for strings).
     /// Set in compile_call before dispatching to builtins.
     pending_len_is_string: bool,
+    /// Cached result of MIMI_OPT env var check at codegen construction time.
+    /// Avoids repeated env var queries within a single compile_to_object call.
+    optimize: bool,
     /// Names of variables holding first-class function pointer values.
     fn_ptr_var_names: std::collections::HashSet<String>,
     /// Stored extern function definitions for lazy code generation.
@@ -265,6 +271,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             repr_c_record_names: std::collections::HashSet::new(),
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
+            optimize: std::env::var("MIMI_OPT")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
+            contract_bb_counter: 0,
             fn_ptr_var_names: std::collections::HashSet::new(),
             extern_func_defs: HashMap::new(),
             extern_block_abis: HashMap::new(),
@@ -646,6 +656,52 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc returned void".to_string()))?;
 
         let heap_raw_ptr = heap_raw.into_pointer_value();
+
+        // BUG-4: mimi_rc_alloc returns NULL on allocation failure.
+        // Check for null before dereferencing to prevent UB.
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("shared let outside function".to_string()))?;
+        let alloc_ok_bb = self.context.append_basic_block(function, "alloc_ok");
+        let alloc_fail_bb = self.context.append_basic_block(function, "alloc_fail");
+        let is_null = self
+            .builder
+            .build_is_null(heap_raw_ptr, "heap_is_null")
+            .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_null, alloc_fail_bb, alloc_ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("alloc check branch: {}", e)))?;
+
+        // Fail path: call abort (allocation failure is unrecoverable)
+        self.builder.position_at_end(alloc_fail_bb);
+        let abort_fn = if let Some(f) = self.module.get_function("mimi_runtime_abort") {
+            f
+        } else {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let ty = self
+                .context
+                .void_type()
+                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+            self.module.add_function(
+                "mimi_runtime_abort",
+                ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        };
+        let msg_ptr = self
+            .builder
+            .build_global_string_ptr(&format!("shared let '{}': allocation failed", name), "alloc_fail_msg")
+            .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
+        self.builder
+            .build_call(abort_fn, &[BasicMetadataValueEnum::PointerValue(msg_ptr.as_pointer_value())], "alloc_abort")
+            .map_err(|e| CompileError::LlvmError(format!("abort call error: {}", e)))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+        // Ok path: proceed with the allocation
+        self.builder.position_at_end(alloc_ok_bb);
+
         let heap_ptr = self
             .builder
             .build_pointer_cast(
@@ -707,6 +763,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.builder.position_at_end(arena_body_bb);
         let saved = self.build_stacksave()?;
+        // QUAL-2 fix: isolate arena-local capability scope.
+        // compile_block does NOT push/pop cap_scope, so we must do it here
+        // to prevent arena-local capabilities from leaking to the outer scope.
+        self.push_cap_scope();
         let vars_before: std::collections::HashSet<String> = vars.keys().cloned().collect();
         self.compile_block(block, vars)?;
         for k in vars.keys().cloned().collect::<Vec<_>>() {
@@ -714,6 +774,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 vars.remove(&k);
             }
         }
+        self.pop_cap_scope();
         self.build_stackrestore(saved)?;
         if !self.block_has_terminator() {
             self.builder
@@ -858,9 +919,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
 
         // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var)
-        if std::env::var("MIMI_OPT")
-            .map(|v| v == "1" || v == "true")
-            .unwrap_or(false)
+        if self.optimize
         {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module

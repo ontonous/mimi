@@ -77,19 +77,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_phi(ty, "ifexpr_result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        let mut phi_incoming: Vec<(
-            &dyn inkwell::values::BasicValue,
-            inkwell::basic_block::BasicBlock,
-        )> = Vec::new();
+        // BUG-2 fix: Add incoming values one at a time to avoid lifetime issues
+        // from storing &dyn BasicValue references that borrow from local variables.
         if let Some(bb) = then_bb_end {
-            phi_incoming.push((&then_val as &dyn inkwell::values::BasicValue, bb));
+            phi.add_incoming(&[(&then_val as &dyn inkwell::values::BasicValue, bb)]);
         }
-        let else_v = else_val.unwrap_or(self.context.i64_type().const_int(0, false).into());
-        if let Some(bb) = else_bb_end {
-            phi_incoming.push((&else_v as &dyn inkwell::values::BasicValue, bb));
-        }
-        if !phi_incoming.is_empty() {
-            phi.add_incoming(&phi_incoming);
+        // Only add else incoming when we have an actual else value.
+        // When else_val is None (no else block), the implicit unit value should not
+        // be phi'd with a then_val of different type (e.g. struct).
+        if let (Some(bb), Some(ev)) = (else_bb_end, else_val) {
+            phi.add_incoming(&[(&ev as &dyn inkwell::values::BasicValue, bb)]);
         }
         Ok(phi.as_basic_value())
     }

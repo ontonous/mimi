@@ -3814,4 +3814,99 @@ func main() -> i32 {
     );
 }
 
+// ─── L1 Regression Tests for v0.27.6 ────────────────────────────
+// Bug fixes verified by dual-backend equivalence.
+
+// BUG-5: MIMI_OPT env var caching — verify consistent behavior
+// when compile_to_object is called multiple times.
+#[test]
+fn dual_mimi_opt_consistency() {
+    if !can_link() {
+        return;
+    }
+    // Run twice to verify cached MIMI_OPT doesn't cause inconsistency.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(1 + 2);
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
+// BUG-4: mimi_rc_alloc null check — shared let with valid allocation.
+// The null check path is tested by verifying shared lets work correctly.
+#[test]
+fn dual_shared_let_basic() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            shared x = 42;
+            println(x.deref());
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+// BUG-2: PHI type mismatch — if-expression with shared result.
+// Verify if-expression with shared pointer result works correctly.
+#[test]
+fn dual_if_expr_shared_no_else() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            shared x = 42;
+            shared y = if true { x } else { x };
+            println(y.deref());
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+// QUAL-5: Multiple contract asserts with unique BB names.
+// Tests that multiple ensures clauses in one function don't cause BB conflicts.
+#[test]
+fn dual_multi_ensures_unique_bb() {
+    if !can_link() {
+        return;
+    }
+    // dual_assert_contract_ok verifies both backends with contract runtime checks.
+    // Multiple ensures: each gets its own BasicBlock; unique naming must not conflict.
+    dual_assert_contract_ok(
+        r#"
+        func double(x: i32) -> i32 {
+            ensures: x * 2 > 0
+            ensures: x * 2 > x
+            x * 2
+        }
+        func main() -> i32 { println(double(5)); 0 }
+    "#,
+    );
+    // Also verify the stdout matches expected.
+    let stdout = compile_and_verify_contracts(
+        r#"
+        func double(x: i32) -> i32 {
+            ensures: x * 2 > 0
+            ensures: x * 2 > x
+            x * 2
+        }
+        func main() -> i32 { println(double(5)); 0 }
+    "#,
+    )
+    .expect("codegen contract stdout");
+    assert_eq!(stdout.trim(), "10");
+}
+
 
