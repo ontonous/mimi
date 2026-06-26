@@ -15,3 +15,4 @@ cc af1fbe2c179843f74768757e77de4d689359b287249c75a111d2d9c7a5440995 # shrinks to
 cc f883a2f5d93ef739ce2a9b17718ae4329fac55ffc84b2dac20238ec169a340b2 # shrinks to t = Newtype("a", Name("unknown", []))
 cc 97a5c0a23d3d759d2e1de154cec1260d194fb9f37956568f7aa11db99514b224 # shrinks to a = Newtype("a", Cap("write")), b = Cap("write")
 cc 4e024a777f8f91f6e077275bef1d7c4e80491ee913797fce951e7b6e266554af # shrinks to a = Name("f64", []), b = Newtype("a", Name("f64", []))
+cc 4fff0c02e027b36430d7f674e7be0633ddd3c552dc3ec7ff3af734f2a4d1d9ab # shrinks to a = Newtype("a", Name("unknown", [])), b = Name("unknown", [])

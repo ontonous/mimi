@@ -214,9 +214,10 @@ impl Parser {
                 return self.parse_postfix(Expr::Literal(Lit::String(s)));
             }
             TokenKind::FString(raw) => {
+                let (line, col) = (self.peek().line, self.peek().col);
                 let raw = raw.clone();
                 self.advance();
-                let parts = self.parse_fstring_parts(&raw)?;
+                let parts = self.parse_fstring_parts(&raw, line, col)?;
                 return self.parse_postfix(Expr::Literal(Lit::FString(parts)));
             }
             TokenKind::True => {

@@ -261,27 +261,28 @@ impl Parser {
     }
 
     fn try_parse_mimispec_with_timeout(content: &str) -> Option<mimispec::ast::File> {
-        use std::sync::mpsc;
         use std::thread;
         use std::time::Duration;
 
         let content_owned = content.to_string();
-        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || mimispec::parse(&content_owned));
 
-        thread::spawn(move || {
-            let result = mimispec::parse(&content_owned);
-            let _ = tx.send(result);
-        });
-
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => {
-                if result.errors.is_empty() {
-                    Some(result.file)
-                } else {
-                    None
-                }
+        // Poll for completion with bounded wait
+        let started = std::time::Instant::now();
+        loop {
+            if handle.is_finished() {
+                break;
             }
-            Err(_) => None,
+            if started.elapsed() > Duration::from_millis(100) {
+                // Timeout: detach thread, return None (same semantics as before)
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        match handle.join() {
+            Ok(result) if result.errors.is_empty() => Some(result.file),
+            _ => None,
         }
     }
 
@@ -460,6 +461,8 @@ impl Parser {
     pub(crate) fn parse_fstring_parts(
         &self,
         raw: &str,
+        base_line: usize,
+        base_col: usize,
     ) -> Result<Vec<crate::ast::FStringPart>, ParseError> {
         use crate::ast::FStringPart;
         let mut parts = Vec::new();
@@ -491,13 +494,13 @@ impl Parser {
                 if depth != 0 {
                     return Err(ParseError::new(
                         "unterminated interpolation in f-string",
-                        0,
-                        0,
+                        base_line,
+                        base_col,
                     ));
                 }
                 let tokens = crate::lexer::Lexer::new(&expr_str)
                     .tokenize()
-                    .map_err(|e| ParseError::new(e.to_string(), 0, 0))?;
+                    .map_err(|e| ParseError::new(e.to_string(), base_line, base_col))?;
                 let expr = Parser::new(tokens).parse_expr(0)?;
                 parts.push(FStringPart::Interp(expr));
             } else if c == '\\' {
@@ -657,6 +660,33 @@ impl Parser {
                     if let Ok(expr) = self.parse_expr(0) {
                         stmts.push(Stmt::Invariant(expr, span));
                     }
+                }
+                continue;
+            }
+            // BUG-7 fix: Math branch was missing in recovery mode, causing math blocks
+            // to be silently dropped and parsed as expression statements instead.
+            if self.at(&TokenKind::Math) {
+                self.advance();
+                if self.expect(TokenKind::Colon, "`:`").is_ok()
+                    && self.expect(TokenKind::LBrace, "`{` for math block").is_ok()
+                {
+                    let mut exprs = Vec::new();
+                    self.skip_newlines();
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        match self.parse_expr(0) {
+                            Ok(expr) => {
+                                exprs.push(expr);
+                                self.match_semi();
+                                self.skip_newlines();
+                            }
+                            Err(_) => {
+                                self.advance();
+                            }
+                        }
+                    }
+                    let _ = self.expect(TokenKind::RBrace, "`}`");
+                    self.match_semi();
+                    stmts.push(Stmt::Math(exprs));
                 }
                 continue;
             }

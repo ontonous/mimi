@@ -1,5 +1,107 @@
 use super::*;
 
+// ─── BUG-4: DedentMismatch col 字段使用 spaces 计数而非实际列位置 ────────────
+// 这是设计选择: Dedent token 的 "col" 表示缩进级别(空格数), 而非光标列位置
+// dedent_mismatch() 调用时传入了正确的 (line, col) 位置给错误报告
+// 此行为已记录, 标记为不修复 (设计选择)
+
+// ─── BUG-3: Token::Unit source_text 返回 "unit" 但 Display 返回 "()" ────────
+// 两者应该一致
+
+#[test]
+fn error_path_unit_token_source_text_matches_display() {
+    assert_eq!(
+        format!("{}", crate::lexer::TokenKind::Unit),
+        "()",
+        "Display of Unit should be ()"
+    );
+    assert_eq!(
+        crate::lexer::TokenKind::Unit.source_text(),
+        "()",
+        "source_text of Unit should be ()"
+    );
+}
+
+// ─── BUG-1: scan_fstring \x hex escape validation ───────────────────────────
+// 不完整的 \xAB (只有1个hexdigit) 应该报错
+
+#[test]
+fn error_path_fstring_incomplete_hex_escape() {
+    let src = r#"func main() -> i32 { let s = f"val \xA end"; 0 }"#;
+    let result = crate::lexer::Lexer::new(src).tokenize();
+    assert!(result.is_err(), "incomplete \\x escape should be a lexer error");
+}
+
+// ─── BUG-2: scan_fstring \u{...} missing closing brace ─────────────────────
+// \u{1F 后缺少 } 应该报错
+
+#[test]
+fn error_path_fstring_unterminated_unicode_brace() {
+    let src = r#"func main() -> i32 { let s = f"val \u{1F end"; 0 }"#;
+    let result = crate::lexer::Lexer::new(src).tokenize();
+    assert!(result.is_err(), "unterminated unicode brace escape should be a lexer error");
+}
+
+#[test]
+fn error_path_fstring_empty_unicode_brace() {
+    let src = r#"func main() -> i32 { let s = f"val \u{} end"; 0 }"#;
+    let result = crate::lexer::Lexer::new(src).tokenize();
+    assert!(result.is_err(), "empty unicode brace escape should be a lexer error");
+}
+
+// ─── BUG-5: parse_fstring_parts 错误位置报告 (0,0) ─────────────────────────
+// f-string 内解析错误时位置被报告为 0,0，无法定位问题
+// 注意: f"x { 1 + } y" 不会导致 lexer 错误 - } 正确关闭了 interpolation
+// BUG-5 的真实测试是 error_path_fstring_parse_inner_error_reports_position
+
+#[test]
+fn error_path_fstring_parse_inner_error_reports_position() {
+    // BUG-5: When f-string inner expression's lexer fails, parse_fstring_parts reports (0,0).
+    // Test with incomplete hex escape \xA (only 1 hex digit instead of 2) - lexer error is (0,0).
+    let src = r#"func main() -> i32 { let s = f"value is { \xA }"; 0 }"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    assert!(tokens.is_ok(), "outer string should tokenize fine");
+    // The FString token holds raw text including \xA, and parse_fstring_parts re-lexes it.
+    // The inner lex error is reported as (0,0) due to the bug.
+    let parse_result = crate::parser::Parser::new(tokens.unwrap()).parse_file();
+    assert!(parse_result.is_err(), "invalid inner escape should parse error");
+    let parse_err = parse_result.unwrap_err();
+    // BUG-5: This assertion fails because the lexer error in the f-string reports (0,0)
+    assert!(
+        parse_err.line > 0 || parse_err.col > 0,
+        "f-string inner lexer error should not be at 0,0 but was line={}, col={}, msg={}",
+        parse_err.line, parse_err.col, parse_err.message
+    );
+}
+
+// ─── BUG-7: parse_block_with_recovery 缺少 Math 分支 ────────────────────────
+// Recovery 模式下 math { ... } 块会被静默丢弃，导致 AST 信息丢失
+
+#[test]
+fn error_path_recovery_keeps_math_block() {
+    // 强制触发 recovery: 在 math 块前注入语法错误
+    let src = r#"
+func f() -> i32 {
+    let x = ;
+    math: { 1 + 2; 3 }
+    0
+}
+"#;
+    // 使用 recovery 模式解析，语法错误会被捕获并继续
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let (file, _errors) = crate::parser::Parser::new_with_recovery(tokens).parse_file_with_recovery();
+    let body = match &file.items[0] {
+        crate::ast::Item::Func(f) => &f.body,
+        _ => panic!("expected func"),
+    };
+    let has_math = body.iter().any(|s| matches!(s, crate::ast::Stmt::Math(_)));
+    assert!(
+        has_math,
+        "Math block was silently dropped during recovery: {:#?}",
+        body
+    );
+}
+
 #[test]
 fn error_path_parse_unclosed_paren() {
     let src = r#"

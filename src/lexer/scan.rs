@@ -1,7 +1,8 @@
 use crate::lexer::errors::{
     dedent_mismatch, indent_not_multiple_of_four, tabs_not_allowed, unexpected_character,
     unexpected_dollar, unterminated_block_comment, unterminated_escape, unterminated_fstring,
-    unterminated_fstring_escape, unterminated_interpolation, unterminated_string, LexerError,
+    unterminated_fstring_escape, unterminated_interpolation, unterminated_string, invalid_escape,
+    LexerError,
 };
 use crate::lexer::keywords::keyword_or_ident;
 use crate::lexer::token::{LexerMode, Token, TokenKind};
@@ -180,23 +181,31 @@ impl<'a> super::Lexer<'a> {
                         }
                         Some('x') => {
                             s.push_str("\\x");
+                            let start_col = self.col;
                             self.advance();
+                            let mut got = 0;
                             for _ in 0..2 {
                                 match self.peek() {
                                     Some(c) if c.is_ascii_hexdigit() => {
                                         s.push(c);
                                         self.advance();
+                                        got += 1;
                                     }
                                     _ => break,
                                 }
                             }
+                            if got != 2 {
+                                return Err(invalid_escape("\\x", self.line, start_col));
+                            }
                         }
                         Some('u') => {
                             s.push_str("\\u");
+                            let start_col = self.col;
                             self.advance();
                             if self.peek() == Some('{') {
                                 s.push('{');
                                 self.advance();
+                                let hex_start = s.len();
                                 while let Some(c) = self.peek() {
                                     if c.is_ascii_hexdigit() || c == '_' {
                                         s.push(c);
@@ -205,19 +214,28 @@ impl<'a> super::Lexer<'a> {
                                         break;
                                     }
                                 }
-                                if self.peek() == Some('}') {
-                                    s.push('}');
-                                    self.advance();
+                                if self.peek() != Some('}') {
+                                    return Err(invalid_escape("\\u{", self.line, start_col));
                                 }
+                                if s.len() == hex_start {
+                                    return Err(invalid_escape("\\u{}", self.line, start_col));
+                                }
+                                s.push('}');
+                                self.advance();
                             } else {
+                                let mut got = 0;
                                 for _ in 0..4 {
                                     match self.peek() {
                                         Some(c) if c.is_ascii_hexdigit() => {
                                             s.push(c);
                                             self.advance();
+                                            got += 1;
                                         }
                                         _ => break,
                                     }
+                                }
+                                if got != 4 {
+                                    return Err(invalid_escape("\\u", self.line, start_col));
                                 }
                             }
                         }

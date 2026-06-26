@@ -13,6 +13,7 @@ pub enum LexerError {
     UnterminatedFStringEscape,
     UnterminatedInterpolation,
     UnterminatedBlockComment,
+    InvalidEscape { escape: String, line: usize, col: usize },
 }
 
 impl fmt::Display for LexerError {
@@ -47,6 +48,9 @@ impl fmt::Display for LexerError {
                 write!(f, "unterminated interpolation in f-string")
             }
             LexerError::UnterminatedBlockComment => write!(f, "unterminated block comment"),
+            LexerError::InvalidEscape { escape, line, col } => {
+                write!(f, "invalid {} escape at {}:{}", escape, line, col)
+            }
         }
     }
 }
@@ -101,4 +105,12 @@ pub fn unterminated_interpolation() -> LexerError {
 
 pub fn unterminated_block_comment() -> LexerError {
     LexerError::UnterminatedBlockComment
+}
+
+pub fn invalid_escape(escape: &str, line: usize, col: usize) -> LexerError {
+    LexerError::InvalidEscape {
+        escape: escape.to_string(),
+        line,
+        col,
+    }
 }

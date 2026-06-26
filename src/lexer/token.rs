@@ -284,7 +284,7 @@ impl TokenKind {
             TokenKind::Ident(v) => v,
             TokenKind::True => "true",
             TokenKind::False => "false",
-            TokenKind::Unit => "unit",
+            TokenKind::Unit => "()",
             TokenKind::Module => "module",
             TokenKind::Type => "type",
             TokenKind::Func => "func",
