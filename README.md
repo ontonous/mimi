@@ -4,9 +4,9 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.23.0--dev-blue.svg)](https://github.com/ontos-hpc/mimi)
+[![Version](https://img.shields.io/badge/version-0.27.6-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2127%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2236%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
@@ -133,7 +133,7 @@ func main() -> i32 {
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
-# 2127 passed, 0 failed, 21 ignored
+# 2236 passed, 0 failed, 21 ignored
 ```
 
 ---
@@ -196,7 +196,7 @@ func main() {
 }
 ```
 
-> More examples in [`examples/`](examples/) (29 `.mimi` programs).
+> More examples in [`examples/`](examples/) (28 `.mimi` programs).
 
 ---
 
@@ -262,7 +262,7 @@ func main() {
 
 ```
 mimi/
-├── src/                   # Rust source code (~88k lines, 285 files)
+├── src/                   # Rust source code (~108k lines, 287 files)
 │   ├── main.rs            # CLI entry point
 │   ├── lib.rs             # Library entry point
 │   ├── ast.rs             # AST definitions
@@ -302,6 +302,10 @@ mimi/
 
 | Version | Highlight |
 |---|---|
+| **v0.27** 🔨 | Audit fixes: P0/P1/P2/P3 safety & correctness (arena, FFI, JSON, runtime) |
+| **v0.26** | Type unification engine + bidirectional inference + FFI P0/P1 security fixes |
+| **v0.25** | Type system refactor: TypeId Arena + Checker fixes + Newtype/ADT codegen |
+| **v0.24** | Structured concurrency state machine + runtime/FFI/codegen fixes |
 | **v0.23** 🔨 | Z3 deep fix + internal audit |
 | **v0.22** | Language completion: Option/nested generics/loop/pipe/LSP |
 | **v0.21** | Clippy zero + codegen gap closure + docs |

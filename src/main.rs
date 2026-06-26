@@ -52,7 +52,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.23.0-dev", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.27.6", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,

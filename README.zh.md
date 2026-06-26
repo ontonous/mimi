@@ -4,9 +4,9 @@
 
 **带合约验证、结构化并发与线性能力的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.23.0--dev-blue.svg)](https://github.com/ontos-hpc/mimi)
+[![Version](https://img.shields.io/badge/version-0.27.6-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2127%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2236%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec 生产编译后端 · Z3 形式化验证 · LLVM 原生编译 · 解释器 + Codegen 双后端
@@ -133,7 +133,7 @@ func main() -> i32 {
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
-# 2127 passed, 0 failed, 21 ignored
+# 2236 passed, 0 failed, 21 ignored
 ```
 
 ---
@@ -196,7 +196,7 @@ func main() {
 }
 ```
 
-> 更多示例见 [`examples/`](examples/) 目录（29 个 `.mimi` 程序）。
+> 更多示例见 [`examples/`](examples/) 目录（28 个 `.mimi` 程序）。
 
 ---
 
@@ -262,7 +262,7 @@ func main() {
 
 ```
 mimi/
-├── src/                   # Rust 源代码 (~88k 行, 285 文件)
+├── src/                   # Rust 源代码 (~108k 行, 287 文件)
 │   ├── main.rs            # CLI 入口
 │   ├── lib.rs             # 库入口
 │   ├── ast.rs             # AST 定义
@@ -302,6 +302,10 @@ mimi/
 
 | 版本 | 亮点 |
 |---|---|
+| **v0.27** 🔨 | 审计修复: P0/P1/P2/P3 安全与正确性 (arena, FFI, JSON, runtime) |
+| **v0.26** | 类型统一引擎 + 双向推断 + FFI P0/P1 安全修复 |
+| **v0.25** | 类型系统重构: TypeId Arena + Checker 修复 + Newtype/ADT codegen |
+| **v0.24** | 结构化并发状态机 + runtime/FFI/codegen 修复 |
 | **v0.23** 🔨 | Z3 深度修复 + 深度审查 |
 | **v0.22** | 语言补全: Option/泛型嵌套/loop/管道符/LSP 增强 |
 | **v0.21** | Clippy 清零 + Codegen 缺口关闭 + 文档补齐 |
