@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::ast::Item;
+use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
 impl LspServer {
@@ -12,20 +13,8 @@ impl LspServer {
         uri: &str,
     ) -> Option<Value> {
         // Get the word at cursor position
-        let lines: Vec<&str> = text.lines().collect();
-        let current_line = lines.get(line)?;
-        let before_cursor: String = current_line.chars().take(character).collect();
-        let after_cursor: String = current_line.chars().skip(character).collect();
-
-        // Find word boundaries
-        let word_start = before_cursor
-            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let word_end = after_cursor
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| character + i)
-            .unwrap_or(current_line.len());
+        let (word_start, word_end) = word_range_at(text, line, character)?;
+        let current_line = text.lines().nth(line)?;
         let word = &current_line[word_start..word_end];
 
         if word.is_empty() {
@@ -37,16 +26,15 @@ impl LspServer {
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
-                        // Find the line where the function is defined
-                        let def_line = text
-                            .lines()
-                            .position(|l| l.contains(&format!("func {}", word)))
-                            .unwrap_or(0);
+                        // Use AST position (line, col) of the func keyword.
+                        // f.pos is 1-indexed, LSP expects 0-indexed.
+                        let def_line = f.pos.0.saturating_sub(1);
+                        let func_keyword_len = "func ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "start": { "line": def_line, "character": f.pos.1 },
+                                "end": { "line": def_line, "character": f.pos.1 + func_keyword_len + f.name.len() }
                             }
                         }));
                     }
@@ -55,11 +43,12 @@ impl LspServer {
                             .lines()
                             .position(|l| l.contains(&format!("type {}", word)))
                             .unwrap_or(0);
+                        let keyword_len = "type ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
                                 "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "end": { "line": def_line, "character": keyword_len + t.name.len() }
                             }
                         }));
                     }
@@ -68,11 +57,12 @@ impl LspServer {
                             .lines()
                             .position(|l| l.contains(&format!("module {}", word)))
                             .unwrap_or(0);
+                        let keyword_len = "module ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
                                 "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
                             }
                         }));
                     }

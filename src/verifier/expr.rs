@@ -563,11 +563,12 @@ impl crate::verifier::Verifier {
         arms: &[MatchArm],
         vars: &mut Z3VarMap,
     ) -> Option<Z3Real> {
-        let matched_int = Z3Int::from_i64(0);
         let mut result: Option<Z3Real> = None;
-        for (i, arm) in arms.iter().rev().enumerate() {
+        for arm in arms.iter().rev() {
             let arm_val = self.expr_to_z3_real(&arm.body, vars)?;
-            if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+            // Wildcard and Variable patterns always match — directly take arm value.
+            // No need to call pattern_matches_z3 with a dummy matched_int = 0.
+            if matches!(arm.pat, Pattern::Wildcard | Pattern::Variable(_)) {
                 result = Some(arm_val);
                 continue;
             }
@@ -578,7 +579,9 @@ impl crate::verifier::Verifier {
                     return None;
                 }
             } else {
-                self.pattern_matches_z3(&matched_int, &arm.pat, vars)?
+                // For non-float-literal patterns (Constructor, Tuple, etc.),
+                // we cannot yet encode the condition — return None.
+                return None;
             };
             let cond = if let Some(ref guard_expr) = arm.guard {
                 if let Some(g) = self.expr_to_z3_bool(guard_expr, vars) {

@@ -270,9 +270,9 @@ impl LspServer {
                 .map_err(|e| format!("read error: {}", e))?;
             let body = String::from_utf8(body).map_err(|e| format!("utf8 error: {}", e))?;
 
-            // Skip empty line after body
+            // Skip empty line after body — use the same locked reader to avoid protocol desync
             let mut newline = [0u8; 1];
-            let _ = io::stdin().read(&mut newline);
+            let _ = reader.read(&mut newline);
 
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {

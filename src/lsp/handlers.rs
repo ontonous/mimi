@@ -111,10 +111,17 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
                 .get("textDocument")?
                 .get("uri")?
                 .as_str()?;
-            let text = msg
+            let changes = msg
                 .get("params")?
                 .get("contentChanges")?
-                .as_array()?
+                .as_array()?;
+
+            // Empty contentChanges is legal in LSP incremental sync — skip silently.
+            if changes.is_empty() {
+                return None;
+            }
+
+            let text = changes
                 .first()?
                 .get("text")?
                 .as_str()?;
@@ -295,23 +302,10 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
             let character = position.get("character")?.as_u64()? as usize;
             server.last_cursor_line = line;
             let text = server.documents.get(uri)?;
-            let word = server.get_word_at(text, line, character);
-            if word.is_empty() {
+            let (word_start, word_end) = server.get_word_range(text, line, character)?;
+            if word_start >= word_end {
                 return None;
             }
-            // Use get_word_at to get proper word boundaries
-            let lines: Vec<&str> = text.lines().collect();
-            let current_line = lines.get(line)?;
-            let before_cursor: String = current_line.chars().take(character).collect();
-            let after_cursor: String = current_line.chars().skip(character).collect();
-            let word_start = before_cursor
-                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let word_end = after_cursor
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|i| character + i)
-                .unwrap_or(current_line.len());
             Some(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,

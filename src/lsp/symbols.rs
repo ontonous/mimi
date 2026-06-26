@@ -3,6 +3,29 @@ use serde_json::Value;
 use crate::ast::{Item, TypeDefKind};
 use crate::lsp::LspServer;
 
+/// Percent-encode a file path segment for use in a file:// URI.
+/// Unlike path.display(), this properly handles spaces, Chinese chars, etc.
+fn encode_path_for_uri(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // On Unix, path.as_os_str().as_bytes() gives the raw bytes.
+    // Percent-encode all bytes that are not unreserved (ALPHA, DIGIT, -, _, ., ~).
+    let bytes = path.as_os_str().as_bytes();
+    let mut encoded = String::with_capacity(bytes.len() * 3);
+    for &b in bytes {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            b'/' => encoded.push('/'),
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    encoded
+}
+
 impl LspServer {
     pub fn compute_document_symbols(&self, text: &str) -> Vec<Value> {
         let mut symbols = Vec::new();
@@ -16,16 +39,17 @@ impl LspServer {
                             .lines()
                             .position(|l| l.contains(&format!("func {}", f.name)))
                             .unwrap_or(0);
+                        let keyword_len = "func ".len();
                         symbols.push(serde_json::json!({
                             "name": f.name,
                             "kind": 12, // Function
                             "range": {
                                 "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "end": { "line": def_line, "character": keyword_len + f.name.len() }
                             },
                             "selectionRange": {
-                                "start": { "line": def_line, "character": 5 },
-                                "end": { "line": def_line, "character": 5 + f.name.len() }
+                                "start": { "line": def_line, "character": keyword_len },
+                                "end": { "line": def_line, "character": keyword_len + f.name.len() }
                             }
                         }));
                     }
@@ -34,16 +58,17 @@ impl LspServer {
                             .lines()
                             .position(|l| l.contains(&format!("type {}", t.name)))
                             .unwrap_or(0);
+                        let keyword_len = "type ".len();
                         symbols.push(serde_json::json!({
                             "name": t.name,
                             "kind": 26, // Enum
                             "range": {
                                 "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "end": { "line": def_line, "character": keyword_len + t.name.len() }
                             },
                             "selectionRange": {
-                                "start": { "line": def_line, "character": 5 },
-                                "end": { "line": def_line, "character": 5 + t.name.len() }
+                                "start": { "line": def_line, "character": keyword_len },
+                                "end": { "line": def_line, "character": keyword_len + t.name.len() }
                             }
                         }));
                     }
@@ -52,16 +77,17 @@ impl LspServer {
                             .lines()
                             .position(|l| l.contains(&format!("module {}", m.name)))
                             .unwrap_or(0);
+                        let keyword_len = "module ".len();
                         symbols.push(serde_json::json!({
                             "name": m.name,
                             "kind": 1, // Module
                             "range": {
                                 "start": { "line": def_line, "character": 0 },
-                                "end": { "line": def_line, "character": 100 }
+                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
                             },
                             "selectionRange": {
-                                "start": { "line": def_line, "character": 7 },
-                                "end": { "line": def_line, "character": 7 + m.name.len() }
+                                "start": { "line": def_line, "character": keyword_len },
+                                "end": { "line": def_line, "character": keyword_len + m.name.len() }
                             }
                         }));
                     }
@@ -86,10 +112,12 @@ impl LspServer {
 
         if let Some(root) = &self.workspace_root {
             if let Ok(entries) = std::fs::read_dir(root) {
-                for entry in entries.flatten() {
+                // Collect into Vec first to drop ReadDir immediately, preventing fd leak.
+                let entries: Vec<_> = entries.flatten().collect();
+                for entry in entries {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("mimi") {
-                        let uri = format!("file://{}", path.display());
+                        let uri = format!("file://{}", encode_path_for_uri(&path));
                         if !self.documents.contains_key(&uri) {
                             if let Ok(text) = std::fs::read_to_string(&path) {
                                 sources.push((uri, text));

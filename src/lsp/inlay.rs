@@ -15,12 +15,13 @@ impl LspServer {
             None => return hints,
         };
 
-        // Pre-build param name lookup from all functions
-        let mut func_params: HashMap<String, Vec<String>> = HashMap::new();
+        // Pre-build param name lookup from all functions.
+        // Use (name, pos.0) as key to handle duplicate function names across modules.
+        let mut func_params: HashMap<(String, usize), Vec<String>> = HashMap::new();
         for item in &file.items {
             if let Item::Func(f) = item {
                 func_params.insert(
-                    f.name.clone(),
+                    (f.name.clone(), f.pos.0),
                     f.params.iter().map(|p| p.name.clone()).collect(),
                 );
             }
@@ -29,7 +30,8 @@ impl LspServer {
         // Walk all function definitions looking for let statements and calls
         for item in &file.items {
             if let Item::Func(f) = item {
-                self.collect_hints_from_block(&f.body, text, &mut hints, &func_params);
+                let func_key = (f.name.clone(), f.pos.0);
+                self.collect_hints_from_block(&f.body, text, &mut hints, &func_params, &func_key);
             }
         }
 
@@ -42,7 +44,8 @@ impl LspServer {
         stmts: &[Stmt],
         text: &str,
         hints: &mut Vec<Value>,
-        func_params: &HashMap<String, Vec<String>>,
+        func_params: &HashMap<(String, usize), Vec<String>>,
+        current_func: &(String, usize),
     ) {
         for stmt in stmts {
             #[allow(clippy::collapsible_match)]
@@ -97,27 +100,27 @@ impl LspServer {
                 }
                 Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
                     // Parameter name hints for function calls
-                    self.collect_param_hints(expr, text, hints, func_params);
+                    self.collect_param_hints(expr, text, hints, func_params, current_func);
                 }
                 Stmt::If {
                     cond: _,
                     then_,
                     else_,
                 } => {
-                    self.collect_hints_from_block(then_, text, hints, func_params);
+                    self.collect_hints_from_block(then_, text, hints, func_params, current_func);
                     if let Some(els) = else_ {
-                        self.collect_hints_from_block(els, text, hints, func_params);
+                        self.collect_hints_from_block(els, text, hints, func_params, current_func);
                     }
                 }
                 Stmt::While { cond: _, body } => {
-                    self.collect_hints_from_block(body, text, hints, func_params);
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
                 }
                 Stmt::For {
                     var: _,
                     iterable: _,
                     body,
                 } => {
-                    self.collect_hints_from_block(body, text, hints, func_params);
+                    self.collect_hints_from_block(body, text, hints, func_params, current_func);
                 }
                 _ => {}
             }
@@ -130,7 +133,8 @@ impl LspServer {
         expr: &Expr,
         text: &str,
         hints: &mut Vec<Value>,
-        func_params: &HashMap<String, Vec<String>>,
+        func_params: &HashMap<(String, usize), Vec<String>>,
+        current_func: &(String, usize),
     ) {
         #[allow(clippy::single_match)]
         match expr {
@@ -140,7 +144,9 @@ impl LspServer {
                     Expr::Ident(n) => n.as_str(),
                     _ => return,
                 };
-                let param_names = match func_params.get(func_name) {
+                // Look up params using (func_name, current_func_line) as key.
+                // This handles same-named functions in different modules correctly.
+                let param_names = match func_params.get(&(func_name.to_string(), current_func.1)) {
                     Some(p) => p,
                     None => return,
                 };

@@ -1,25 +1,14 @@
 use serde_json::Value;
 
 use crate::ast::{BinOp, Expr, Item, Lit, Pattern, Stmt, Type, TypeDefKind, UnOp};
+use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
 impl LspServer {
     pub fn compute_hover(&self, text: &str, line: usize, character: usize) -> Option<Value> {
-        // Get the word at cursor position
-        let lines: Vec<&str> = text.lines().collect();
-        let current_line = lines.get(line)?;
-        let before_cursor: String = current_line.chars().take(character).collect();
-        let after_cursor: String = current_line.chars().skip(character).collect();
-
-        // Find word boundaries
-        let word_start = before_cursor
-            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let word_end = after_cursor
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| character + i)
-            .unwrap_or(current_line.len());
+        // Get the word at cursor position using unified word boundary detection
+        let (word_start, word_end) = word_range_at(text, line, character)?;
+        let current_line = text.lines().nth(line)?;
         let word = &current_line[word_start..word_end];
 
         if word.is_empty() {

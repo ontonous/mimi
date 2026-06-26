@@ -33,11 +33,12 @@ pub(crate) fn percent_decode(s: &str) -> String {
                     result.push_str(&hex);
                 }
             } else {
-                // Byte escape: %XX
+                // Byte escape: %XX — decode to raw bytes, then convert to string.
                 let hex: String = chars.by_ref().take(2).collect();
                 if hex.len() == 2 {
                     if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte as char);
+                        // Use char::from_u32 to properly handle bytes >= 0x80.
+                        result.push(char::from_u32(byte as u32).unwrap_or('\u{FFFD}'));
                     } else {
                         result.push('%');
                         result.push_str(&hex);
@@ -130,55 +131,49 @@ pub(crate) fn find_enclosing_func_in_items<'a>(
 impl LspServer {
     /// Get the column of the word start at the given position
     pub fn word_start_col(&self, text: &str, line: usize, character: usize) -> usize {
-        let lines: Vec<&str> = text.lines().collect();
-        let current_line = match lines.get(line) {
-            Some(l) => l,
-            None => return character,
-        };
-        let before_cursor: String = current_line.chars().take(character).collect();
-        before_cursor
-            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        word_range_at(text, line, character).map(|(s, _)| s).unwrap_or(character)
     }
 
     /// Get the number of characters from the cursor to the end of the word
     pub fn word_end_offset(&self, text: &str, line: usize, character: usize) -> usize {
-        let lines: Vec<&str> = text.lines().collect();
-        let current_line = match lines.get(line) {
-            Some(l) => l,
-            None => return 0,
-        };
-        let after_cursor: String = current_line.chars().skip(character).collect();
-        after_cursor
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or_else(|| after_cursor.len())
+        word_range_at(text, line, character).map(|(_, e)| e.saturating_sub(character)).unwrap_or(0)
     }
 
     /// Helper: get the word at a given position
     pub fn get_word_at(&self, text: &str, line: usize, character: usize) -> String {
-        let lines: Vec<&str> = text.lines().collect();
-        let current_line = match lines.get(line) {
-            Some(l) => l,
-            None => return String::new(),
-        };
-
-        let before_cursor: String = current_line.chars().take(character).collect();
-        let after_cursor: String = current_line.chars().skip(character).collect();
-
-        let word_start = before_cursor
-            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let word_end = after_cursor
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .map(|i| character + i)
-            .unwrap_or(current_line.len());
-
-        if word_start >= word_end {
-            return String::new();
-        }
-
-        current_line[word_start..word_end].to_string()
+        word_range_at(text, line, character)
+            .map(|(start, end)| {
+                text.lines().nth(line).map(|l| l[start..end].to_string()).unwrap_or_default()
+            })
+            .unwrap_or_default()
     }
+
+    /// Helper: get the (start, end) byte indices of the word at a given position
+    pub fn get_word_range(&self, text: &str, line: usize, character: usize) -> Option<(usize, usize)> {
+        word_range_at(text, line, character)
+    }
+}
+
+/// Returns (start, end) byte indices for the word at the given position.
+/// Returns None if the position is invalid.
+pub fn word_range_at(text: &str, line: usize, character: usize) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let current_line = lines.get(line)?;
+
+    let before_cursor: String = current_line.chars().take(character).collect();
+    let after_cursor: String = current_line.chars().skip(character).collect();
+
+    let word_start = before_cursor
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let word_end = after_cursor
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+        .map(|i| character + i)
+        .unwrap_or(current_line.len());
+
+    if word_start >= word_end {
+        return None;
+    }
+    Some((word_start, word_end))
 }

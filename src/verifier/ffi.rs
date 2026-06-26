@@ -392,6 +392,77 @@ fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -
             target: substitute_args(target, params, args),
             value: substitute_args(value, params, args),
         },
+        Stmt::While { cond, body } => Stmt::While {
+            cond: substitute_args(cond, params, args),
+            body: body
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        },
+        Stmt::WhileLet { pat, init, body } => Stmt::WhileLet {
+            pat: pat.clone(),
+            init: substitute_args(init, params, args),
+            body: body
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        },
+        Stmt::Loop(block) => Stmt::Loop(
+            block
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        ),
+        Stmt::For {
+            var,
+            iterable,
+            body,
+        } => Stmt::For {
+            var: var.clone(),
+            iterable: substitute_args(iterable, params, args),
+            body: body
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        },
+        Stmt::Block(block) => Stmt::Block(
+            block
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        ),
+        Stmt::Break(e) => Stmt::Break(e.as_ref().map(|e| substitute_args(e, params, args))),
+        Stmt::Continue => Stmt::Continue,
+        Stmt::Drop(e) => Stmt::Drop(substitute_args(e, params, args)),
+        Stmt::Arena(block) => Stmt::Arena(
+            block
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        ),
+        Stmt::Unsafe(block) => Stmt::Unsafe(
+            block
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        ),
+        Stmt::OnFailure(block) => Stmt::OnFailure(
+            block
+                .iter()
+                .map(|s| substitute_args_in_stmt(s, params, args))
+                .collect(),
+        ),
+        Stmt::SharedLet {
+            kind,
+            name,
+            ty,
+            init,
+        } => Stmt::SharedLet {
+            kind: kind.clone(),
+            name: name.clone(),
+            ty: ty.clone(),
+            init: substitute_args(init, params, args),
+        },
         _ => stmt.clone(),
     }
 }
