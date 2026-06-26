@@ -1,6 +1,21 @@
 # Changelog
 
-## [Unreleased] — v0.26.7-dev
+## [Unreleased] — v0.27.2-dev
+
+## [v0.27.1] — 2026-06-26
+
+### Bug Fixes (P0/P1)
+
+- **P0.1**: `expr.rs encode_match_real` — `matched_int` 硬编码为 0 导致实数型 match 的 Wildcard/Variable 模式错误编码；修复：Wildcard/Variable 模式跳过 `pattern_matches_z3`，直接取 arm 值
+- **P1.1**: `func.rs eval_expr_on_model` — EqCmp/NeCmp 无法求值时返回 true（假设满足），导致假阴性；修复：改为返回 false（假设违反），避免实际违反被忽略
+- **P2.3**: `func.rs verify_extern_func` — requires∧¬ensures 为 Sat 时返回 Verified 状态，语义误导；修复：改为 Unknown（因为外部函数无法静态证明 ensures）
+- **P1.4**: `ffi.rs substitute_args` — Block 语句递归只处理了 Expr/Return/Let/If/Assign，While/For/Loop/WhileLet 直接 clone；修复：补全这四种语句类型的参数替换
+
+### Tests
+
+- 更新 `verify_extern_ensures_consistent` 和 `verify_extern_requires_ensures_consistent` 测试期望值为 Unknown（P2.3 修复）
+
+> **注意**：v0.27.1 的 P0.1 和 P1.4 修复实际上已在 commit ad6f5ba 中合入，此处 CHANGELOG 补录以保持记录完整。
 
 ## [v0.26.6] — 2026-06-26
 

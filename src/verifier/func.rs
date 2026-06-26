@@ -163,7 +163,7 @@ impl crate::verifier::Verifier {
                                 self.solver_pop(1);
                                 VerificationResult {
                                 func_name: format!("extern {}", func.name),
-                                status: VerifStatus::Verified,
+                                status: VerifStatus::Unknown, // P2.3 fix: Unknown (not Verified) since we found a counterexample
                                     message:
                                         "extern contracts are consistent (preconditions do not statically guarantee postconditions; runtime verification required)"
                                             .into(),
@@ -888,7 +888,7 @@ impl crate::verifier::Verifier {
                                 Self::resolve_to_string(rhs, model, vars),
                             ) {
                                 (Some(l), Some(r)) => l == r,
-                                _ => true, // cannot evaluate — assume satisfied (avoid false violation)
+                                _ => false, // P1.1 fix: cannot evaluate — return false (assume violated)
                             },
                         },
                     }
@@ -909,7 +909,7 @@ impl crate::verifier::Verifier {
                                 Self::resolve_to_string(rhs, model, vars),
                             ) {
                                 (Some(l), Some(r)) => l != r,
-                                _ => true, // cannot evaluate — assume satisfied (avoid false violation)
+                                _ => false, // P1.1 fix: cannot evaluate — return false (assume violated)
                             },
                         },
                     }

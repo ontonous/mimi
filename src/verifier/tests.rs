@@ -228,7 +228,7 @@ func main() -> i64 { 0 }
     assert_eq!(ext.len(), 1, "extern func should be verified");
     assert_eq!(
         ext[0].status,
-        VerifStatus::Verified,
+        VerifStatus::Unknown, // P2.3 fix: Sat means counterexample exists, so Unknown (not Verified)
         "extern ensures should be consistent: {}",
         ext[0].message
     );
@@ -254,7 +254,7 @@ func main() -> i64 { 0 }
     assert_eq!(ext.len(), 1, "extern func should be verified");
     assert_eq!(
         ext[0].status,
-        VerifStatus::Verified,
+        VerifStatus::Unknown, // P2.3 fix: Sat means counterexample exists, so Unknown (not Verified)
         "extern requires+ensures should be consistent: {}",
         ext[0].message
     );
