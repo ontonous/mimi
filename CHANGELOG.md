@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v0.27.6-dev
+## [v0.27.6] — 2026-06-26
 
 ### Bug Fixes (Correctness)
 
@@ -22,6 +22,18 @@
 - **BUG-5**: `compile_to_object` queried `MIMI_OPT` env var on every call; fixed by caching in `CodeGenerator.optimize` field at construction time
 - **BUG-4**: `mimi_rc_alloc` can return NULL on allocation failure but code didn't check; fixed with null check + abort path before store-through-pointer
 - **BUG-2**: `compile_if_expr` used `unwrap_or(i64(0))` for missing else values, causing PHI type mismatch when `then_val` was a struct; fixed by only phi'ing `else_val` when `Some`
+
+### Code Quality
+
+- **QUAL-2**: `compile_arena_block` didn't push/pop `cap_scope`, causing arena-local capabilities to leak to outer scope; fixed with `push_cap_scope`/`pop_cap_scope` around `compile_block`
+- **QUAL-5**: Multiple contract asserts in one function caused duplicate `BasicBlock` names (`contract_pass`/`contract_fail`); fixed with `contract_bb_counter` for unique naming
+
+### Tests
+
+- `dual_mimi_opt_consistency`, `dual_shared_let_basic`, `dual_if_expr_shared_no_else`, `dual_multi_ensures_unique_bb` — L1 regression tests for codegen fixes
+- `dual_arena_closure_no_extra_capture`, `dual_block_closure_no_extra_capture`, `dual_parasteps_let_spawn_await` — L1 regression tests for P0 fixes
+
+## [Unreleased] — v0.27.7-dev
 
 ### Code Quality
 
