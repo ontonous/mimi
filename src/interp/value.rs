@@ -576,7 +576,7 @@ impl std::fmt::Display for Value {
                 write!(f, "shared({})", v)
             }
             Value::LocalShared(rc) => {
-                let v = rc.lock().unwrap();
+                let v = rc.lock().expect("local_shared lock not poisoned");
                 write!(f, "local_shared({})", v)
             }
             Value::WeakShared(w) => match w.upgrade() {
@@ -588,7 +588,7 @@ impl std::fmt::Display for Value {
             },
             Value::WeakLocal(w) => match w.upgrade() {
                 Some(rc) => {
-                    let v = rc.lock().unwrap();
+                    let v = rc.lock().expect("local_shared lock not poisoned");
                     write!(f, "weak_local({})", v)
                 }
                 None => write!(f, "weak_local(None)"),
@@ -658,7 +658,7 @@ pub(crate) fn contains_local_shared(v: &Value) -> bool {
         Value::Ref(rc) | Value::RefMut(rc) => {
             // RwLock::read() only returns Err on poisoning; in practice this is unreachable
             // since we don't poison locks in normal operation.
-            rc.read().map_or(false, |v| contains_local_shared(&v))
+            rc.read().is_ok_and(|v| contains_local_shared(&v))
         }
         Value::Closure { captured, .. } => captured.values().any(contains_local_shared),
         Value::Shared(arc) => {
@@ -707,10 +707,10 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
             }
             false
         }
-        Value::LocalShared(inner) => contains_arena_ref(&inner.0.lock().unwrap(), arena_id),
+        Value::LocalShared(inner) => contains_arena_ref(&inner.0.lock().expect("local_shared lock not poisoned"), arena_id),
         Value::WeakLocal(inner) => {
             if let Some(rc) = inner.0.upgrade() {
-                contains_arena_ref(&rc.lock().unwrap(), arena_id)
+                contains_arena_ref(&rc.lock().expect("local_shared lock not poisoned"), arena_id)
             } else {
                 false
             }
@@ -844,7 +844,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
             }
         }
         (Value::LocalShared(a), Value::LocalShared(b)) => {
-            values_equal(&a.0.lock().unwrap(), &b.0.lock().unwrap())
+            values_equal(
+                &a.0.lock().expect("local_shared lock not poisoned"),
+                &b.0.lock().expect("local_shared lock not poisoned"),
+            )
         }
         (Value::Cap(a), Value::Cap(b)) => a == b,
         (

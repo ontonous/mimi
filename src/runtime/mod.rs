@@ -2873,8 +2873,8 @@ mod no_panic {
             unsafe {
                 OLD_HANDLERS.with(|old| {
                     let arr = &*old.get();
-                    // OLD_HANDLERS stores raw handler pointer as usize; cast back through usize
-                    libc::signal(sig, std::mem::transmute(arr[idx]));
+                    // OLD_HANDLERS stores raw handler pointer as usize
+                    libc::signal(sig, arr[idx]);
                 });
             }
         }

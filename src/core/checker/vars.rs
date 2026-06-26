@@ -20,7 +20,7 @@ impl<'a> Checker<'a> {
             let qualified = format!("{}::{}", module, name);
             if let Some((params, ret)) = self.funcs.get(&qualified) {
                 // Arch-4: resolve TypeVars in function signature
-                let ret = self.unification.resolve(&ret);
+                let ret = self.unification.resolve(ret);
                 return Type::Func(params.clone(), Box::new(ret));
             }
         }

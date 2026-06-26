@@ -458,7 +458,7 @@ fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -
             ty,
             init,
         } => Stmt::SharedLet {
-            kind: kind.clone(),
+            kind: *kind,
             name: name.clone(),
             ty: ty.clone(),
             init: substitute_args(init, params, args),

@@ -43,23 +43,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         // Arch-2: Try type-driven lookup first (no string parsing)
         if let Expr::Ident(name) = obj_expr {
-            if let Some(list_ty) = self.var_types.get(name) {
-                if let Type::Name(n, args) = list_ty {
-                    if n == "List" && args.len() == 1 {
-                        let elem_ty = &args[0];
-                        let llvm_ty = types::mimi_type_to_llvm(self.context, elem_ty);
-                        if let Some(BasicTypeEnum::StructType(sty)) = llvm_ty {
-                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let elem_ptr = self
-                                .builder
-                                .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
-                                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
-                            let struct_val = self
-                                .builder
-                                .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
-                                .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
-                            return Ok(Some(struct_val));
-                        }
+            if let Some(Type::Name(n, args)) = self.var_types.get(name) {
+                if n == "List" && args.len() == 1 {
+                    let elem_ty = &args[0];
+                    let llvm_ty = types::mimi_type_to_llvm(self.context, elem_ty);
+                    if let Some(BasicTypeEnum::StructType(sty)) = llvm_ty {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let elem_ptr = self
+                            .builder
+                            .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                        let struct_val = self
+                            .builder
+                            .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
+                            .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
+                        return Ok(Some(struct_val));
                     }
                 }
             }

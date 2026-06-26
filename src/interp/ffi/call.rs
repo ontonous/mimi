@@ -56,6 +56,7 @@ unsafe impl Sync for JmpBufPtr {}
 /// Solution: Two maps:
 /// 1. FFI_CRASH_JUMP_BUFFERS — Mutex<HashMap> for main thread store/clear (via set/clear_jump_buf)
 /// 2. FFI_CRASH_JUMP_ATOMIC  — HashMap<AtomicPtr> for signal handler read (via get_jump_buf)
+///
 /// set_jump_buf writes to BOTH maps (main thread), get_jump_buf reads only the atomic map.
 /// This ensures the signal handler path uses only async-signal-safe atomic loads.
 static FFI_CRASH_JUMP_BUFFERS: std::sync::OnceLock<
@@ -123,7 +124,7 @@ fn get_jump_buf() -> *mut SigJmpBuf {
 /// - libc::pthread_self (async-signal-safe per POSIX)
 /// - AtomicPtr load (hardware atomic, signal-safe)
 /// - siglongjmp (async-signal-safe per POSIX)
-/// NO mutex, NO pthread_getspecific, NO RefCell.
+///   NO mutex, NO pthread_getspecific, NO RefCell.
 extern "C" fn ffi_crash_signal_handler(
     sig: libc::c_int,
     _siginfo: *mut libc::siginfo_t,
@@ -160,7 +161,7 @@ fn install_crash_handlers() -> [libc::sigaction; 5] {
     sa.sa_flags = libc::SA_NODEFER | libc::SA_SIGINFO;
     // FFI-5: sa_sigaction is a usize field — cast the function pointer.
     // ffi_crash_signal_handler now has the matching 3-arg signature.
-    sa.sa_sigaction = ffi_crash_signal_handler as usize;
+    sa.sa_sigaction = ffi_crash_signal_handler as *const () as usize;
 
     let mut old = [
         unsafe { std::mem::zeroed() },

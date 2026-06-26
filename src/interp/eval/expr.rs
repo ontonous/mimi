@@ -91,7 +91,7 @@ impl<'a> Interpreter<'a> {
                         InterpError::lock_error(format!("shared read lock failed: {}", e))
                     })?
                     .clone()),
-                Value::LocalShared(rc) => Ok(rc.lock().unwrap().clone()),
+                Value::LocalShared(rc) => Ok(rc.lock().expect("local_shared lock not poisoned").clone()),
                 _ => Err(InterpError::new(format!(
                     "cannot dereference {}",
                     type_name(&v)
@@ -731,7 +731,7 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::LocalShared(rc) => {
-                let inner = rc.lock().unwrap();
+                let inner = rc.lock().expect("local_shared lock not poisoned");
                 match &*inner {
                     Value::Record(_, fields) => fields.get(field).cloned().ok_or_else(|| {
                         InterpError::new(format!(

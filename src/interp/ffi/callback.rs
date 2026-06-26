@@ -245,7 +245,7 @@ unsafe fn callback_trampoline_inner(
         // active_guard dropped here — decrements count
         return;
     }
-    let interp = &mut *(interp_ptr as *mut Interpreter<'static>);
+    let interp = unsafe { &mut *interp_ptr };
     let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
     // Restore the interp pointer after the callback completes
     FFI_CALLBACK_CTX.with(|c| {

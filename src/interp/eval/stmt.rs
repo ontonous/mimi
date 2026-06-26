@@ -479,7 +479,7 @@ impl<'a> Interpreter<'a> {
                         })? = v;
                     }
                     Value::LocalShared(rc) => {
-                        *rc.lock().unwrap() = v;
+                        *rc.lock().expect("local_shared lock not poisoned") = v;
                     }
                     _ => {
                         return Err(InterpError::new(format!(
@@ -561,7 +561,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     Value::LocalShared(rc) => {
-                        let mut inner = rc.lock().unwrap();
+                        let mut inner = rc.lock().expect("local_shared lock not poisoned");
                         match &mut *inner {
                             Value::Record(_, fields) => {
                                 if fields.contains_key(field.as_str()) {
