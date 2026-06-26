@@ -248,6 +248,14 @@ impl SharedHandleTable {
     /// Create or reuse a handle, deduplicating by Arc inner pointer.
     /// If the same Arc pointer has been registered before, returns the
     /// existing handle ID and increments the C-side reference count.
+    ///
+    /// # Deduplication semantics (FFI-DESIGN-4)
+    /// Deduplication is by `Arc::as_ptr(arc) as *const ()` — i.e., the
+    /// **identity** of the Arc allocation, not its content. Two `Arc`
+    /// values that are equal in Mimi semantics but are distinct heap
+    /// allocations will NOT be deduplicated. This is intentional: in FFI
+    /// contexts, value equality ≠ pointer identity; deduplicating by content
+    /// would conflate distinct handle lifetimes.
     pub fn create_dedup(&self, inner: Arc<RwLock<Value>>, ptr: *const ()) -> i64 {
         // Check dedup table first (lock dedup, then release before locking handles)
         {
@@ -259,7 +267,12 @@ impl SharedHandleTable {
                 if self.retain(existing_id) {
                     return existing_id;
                 }
-                // Handle was cleaned up from under us; fall through to create new.
+                // FFI-BUG-1: Handle was cleaned up but dedup entry is stale.
+                // Remove it to prevent reuse of released handle ID and dedup pollution.
+                if let Ok(mut dedup) = self.dedup.lock() {
+                    dedup.remove(&ptr);
+                }
+                // Fall through to create new handle.
             }
         }
 
@@ -764,13 +777,19 @@ impl MimiThreadPool {
 
 impl Drop for MimiThreadPool {
     fn drop(&mut self) {
-        // Drop the sender first to close the channel, signaling workers to exit.
+        // FFI-BUG-4 fix: Drop the sender first to close the channel, signaling
+        // workers to exit. Then let JoinHandles drop (detaching threads) instead
+        // of joining to avoid blocking indefinitely if a worker is stuck
+        // (e.g., in an uninterruptible syscall). Dropping detached handles is safe
+        // because:
+        // 1. The pool is a process-global that lives until process exit.
+        // 2. Workers are daemons — they don't need to finish for other cleanup.
+        // 3. OS will reclaim thread resources when the process exits.
+        // 4. If a worker panicked, the panic is silently ignored (detached threads).
         drop(self.sender.take());
-        // Join worker threads.
-        for handle in self.workers.drain(..) {
-            if handle.join().is_err() {
-                eprintln!("[mimi ffi] worker thread panicked");
-            }
+        for _ in self.workers.drain(..) {
+            // Dropping JoinHandle detaches the thread — it will continue until
+            // the channel is closed (sender dropped above), then exit.
         }
     }
 }
@@ -802,4 +821,92 @@ pub unsafe extern "C" fn mimi_pool_submit(fn_ptr: extern "C" fn(*mut u8) -> *mut
 #[no_mangle]
 pub extern "C" fn mimi_pool_join_all() {
     MIMI_POOL.join_all();
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for FFI-BUG-1: create_dedup must remove stale dedup
+    /// entries when retain() returns false (handle was cleaned up from under
+    /// us). Otherwise the next create_dedup with the same Arc pointer returns
+    /// the released handle ID, causing the C caller to use a dangling handle.
+    #[test]
+    fn test_create_dedup_removes_stale_entry_on_retain_failure() {
+        // Given: a fresh handle table and an Arc allocation
+        let table = SharedHandleTable::new();
+        let value = Arc::new(RwLock::new(Value::Int(42)));
+        let ptr = Arc::as_ptr(&value) as *const ();
+
+        // When: we create a dedup handle
+        let id1 = table.create_dedup(Arc::clone(&value), ptr);
+        assert_eq!(table.get(id1).map(|h| h.strong_count()), Some(1));
+
+        // And: we release it to drop refcount to zero (simulating C-side cleanup)
+        table.retain(id1); // bump to 2
+        table.release(id1); // back to 1
+        table.release(id1); // to 0 → SharedHandle is dropped here
+
+        // Then: the next create_dedup for the same pointer must NOT reuse
+        // the stale id1 — it must create a new handle (id2).
+        // Before the fix, id1 would be returned (dedup entry was not cleaned),
+        // causing C code to use a dangling handle.
+        let id2 = table.create_dedup(Arc::clone(&value), ptr);
+        assert_ne!(
+            id1, id2,
+            "create_dedup returned the same id after handle was released; \
+             FFI-BUG-1: stale dedup entry was not removed"
+        );
+        assert_eq!(table.get(id2).map(|h| h.strong_count()), Some(1));
+        // id1 should no longer be valid
+        assert!(
+            table.get(id1).is_none(),
+            "released handle id1 should not be retrievable"
+        );
+    }
+
+    /// Regression test for FFI-BUG-1: verify dedup entry is removed so that
+    /// distinct Arc allocations (same content, different addresses) are NOT
+    /// conflated — this is FFI-DESIGN-4 (identity-based dedup, not content-based).
+    #[test]
+    fn test_create_dedup_is_by_identity_not_content() {
+        let table = SharedHandleTable::new();
+
+        // Two equal Mimi values in distinct Arc allocations
+        let arc1 = Arc::new(RwLock::new(Value::Int(42)));
+        let arc2 = Arc::new(RwLock::new(Value::Int(42)));
+        let ptr1 = Arc::as_ptr(&arc1) as *const ();
+        let ptr2 = Arc::as_ptr(&arc2) as *const ();
+
+        let id1 = table.create_dedup(Arc::clone(&arc1), ptr1);
+        let id2 = table.create_dedup(Arc::clone(&arc2), ptr2);
+
+        // Distinct Arc allocations → distinct handle IDs
+        assert_ne!(
+            id1, id2,
+            "two equal values in distinct Arc allocations should get distinct IDs; \
+             dedup is by Arc identity (pointer), not Mimi content equality"
+        );
+    }
+
+    /// FFI-BUG-4: MimiThreadPool::drop must not block on detached/dropped JoinHandles.
+    /// Creating and immediately dropping a pool (no tasks submitted) is a minimal
+    /// smoke test that the drop path does not hang. The real regression test is
+    /// that the Drop impl no longer calls join() — verified by code inspection.
+    #[test]
+    fn test_thread_pool_drop_does_not_hang() {
+        use std::time::{Duration, Instant};
+        let pool = MimiThreadPool::new(1);
+        let start = Instant::now();
+        drop(pool);
+        // Should return almost immediately, not block on join()
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "drop(pool) took >1s — FFI-BUG-4: Drop impl may still be calling join()"
+        );
+    }
 }

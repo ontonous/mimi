@@ -66,28 +66,29 @@ fn global_callback_store()
 #[no_mangle]
 pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
     callback_table_remove(callback_id);
-    // FFI-10: Extract the active-count Arc and wait for in-flight calls to drain.
+    // FFI-10: Extract the active-count Arc and remove the entry BEFORE waiting.
+    // FFI-BUG-3 fix: Removing the entry first prevents new calls from finding
+    // it and incrementing the count during the spin-drain loop (TOCTOU window).
     let active_count = {
-        let store = global_callback_store()
+        let mut store = global_callback_store()
             .lock()
             .expect("CALLBACK_GLOBAL_STORE lock poisoned");
         if let Some((_, _, _, count)) = store.get(&callback_id) {
-            Arc::clone(count)
+            let cnt = Arc::clone(count);
+            // Remove entry first so new calls won't find it and increment count
+            store.remove(&callback_id);
+            cnt
         } else {
             return;
         }
     };
-    // Spin until no in-flight calls.
+    // Spin until no in-flight calls remain.
     loop {
         let n = active_count.load(Ordering::Acquire);
         if n == 0 {
             break;
         }
         std::hint::spin_loop();
-    }
-    // Now safe to remove.
-    if let Ok(mut store) = global_callback_store().lock() {
-        store.remove(&callback_id);
     }
     FFI_CALLBACK_CTX.with(|c| {
         c.borrow_mut().entries.remove(&callback_id);
@@ -216,6 +217,18 @@ unsafe fn callback_trampoline_inner(
             callback_id,
         );
         *result = i64::MIN;
+        // FFI-BUG-2: Free C-allocated string pointers before returning,
+        // otherwise the memory leaks on every cross-thread callback.
+        for (i, &should_free) in arg_free_mask.iter().enumerate() {
+            if should_free && i < nargs {
+                let arg_ptr = *args.add(i);
+                if !arg_ptr.is_null() {
+                    unsafe {
+                        libc::free(arg_ptr as *mut libc::c_void);
+                    }
+                }
+            }
+        }
         // active_guard dropped here — decrements count
         return;
     }
@@ -223,11 +236,20 @@ unsafe fn callback_trampoline_inner(
     let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
     match closure_result {
         Ok(val) => {
+            // FFI-DESIGN-3: ret_is_float is a hint from the C signature; if the
+            // actual return type differs (e.g., Bool returned where f64 expected),
+            // we return i64::MIN as a type-error sentinel rather than silently
+            // returning garbage (Bool bits reinterpreted as f64 representation).
             if ret_is_float {
-                if let Value::Float(f) = val {
-                    *result = f.to_bits() as i64;
-                } else if let Value::Int(n) = val {
-                    *result = (n as f64).to_bits() as i64;
+                match val {
+                    Value::Float(f) => *result = f.to_bits() as i64,
+                    Value::Int(n) => *result = (n as f64).to_bits() as i64,
+                    // FFI-DESIGN-3: Bool/Unit/other — wrong type for float slot
+                    _ => {
+                        *result = i64::MIN;
+                        // active_guard dropped here — decrements count
+                        return;
+                    }
                 }
             } else {
                 *result = match val {
