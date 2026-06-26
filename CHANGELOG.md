@@ -1,6 +1,22 @@
 # Changelog
 
-## [Unreleased] — v0.27.5-dev
+## [Unreleased] — v0.27.6-dev
+
+## [v0.27.5] — 2026-06-26
+
+### Bug Fixes (Correctness)
+
+- **Bug-1**: `resolve_type` generic alias incomplete substitution — when args.is_empty() but generics exist, substitution was skipped; fixed by using `unknown` type for each generic parameter
+- **Bug-4**: `find_borrow_ref` only handles direct `&x` patterns — indirect borrow expressions (tuple destructuring, function calls, conditionals) returned borrowed_var incorrectly; fixed by returning `Option<String>` and skipping NLL release when trace fails
+- **Bug-6**: `collect_shared_writes_in_stmt` missing WhileLet init — init expression in `while let pattern = init { body }` wasn't checked for shared writes; fixed by adding init expression check
+- **Bug-9**: `verify_rules_in_block` missing WhileLet — WhileLet body wasn't recursively verified for rule attachments; fixed by adding WhileLet case
+
+### Documentation Clarifications
+
+- **Bug-3**: `subst_type_params` TypeVar handling — added clarifying comment explaining TypeVar (inference variable) vs Type::Name (user parameter) distinction
+- **Bug-8**: `ForAll` params vs TypeVar — added clarifying comment explaining params are labels for error messages only, actual substitution uses integer indices
+- **Bug-12**: `TypeArena` unused — documented known tech debt (Arch-5 incomplete integration)
+- **Bug-14**: `ImplTrait` trait argument checking — documented that traits in this context don't have type arguments
 
 ## [v0.27.4] — 2026-06-26
 
