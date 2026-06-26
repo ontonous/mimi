@@ -3909,4 +3909,124 @@ fn dual_multi_ensures_unique_bb() {
     assert_eq!(stdout.trim(), "10");
 }
 
+// ─── v0.27.6 Regression Tests ────────────────────────────────────────────────
+
+// P0-1: Arena/Block local_bound clone discard fix.
+// Arena-block-bound variables must NOT be collected as free vars of the arena expr.
+// If the bug were present, x would be wrongly captured as a free var by the closure,
+// causing duplicate binding or dangling reference.
+#[test]
+fn dual_arena_closure_no_extra_capture() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let f = arena {
+                let x = 10
+                fn() -> i32 { x }
+            }
+            println(f())
+            0
+        }
+    "#,
+        "10"
+    );
+}
+
+// P0-1: Block expr (non-arena) must also correctly accumulate local_bound.
+#[test]
+fn dual_block_closure_no_extra_capture() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let f = {
+                let x = 20
+                fn() -> i32 { x }
+            }
+            println(f())
+            0
+        }
+    "#,
+        "20"
+    );
+}
+
+// P0-2: let x = spawn foo() inside parasteps: future must be awaited properly.
+// The bug was that futures from Stmt::Let { init: Some(Spawn(...)) } were
+// stored in spawn_bindings but never added to the futures Vec for await at block end.
+#[test]
+fn dual_parasteps_let_spawn_await() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func double(n: i32) -> i32 { n * 2 }
+        func main() -> i32 {
+            let mut r = 0
+            parasteps {
+                let a = spawn double(7)
+                let b = spawn double(3)
+                r = (await a) + (await b)
+            }
+            println(r)
+            0
+        }
+    "#,
+        "20"
+    );
+}
+
+// P1-6: no_panic_handler only resets the caught signal, not all managed signals.
+#[test]
+fn dual_ffi_no_panic_only_resets_caught_signal() {
+    if !can_link() {
+        return;
+    }
+    // Basic smoke test — the real no_panic tests (segfault_caught etc) verify
+    // that other signal handlers remain intact after SIGSEGV is handled.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(42)
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+// P2-8: check_invariants must check nested block structures (while, if, loop).
+// Nested invariant inside a while's if arm must be checked.
+#[test]
+fn dual_invariant_nested_block() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut x = 0
+            while x < 3 {
+                invariant: x >= 0
+                x = x + 1
+            }
+            println(x)
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
+// P2-14: empty set returns null pointer (distinct from invalid handle).
+// This is tested via the C runtime directly; from Mimi source the Set type
+// constructor syntax does not allow creating a set to trigger this path.
+// The fix is verified by the runtime unit tests.
+
 

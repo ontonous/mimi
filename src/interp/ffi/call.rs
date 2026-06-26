@@ -27,6 +27,9 @@ extern "C" {
 static FORK_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
+    // P2-13 fix: OnceLock::get_or_init returns &'static T directly after first call.
+    // The OnceLock internal check is a simple volatile read (not a heavy lock),
+    // so the repeated calls have negligible overhead.
     FORK_LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 

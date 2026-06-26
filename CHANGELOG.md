@@ -4,6 +4,21 @@
 
 ### Bug Fixes (Correctness)
 
+- **P0-1**: `closure_utils.rs` `Expr::Arena`/`Expr::Block` discarded `local_bound` clone results — variables bound inside arena/block were incorrectly captured as free vars by closures; fixed by using local `mut local_bound` accumulated across statements
+- **P0-2**: `eval/stmt.rs` `Stmt::Let { init: Some(Spawn(...)) }` spawned futures but never added them to the `futures` Vec for await — `await` on such futures would block forever; fixed by pushing spawned futures to `futures` alongside `Stmt::Expr(Spawn(...))` path
+- **P1-4**: `mimi_json_deserialize` leaked allocated C strings on parse error — `data` Vec with already-allocated pointers was forgotten; fixed by freeing allocated strings before returning null on overflow
+- **P1-5**: `mimi_json_deserialize` integer parsing used `wrapping_mul/wrapping_add` silently overflow; fixed with `checked_mul/checked_add` that returns null on overflow
+- **P1-6**: `no_panic_handler` reset ALL 5 managed signal handlers on any signal; fixed to only reset the caught signal via `sig_index`
+- **P1-7**: FFI callback stored `interp_ptr` as `*const` but used as `&mut`; fixed to `*mut` with null-clear/re-restore pattern preventing reentrancy UB
+- **P2-8**: `check_invariants` only checked top-level block statements, ignoring nested `If/While/Loop/For/Arena/Block`; fixed with recursive descent
+- **P2-10**: `contains_local_shared` `Ref`/`RefMut` branch had unreachable `else` — fixed with `map_or`
+- **P2-11**: `eval_quoted_ast` `Interpolate` unnecessarily cloned the `Box<Value>`; reduced to single clone
+- **P2-12**: `mimi_await_future` was unbounded spin (no max iterations) — infinite loop on bug; fixed with 1M iteration cap + abort
+- **P2-13**: `ensure_fork_lock` repeated `OnceLock::get_or_init` overhead on every call; clarified comment that overhead is negligible
+- **P2-14**: `mimi_set_to_list` returned same null for `handle==0` and empty set; fixed to return `*mut ptr::null_mut()-isize` for invalid handle
+- **P3-17**: Duplicate Re-export types comment in `runtime/mod.rs`; removed duplicate line
+- **P3-18**: `FfiSharedGuard::drop` silently ignored `release` errors; fixed to log via `eprintln`
+- **P3-19**: `mimi_runtime_abort` called `eprintln!` (not async-signal-safe) from signal context; fixed with raw `write(2, ...)` syscall
 - **BUG-5**: `compile_to_object` queried `MIMI_OPT` env var on every call; fixed by caching in `CodeGenerator.optimize` field at construction time
 - **BUG-4**: `mimi_rc_alloc` can return NULL on allocation failure but code didn't check; fixed with null check + abort path before store-through-pointer
 - **BUG-2**: `compile_if_expr` used `unwrap_or(i64(0))` for missing else values, causing PHI type mismatch when `then_val` was a struct; fixed by only phi'ing `else_val` when `Some`
@@ -16,6 +31,7 @@
 ### Tests
 
 - `dual_mimi_opt_consistency`, `dual_shared_let_basic`, `dual_if_expr_shared_no_else`, `dual_multi_ensures_unique_bb` — L1 regression tests for codegen fixes
+- `dual_arena_closure_no_extra_capture`, `dual_block_closure_no_extra_capture`, `dual_parasteps_let_spawn_await` — L1 regression tests for P0 fixes
 
 ## [v0.27.5] — 2026-06-26
 

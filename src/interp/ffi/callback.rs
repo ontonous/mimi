@@ -18,13 +18,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // interpreter's environment and lives for the duration of the call.
 thread_local! {
     pub(in crate::interp) static FFI_CALLBACK_CTX: RefCell<FfiCallbackCtx> = RefCell::new(FfiCallbackCtx {
-        interp: std::ptr::null(),
+        interp: std::ptr::null_mut(),
         entries: HashMap::new(),
     });
 }
 
 pub(in crate::interp) struct FfiCallbackCtx {
-    pub(in crate::interp) interp: *const Interpreter<'static>,
+    pub(in crate::interp) interp: *mut Interpreter<'static>,
     // (closure, ret_is_float, arg_free_mask: Vec<bool>)
     pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>)>,
 }
@@ -202,18 +202,31 @@ unsafe fn callback_trampoline_inner(
     }
 
     // Call the Mimi closure via interpreter
-    let interp_ptr = FFI_CALLBACK_CTX.with(|c| c.borrow().interp);
+    // P1-7 fix: Save interp pointer and clear it to prevent reentrancy UB.
+    // If a nested callback (same thread) tries to re-enter during apply_closure_ffi,
+    // it will see a null interp and return gracefully instead of causing
+    // a mutable borrow conflict on the same Interpreter.
+    let interp_ptr = {
+        let mut interp_ptr_copy: *mut Interpreter<'static> = std::ptr::null_mut();
+        FFI_CALLBACK_CTX.with(|c| {
+            let mut ctx = c.borrow_mut();
+            interp_ptr_copy = ctx.interp;
+            ctx.interp = std::ptr::null_mut(); // clear — prevents reentrancy
+        });
+        interp_ptr_copy
+    };
     if interp_ptr.is_null() {
         // Cross-thread / async callback: the synchronous FFI call has completed
-        // and the interpreter context has been cleared. Full async evaluation
-        // (dispatching to a worker thread or event loop) is not yet supported.
+        // and the interpreter context has been cleared. OR reentrancy attempt
+        // (nested FFI call during callback). Full async evaluation (dispatching
+        // to a worker thread or event loop) is not yet supported.
         // Return i64::MIN as a distinct error sentinel so the C caller can
         // detect that the callback could not be evaluated.
         eprintln!(
             "[mimi] WARNING: callback {} invoked without an interpreter context \
-             (cross-thread or async). Returning i64::MIN. \
+             (cross-thread, async, or reentrant). Returning i64::MIN. \
              Async/off-thread callback evaluation is not yet fully supported. \
-             Callbacks during a synchronous FFI call on the same thread work correctly.",
+             Reentrant callback evaluation is not supported.",
             callback_id,
         );
         *result = i64::MIN;
@@ -234,6 +247,10 @@ unsafe fn callback_trampoline_inner(
     }
     let interp = &mut *(interp_ptr as *mut Interpreter<'static>);
     let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
+    // Restore the interp pointer after the callback completes
+    FFI_CALLBACK_CTX.with(|c| {
+        c.borrow_mut().interp = interp_ptr;
+    });
     match closure_result {
         Ok(val) => {
             // FFI-DESIGN-3: ret_is_float is a hint from the C signature; if the

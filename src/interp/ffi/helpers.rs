@@ -104,7 +104,11 @@ impl Drop for FfiSharedGuard {
     fn drop(&mut self) {
         crate::ffi::runtime::with_shared_table(|table| {
             for id in &self.handles {
-                let _ = table.release(*id);
+                // P3-18 fix: release failures are logged, not silently ignored.
+                // Note: release returns bool (not Result), false means not found.
+                if !table.release(*id) {
+                    eprintln!("[mimi] FfiSharedGuard: release failed for handle {}", id);
+                }
             }
         });
     }

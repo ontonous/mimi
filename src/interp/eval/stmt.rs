@@ -56,9 +56,11 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Handle `let ref` in arena: create ArenaRef instead of storing value directly
+        // Handle `let ref` in arena: create ArenaRef for arena-allocated values.
+        // The value is always stored in the arena; ArenaRef is needed so that
+        // the arena escape check can detect when a reference to arena data
+        // escapes the arena scope (via return or assignment to outer scope).
         let final_value = if ref_ && self.arena_depth > 0 {
-            // Allocate in current arena
             let arena_id = self.arenas.len() - 1;
             let slot_index = self.arenas[arena_id].slots.len();
             self.arenas[arena_id].slots.push(v.clone());
@@ -231,6 +233,31 @@ impl<'a> Interpreter<'a> {
                 if !is_truthy(&val) {
                     return Err(InterpError::new(format!("invariant violated: {:?}", expr)));
                 }
+            }
+            // Recursively check nested structures that contain blocks
+            match stmt {
+                Stmt::If { then_, else_, .. } => {
+                    self.check_invariants(then_)?;
+                    if let Some(eb) = else_ {
+                        self.check_invariants(eb)?;
+                    }
+                }
+                Stmt::While { body, .. } => {
+                    self.check_invariants(body)?;
+                }
+                Stmt::Loop(body) => {
+                    self.check_invariants(body)?;
+                }
+                Stmt::For { body, .. } => {
+                    self.check_invariants(body)?;
+                }
+                Stmt::Block(b) => {
+                    self.check_invariants(b)?;
+                }
+                Stmt::Arena(b) | Stmt::Parasteps(b) | Stmt::OnFailure(b) => {
+                    self.check_invariants(b)?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -714,7 +741,9 @@ impl<'a> Interpreter<'a> {
                             let fut_arc = std::sync::Arc::new(std::sync::Mutex::new(
                                 crate::interp::value::PollFuture::Pending(rx),
                             ));
-                            // Store the future for later await
+                            // Add to futures for proper await at block end
+                            futures.push(fut_arc.clone());
+                            // Store in spawn_bindings for name->future lookup
                             if let Pattern::Variable(name) = pat {
                                 spawn_bindings.insert(name.clone(), fut_arc.clone());
                             }

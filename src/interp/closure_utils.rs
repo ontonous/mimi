@@ -201,13 +201,15 @@ pub(crate) fn collect_expr_free_vars(
             collect_expr_free_vars(inner, bound, free);
         }
         Expr::Arena(block) => {
+            let mut local_bound = bound.clone();
             for s in block {
-                collect_stmt_free_vars(s, bound, free, &mut bound.clone());
+                collect_stmt_free_vars(s, bound, free, &mut local_bound);
             }
         }
         Expr::Block(block) => {
+            let mut local_bound = bound.clone();
             for s in block {
-                collect_stmt_free_vars(s, bound, free, &mut bound.clone());
+                collect_stmt_free_vars(s, bound, free, &mut local_bound);
             }
         }
         // Expr::Literal, Expr::Quote, Expr::Comptime, Expr::TypeInfo have no free vars

@@ -656,11 +656,9 @@ pub(crate) fn contains_local_shared(v: &Value) -> bool {
         Value::Newtype(inner) => contains_local_shared(inner),
         Value::DynTrait { data, .. } => contains_local_shared(data),
         Value::Ref(rc) | Value::RefMut(rc) => {
-            if let Ok(v) = rc.read() {
-                contains_local_shared(&v)
-            } else {
-                false
-            }
+            // RwLock::read() only returns Err on poisoning; in practice this is unreachable
+            // since we don't poison locks in normal operation.
+            rc.read().map_or(false, |v| contains_local_shared(&v))
         }
         Value::Closure { captured, .. } => captured.values().any(contains_local_shared),
         Value::Shared(arc) => {

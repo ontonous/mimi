@@ -117,8 +117,6 @@ use std::sync::Mutex;
 
 // Re-export types used by FFI tests and codegen
 // Must match the C layouts exactly.
-// Re-export types used by FFI tests and codegen
-// Must match the C layouts exactly.
 #[repr(C)]
 pub struct MimiList {
     len: i64,
@@ -1439,13 +1437,16 @@ pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut SetValueHandle {
-    if handle == 0 || out_len.is_null() {
-        unsafe {
-            if !out_len.is_null() {
-                *out_len = 0;
-            }
-        }
+    // P2-14 fix: handle == 0 (invalid) returns distinct sentinel from empty set.
+    // Invalid handle: returns -1 cast to pointer, *out_len = -1.
+    // Empty set: returns null, *out_len = 0.
+    // This allows callers to distinguish the two cases.
+    if out_len.is_null() {
         return std::ptr::null_mut();
+    }
+    if handle == 0 {
+        unsafe { *out_len = -1; }
+        return -1isize as *mut SetValueHandle;
     }
     let set = unsafe { &*set_from_handle(handle) };
     let len = set.inner.len() as i64;
@@ -2337,14 +2338,36 @@ pub extern "C" fn mimi_json_deserialize(
                     false
                 };
                 let mut val: i64 = 0;
+                let mut overflow = false;
                 while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                    val = val
-                        .wrapping_mul(10)
-                        .wrapping_add((bytes[pos] - b'0') as i64);
+                    if let Some(v) = val.checked_mul(10) {
+                        if let Some(v2) = v.checked_add((bytes[pos] - b'0') as i64) {
+                            val = v2;
+                        } else {
+                            overflow = true;
+                            break;
+                        }
+                    } else {
+                        overflow = true;
+                        break;
+                    }
                     pos += 1;
                 }
+                if overflow {
+                    // Free any strings allocated so far and return null
+                    if elem_type == 2 {
+                        for i in 0..idx {
+                            let ptr = data[i as usize] as *mut std::ffi::c_char;
+                            if !ptr.is_null() {
+                                unsafe { libc::free(ptr as *mut std::ffi::c_void) };
+                            }
+                        }
+                    }
+                    unsafe { *out_len = 0 };
+                    return std::ptr::null_mut();
+                }
                 if neg {
-                    val = val.wrapping_neg();
+                    val = -val;
                 }
                 data[idx as usize] = val;
                 idx += 1;
@@ -2845,12 +2868,15 @@ mod no_panic {
     }
 
     extern "C" fn no_panic_handler(sig: i32) {
-        unsafe {
-            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
-            libc::signal(libc::SIGABRT, libc::SIG_DFL);
-            libc::signal(libc::SIGBUS, libc::SIG_DFL);
-            libc::signal(libc::SIGILL, libc::SIG_DFL);
-            libc::signal(libc::SIGFPE, libc::SIG_DFL);
+        // Only reset the signal that was actually caught, not all managed signals
+        if let Some(idx) = sig_index(sig) {
+            unsafe {
+                OLD_HANDLERS.with(|old| {
+                    let arr = &*old.get();
+                    // OLD_HANDLERS stores raw handler pointer as usize; cast back through usize
+                    libc::signal(sig, std::mem::transmute(arr[idx]));
+                });
+            }
         }
         NO_PANIC_JUMP_BUF.with(|buf| {
             let jmp_buf = buf.get();
@@ -2919,11 +2945,25 @@ pub extern "C" fn mimi_runtime_set_error_handler(handler: Option<ErrorHandler>) 
 
 #[no_mangle]
 pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
-    if !msg.is_null() {
-        let s = unsafe { CStr::from_ptr(msg) };
-        eprintln!("[FFI contract violation] {}", s.to_string_lossy());
-    } else {
-        eprintln!("[FFI contract violation] (no details)");
+    // P3-19 fix: write to stderr fd using raw syscall (async-signal-safe),
+    // instead of eprintln!() which acquires locks that may deadlock in signal context.
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const PREFIX: &[u8] = b"[FFI contract violation] ";
+    const HINT: &[u8] = b"\nHint: use --skip-verify-ffi to disable contract checking.\n";
+    const DETAIL: &[u8] = b"(no details)\n";
+    unsafe {
+        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
+        if !msg.is_null() {
+            let s = CStr::from_ptr(msg);
+            let loss = s.to_string_lossy();
+            let bytes = loss.as_bytes();
+            let _ = write(2, bytes.as_ptr() as *const std::ffi::c_void, bytes.len());
+        } else {
+            let _ = write(2, DETAIL.as_ptr() as *const std::ffi::c_void, DETAIL.len());
+        }
+        let _ = write(2, HINT.as_ptr() as *const std::ffi::c_void, HINT.len());
     }
 
     let handler_ptr = ERROR_HANDLER.load(Ordering::Acquire);
@@ -2934,7 +2974,6 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
         std::process::abort();
     }
 
-    eprintln!("Hint: use --skip-verify-ffi to disable contract checking.");
     std::process::abort();
 }
 
@@ -3067,10 +3106,19 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     // Spin until completed (the spawned thread sets completed=1 after poll_fn returns)
     // Uses Acquire ordering to synchronize-with the Release store in set_completed,
     // ensuring result data written before the completed flag is visible.
+    // P2-12 fix: bounded spin with max iterations to prevent infinite CPU spin on bug.
     unsafe {
         let rep = &*(future as *const MimiFutureRepr);
+        let mut iterations: u64 = 0;
+        const MAX_SPIN_ITERATIONS: u64 = 1_000_000;
         while rep.completed.load(Ordering::Acquire) == 0 {
             std::thread::yield_now();
+            iterations += 1;
+            if iterations >= MAX_SPIN_ITERATIONS {
+                // Future not completed after max spin iterations — abort rather than
+                // spin forever (which would consume 100% CPU indefinitely on bug).
+                std::process::abort();
+            }
         }
     }
 }

@@ -252,13 +252,13 @@ impl<'a> Interpreter<'a> {
                 // SAFETY: self is a mutable reference that lives for the duration of
                 // the synchronous C call. The C call may invoke callbacks on the same
                 // thread, which will read this context.
-                let interp_ptr: *const Interpreter<'_> = self;
+                let interp_ptr: *mut Interpreter<'_> = self;
                 // SAFETY: The interpreter outlives the synchronous C call.
                 // The C call runs on the same thread and callbacks only execute
                 // during the C function's execution, which is within the scope
                 // of `self`.
                 #[allow(clippy::unnecessary_cast)]
-                let static_ptr = interp_ptr as *const Interpreter<'static>;
+                let static_ptr = interp_ptr as *mut Interpreter<'static>;
                 super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
                     ctx.interp = static_ptr;
@@ -315,7 +315,7 @@ impl<'a> Interpreter<'a> {
                 } else {
                     super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {
                         let mut ctx = c.borrow_mut();
-                        ctx.interp = std::ptr::null();
+                        ctx.interp = std::ptr::null_mut();
                         ctx.entries.clear();
                     });
                 }

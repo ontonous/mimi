@@ -419,6 +419,11 @@ impl<'a> Interpreter<'a> {
                     let vals = vals?;
                     return self.eval_call_dispatch(callee, &vals, args);
                 }
+            } else {
+                // P2-9: Named args with Expr::Field (method calls) or Expr::Index
+                // are not yet supported — the args are evaluated positionally without
+                // reordering. The fix requires type information to look up method signatures.
+                // Falls through to positional evaluation below.
             }
         }
 
