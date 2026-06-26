@@ -428,21 +428,11 @@ pub fn fmt_type(t: &Type) -> String {
         Type::LocalShared(inner) => format!("local_shared {}", fmt_type(inner)),
         Type::Weak(inner) => format!("weak {}", fmt_type(inner)),
         Type::WeakLocal(inner) => format!("weak_local {}", fmt_type(inner)),
-        // Newtype is transparent when wrapping a capability or primitive type —
-        // fmt_type aligns with same_type so equal types produce equal output.
+        // Newtype is transparent when wrapping a non-Newtype inner type.
+        // This aligns fmt_type with same_type: if same_type(Newtype(x, A), B) is true,
+        // then fmt_type(Newtype(x, A)) == fmt_type(B).
         Type::Newtype(_name, inner) => {
-            let inner_is_transparent = match inner.as_ref() {
-                // Leaf/primitive types that newtype wraps transparently
-                Type::Cap(_) | Type::Nothing | Type::RawString | Type::Allocator | Type::Infer => true,
-                // Primitive type names (int, bool, str, float, unit)
-                Type::Name(n, args) if args.is_empty() => {
-                    matches!(n.as_str(), "int" | "bool" | "str" | "float" | "unit" | "u8"
-                        | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize"
-                        | "f32" | "f64")
-                }
-                _ => false,
-            };
-            if inner_is_transparent {
+            if !matches!(inner.as_ref(), Type::Newtype(..)) {
                 fmt_type(inner)
             } else {
                 format!("newtype {} {}", _name, fmt_type(inner))
