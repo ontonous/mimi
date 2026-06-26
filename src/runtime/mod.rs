@@ -3239,3 +3239,204 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
         false
     })
 }
+
+// ─── Directory & path operations ───────────────────────────────
+
+/// Returns a Mimi List of entry names in the given directory.
+/// Returns an empty list on error (not a directory, permission denied, etc.).
+#[no_mangle]
+pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
+    let path_str = if path.is_null() {
+        return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true }));
+    } else {
+        match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+        }
+    };
+    let entries: Vec<*mut std::ffi::c_char> = match std::fs::read_dir(path_str) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| alloc_c_string(s))
+            })
+            .collect(),
+        Err(_) => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+    };
+    let len = entries.len() as i64;
+    let mut items = entries;
+    let data_ptr = items.as_mut_ptr();
+    std::mem::forget(items);
+    Box::into_raw(Box::new(MimiList { len, data: data_ptr, owns_data: true }))
+}
+
+/// Returns 1 if path is a directory, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::path::Path::new(path_str).is_dir() { 1 } else { 0 }
+}
+
+/// Returns 1 if path is a regular file, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::path::Path::new(path_str).is_file() { 1 } else { 0 }
+}
+
+/// Joins two path components. Returns a new allocated string.
+#[no_mangle]
+pub extern "C" fn mimi_path_join(
+    a: *const std::ffi::c_char,
+    b: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let a_str = if a.is_null() {
+        ""
+    } else {
+        match unsafe { CStr::from_ptr(a) }.to_str() {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+    };
+    let b_str = if b.is_null() {
+        ""
+    } else {
+        match unsafe { CStr::from_ptr(b) }.to_str() {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+    };
+    let joined = std::path::Path::new(a_str)
+        .join(b_str)
+        .to_string_lossy()
+        .into_owned();
+    alloc_c_string(&joined)
+}
+
+/// Returns the file extension (without dot). Returns "" if none.
+#[no_mangle]
+pub extern "C" fn mimi_path_ext(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    if path.is_null() {
+        return alloc_c_string("");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    let ext = std::path::Path::new(path_str)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    alloc_c_string(ext)
+}
+
+/// Returns the filename component of a path.
+#[no_mangle]
+pub extern "C" fn mimi_path_basename(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    if path.is_null() {
+        return alloc_c_string("");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    let name = std::path::Path::new(path_str)
+        .file_name()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    alloc_c_string(name)
+}
+
+/// Returns the directory component of a path.
+#[no_mangle]
+pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    if path.is_null() {
+        return alloc_c_string("");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    let dir = std::path::Path::new(path_str)
+        .parent()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    alloc_c_string(dir)
+}
+
+/// Recursively walks a directory and returns all file paths (as a Mimi List).
+#[no_mangle]
+pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList {
+    let empty = || Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true }));
+    let path_str = if path.is_null() {
+        return empty();
+    } else {
+        match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return empty(),
+        }
+    };
+    let mut results = Vec::new();
+    walk_dir_recursive(path_str, &mut results);
+    let len = results.len() as i64;
+    let mut items: Vec<*mut std::ffi::c_char> = results.into_iter().map(|s| alloc_c_string(&s)).collect();
+    let data_ptr = items.as_mut_ptr();
+    std::mem::forget(items);
+    Box::into_raw(Box::new(MimiList { len, data: data_ptr, owns_data: true }))
+}
+
+fn walk_dir_recursive(dir: &str, results: &mut Vec<String>) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().into_owned();
+        if path.is_dir() {
+            walk_dir_recursive(&path_str, results);
+        } else {
+            results.push(path_str);
+        }
+    }
+}
+
+/// Creates a directory and all parent directories. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::fs::create_dir_all(path_str).is_ok() { 1 } else { 0 }
+}
+
+/// Removes a file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::fs::remove_file(path_str).is_ok() { 1 } else { 0 }
+}

@@ -1,0 +1,56 @@
+// mimi-stat: 文件统计 CLI 工具
+// 测试新实现的目录/路径内置函数
+
+func main() -> i32 {
+    let target = "."
+
+    println("=== mimi-stat ===")
+    println("Scanning:", target)
+
+    if !file_exists(target) {
+        println("Error: path does not exist:", target)
+        return 1
+    }
+
+    // G-01 已修复: listdir
+    let entries = listdir(target)
+    println("Entries found:", len(entries))
+
+    let mut file_count = 0
+    let mut dir_count = 0
+
+    for entry in entries {
+        // G-04 已修复: path_join
+        let full_path = path_join(target, entry)
+        // G-03 已修复: is_dir
+        if is_dir(full_path) {
+            dir_count = dir_count + 1
+            println("  [DIR] ", entry)
+        } else {
+            file_count = file_count + 1
+            println("  [FILE]", entry)
+        }
+    }
+
+    // G-02 已修复: walk_dir (递归)
+    let all_files = walk_dir("examples")
+    println("")
+    println("Recursive walk of examples/:")
+    println("  Total files:", len(all_files))
+    for f in all_files {
+        let ext = path_ext(f)
+        println("  ", f, "(", ext, ")")
+    }
+
+    // 路径工具演示
+    println("")
+    println("Path utilities:")
+    println("  path_join('a', 'b') =", path_join("a", "b"))
+    println("  path_ext('file.txt') =", path_ext("file.txt"))
+    println("  path_basename('/a/b/c.txt') =", path_basename("/a/b/c.txt"))
+    println("  path_dirname('/a/b/c.txt') =", path_dirname("/a/b/c.txt"))
+    println("  is_dir('.') =", is_dir("."))
+    println("  is_file('examples/hello.mimi') =", is_file("examples/hello.mimi"))
+
+    0
+}

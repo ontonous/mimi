@@ -177,6 +177,26 @@ declare ptr @mimi_spawn_future(ptr, ptr)
 
 declare void @mimi_await_future(ptr)
 
+declare ptr @mimi_listdir(ptr)
+
+declare i64 @mimi_is_dir(ptr)
+
+declare i64 @mimi_is_file(ptr)
+
+declare ptr @mimi_path_join(ptr, ptr)
+
+declare ptr @mimi_path_ext(ptr)
+
+declare ptr @mimi_path_basename(ptr)
+
+declare ptr @mimi_path_dirname(ptr)
+
+declare ptr @mimi_walk_dir(ptr)
+
+declare i64 @mimi_mkdir_p(ptr)
+
+declare i64 @mimi_remove_file(ptr)
+
 define i1 @main() {
 entry:
   %t = alloca i1, align 1
