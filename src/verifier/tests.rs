@@ -1605,3 +1605,77 @@ func main() -> i32 { 0 }
         f.unwrap().status,
     );
 }
+
+/// P1.2: let-bound call expressions outside tail position should propagate callee ensures.
+/// Previously, `let_subst` was only applied to body_return, so `assert_callee_ensures_in_block`
+/// saw bare identifiers (e.g. `d`) instead of expanded calls (e.g. `double(y)`), causing
+/// callee ensures to be silently dropped.
+#[test]
+fn verify_let_bound_call_ensures_propagated() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    x * 2
+}
+
+func caller(y: i32) -> i32 {
+    requires: y >= 0
+    ensures: result >= 0
+    let d = double(y);
+    let _unused = d + 1;  // d used here, not just in tail position
+    d  // tail returns d, whose value depends on double's ensures
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("P1.2: let_subst propagation");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(
+        caller.is_some(),
+        "caller function should be verified"
+    );
+    assert_eq!(
+        caller.unwrap().status,
+        VerifStatus::Verified,
+        "caller should verify because double's ensures (result >= 0) is propagated to let-bound d: {:?}",
+        caller.unwrap().message
+    );
+}
+
+/// P1.2 variant: let-bound call with ensures violation should fail even when the call
+/// is not in tail position (proving the ensures was actually propagated and checked).
+#[test]
+fn verify_let_bound_call_ensures_violation_detected() {
+    require_z3!();
+    let src = r#"
+func half(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    x / 2
+}
+
+func caller(y: i32) -> i32 {
+    requires: y >= 0
+    ensures: result >= 10  // requires that d >= 10, but half's ensures only guarantees d >= 0
+    let d = half(y);      // if y = 0, d = 0 which violates result >= 10
+    d
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("P1.2: let_subst violation detection");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(
+        caller.is_some(),
+        "caller function should be present"
+    );
+    // With P1.2 fix: half's ensures (d >= 0) is propagated, so verifier knows
+    // d >= 0 but requires d >= 10 → violation detected → Failed
+    // Without fix: half's ensures not propagated → no constraint on d → potentially Verified
+    assert_eq!(
+        caller.unwrap().status,
+        VerifStatus::Failed,
+        "caller should fail because half's ensures doesn't guarantee result >= 10: {:?}",
+        caller.unwrap().message
+    );
+}
