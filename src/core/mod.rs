@@ -82,6 +82,11 @@ fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str
                 verify_rules_in_block(body, errors, context);
                 last_was_rule = false;
             }
+            // Bug-9 fix: WhileLet also has a body that may contain rules
+            Stmt::WhileLet { body, .. } => {
+                verify_rules_in_block(body, errors, context);
+                last_was_rule = false;
+            }
             Stmt::If { then_, else_, .. } => {
                 verify_rules_in_block(then_, errors, context);
                 if let Some(else_) = else_ {

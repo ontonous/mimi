@@ -27,7 +27,8 @@ impl<'a> Checker<'a> {
         // Check if it's a zero-argument constructor (enum variant without payload)
         if let Some((params, ret)) = self.funcs.get(name) {
             if params.is_empty() {
-                // Arch-4: resolve TypeVars in constructor return type
+                // Bug-2 fix: resolve TypeVars in constructor return type before returning.
+                // The ret type may contain TypeVars from inference that need to be resolved.
                 return self.unification.resolve(ret);
             }
         }

@@ -302,7 +302,7 @@ impl<'a> Checker<'a> {
     /// borrow reference variable is NOT used in the current or any later statement.
     pub(crate) fn release_borrows_at_last_use(&mut self, block: &[Stmt], current_idx: usize) {
         // Collect currently borrowed variables and their borrow reference names
-        let borrows: Vec<(String, String)> = {
+        let borrows: Vec<(String, Option<String>)> = {
             if let Some(scope) = self.borrows.last() {
                 scope
                     .iter()
@@ -319,13 +319,19 @@ impl<'a> Checker<'a> {
             }
         };
 
-        for (borrowed_var, borrow_ref) in &borrows {
+        for (borrowed_var, borrow_ref_opt) in &borrows {
             if matches!(
                 self.lookup_borrow(borrowed_var),
                 Some(BorrowState::Unborrowed) | None
             ) {
                 continue;
             }
+
+            // Bug-4 fix: if borrow_ref is None, we can't track the reference variable
+            // (borrow was created through complex expressions), so skip NLL release
+            let Some(borrow_ref) = borrow_ref_opt else {
+                continue;
+            };
 
             // NLL: Release borrow if the reference variable is completely unused from now on.
             // Check: is the reference used in any statement from current_idx onward?
@@ -342,7 +348,7 @@ impl<'a> Checker<'a> {
         }
 
         // E5: Also release field-level borrows at their last use.
-        let field_borrows: Vec<(String, String, String)> = {
+        let field_borrows: Vec<(String, String, Option<String>)> = {
             if let Some(scope) = self.field_borrows.last() {
                 scope
                     .iter()
@@ -358,10 +364,14 @@ impl<'a> Checker<'a> {
             }
         };
 
-        for (borrowed_var, field, borrow_ref) in &field_borrows {
+        for (borrowed_var, field, borrow_ref_opt) in &field_borrows {
             if self.is_field_borrowed(borrowed_var, field, false).is_none() {
                 continue;
             }
+            // Bug-4 fix: if borrow_ref is None, skip NLL release for this field borrow
+            let Some(borrow_ref) = borrow_ref_opt else {
+                continue;
+            };
             let ref_used_after = block[current_idx..].iter().any(|s| {
                 let mut uses = Vec::new();
                 Self::collect_uses_in_stmt(s, &mut uses);
@@ -375,12 +385,14 @@ impl<'a> Checker<'a> {
 
     /// Find the name of the variable that holds a borrow reference to `borrowed_var`.
     /// Scans earlier statements for `let ref_name = &borrowed_var` patterns.
+    /// Returns None if the borrow was created through complex expressions
+    /// (e.g., let r = ((&x),).0, let r = foo(&x), etc.) where NLL release cannot be tracked.
     pub(crate) fn find_borrow_ref(
         &self,
         borrowed_var: &str,
         block: &[Stmt],
         current_idx: usize,
-    ) -> String {
+    ) -> Option<String> {
         for stmt in &block[..current_idx] {
             if let Stmt::Let {
                 pat,
@@ -391,7 +403,7 @@ impl<'a> Checker<'a> {
                 if let Expr::Ident(name) = inner.as_ref() {
                     if name == borrowed_var {
                         if let Pattern::Variable(ref_name) = pat {
-                            return ref_name.clone();
+                            return Some(ref_name.clone());
                         }
                     }
                 }
@@ -405,12 +417,15 @@ impl<'a> Checker<'a> {
                 if let Expr::Ident(name) = inner.as_ref() {
                     if name == borrowed_var {
                         if let Pattern::Variable(ref_name) = pat {
-                            return ref_name.clone();
+                            return Some(ref_name.clone());
                         }
                     }
                 }
             }
         }
-        borrowed_var.to_string()
+        // Bug-4 fix: return None when we can't trace the borrow reference.
+        // This signals to the NLL release logic that it should NOT release
+        // the borrow automatically since we can't track proper last-use.
+        None
     }
 }

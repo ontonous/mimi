@@ -161,7 +161,9 @@ impl<'a> Checker<'a> {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
             }
-            Stmt::WhileLet { body, .. } => {
+            Stmt::WhileLet { pat: _, init, body } => {
+                // Bug-6 fix: check init expression for shared writes (e.g., shared_var.pop())
+                self.collect_shared_writes_in_expr(init, scopes, writes);
                 for s in body {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }

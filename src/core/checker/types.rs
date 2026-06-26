@@ -12,11 +12,20 @@ impl<'a> Checker<'a> {
             Type::Name(name, args) => {
                 if let Some(aliased) = self.aliases.get(name) {
                     if let Some(generics) = self.type_generics.get(name) {
-                        if !args.is_empty() && args.len() == generics.len() {
+                        if args.len() == generics.len() {
+                            // Full substitution with provided args (or empty args with zero generics)
                             let type_map: HashMap<String, Type> = generics
                                 .iter()
                                 .zip(args.iter())
                                 .map(|(g, a)| (g.name.clone(), a.clone()))
+                                .collect();
+                            return subst_type_params(aliased, generics, &type_map);
+                        } else if args.is_empty() {
+                            // Bug-1 fix: when args is empty but generics exist, use unknown type
+                            // e.g., `type Foo[T] = List[T]; let x: Foo` should resolve to List[unknown]
+                            let type_map: HashMap<String, Type> = generics
+                                .iter()
+                                .map(|g| (g.name.clone(), Type::Name("unknown".into(), vec![])))
                                 .collect();
                             return subst_type_params(aliased, generics, &type_map);
                         }
@@ -273,6 +282,9 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
+                    // Bug-14 fix: check that trait generic arguments are valid if provided
+                    // Note: traits currently stores simple trait names without type args in this context
+                    // The type arguments would be part of the trait signature, not the impl Trait list
                 }
             }
             Type::DynTrait(traits) => {

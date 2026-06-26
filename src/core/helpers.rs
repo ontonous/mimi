@@ -216,7 +216,11 @@ pub fn subst_type_params(
         Type::Slice(inner) => Type::Slice(Box::new(subst_type_params(inner, generics, type_map))),
         Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
         Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
-        Type::TypeVar(_) => ty.clone(),
+        Type::TypeVar(_) => ty.clone(),  // Bug-3 clarification: TypeVar represents inference variables (u32 IDs)
+        // NOT user-defined type parameters. User params like `T` in `type Foo[T] = T`
+        // are stored as Type::Name("T", vec![]), which IS replaced by subst_type_params.
+        // TypeVar is created by the inference engine and should be resolved by unify, not
+        // by generic parameter substitution.
         Type::ForAll(params, body) => Type::ForAll(
             params.clone(),
             Box::new(subst_type_params(body, generics, type_map)),

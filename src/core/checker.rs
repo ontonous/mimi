@@ -67,7 +67,10 @@ pub(crate) struct Checker<'a> {
     /// C2: Unification table for type inference
     pub(crate) unification: UnificationTable,
     /// C1/Arch-5: Arena with hash-consing for O(1) type equality.
-    /// Used to intern canonical types when storing in maps (funcs, aliases, newtypes).
+    /// Bug-12: Currently only provides arena infrastructure (intern_type/get_type/arena_len)
+    /// but is NOT integrated into the main type comparison path. The checker still uses
+    /// same_type() for structural comparisons which is O(N). This is known tech debt.
+    /// Integration would require replacing Type equality checks with TypeId comparisons.
     arena: TypeArena,
 }
 
@@ -389,6 +392,11 @@ impl<'a> Checker<'a> {
     /// C4: Instantiate a ForAll type — replace bound variables with fresh TypeVars.
     ///
     /// When using a polymorphic function, call this to get a fresh copy.
+    ///
+    /// Bug-8 clarification: params (Vec<String>) are labels for error messages only,
+    /// not used for type substitution. The actual substitution uses integer indices
+    /// (i as u32) matching TypeVar IDs in the body. This avoids confusion between
+    /// user-defined type parameters (Type::Name) and inference variables (TypeVar).
     pub(crate) fn instantiate(&mut self, ty: &Type) -> Type {
         match ty {
             Type::ForAll(params, body) => {
