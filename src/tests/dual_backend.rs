@@ -4029,4 +4029,168 @@ fn dual_invariant_nested_block() {
 // constructor syntax does not allow creating a set to trigger this path.
 // The fix is verified by the runtime unit tests.
 
+// ─── Additional v0.27.6 Regression Tests ────────────────────────────────────
+
+// P2-8: Nested invariant inside loop body (not just while).
+#[test]
+fn dual_invariant_nested_in_loop() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut i = 0
+            loop {
+                invariant: i >= 0
+                invariant: i <= 5
+                if i >= 4 { break }
+                i = i + 1
+            }
+            println(i)
+            0
+        }
+    "#,
+        "4"
+    );
+}
+
+// P2-8: Nested invariant — invariant inside a while whose body has if/else.
+// Verifies check_invariants recursively descends into if branches.
+#[test]
+fn dual_invariant_nested_if_in_while() {
+    if !can_link() {
+        return;
+    }
+    // The outer invariant x >= 0 must hold throughout; the if/else inside
+    // the while is traversed recursively by check_invariants.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut x = 0
+            while x < 5 {
+                invariant: x >= 0
+                if x < 3 {
+                    x = x + 1
+                } else {
+                    x = x + 1
+                }
+            }
+            println(x)
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
+// BUG-5: MIMI_OPT caching — compile_to_object called multiple times
+// must not use stale cached optimize flag from a previous call.
+#[test]
+fn dual_mimi_opt_cache_varied() {
+    if !can_link() {
+        return;
+    }
+    // First: compile and run, verify correct output
+    let r1 = compile_and_run(
+        r#"
+        func main() -> i32 {
+            println(1 + 2)
+            0
+        }
+    "#,
+    )
+    .expect("first compile failed");
+    assert_eq!(r1.trim(), "3", "first compile output mismatch");
+
+    // Second: compile again — cached MIMI_OPT must not cause inconsistency
+    let r2 = compile_and_run(
+        r#"
+        func main() -> i32 {
+            println(4 + 5)
+            0
+        }
+    "#,
+    )
+    .expect("second compile failed");
+    assert_eq!(r2.trim(), "9", "second compile output mismatch (stale cache?)");
+}
+
+// P2-11: eval_quoted_ast Interpolate must not double-clone Box<Value>.
+// If the bug were present (double clone on Interpolate), the second ast_eval
+// would double-free the captured variable `n` and abort the process.
+// Note: quote! is comptime-only, tested via interpreter only.
+#[test]
+fn dual_quote_interpolate_snapshot() {
+    let src = r#"
+    func main() -> i32 {
+        let n = 7
+        let q = quote! { n * 2 }
+        let r1 = ast_eval(q)
+        let r2 = ast_eval(q)
+        println(r1)
+        println(r2)
+        0
+    }
+    "#;
+    // Both evaluations must succeed without panic (double-free would abort).
+    let v1 = run_source(src);
+    let v2 = run_source(src);
+    assert_eq!(v1, interp::Value::Int(0), "first eval must succeed");
+    assert_eq!(v2, interp::Value::Int(0), "second eval must succeed (no double-free)");
+}
+
+// P0-2: parasteps with spawn in nested scope (inner block).
+#[test]
+fn dual_parasteps_spawn_nested_scope() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut results = [0, 0]
+            parasteps {
+                let f1 = spawn {
+                    let x = 10
+                    x * 2
+                }
+                let f2 = spawn {
+                    let y = 5
+                    y + 3
+                }
+                results[0] = await f1
+                results[1] = await f2
+            }
+            println(results[0])
+            println(results[1])
+            0
+        }
+    "#,
+        "20\n8"
+    );
+}
+
+// QUAL-2: Arena block correctly isolates its scope — outer `let` shadows inner `let`.
+#[test]
+fn dual_arena_let_shadowing() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = 1
+            let result = arena {
+                let x = 2
+                x
+            }
+            println(result)
+            0
+        }
+    "#,
+        "2"
+    );
+}
+
 
