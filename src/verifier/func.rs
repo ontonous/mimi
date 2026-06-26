@@ -468,10 +468,19 @@ impl crate::verifier::Verifier {
         // let/assign/if blocks are also propagated. Fixes P0.1: ensures from
         // calls in non-tail positions (e.g. `let y = double(x); y`) are now
         // propagated to the solver.
+        // P1.2 fix: also expand let-bindings in body statements so that
+        // `let y = double(x); y` expands to `double(x)` before ensures propagation,
+        // ensuring callee ensures are propagated even when the call result is
+        // stored in a let-bound variable.
         if let Some(ref return_expr) = body_return {
             self.assert_callee_ensures_in_expr(return_expr, &mut vars);
         }
-        self.assert_callee_ensures_in_block(&func.body, &mut vars);
+        let expanded_body: Vec<Stmt> = func
+            .body
+            .iter()
+            .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
+            .collect();
+        self.assert_callee_ensures_in_block(&expanded_body, &mut vars);
 
         let num_real_params = func
             .params

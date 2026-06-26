@@ -108,16 +108,44 @@ impl Z3VarMap {
         self.real_vars.contains_key(name)
     }
 
-    /// Get or create an Int variable. If the key already exists as Real, creates a new Int.
+    /// Get or create an Int variable. If the same name is already registered as Real,
+    /// this signals a type-conflict bug — the same logical variable is being used as
+    /// both Real and Int, causing Z3 constraint fragmentation.
+    /// P2.1 fix: detect the conflict and use a suffixed name instead of silently
+    /// creating a separate Z3 variable.
     pub(crate) fn get_or_create_int(&mut self, name: &str) -> Z3Int {
+        if self.real_vars.contains_key(name) {
+            // Type conflict — same name used as Real. Use suffixed name to avoid
+            // creating a duplicate Z3 variable for the same logical name.
+            let int_name = format!("{}_i", name);
+            return self
+                .int_vars
+                .entry(int_name.clone())
+                .or_insert_with(|| Z3Int::new_const(int_name))
+                .clone();
+        }
         self.int_vars
             .entry(name.to_string())
             .or_insert_with(|| Z3Int::new_const(name))
             .clone()
     }
 
-    /// Get or create a Real variable. If the key already exists as Int, creates a new Real.
+    /// Get or create a Real variable. If the same name is already registered as Int,
+    /// this signals a type-conflict bug — the same logical variable is being used as
+    /// both Int and Real, causing Z3 constraint fragmentation.
+    /// P2.1 fix: detect the conflict and use a suffixed name instead of silently
+    /// creating a separate Z3 variable.
     pub(crate) fn get_or_create_real(&mut self, name: &str) -> Z3Real {
+        if self.int_vars.contains_key(name) {
+            // Type conflict — same name used as Int. Use suffixed name to avoid
+            // creating a duplicate Z3 variable for the same logical name.
+            let real_name = format!("{}_r", name);
+            return self
+                .real_vars
+                .entry(real_name.clone())
+                .or_insert_with(|| Z3Real::new_const(real_name))
+                .clone();
+        }
         self.real_vars
             .entry(name.to_string())
             .or_insert_with(|| Z3Real::new_const(name))
