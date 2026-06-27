@@ -4856,4 +4856,117 @@ fn dual_filter_inline_closure() {
     );
 }
 
+// ─── v0.28.5: Process & advanced file operations ────────────────
+
+#[test]
+fn dual_exec_basic() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = exec("echo hello")
+            println(r.exit_code)
+            0
+        }
+        "#,
+        "0"
+    );
+}
+
+#[test]
+fn dual_exec_stdout() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = exec("echo hello")
+            println(r.stdout)
+            0
+        }
+        "#,
+        "hello"
+    );
+}
+
+#[test]
+fn dual_exec_exit_code() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = exec("exit 42")
+            println(r.exit_code)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_file_stat_file() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_stat_test.txt", "hello world")
+            let s = file_stat("/tmp/mimi_stat_test.txt")
+            println(s.is_file)
+            println(s.is_dir)
+            println(s.size)
+            0
+        }
+        "#,
+        "1\n0\n11"
+    );
+}
+
+#[test]
+fn dual_file_stat_dir() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            mkdir_p("/tmp/mimi_stat_dir_test")
+            let s = file_stat("/tmp/mimi_stat_dir_test")
+            println(s.is_file)
+            println(s.is_dir)
+            0
+        }
+        "#,
+        "0\n1"
+    );
+}
+
+#[test]
+fn dual_append_file() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_append_test.txt", "hello")
+            let ok = append_file("/tmp/mimi_append_test.txt", " world")
+            println(ok)
+            0
+        }
+        "#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_set_env() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ok = set_env("MIMI_TEST_VAR", "test_value_42")
+            println(ok)
+            0
+        }
+        "#,
+        "1"
+    );
+}
+
 
