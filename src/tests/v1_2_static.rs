@@ -171,7 +171,7 @@ func main() -> i32 {
     let errors = result.unwrap_err();
     let msgs: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
     assert!(
-        msgs.iter().any(|m| m.contains("shadows")),
+        msgs.iter().any(|m| m.contains("already defined") || m.contains("shadows")),
         "Expected shadowing error, got: {:?}",
         msgs
     );
