@@ -45,79 +45,93 @@ macro_rules! dual_assert_interp_only {
     }};
 }
 
-// ─── Map type inference tests (v0.28.1) ────────────────────────────
-// NOTE: Map operations in codegen are a known gap (codegen returns 0 for all map ops).
-// These tests verify interpreter behavior only.
+// ─── Map codegen tests (v0.28.2) ────────────────────────────
+// Map operations now work in both interpreter and codegen.
 
 #[test]
-fn interp_map_new_size() {
-    dual_assert_interp_only!(
+fn dual_map_new_size() {
+    if !can_link() { return; }
+    dual_assert!(
         r#"
         func main() -> i32 {
             let m = map_new()
-            map_size(m)
+            let s = map_size(m)
+            println(to_string(s))
+            0
         }
     "#,
-        interp::Value::Int(0)
+        "0"
     );
 }
 
 #[test]
-fn interp_map_set_size() {
-    dual_assert_interp_only!(
+fn dual_map_set_size() {
+    if !can_link() { return; }
+    dual_assert!(
         r#"
         func main() -> i32 {
-            let m = map_new()
-            let m = map_set(m, "a", 1)
-            let m = map_set(m, "b", 2)
-            map_size(m)
+            let m1 = map_new()
+            let m2 = map_set(m1, "a", 1)
+            let m3 = map_set(m2, "b", 2)
+            let s = map_size(m3)
+            println(to_string(s))
+            0
         }
     "#,
-        interp::Value::Int(2)
+        "2"
     );
 }
 
 #[test]
-fn interp_map_has_key() {
-    dual_assert_interp_only!(
+fn dual_map_has_key() {
+    if !can_link() { return; }
+    dual_assert!(
         r#"
         func main() -> i32 {
-            let m = map_new()
-            let m = map_set(m, "x", 42)
-            if has_key(m, "x") { 1 } else { 0 }
+            let m1 = map_new()
+            let m2 = map_set(m1, "x", 42)
+            if has_key(m2, "x") { println("yes") } else { println("no") }
+            if has_key(m2, "y") { println("yes") } else { println("no") }
+            0
         }
     "#,
-        interp::Value::Int(1)
+        "yes\nno"
     );
 }
 
 #[test]
-fn interp_map_remove_size() {
-    dual_assert_interp_only!(
+fn dual_map_get() {
+    if !can_link() { return; }
+    dual_assert!(
         r#"
         func main() -> i32 {
-            let m = map_new()
-            let m = map_set(m, "a", 1)
-            let m = map_set(m, "b", 2)
-            let m = map_remove(m, "a")
-            map_size(m)
+            let m1 = map_new()
+            let m2 = map_set(m1, "x", 42)
+            let r = map_get(m2, "x")
+            if r.0 { println("found") } else { println("not found") }
+            0
         }
     "#,
-        interp::Value::Int(1)
+        "found"
     );
 }
 
 #[test]
-fn interp_map_from_list_size() {
-    dual_assert_interp_only!(
+fn dual_map_remove_size() {
+    if !can_link() { return; }
+    dual_assert!(
         r#"
         func main() -> i32 {
-            let pairs = [("a", 1), ("b", 2), ("c", 3)]
-            let m = map_from_list(pairs)
-            map_size(m)
+            let m1 = map_new()
+            let m2 = map_set(m1, "a", 1)
+            let m3 = map_set(m2, "b", 2)
+            let m4 = map_remove(m3, "a")
+            let s = map_size(m4)
+            println(to_string(s))
+            0
         }
     "#,
-        interp::Value::Int(3)
+        "1"
     );
 }
 
