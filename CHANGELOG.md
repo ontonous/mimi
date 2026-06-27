@@ -8,7 +8,21 @@
 
 ### Fixed
 
-_(待填充)_
+- **Type inference**: map builtins return proper types instead of `unknown`
+  - `map_new` → `Record`
+  - `map_get` → `(bool, Any)` tuple
+  - `map_set` → `Record`
+  - `map_remove` → `Record`
+  - `map_from_list` → `Record`
+  - `from_json` → `Record` (was `string`)
+  - `keys`/`values` → `List<string>` (was `List<unknown>`)
+
+### Known Gaps (documented)
+
+- `const` keyword not supported at top level
+- `Record` not a valid type annotation
+- `as i32`/`as i64` cast not supported
+- Map operations in codegen return 0 (interpreter works correctly)
 
 ---
 
