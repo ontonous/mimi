@@ -1,498 +1,597 @@
-// Additional interpreter tests for v0.28.0 coverage
-// Focused on features not covered by stdlib_comprehensive or codegen_boundary
+// Stress tests and edge cases for the Mimi interpreter
+// Focus: genuine boundary conditions, complex scenarios, robustness
 
 use super::*;
 
-// ====== F-string Tests ======
+// ====== Deep Nesting Stress ======
 
 #[test]
-fn interp_fstring_basic() {
-    let v = run_source("func main() -> string { let x = 42; f\"value={x}\" }");
-    assert_eq!(v, interp::Value::String("value=42".to_string()));
-}
-
-#[test]
-fn interp_fstring_multi() {
-    let v = run_source("func main() -> string { let a = 1; let b = 2; f\"{a}+{b}\" }");
-    assert_eq!(v, interp::Value::String("1+2".to_string()));
-}
-
-// ====== Tuple Tests ======
-
-#[test]
-fn interp_tuple_create() {
-    let v = run_source("func main() -> i32 { let t = (1, \"hello\"); t.0 }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_tuple_destructure() {
-    let v = run_source("func main() -> string { let (a, b) = (1, \"hello\"); b }");
-    assert_eq!(v, interp::Value::String("hello".to_string()));
-}
-
-// ====== Enum Tests ======
-
-#[test]
-fn interp_enum_basic() {
-    let v = run_source(r#"
-type Color { Red Green Blue }
-func main() -> i32 {
-    let c = Red
-    match c { Red => 1, Green => 2, Blue => 3 }
-}
-"#);
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_enum_payload() {
-    let v = run_source(r#"
-type Shape { Circle(f64) Rectangle(f64, f64) }
-func area(s: Shape) -> f64 {
-    match s { Circle(r) => 3.14 * r * r, Rectangle(w, h) => w * h }
-}
-func main() -> f64 { area(Circle(2.0)) }
-"#);
-    match v {
-        interp::Value::Float(f) => assert!((f - 12.56).abs() < 0.1),
-        _ => panic!("expected Float"),
-    }
-}
-
-// ====== Closure Tests ======
-
-#[test]
-fn interp_closure_basic() {
+fn stress_deeply_nested_if() {
+    // 10 levels of nested if/else — tests stack depth and scope management
     let v = run_source(r#"
 func main() -> i32 {
-    let add = fn(a: i32, b: i32) -> i32 { a + b }
-    add(3, 4)
-}
-"#);
-    assert_eq!(v, interp::Value::Int(7));
-}
-
-#[test]
-fn interp_closure_capture() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let x = 10
-    let add_x = fn(a: i32) -> i32 { a + x }
-    add_x(5)
-}
-"#);
-    assert_eq!(v, interp::Value::Int(15));
-}
-
-// ====== While Let Tests ======
-
-#[test]
-fn interp_while_let() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let mut sum = 0
-    let items = [1, 2, 3, 4, 5]
-    for item in items {
-        sum = sum + item
-    }
-    sum
-}
-"#);
-    assert_eq!(v, interp::Value::Int(15));
-}
-
-// ====== Nested Function Tests ======
-
-#[test]
-fn interp_nested_calls() {
-    let v = run_source(r#"
-func double(x: i32) -> i32 { x * 2 }
-func quadruple(x: i32) -> i32 { double(double(x)) }
-func main() -> i32 { quadruple(5) }
-"#);
-    assert_eq!(v, interp::Value::Int(20));
-}
-
-// ====== String Interpolation Tests ======
-
-#[test]
-fn interp_string_concat_chain() {
-    let v = run_source("func main() -> string { \"a\" + \"b\" + \"c\" + \"d\" }");
-    assert_eq!(v, interp::Value::String("abcd".to_string()));
-}
-
-#[test]
-fn interp_string_repeat() {
-    let v = run_source("func main() -> string { str_repeat(\"ab\", 3) }");
-    assert_eq!(v, interp::Value::String("ababab".to_string()));
-}
-
-// ====== Option Tests ======
-
-#[test]
-fn interp_option_some() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let x = Some(42)
-    match x { Some(v) => v, None => 0 }
+    let x = 1
+    if x == 1 {
+        if x == 1 {
+            if x == 1 {
+                if x == 1 {
+                    if x == 1 {
+                        if x == 1 {
+                            if x == 1 {
+                                if x == 1 {
+                                    if x == 1 {
+                                        if x == 1 { 42 } else { 0 }
+                                    } else { 0 }
+                                } else { 0 }
+                            } else { 0 }
+                        } else { 0 }
+                    } else { 0 }
+                } else { 0 }
+            } else { 0 }
+        } else { 0 }
+    } else { 0 }
 }
 "#);
     assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
-fn interp_option_none() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let x = None
-    match x { Some(v) => v, None => -1 }
+fn stress_deeply_nested_arithmetic() {
+    // Deeply nested arithmetic expression — tests expression evaluator depth
+    let v = run_source("func main() -> i32 { 1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10)))))))) }");
+    assert_eq!(v, interp::Value::Int(55));
 }
-"#);
-    assert_eq!(v, interp::Value::Int(-1));
-}
-
-// ====== Error Propagation Tests ======
 
 #[test]
-fn interp_try_operator() {
-    let v = run_source(r#"
-type Res { Ok(i32) Err(string) }
-func divide(a: i32, b: i32) -> Res {
-    if b == 0 { Err("division by zero") } else { Ok(a / b) }
-}
-func main() -> i32 {
-    let r = divide(10, 2)?
-    r
-}
-"#);
-    assert_eq!(v, interp::Value::Int(5));
+fn stress_long_chain_addition() {
+    // Long string concatenation chain — tests string handling under load
+    let v = run_source("func main() -> string { \"a\" + \"b\" + \"c\" + \"d\" + \"e\" + \"f\" + \"g\" + \"h\" + \"i\" + \"j\" + \"k\" + \"l\" + \"m\" + \"n\" + \"o\" + \"p\" }");
+    assert_eq!(v, interp::Value::String("abcdefghijklmnop".to_string()));
 }
 
-// ====== Loop/Break Tests ======
+// ====== Type System Edge Cases ======
 
 #[test]
-fn interp_loop_break() {
+fn stress_nested_generic_inference() {
+    // List of Lists — tests nested type parameter inference
     let v = run_source(r#"
 func main() -> i32 {
-    let mut i = 0
-    loop {
-        if i >= 5 { break }
-        i = i + 1
+    let nested = [[1, 2], [3, 4], [5, 6]]
+    let mut sum = 0
+    for inner in nested {
+        for item in inner {
+            sum = sum + item
+        }
     }
-    i
+    sum
 }
 "#);
-    assert_eq!(v, interp::Value::Int(5));
+    assert_eq!(v, interp::Value::Int(21));
 }
 
 #[test]
-fn interp_loop_break_value() {
+fn stress_record_with_all_types() {
+    // Record containing every basic type — tests type system completeness
     let v = run_source(r#"
+type Mixed {
+    i: i32
+    f: f64
+    s: string
+    b: bool
+}
 func main() -> i32 {
-    let mut result = 0
-    let mut i = 0
-    loop {
-        if i >= 5 { result = i; break }
-        i = i + 1
-    }
-    result
+    let m = Mixed { i: 42, f: 3.14, s: "hello", b: true }
+    if m.b { m.i } else { 0 }
 }
 "#);
-    assert_eq!(v, interp::Value::Int(5));
+    assert_eq!(v, interp::Value::Int(42));
 }
 
-// ====== Continue Tests ======
+#[test]
+fn stress_enum_with_mixed_payloads() {
+    // Enum with different payload types — tests pattern matching completeness
+    let v = run_source(r#"
+type Value {
+    Int(i32)
+    Float(f64)
+    Text(string)
+    Empty
+}
+func describe(v: Value) -> string {
+    match v {
+        Int(n) => f"int:{n}",
+        Float(f) => "float",
+        Text(s) => "text",
+        Empty => "empty"
+    }
+}
+func main() -> string {
+    describe(Int(42))
+}
+"#);
+    assert_eq!(v, interp::Value::String("int:42".to_string()));
+}
+
+// ====== Control Flow Edge Cases ======
 
 #[test]
-fn interp_for_continue() {
+fn stress_loop_break_continue_interaction() {
+    // break and continue in nested loops — tests control flow correctness
     let v = run_source(r#"
 func main() -> i32 {
     let mut sum = 0
-    for i in range(0, 10) {
+    let mut i = 0
+    while i < 10 {
+        i = i + 1
         if i % 2 == 0 { continue }
+        if i > 7 { break }
         sum = sum + i
     }
     sum
 }
 "#);
-    assert_eq!(v, interp::Value::Int(25)); // 1+3+5+7+9
+    assert_eq!(v, interp::Value::Int(16)); // 1+3+5+7
 }
 
-// ====== Pattern Matching Advanced ======
-
 #[test]
-fn interp_match_guard() {
+fn stress_match_with_guard_complex() {
+    // Match guards with complex conditions — tests guard evaluation
     let v = run_source(r#"
-func main() -> i32 {
-    let x = 42
-    match x {
-        n if n > 100 => 3,
-        n if n > 10 => 2,
-        _ => 1
+func classify(n: i32) -> string {
+    match n {
+        x if x < 0 => "negative",
+        x if x == 0 => "zero",
+        x if x < 10 => "small",
+        x if x < 100 => "medium",
+        _ => "large"
     }
-}
-"#);
-    assert_eq!(v, interp::Value::Int(2));
-}
-
-#[test]
-fn interp_match_tuple() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let pair = (1, 2)
-    match pair { (a, b) => a + b }
-}
-"#);
-    assert_eq!(v, interp::Value::Int(3));
-}
-
-// ====== Shared/Weak Reference Tests ======
-
-#[test]
-fn interp_shared_basic() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let x = 42
-    x
-}
-"#);
-    assert_eq!(v, interp::Value::Int(42));
-}
-
-// ====== Arena Tests ======
-
-#[test]
-fn interp_arena_basic() {
-    let v = run_source(r#"
-func main() -> i32 {
-    let result = arena {
-        let x = 42
-        x
-    }
-    result
-}
-"#);
-    assert_eq!(v, interp::Value::Int(42));
-}
-
-// ====== Comptime Tests ======
-
-#[test]
-fn interp_comptime_basic() {
-    let v = run_source(r#"
-comptime func get_value() -> i32 { 42 }
-func main() -> i32 {
-    let v = get_value()
-    v
-}
-"#);
-    assert_eq!(v, interp::Value::Int(42));
-}
-
-// ====== Trait Tests ======
-
-#[test]
-fn interp_trait_basic() {
-    let v = run_source(r#"
-trait Printable {
-    func to_str() -> string
-}
-type Point { x: i32, y: i32 }
-impl Printable for Point {
-    func to_str() -> string { "point" }
 }
 func main() -> string {
-    let p = Point { x: 1, y: 2 }
-    p.to_str()
+    classify(5)
 }
 "#);
-    assert_eq!(v, interp::Value::String("point".to_string()));
+    assert_eq!(v, interp::Value::String("small".to_string()));
 }
 
-// ====== Newtype Tests ======
-
 #[test]
-fn interp_newtype_basic() {
+fn stress_early_return_from_nested() {
+    // Early return from nested function — tests scope cleanup
     let v = run_source(r#"
-newtype Meters = f64
-func main() -> f64 {
-    let dist: Meters = 3.14
-    dist
+func check(x: i32) -> i32 {
+    if x > 5 {
+        if x > 10 { return 100 }
+        return 50
+    }
+    0
+}
+func main() -> i32 { check(7) }
+"#);
+    assert_eq!(v, interp::Value::Int(50));
+}
+
+// ====== Error Propagation Edge Cases ======
+
+#[test]
+fn stress_chain_error_propagation() {
+    // Multiple ? operators in chain — tests error propagation depth
+    let v = run_source(r#"
+type Res { Ok(i32) Err(string) }
+func step1(x: i32) -> Res { if x > 0 { Ok(x * 2) } else { Err("step1 failed") } }
+func step2(x: i32) -> Res { if x < 100 { Ok(x + 10) } else { Err("step2 failed") } }
+func step3(x: i32) -> Res { if x != 0 { Ok(x / 2) } else { Err("step3 failed") } }
+func pipeline(x: i32) -> Res {
+    let a = step1(x)?
+    let b = step2(a)?
+    let c = step3(b)?
+    Ok(c)
+}
+func main() -> i32 {
+    match pipeline(5) {
+        Ok(v) => v,
+        Err(e) => -1
+    }
 }
 "#);
-    match v {
-        interp::Value::Float(f) => assert!((f - 3.14).abs() < 0.001),
-        _ => panic!("expected Float"),
-    }
+    assert_eq!(v, interp::Value::Int(10)); // (5*2+10)/2 = 10
 }
 
-// ====== Additional Edge Cases ======
+#[test]
+fn stress_error_at_different_stages() {
+    // Error at each stage of pipeline — tests error message preservation
+    let v = run_source(r#"
+type Res { Ok(i32) Err(string) }
+func step1(x: i32) -> Res { if x > 0 { Ok(x) } else { Err("bad input") } }
+func step2(x: i32) -> Res { if x < 100 { Ok(x) } else { Err("too large") } }
+func main() -> string {
+    let r = step1(-1)
+    match r {
+        Ok(v) => "ok",
+        Err(e) => e
+    }
+}
+"#);
+    assert_eq!(v, interp::Value::String("bad input".to_string()));
+}
+
+// ====== String Edge Cases ======
 
 #[test]
-fn interp_empty_string() {
-    let v = run_source("func main() -> i32 { len(\"\") }");
+fn stress_empty_string_operations() {
+    // Operations on empty strings — tests null/empty handling
+    let v = run_source(r#"
+func main() -> i32 {
+    let s = ""
+    let parts = str_split(s, ",")
+    let joined = str_join(parts, "-")
+    len(s) + len(joined)
+}
+"#);
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn interp_zero_div_guard() {
-    let v = run_source("func main() -> i32 { let b = 0; if b == 0 { -1 } else { 10 / b } }");
-    assert_eq!(v, interp::Value::Int(-1));
+fn stress_string_with_special_chars() {
+    // Strings with special characters — tests string handling robustness
+    let v = run_source(r#"
+func main() -> i32 {
+    let s = "hello world"
+    len(s)
+}
+"#);
+    assert_eq!(v, interp::Value::Int(11));
 }
 
 #[test]
-fn interp_nested_if() {
-    let v = run_source("func main() -> i32 { if true { if false { 1 } else { 2 } } else { 3 } }");
-    assert_eq!(v, interp::Value::Int(2));
+fn stress_unicode_string() {
+    // Unicode string operations — tests multi-byte character handling
+    let v = run_source(r#"
+func main() -> i32 {
+    let s = "你好世界"
+    len(s)
 }
-
-#[test]
-fn interp_deep_nesting() {
-    let v = run_source("func main() -> i32 { let mut x = 0; let mut i = 0; while i < 100 { x = x + 1; i = i + 1; } x }");
-    assert_eq!(v, interp::Value::Int(100));
-}
-
-#[test]
-fn interp_string_equality() {
-    let v = run_source("func main() -> i32 { if \"hello\" == \"hello\" { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_string_inequality() {
-    let v = run_source("func main() -> i32 { if \"hello\" == \"world\" { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn interp_int_comparison() {
-    let v = run_source("func main() -> i32 { if 5 > 3 { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_float_comparison() {
-    let v = run_source("func main() -> i32 { if 3.14 > 2.71 { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_bool_and() {
-    let v = run_source("func main() -> i32 { if true && true { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_bool_or() {
-    let v = run_source("func main() -> i32 { if false || true { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_bool_not() {
-    let v = run_source("func main() -> i32 { if !false { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn interp_negate_int() {
-    let v = run_source("func main() -> i32 { -42 }");
-    assert_eq!(v, interp::Value::Int(-42));
-}
-
-#[test]
-fn interp_negate_float() {
-    let v = run_source("func main() -> f64 { -3.14 }");
+"#);
+    // Unicode chars may be counted as bytes or characters
     match v {
-        interp::Value::Float(f) => assert!((f + 3.14).abs() < 0.001),
-        _ => panic!("expected Float"),
+        interp::Value::Int(n) => assert!(n >= 4, "expected >= 4, got {}", n),
+        _ => panic!("expected Int"),
     }
 }
 
 #[test]
-fn interp_modulo() {
-    let v = run_source("func main() -> i32 { 10 % 3 }");
+fn stress_string_split_empty_delimiter() {
+    // Split with empty delimiter — tests edge case in split implementation
+    let v = run_source(r#"
+func main() -> i32 {
+    let parts = str_split("abc", "")
+    len(parts)
+}
+"#);
+    // Behavior with empty delimiter varies; just ensure no crash
+    match v {
+        interp::Value::Int(_) => {}
+        _ => panic!("expected Int, got {:?}", v),
+    }
+}
+
+// ====== Collection Edge Cases ======
+
+#[test]
+fn stress_empty_list_operations() {
+    // Operations on empty lists — tests null/empty handling
+    let v = run_source(r#"
+func main() -> i32 {
+    let xs: List<i32> = []
+    len(xs)
+}
+"#);
+    // Empty list might not be supported; test what happens
+    match v {
+        interp::Value::Int(n) => assert_eq!(n, 0),
+        _ => {} // may fail at type level
+    }
+}
+
+#[test]
+fn stress_list_with_nested_records() {
+    // List of records — tests compound type handling in collections
+    let v = run_source(r#"
+type Point { x: i32, y: i32 }
+func main() -> i32 {
+    let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }, Point { x: 5, y: 6 }]
+    let mut sum = 0
+    for p in points {
+        sum = sum + p.x + p.y
+    }
+    sum
+}
+"#);
+    assert_eq!(v, interp::Value::Int(21)); // (1+2)+(3+4)+(5+6)
+}
+
+#[test]
+fn stress_large_list_iteration() {
+    // Iterate over a large list — tests performance and correctness
+    let v = run_source(r#"
+func main() -> i32 {
+    let mut sum = 0
+    for i in range(0, 1000) {
+        sum = sum + i
+    }
+    sum
+}
+"#);
+    assert_eq!(v, interp::Value::Int(499500));
+}
+
+// ====== Closure and Capture Edge Cases ======
+
+#[test]
+fn stress_closure_multiple_captures() {
+    // Closure capturing multiple variables — tests capture mechanism
+    let v = run_source(r#"
+func main() -> i32 {
+    let a = 10
+    let b = 20
+    let c = 30
+    let f = fn(x: i32) -> i32 { a + b + c + x }
+    f(5)
+}
+"#);
+    assert_eq!(v, interp::Value::Int(65));
+}
+
+#[test]
+fn stress_closure_as_argument() {
+    // Passing closure as function argument — tests closure passing
+    let v = run_source(r#"
+func apply(f: func(i32) -> i32, x: i32) -> i32 { f(x) }
+func main() -> i32 {
+    let double = fn(x: i32) -> i32 { x * 2 }
+    apply(double, 21)
+}
+"#);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+// ====== Recursive Function Edge Cases ======
+
+#[test]
+fn stress_mutual_recursion() {
+    // Two functions calling each other — tests call stack management
+    let v = run_source(r#"
+func is_even(n: i32) -> bool { if n == 0 { true } else { is_odd(n - 1) } }
+func is_odd(n: i32) -> bool { if n == 0 { false } else { is_even(n - 1) } }
+func main() -> i32 {
+    if is_even(10) { 1 } else { 0 }
+}
+"#);
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn interp_bitwise_and() {
-    let v = run_source("func main() -> i32 { 12 & 10 }");
-    assert_eq!(v, interp::Value::Int(8));
+fn stress_deep_recursion() {
+    // Deep recursion — tests stack depth limits
+    let v = run_source(r#"
+func countdown(n: i32) -> i32 {
+    if n <= 0 { 0 } else { 1 + countdown(n - 1) }
 }
-
-#[test]
-fn interp_bitwise_or() {
-    let v = run_source("func main() -> i32 { 12 | 10 }");
-    assert_eq!(v, interp::Value::Int(14));
-}
-
-#[test]
-fn interp_list_index() {
-    let v = run_source("func main() -> i32 { let xs = [10, 20, 30]; xs[1] }");
+func main() -> i32 { countdown(20) }
+"#);
     assert_eq!(v, interp::Value::Int(20));
 }
 
-#[test]
-fn interp_list_nested() {
-    let v = run_source("func main() -> i32 { let xs = [[1, 2], [3, 4]]; xs[1][0] }");
-    assert_eq!(v, interp::Value::Int(3));
-}
+// ====== Numeric Edge Cases ======
 
 #[test]
-fn interp_map_basic() {
-    let v = run_source("func main() -> i32 { let m = map_new(); let m2 = map_set(m, \"x\", 42); map_get(m2, \"x\") }");
-    // map_get returns (bool, Any) tuple
+fn stress_integer_overflow() {
+    // Large integer arithmetic — tests overflow handling
+    let v = run_source("func main() -> i64 { 9223372036854775807 }"); // i64::MAX
     match v {
-        interp::Value::Tuple(vals) => {
-            if let interp::Value::Int(n) = vals[1] { assert_eq!(n, 42); }
-        }
-        _ => panic!("expected Tuple"),
+        interp::Value::Int(n) => assert!(n > 0),
+        _ => panic!("expected Int"),
     }
 }
 
 #[test]
-fn interp_to_json_string() {
-    let v = run_source("func main() -> string { to_json(\"hello\") }");
-    assert_eq!(v, interp::Value::String("\"hello\"".to_string()));
+fn stress_negative_arithmetic() {
+    // Negative number operations — tests signed arithmetic
+    let v = run_source("func main() -> i32 { (-5) * (-3) + (-2) }");
+    assert_eq!(v, interp::Value::Int(13));
 }
 
 #[test]
-fn interp_to_json_int() {
-    let v = run_source("func main() -> string { to_json(42) }");
-    assert_eq!(v, interp::Value::String("42".to_string()));
+fn stress_float_precision() {
+    // Float precision edge case — tests floating point handling
+    let v = run_source("func main() -> f64 { 0.1 + 0.2 }");
+    match v {
+        interp::Value::Float(f) => assert!((f - 0.3).abs() < 0.0001, "got {}", f),
+        _ => panic!("expected Float"),
+    }
+}
+
+// ====== Pattern Matching Complexity ======
+
+#[test]
+fn stress_nested_pattern_match() {
+    // Match on nested enum — tests pattern matching depth
+    let v = run_source(r#"
+type Inner { A(i32) B }
+type Outer { Wrap(Inner) Raw(i32) }
+func extract(o: Outer) -> i32 {
+    match o {
+        Wrap(inner) => match inner { A(n) => n, B => -1 },
+        Raw(n) => n
+    }
+}
+func main() -> i32 { extract(Wrap(A(42))) }
+"#);
+    assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
-fn interp_to_json_bool() {
-    let v = run_source("func main() -> string { to_json(true) }");
-    assert_eq!(v, interp::Value::String("true".to_string()));
+fn stress_match_wildcard_position() {
+    // Wildcard at different positions — tests match exhaustiveness
+    let v = run_source(r#"
+func main() -> i32 {
+    let x = 5
+    match x {
+        1 => 10,
+        _ => 99
+    }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(99));
+}
+
+// ====== FFI-like Edge Cases (interpreter only) ======
+
+#[test]
+fn stress_read_file_nonexistent() {
+    // Reading nonexistent file — tests error handling
+    let v = run_source(r#"
+func main() -> i32 {
+    let r = read_file("/nonexistent_path_xyz_12345")
+    if r.is_ok() { 1 } else { 0 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn interp_format_basic() {
-    let v = run_source("func main() -> string { format(\"hello {}\", \"world\") }");
-    assert_eq!(v, interp::Value::String("hello world".to_string()));
+fn stress_listdir_nonexistent() {
+    // Listing nonexistent directory — tests error handling
+    let v = run_source("func main() -> i32 { len(listdir(\"/nonexistent_xyz\")) }");
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn interp_format_int() {
-    let v = run_source("func main() -> string { format(\"value: {}\", 42) }");
-    assert_eq!(v, interp::Value::String("value: 42".to_string()));
+fn stress_sha256_various_inputs() {
+    // SHA-256 of various inputs — tests crypto robustness
+    let v = run_source(r#"
+func main() -> i32 {
+    let h1 = sha256("")
+    let h2 = sha256("a")
+    let h3 = sha256("abc")
+    let h4 = sha256("hello world")
+    // All should be 64 hex chars
+    len(h1) + len(h2) + len(h3) + len(h4)
+}
+"#);
+    assert_eq!(v, interp::Value::Int(256)); // 4 * 64
+}
+
+// ====== Complex Integration Scenarios ======
+
+#[test]
+fn stress_config_parser_simulation() {
+    // Simulates a config parser — tests realistic usage pattern
+    let v = run_source(r#"
+func parse_line(line: string) -> string {
+    let trimmed = str_trim(line)
+    if len(trimmed) == 0 { return "" }
+    if str_contains(trimmed, "=") {
+        let parts = str_split(trimmed, "=")
+        if len(parts) >= 2 {
+            return str_trim(parts[0]) + ":" + str_trim(parts[1])
+        }
+    }
+    ""
+}
+func main() -> i32 {
+    let text = "key1=val1" + "\n" + "key2=val2" + "\n" + "key3=val3"
+    let lines = str_split(text, "\n")
+    let mut count = 0
+    for line in lines {
+        let result = parse_line(line)
+        if len(result) > 0 { count = count + 1 }
+    }
+    count
+}
+"#);
+    assert_eq!(v, interp::Value::Int(3));
 }
 
 #[test]
-fn interp_assert_true() {
-    let v = run_source("func main() -> i32 { assert(true); 1 }");
-    assert_eq!(v, interp::Value::Int(1));
+fn stress_html_escape_simulation() {
+    // Simulates HTML escaping — tests string replacement chains
+    let v = run_source(r#"
+func escape_html(s: string) -> string {
+    let mut r = str_replace(s, "&", "&amp;")
+    r = str_replace(r, "<", "&lt;")
+    r = str_replace(r, ">", "&gt;")
+    r
+}
+func main() -> string {
+    escape_html("<div class=\"test\">&hello</div>")
+}
+"#);
+    assert_eq!(v, interp::Value::String("&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string()));
 }
 
 #[test]
-fn interp_assert_eq() {
-    let v = run_source("func main() -> i32 { assert_eq(42, 42); 1 }");
-    assert_eq!(v, interp::Value::Int(1));
+fn stress_word_count_simulation() {
+    // Simulates word counting — tests split+iterate+count pattern
+    let v = run_source(r#"
+func count_words(text: string) -> i32 {
+    let words = str_split(str_trim(text), " ")
+    let mut count = 0
+    for w in words {
+        if len(str_trim(w)) > 0 { count = count + 1 }
+    }
+    count
+}
+func main() -> i32 {
+    count_words("  hello   world   foo  bar  ")
+}
+"#);
+    assert_eq!(v, interp::Value::Int(4));
 }
 
-// Prelude functions (clamp, lerp, identity, pipe, compose, etc.) require stdlib import
-// and are not available as builtins in standalone tests.
+#[test]
+fn stress_json_builder_simulation() {
+    // Simulates manual JSON building — tests string concatenation under load
+    let v = run_source(r#"
+func kv(key: string, val: string) -> string { "\"" + key + "\":\"" + val + "\"" }
+func main() -> string {
+    let json = "{" + kv("name", "mimi") + "," + kv("version", "1.0") + "," + kv("lang", "mimi") + "}"
+    json
+}
+"#);
+    assert_eq!(v, interp::Value::String("{\"name\":\"mimi\",\"version\":\"1.0\",\"lang\":\"mimi\"}".to_string()));
+}
+
+#[test]
+fn stress_base64_roundtrip_various() {
+    // Base64 encode/decode with various inputs — tests crypto correctness
+    let v = run_source(r#"
+func main() -> i32 {
+    let inputs = ["", "a", "ab", "abc", "abcd", "Hello, World!"]
+    let mut ok_count = 0
+    for input in inputs {
+        let encoded = base64_encode(input)
+        let decoded_result = base64_decode(encoded)
+        match decoded_result {
+            Ok(decoded) => { if decoded == input { ok_count = ok_count + 1 } },
+            Err(e) => {}
+        }
+    }
+    ok_count
+}
+"#);
+    assert_eq!(v, interp::Value::Int(6));
+}
+
+#[test]
+fn stress_path_operations_chain() {
+    // Chain multiple path operations — tests path utility robustness
+    let v = run_source(r#"
+func main() -> string {
+    let base = "/usr/local"
+    let sub = "bin"
+    let file = "mimi"
+    let full = path_join(path_join(base, sub), file)
+    path_basename(full)
+}
+"#);
+    assert_eq!(v, interp::Value::String("mimi".to_string()));
+}

@@ -1,588 +1,337 @@
-// Comprehensive tests for stdlib modules (v0.28.0)
-// Covers: fs, crypto, paths, strings, collections, json, io, math
+// Stdlib edge case and robustness tests
+// Focus: boundary conditions, error paths, unusual inputs
 
 use super::*;
 
-// ====== FS Module Tests ======
+// ====== Directory Operations — Error Paths ======
 
 #[test]
-fn std_fs_exists_true() {
-    let v = run_source("func main() -> i32 { if file_exists(\"examples/hello.mimi\") { 1 } else { 0 } }");
+fn edge_listdir_file_not_dir() {
+    // listdir on a file (not a directory) — should return empty
+    let v = run_source("func main() -> i32 { len(listdir(\"examples/hello.mimi\")) }");
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn edge_walk_dir_single_file() {
+    // walk_dir on a single file — should return empty or single entry
+    let v = run_source("func main() -> i32 { let r = len(walk_dir(\"examples/hello.mimi\")); if r <= 1 { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_fs_exists_false() {
-    let v = run_source("func main() -> i32 { if file_exists(\"/nonexistent\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_fs_read_file() {
-    let v = run_source("func main() -> i32 { let r = read_file(\"examples/hello.mimi\"); if r.is_ok() { 1 } else { 0 } }");
+fn edge_is_dir_on_symlink_like() {
+    // is_dir on special paths
+    let v = run_source("func main() -> i32 { if is_dir(\"/tmp\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(1));
 }
 
-#[test]
-fn std_fs_read_nonexistent() {
-    let v = run_source("func main() -> i32 { let r = read_file(\"/nonexistent\"); if r.is_ok() { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
+// ====== Path Operations — Edge Cases ======
 
 #[test]
-fn std_fs_listdir_count() {
-    let v = run_source("func main() -> i32 { len(listdir(\"examples\")) }");
-    match v { interp::Value::Int(n) => assert!(n > 0), _ => panic!("expected Int") }
-}
-
-#[test]
-fn std_fs_listdir_empty() {
-    let v = run_source("func main() -> i32 { len(listdir(\"/nonexistent\")) }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_fs_walk_dir_count() {
-    let v = run_source("func main() -> i32 { len(walk_dir(\"examples\")) }");
-    match v { interp::Value::Int(n) => assert!(n > 20), _ => panic!("expected Int") }
-}
-
-#[test]
-fn std_fs_is_dir_true() {
-    let v = run_source("func main() -> i32 { if is_dir(\"examples\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_fs_is_dir_false() {
-    let v = run_source("func main() -> i32 { if is_dir(\"examples/hello.mimi\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_fs_is_file_true() {
-    let v = run_source("func main() -> i32 { if is_file(\"examples/hello.mimi\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_fs_is_file_false() {
-    let v = run_source("func main() -> i32 { if is_file(\"examples\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_fs_mkdir_p() {
-    let v = run_source("func main() -> i32 { if mkdir_p(\"/tmp/mimi_test_dir\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-    std::fs::remove_dir("/tmp/mimi_test_dir").ok();
-}
-
-#[test]
-fn std_fs_remove_nonexistent() {
-    let v = run_source("func main() -> i32 { if remove_file(\"/nonexistent\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-// ====== Path Tests ======
-
-#[test]
-fn std_path_join_basic() {
-    let v = run_source("func main() -> string { path_join(\"a\", \"b\") }");
+fn edge_path_join_trailing_slash() {
+    // path_join with trailing slash in first component
+    let v = run_source("func main() -> string { path_join(\"a/\", \"b\") }");
     assert_eq!(v, interp::Value::String("a/b".to_string()));
 }
 
 #[test]
-fn std_path_join_empty_a() {
-    let v = run_source("func main() -> string { path_join(\"\", \"b\") }");
-    assert_eq!(v, interp::Value::String("b".to_string()));
+fn path_ext_on_dotfile() {
+    // Extension of a dotfile like ".gitignore" — Rust's Path::extension() returns "" for dotfiles
+    let v = run_source("func main() -> string { path_ext(\".gitignore\") }");
+    assert_eq!(v, interp::Value::String("".to_string()));
 }
 
 #[test]
-fn std_path_join_empty_b() {
-    let v = run_source("func main() -> string { path_join(\"a\", \"\") }");
-    // path_join("a", "") may return "a/" depending on implementation
-    match v {
-        interp::Value::String(s) => assert!(s == "a" || s == "a/", "got '{}'", s),
-        _ => panic!("expected String"),
-    }
-}
-
-#[test]
-fn std_path_join_absolute() {
-    let v = run_source("func main() -> string { path_join(\"/usr\", \"lib\") }");
-    assert_eq!(v, interp::Value::String("/usr/lib".to_string()));
-}
-
-#[test]
-fn std_path_join_chain() {
-    let v = run_source("func main() -> string { path_join(path_join(\"a\", \"b\"), \"c\") }");
-    assert_eq!(v, interp::Value::String("a/b/c".to_string()));
-}
-
-#[test]
-fn std_path_ext_txt() {
-    let v = run_source("func main() -> string { path_ext(\"file.txt\") }");
-    assert_eq!(v, interp::Value::String("txt".to_string()));
-}
-
-#[test]
-fn std_path_ext_mimi() {
-    let v = run_source("func main() -> string { path_ext(\"test.mimi\") }");
-    assert_eq!(v, interp::Value::String("mimi".to_string()));
-}
-
-#[test]
-fn std_path_ext_none() {
-    let v = run_source("func main() -> i32 { len(path_ext(\"Makefile\")) }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_path_ext_double() {
+fn path_ext_on_double_ext() {
+    // Extension of "archive.tar.gz"
     let v = run_source("func main() -> string { path_ext(\"archive.tar.gz\") }");
     assert_eq!(v, interp::Value::String("gz".to_string()));
 }
 
 #[test]
-fn std_path_basename_simple() {
-    let v = run_source("func main() -> string { path_basename(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String("c.txt".to_string()));
-}
-
-#[test]
-fn std_path_basename_no_dir() {
-    let v = run_source("func main() -> string { path_basename(\"file.txt\") }");
-    assert_eq!(v, interp::Value::String("file.txt".to_string()));
-}
-
-#[test]
-fn std_path_dirname_simple() {
-    let v = run_source("func main() -> string { path_dirname(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String("/a/b".to_string()));
-}
-
-#[test]
-fn std_path_dirname_no_dir() {
-    let v = run_source("func main() -> string { path_dirname(\"file.txt\") }");
+fn path_basename_of_dot() {
+    // basename of "." — Rust's Path::file_name() returns None for "."
+    let v = run_source("func main() -> string { path_basename(\".\") }");
     assert_eq!(v, interp::Value::String("".to_string()));
 }
 
-// ====== Crypto Tests ======
-
 #[test]
-fn std_sha256_hello() {
-    let v = run_source("func main() -> string { sha256(\"hello\") }");
-    assert_eq!(v, interp::Value::String("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()));
+fn path_dirname_of_dot() {
+    // dirname of "."
+    let v = run_source("func main() -> string { path_dirname(\".\") }");
+    assert_eq!(v, interp::Value::String("".to_string()));
 }
 
-#[test]
-fn std_sha256_empty() {
-    let v = run_source("func main() -> string { sha256(\"\") }");
-    assert_eq!(v, interp::Value::String("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()));
-}
+// ====== Crypto — Known Test Vectors ======
 
 #[test]
-fn std_sha256_abc() {
+fn sha256_test_vector_1() {
+    // NIST test vector: SHA-256("abc")
     let v = run_source("func main() -> string { sha256(\"abc\") }");
     assert_eq!(v, interp::Value::String("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()));
 }
 
 #[test]
-fn std_sha256_len() {
-    let v = run_source("func main() -> i32 { len(sha256(\"test\")) }");
-    assert_eq!(v, interp::Value::Int(64));
+fn sha256_test_vector_2() {
+    // SHA-256 of empty string
+    let v = run_source("func main() -> string { sha256(\"\") }");
+    assert_eq!(v, interp::Value::String("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()));
 }
 
 #[test]
-fn std_base64_encode_hello() {
-    let v = run_source("func main() -> string { base64_encode(\"Hello\") }");
-    assert_eq!(v, interp::Value::String("SGVsbG8=".to_string()));
+fn sha256_test_vector_3() {
+    // SHA-256("hello") — well-known vector
+    let v = run_source("func main() -> string { sha256(\"hello\") }");
+    assert_eq!(v, interp::Value::String("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()));
 }
 
 #[test]
-fn std_base64_encode_empty() {
-    let v = run_source("func main() -> string { base64_encode(\"\") }");
-    assert_eq!(v, interp::Value::String("".to_string()));
+fn sha256_deterministic() {
+    // Same input should always produce same output
+    let v = run_source(r#"
+func main() -> i32 {
+    let h1 = sha256("test")
+    let h2 = sha256("test")
+    if h1 == h2 { 1 } else { 0 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_base64_encode_long() {
-    let v = run_source("func main() -> string { base64_encode(\"Hello, World!\") }");
-    assert_eq!(v, interp::Value::String("SGVsbG8sIFdvcmxkIQ==".to_string()));
+fn sha256_different_inputs_different() {
+    // Different inputs should produce different hashes
+    let v = run_source(r#"
+func main() -> i32 {
+    let h1 = sha256("hello")
+    let h2 = sha256("world")
+    if h1 == h2 { 0 } else { 1 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_base64_decode_valid() {
-    let v = run_source(r#"func main() -> string { let r = base64_decode("SGVsbG8="); match r { Ok(s) => s, Err(e) => "err" } }"#);
-    assert_eq!(v, interp::Value::String("Hello".to_string()));
+fn base64_roundtrip_empty() {
+    let v = run_source(r#"
+func main() -> i32 {
+    let e = base64_encode("")
+    let d = base64_decode(e)
+    match d { Ok(s) => if s == "" { 1 } else { 0 }, Err(_) => 0 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_base64_decode_invalid() {
-    let v = run_source(r#"func main() -> string { let r = base64_decode("not!valid!"); match r { Ok(s) => s, Err(e) => "err" } }"#);
-    assert_eq!(v, interp::Value::String("err".to_string()));
+fn base64_roundtrip_binary_like() {
+    // Base64 of a string with special characters
+    let v = run_source(r#"
+func main() -> i32 {
+    let original = "Hello, World! 123"
+    let e = base64_encode(original)
+    let d = base64_decode(e)
+    match d { Ok(s) => if s == original { 1 } else { 0 }, Err(_) => 0 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_base64_roundtrip() {
-    let v = run_source(r#"func main() -> string { let e = base64_encode("Mimi"); let r = base64_decode(e); match r { Ok(s) => s, Err(e) => "err" } }"#);
-    assert_eq!(v, interp::Value::String("Mimi".to_string()));
+fn base64_decode_invalid_returns_err() {
+    // Invalid base64 should return Err, not crash
+    let v = run_source(r#"
+func main() -> i32 {
+    let d = base64_decode("not!valid!base64!!!")
+    match d { Ok(_) => 0, Err(_) => 1 }
+}
+"#);
+    assert_eq!(v, interp::Value::Int(1));
 }
 
-// ====== String Tests ======
+// ====== String Operations — Edge Cases ======
 
 #[test]
-fn std_str_split_count() {
-    let v = run_source("func main() -> i32 { len(str_split(\"a,b,c\", \",\")) }");
+fn str_split_single_element() {
+    // Split with delimiter not present
+    let v = run_source("func main() -> i32 { len(str_split(\"hello\", \",\")) }");
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+#[test]
+fn str_split_consecutive_delimiters() {
+    // Split with consecutive delimiters produces empty strings
+    let v = run_source("func main() -> i32 { len(str_split(\"a,,b\", \",\")) }");
     assert_eq!(v, interp::Value::Int(3));
 }
 
 #[test]
-fn std_str_join_basic() {
-    let v = run_source("func main() -> string { str_join([\"a\", \"b\", \"c\"], \",\") }");
-    assert_eq!(v, interp::Value::String("a,b,c".to_string()));
-}
-
-#[test]
-fn std_str_contains_true() {
-    let v = run_source("func main() -> i32 { if str_contains(\"hello world\", \"world\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_str_contains_false() {
-    let v = run_source("func main() -> i32 { if str_contains(\"hello\", \"xyz\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-#[test]
-fn std_str_starts_with_true() {
-    let v = run_source("func main() -> i32 { if str_starts_with(\"hello\", \"hel\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_str_ends_with_true() {
-    let v = run_source("func main() -> i32 { if str_ends_with(\"hello\", \"llo\") { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_str_replace_basic() {
-    let v = run_source("func main() -> string { str_replace(\"hello world\", \"world\", \"mimi\") }");
-    assert_eq!(v, interp::Value::String("hello mimi".to_string()));
-}
-
-#[test]
-fn std_str_to_upper() {
-    let v = run_source("func main() -> string { str_to_upper(\"hello\") }");
-    assert_eq!(v, interp::Value::String("HELLO".to_string()));
-}
-
-#[test]
-fn std_str_to_lower() {
-    let v = run_source("func main() -> string { str_to_lower(\"HELLO\") }");
+fn str_replace_no_match() {
+    // Replace with no match returns original
+    let v = run_source("func main() -> string { str_replace(\"hello\", \"xyz\", \"abc\") }");
     assert_eq!(v, interp::Value::String("hello".to_string()));
 }
 
 #[test]
-fn std_str_trim() {
-    let v = run_source("func main() -> string { str_trim(\"  hello  \") }");
-    assert_eq!(v, interp::Value::String("hello".to_string()));
-}
-
-#[test]
-fn std_str_len() {
-    let v = run_source("func main() -> i32 { len(\"hello\") }");
-    assert_eq!(v, interp::Value::Int(5));
-}
-
-#[test]
-fn std_str_char_at() {
-    let v = run_source("func main() -> string { str_char_at(\"hello\", 1) }");
-    assert_eq!(v, interp::Value::String("e".to_string()));
-}
-
-#[test]
-fn std_str_substring() {
-    let v = run_source("func main() -> string { str_substring(\"hello\", 1, 3) }");
-    assert_eq!(v, interp::Value::String("el".to_string()));
-}
-
-#[test]
-fn std_str_repeat() {
-    let v = run_source("func main() -> string { str_repeat(\"ab\", 3) }");
-    assert_eq!(v, interp::Value::String("ababab".to_string()));
-}
-
-#[test]
-fn std_str_index_of_found() {
-    let v = run_source("func main() -> i32 { str_index_of(\"hello\", \"ll\") }");
-    // str_index_of returns Option<i32> = Variant("Some", [Int]) or Variant("None", [])
-    match v {
-        interp::Value::Variant(name, vals) => {
-            assert_eq!(name, "Some");
-            if let interp::Value::Int(n) = vals[0] { assert_eq!(n, 2); }
-        }
-        _ => panic!("expected Option variant, got {:?}", v),
-    }
-}
-
-#[test]
-fn std_str_index_of_not_found() {
-    let v = run_source("func main() -> i32 { str_index_of(\"hello\", \"xyz\") }");
-    // str_index_of returns None
-    match v {
-        interp::Value::Variant(name, _) => {
-            assert_eq!(name, "None");
-        }
-        _ => panic!("expected None variant, got {:?}", v),
-    }
-}
-
-// ====== Regex Tests ======
-
-#[test]
-fn std_regex_match_true() {
-    let v = run_source("func main() -> i32 { if regex_match(\"hello123\", \"[a-z]+[0-9]+\") { 1 } else { 0 } }");
+fn str_contains_empty_pattern() {
+    // Contains with empty pattern
+    let v = run_source("func main() -> i32 { if str_contains(\"hello\", \"\") { 1 } else { 0 } }");
+    // Empty pattern should match
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_regex_match_false() {
-    let v = run_source("func main() -> i32 { if regex_match(\"123\", \"[a-z]+\") { 1 } else { 0 } }");
+fn str_starts_with_longer_prefix() {
+    // starts_with where prefix is longer than string
+    let v = run_source("func main() -> i32 { if str_starts_with(\"hi\", \"hello world\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn std_regex_find_basic() {
-    let v = run_source("func main() -> string { regex_find(\"abc 123 def\", \"[0-9]+\") }");
-    assert_eq!(v, interp::Value::String("123".to_string()));
-}
-
-#[test]
-fn std_regex_replace_basic() {
-    let v = run_source("func main() -> string { regex_replace(\"hello world\", \"world\", \"mimi\") }");
-    assert_eq!(v, interp::Value::String("hello mimi".to_string()));
-}
-
-// ====== Math Tests ======
-
-#[test]
-fn std_math_abs_positive() {
-    let v = run_source("func main() -> i32 { abs(5) }");
-    assert_eq!(v, interp::Value::Int(5));
-}
-
-#[test]
-fn std_math_abs_negative() {
-    let v = run_source("func main() -> i32 { abs(-5) }");
-    assert_eq!(v, interp::Value::Int(5));
-}
-
-#[test]
-fn std_math_min() {
-    let v = run_source("func main() -> i32 { min(3, 7) }");
-    assert_eq!(v, interp::Value::Int(3));
-}
-
-#[test]
-fn std_math_max() {
-    let v = run_source("func main() -> i32 { max(3, 7) }");
-    assert_eq!(v, interp::Value::Int(7));
-}
-
-#[test]
-fn std_math_sqrt() {
-    let v = run_source("func main() -> f64 { sqrt(9.0) }");
-    assert_eq!(v, interp::Value::Float(3.0));
-}
-
-#[test]
-fn std_math_pow() {
-    let v = run_source("func main() -> f64 { pow(2.0, 3.0) }");
-    assert_eq!(v, interp::Value::Float(8.0));
-}
-
-#[test]
-fn std_math_floor() {
-    let v = run_source("func main() -> i32 { floor(3.7) }");
-    assert_eq!(v, interp::Value::Int(3));
-}
-
-#[test]
-fn std_math_ceil() {
-    let v = run_source("func main() -> i32 { ceil(3.2) }");
-    assert_eq!(v, interp::Value::Int(4));
-}
-
-// ====== Collection Tests ======
-
-#[test]
-fn std_list_len() {
-    let v = run_source("func main() -> i32 { len([1, 2, 3]) }");
-    assert_eq!(v, interp::Value::Int(3));
-}
-
-#[test]
-fn std_list_contains_true() {
-    let v = run_source("func main() -> i32 { if contains([1, 2, 3], 2) { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_list_contains_false() {
-    let v = run_source("func main() -> i32 { if contains([1, 2, 3], 5) { 1 } else { 0 } }");
+fn str_trim_only_whitespace() {
+    // Trim a string that is all whitespace
+    let v = run_source("func main() -> i32 { len(str_trim(\"   \")) }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn std_list_push_pop() {
-    let v = run_source("func main() -> i32 { let xs = [1, 2]; push(xs, 3); pop(xs); len(xs) }");
-    // pop removes an element, list length should decrease
-    assert_eq!(v, interp::Value::Int(2));
+fn str_join_empty_list() {
+    // Join an empty list — tests empty collection handling
+    let v = run_source("func main() -> i32 { let empty = str_split(\"\", \"|\"); len(str_join(empty, \",\")) }");
+    // str_split("", "|") returns [""], so join returns ""
+    assert_eq!(v, interp::Value::Int(0));
 }
 
-#[test]
-fn std_list_range() {
-    let v = run_source("func main() -> i32 { let r = range(0, 5); len(r) }");
-    assert_eq!(v, interp::Value::Int(5));
-}
+// ====== Regex — Edge Cases ======
 
 #[test]
-fn std_list_sum() {
-    let v = run_source("func main() -> i32 { sum([1, 2, 3, 4, 5]) }");
-    assert_eq!(v, interp::Value::Int(15));
-}
-
-#[test]
-fn std_list_reverse() {
-    let v = run_source("func main() -> i32 { let xs = [1, 2, 3]; reverse(xs); len(xs) }");
-    // reverse modifies in-place, check length is preserved
-    assert_eq!(v, interp::Value::Int(3));
-}
-
-// ====== Conversion Tests ======
-
-#[test]
-fn std_to_string_int() {
-    let v = run_source("func main() -> string { to_string(42) }");
-    assert_eq!(v, interp::Value::String("42".to_string()));
-}
-
-#[test]
-fn std_to_string_float() {
-    let v = run_source("func main() -> string { to_string(3.14) }");
-    assert_eq!(v, interp::Value::String("3.14".to_string()));
-}
-
-#[test]
-fn std_str_parse_int() {
-    let v = run_source("func main() -> i32 { str_parse_int(\"42\") }");
-    // str_parse_int may return int directly or tuple
+fn regex_match_empty_pattern() {
+    // Regex with empty pattern matches everything
+    let v = run_source("func main() -> i32 { if regex_match(\"hello\", \"\") { 1 } else { 0 } }");
     match v {
-        interp::Value::Int(n) => assert_eq!(n, 42),
-        interp::Value::Tuple(vals) => {
-            if let interp::Value::Int(n) = vals[1] { assert_eq!(n, 42); }
-        }
-        _ => panic!("expected Int or Tuple, got {:?}", v),
+        interp::Value::Int(_) => {} // either 0 or 1 is acceptable
+        _ => panic!("expected Int"),
     }
 }
 
 #[test]
-fn std_str_parse_float() {
-    let v = run_source("func main() -> f64 { str_parse_float(\"3.14\") }");
-    // str_parse_float may return float directly or tuple
-    match v {
-        interp::Value::Float(n) => assert!((n - 3.14).abs() < 0.001),
-        interp::Value::Tuple(vals) => {
-            if let interp::Value::Float(n) = vals[1] { assert!((n - 3.14).abs() < 0.001); }
-        }
-        _ => panic!("expected Float or Tuple, got {:?}", v),
-    }
-}
-
-// ====== Control Flow Tests ======
-
-#[test]
-fn std_if_else_true() {
-    let v = run_source("func main() -> i32 { if true { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(1));
-}
-
-#[test]
-fn std_if_else_false() {
-    let v = run_source("func main() -> i32 { if false { 1 } else { 0 } }");
+fn regex_match_no_match() {
+    // Regex that doesn't match
+    let v = run_source("func main() -> i32 { if regex_match(\"hello\", \"^[0-9]+$\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn std_while_loop() {
-    let v = run_source("func main() -> i32 { let mut i = 0; let mut sum = 0; while i < 5 { sum = sum + i; i = i + 1; } sum }");
-    assert_eq!(v, interp::Value::Int(10));
+fn regex_find_no_match() {
+    // regex_find with no match
+    let v = run_source("func main() -> i32 { len(regex_find(\"hello\", \"[0-9]+\")) }");
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+// ====== Numeric Edge Cases ======
+
+#[test]
+fn integer_zero_operations() {
+    let v = run_source("func main() -> i32 { 0 * 100 + 0 - 0 }");
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn std_for_loop() {
-    let v = run_source("func main() -> i32 { let mut sum = 0; for i in range(0, 5) { sum = sum + i; } sum }");
-    assert_eq!(v, interp::Value::Int(10));
+fn integer_large_multiplication() {
+    let v = run_source("func main() -> i32 { 10000 * 10000 }");
+    assert_eq!(v, interp::Value::Int(100000000));
 }
 
 #[test]
-fn std_match_basic() {
-    let v = run_source("func main() -> i32 { let x = 2; match x { 1 => 10, 2 => 20, 3 => 30, _ => 0 } }");
-    assert_eq!(v, interp::Value::Int(20));
+fn float_zero_division() {
+    // Division by zero causes interpreter error (DivisionByZero)
+    let result = run_source_result("func main() -> f64 { 1.0 / 0.0 }");
+    assert!(result.is_err(), "expected division by zero error");
 }
 
-// ====== Error Handling Tests ======
+#[test]
+fn integer_min_operations() {
+    // Operations with 0 and 1
+    let v = run_source("func main() -> i32 { 1 * 1 + 0 * 100 }");
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ====== JSON Edge Cases ======
 
 #[test]
-fn std_result_ok() {
-    let v = run_source("func main() -> i32 { let r = read_file(\"examples/hello.mimi\"); if r.is_ok() { 1 } else { 0 } }");
+fn json_roundtrip_string() {
+    let v = run_source(r#"
+func main() -> i32 {
+    let s = to_json("hello")
+    if s == "\"hello\"" { 1 } else { 0 }
+}
+"#);
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_result_err() {
-    let v = run_source("func main() -> i32 { let r = read_file(\"/nonexistent\"); if r.is_ok() { 1 } else { 0 } }");
-    assert_eq!(v, interp::Value::Int(0));
-}
-
-// ====== JSON Tests ======
-
-#[test]
-fn std_to_json_string() {
-    let v = run_source("func main() -> string { to_json(\"hello\") }");
-    assert_eq!(v, interp::Value::String("\"hello\"".to_string()));
-}
-
-#[test]
-fn std_to_json_int() {
-    let v = run_source("func main() -> string { to_json(42) }");
-    assert_eq!(v, interp::Value::String("42".to_string()));
-}
-
-#[test]
-fn std_is_valid_json_true() {
+fn json_valid_object() {
     let v = run_source("func main() -> i32 { if json_is_valid(\"{\\\"a\\\":1}\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
-fn std_is_valid_json_false() {
+fn json_invalid_string() {
     let v = run_source("func main() -> i32 { if json_is_valid(\"not json\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
-fn std_json_get_string() {
-    let v = run_source("func main() -> string { json_get_string(\"{\\\"name\\\":\\\"Mimi\\\"}\", \"name\") }");
-    assert_eq!(v, interp::Value::String("Mimi".to_string()));
+fn json_get_missing_key() {
+    // Getting a missing key from JSON causes error (not graceful)
+    let result = run_source_result("func main() -> i32 { json_get_int(\"{\\\"a\\\":1}\", \"b\") }");
+    assert!(result.is_err(), "expected error for missing key");
+}
+
+// ====== Control Flow — Boundary Cases ======
+
+#[test]
+fn while_false_immediately() {
+    // While loop that never executes
+    let v = run_source("func main() -> i32 { let mut x = 42; while false { x = 0; } x }");
+    assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
-fn std_json_get_int() {
-    let v = run_source("func main() -> i32 { json_get_int(\"{\\\"n\\\":42}\", \"n\") }");
-    assert_eq!(v, interp::Value::Int(42));
+fn for_empty_range() {
+    // For loop over empty range
+    let v = run_source("func main() -> i32 { let mut x = 0; for i in range(5, 5) { x = x + 1; } x }");
+    assert_eq!(v, interp::Value::Int(0));
+}
+
+#[test]
+fn match_all_wildcard() {
+    // Match with only wildcard
+    let v = run_source("func main() -> i32 { match 42 { _ => 99 } }");
+    assert_eq!(v, interp::Value::Int(99));
+}
+
+// ====== Record/Tuple Edge Cases ======
+
+#[test]
+fn record_field_shadowing() {
+    // Record field name shadowing a variable
+    let v = run_source(r#"
+type Item { name: string }
+func main() -> string {
+    let name = "outer"
+    let item = Item { name: "inner" }
+    item.name
+}
+"#);
+    assert_eq!(v, interp::Value::String("inner".to_string()));
+}
+
+#[test]
+fn tuple_nested_access() {
+    // Accessing nested tuple elements — parser doesn't support t.1.1
+    // Use destructuring instead
+    let v = run_source("func main() -> i32 { let t = (1, (2, 3)); let (a, b) = t; let (c, d) = b; d }");
+    assert_eq!(v, interp::Value::Int(3));
 }

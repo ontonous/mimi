@@ -19,6 +19,7 @@ pub(crate) mod contracts;
 pub(crate) mod error_handling;
 pub(crate) mod extern_blocks;
 pub(crate) mod generics;
+pub(crate) mod interpreter_features;
 pub(crate) mod ownership;
 pub(crate) mod stdlib_comprehensive;
 pub(crate) mod strings;
