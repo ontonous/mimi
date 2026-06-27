@@ -3,6 +3,7 @@
 pub mod c_header;
 pub mod callback;
 pub mod contract;
+pub mod cpp_bind;
 pub mod errno;
 pub mod go_bind;
 pub mod jni_bind;

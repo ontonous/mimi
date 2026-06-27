@@ -52,7 +52,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.27.6", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.28.0-dev", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
@@ -236,6 +236,12 @@ enum Command {
         #[arg(long)]
         ts: Option<PathBuf>,
     },
+    /// Generate C++ RAII bindings from extern declarations
+    EmitCppBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Generate Java JNI bindings from extern declarations
     EmitJavaBindings {
         path: Option<PathBuf>,
@@ -414,6 +420,9 @@ fn main() {
         }
         Command::EmitNodeBindings { path, output, ts } => {
             emit::emit_node_bindings(path.as_deref(), output.as_deref(), ts.as_deref())
+        }
+        Command::EmitCppBindings { path, output } => {
+            emit::emit_cpp_bindings(path.as_deref(), output.as_deref())
         }
         Command::EmitJavaBindings { path, output, java } => {
             emit::emit_java_bindings(path.as_deref(), output.as_deref(), java.as_deref())
