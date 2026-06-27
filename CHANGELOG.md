@@ -19,12 +19,12 @@
 - **G-66**: 嵌套作用域允许变量遮蔽（仅同作用域重定义报错）
 - **G-68**: `push()` 支持 Record/StructValue 类型
 - **G-69**: `List<T>` 变量的 var_type_names 存储完整泛型类型名
+- **G-70**: string builtins 返回 `{ptr, i64}` 结构体指针导致 codegen 输出乱码
 - **G-72**: if/else 分支允许同名变量
 - **G-73**: Record 构造器内空列表从字段类型推断
 
 ### Known Gaps
 
-- **G-70**: `let x = if cond { a } else { b }` 在 while 循环内导致 codegen 乱码（phi node 问题）
 - **G-71**: codegen 第二次构建同一文件 segfault（LLVM 状态未重置）
 
 ---
