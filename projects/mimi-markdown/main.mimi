@@ -143,6 +143,127 @@ func escape_html(s: string) -> string {
 }
 
 // ============================================================
+// Inline Renderer
+// ============================================================
+
+// Find closing marker starting from position start
+func find_closing(text: string, start: i32, marker: string) -> i32 {
+    let tlen = len(text)
+    let mlen = len(marker)
+    let mut i = start
+    while i <= tlen - mlen {
+        let sub = str_substring(text, i, i + mlen)
+        if sub == marker {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Render inline markdown formatting (non-recursive, simple pass)
+func render_inline(text: string) -> string {
+    let tlen = len(text)
+    let mut result = ""
+    let mut i = 0
+    while i < tlen {
+        let ch = str_char_at(text, i)
+        // Bold: **text**
+        if ch == "*" && i + 1 < tlen && str_char_at(text, i + 1) == "*" {
+            let bold_end = find_closing(text, i + 2, "**")
+            if bold_end > 0 {
+                let bold_inner = str_substring(text, i + 2, bold_end)
+                result = result + "<strong>" + bold_inner + "</strong>"
+                i = bold_end + 2
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Italic: *text*
+        else if ch == "*" {
+            let italic_end = find_closing(text, i + 1, "*")
+            if italic_end > 0 {
+                let italic_inner = str_substring(text, i + 1, italic_end)
+                result = result + "<em>" + italic_inner + "</em>"
+                i = italic_end + 1
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Inline code: `text`
+        else if ch == "`" {
+            let code_end = find_closing(text, i + 1, "`")
+            if code_end > 0 {
+                let code_inner = str_substring(text, i + 1, code_end)
+                result = result + "<code>" + escape_html(code_inner) + "</code>"
+                i = code_end + 1
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Link: [text](url)
+        else if ch == "[" {
+            let link_bracket = find_closing(text, i + 1, "]")
+            if link_bracket > 0 && link_bracket + 1 < tlen && str_char_at(text, link_bracket + 1) == "(" {
+                let link_paren = find_closing(text, link_bracket + 2, ")")
+                if link_paren > 0 {
+                    let link_text = str_substring(text, i + 1, link_bracket)
+                    let link_url = str_substring(text, link_bracket + 2, link_paren)
+                    result = result + "<a href=\"" + link_url + "\">" + link_text + "</a>"
+                    i = link_paren + 1
+                } else {
+                    result = result + ch
+                    i = i + 1
+                }
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Image: ![alt](url)
+        else if ch == "!" && i + 1 < tlen && str_char_at(text, i + 1) == "[" {
+            let img_bracket = find_closing(text, i + 2, "]")
+            if img_bracket > 0 && img_bracket + 1 < tlen && str_char_at(text, img_bracket + 1) == "(" {
+                let img_paren = find_closing(text, img_bracket + 2, ")")
+                if img_paren > 0 {
+                    let img_alt = str_substring(text, i + 2, img_bracket)
+                    let img_url = str_substring(text, img_bracket + 2, img_paren)
+                    result = result + "<img src=\"" + img_url + "\" alt=\"" + img_alt + "\">"
+                    i = img_paren + 1
+                } else {
+                    result = result + ch
+                    i = i + 1
+                }
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Strikethrough: ~~text~~
+        else if ch == "~" && i + 1 < tlen && str_char_at(text, i + 1) == "~" {
+            let strike_end = find_closing(text, i + 2, "~~")
+            if strike_end > 0 {
+                let strike_inner = str_substring(text, i + 2, strike_end)
+                result = result + "<del>" + strike_inner + "</del>"
+                i = strike_end + 2
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        }
+        // Regular character
+        else {
+            result = result + ch
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ============================================================
 // Block Parser
 // ============================================================
 
@@ -218,9 +339,9 @@ func render_block(block: MdBlock) -> string {
         let lvl = to_string(block.level)
         let open = "<h" + lvl + ">"
         let close = "</h" + lvl + ">"
-        open + escape_html(block.content) + close
+        open + render_inline(block.content) + close
     } else if block.tag == "paragraph" {
-        "<p>" + escape_html(block.content) + "</p>"
+        "<p>" + render_inline(block.content) + "</p>"
     } else {
         ""
     }
@@ -316,6 +437,41 @@ func test_mixed_headings_paragraphs() {
     let src = "# Title\n\nSome text here.\n\n## Subtitle\n\nMore text."
     let blocks = parse_blocks(src)
     let html = render_html(blocks)
+    println(html)
+}
+
+func test_bold() {
+    let html = render_inline("This is **bold** text")
+    println(html)
+}
+
+func test_italic() {
+    let html = render_inline("This is *italic* text")
+    println(html)
+}
+
+func test_bold_italic() {
+    let html = render_inline("This is ***bold italic*** text")
+    println(html)
+}
+
+func test_inline_code() {
+    let html = render_inline("Use `code` here")
+    println(html)
+}
+
+func test_link() {
+    let html = render_inline("Click [here](https://example.com) now")
+    println(html)
+}
+
+func test_image() {
+    let html = render_inline("![alt text](image.png)")
+    println(html)
+}
+
+func test_strikethrough() {
+    let html = render_inline("This is ~~deleted~~ text")
     println(html)
 }
 
