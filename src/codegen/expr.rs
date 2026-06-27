@@ -267,7 +267,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     String::new()
                 }
             }
-            Expr::Field(obj, _) => self.infer_object_type(obj, vars),
+            Expr::Field(obj, field_name) => {
+                let obj_type = self.infer_object_type(obj, vars);
+                if let Some(td) = self.type_defs.get(&obj_type) {
+                    if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                        if let Some(f) = fields.iter().find(|f| f.name == *field_name) {
+                            return crate::core::fmt_type(&f.ty);
+                        }
+                    }
+                }
+                obj_type
+            }
             Expr::Index(obj, _) => {
                 // Index into a List<T> returns T. Infer the list's element type.
                 let obj_type = self.infer_object_type(obj, vars);

@@ -31,8 +31,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .gep()
                     .build_struct_gep(sty, alloca, i as u32, &field.name)
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let field_ty = sty.get_field_type_at_index(i as u32)
+                    .ok_or_else(|| CompileError::LlvmError(format!("field {} type", i)))?;
+                // List expressions return PointerValue (alloca of list struct).
+                // Record struct fields expect the struct value itself, so load.
+                let store_val = if let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) = (&val, field_ty) {
+                    let needs_load = matches!(&field.value,
+                        Expr::List(_) | Expr::Tuple(_) | Expr::Comprehension { .. }
+                    );
+                    if needs_load {
+                        self.builder.build_load(field_ty, *pv, &format!("load_{}", field.name))
+                            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                };
                 self.builder
-                    .build_store(gep, val)
+                    .build_store(gep, store_val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
             }
             Ok(alloca.into())

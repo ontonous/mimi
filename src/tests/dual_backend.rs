@@ -4724,4 +4724,66 @@ fn dual_format_mixed() {
     );
 }
 
+#[test]
+fn dual_record_list_field() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        type Config {
+            name: string,
+            tags: List<string>
+        }
+        func main() -> i32 {
+            let c = Config { name: "test", tags: ["hello", "world"] }
+            println(c.name)
+            println(len(c.tags))
+            println(c.tags[0])
+            println(c.tags[1])
+            0
+        }
+    "#,
+        "test\n2\nhello\nworld"
+    );
+}
+
+#[test]
+fn dual_record_empty_list_field() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        type Config {
+            name: string,
+            tags: List<string>
+        }
+        func main() -> i32 {
+            let c = Config { name: "test", tags: [] }
+            println(c.name)
+            println(len(c.tags))
+            0
+        }
+    "#,
+        "test\n0"
+    );
+}
+
+#[test]
+fn dual_record_list_i32_field() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        type Data {
+            scores: List<i32>
+        }
+        func main() -> i32 {
+            let d = Data { scores: [10, 20, 30] }
+            println(d.scores[0])
+            println(d.scores[2])
+            println(len(d.scores))
+            0
+        }
+    "#,
+        "10\n30\n3"
+    );
+}
+
 
