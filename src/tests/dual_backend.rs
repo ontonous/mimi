@@ -45,6 +45,82 @@ macro_rules! dual_assert_interp_only {
     }};
 }
 
+// ─── Map type inference tests (v0.28.1) ────────────────────────────
+// NOTE: Map operations in codegen are a known gap (codegen returns 0 for all map ops).
+// These tests verify interpreter behavior only.
+
+#[test]
+fn interp_map_new_size() {
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            map_size(m)
+        }
+    "#,
+        interp::Value::Int(0)
+    );
+}
+
+#[test]
+fn interp_map_set_size() {
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m = map_set(m, "a", 1)
+            let m = map_set(m, "b", 2)
+            map_size(m)
+        }
+    "#,
+        interp::Value::Int(2)
+    );
+}
+
+#[test]
+fn interp_map_has_key() {
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m = map_set(m, "x", 42)
+            if has_key(m, "x") { 1 } else { 0 }
+        }
+    "#,
+        interp::Value::Int(1)
+    );
+}
+
+#[test]
+fn interp_map_remove_size() {
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m = map_set(m, "a", 1)
+            let m = map_set(m, "b", 2)
+            let m = map_remove(m, "a")
+            map_size(m)
+        }
+    "#,
+        interp::Value::Int(1)
+    );
+}
+
+#[test]
+fn interp_map_from_list_size() {
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let pairs = [("a", 1), ("b", 2), ("c", 3)]
+            let m = map_from_list(pairs)
+            map_size(m)
+        }
+    "#,
+        interp::Value::Int(3)
+    );
+}
+
 // ─── 1.  Arithmetic (7 tests) ────────────────────────────────
 
 #[test]

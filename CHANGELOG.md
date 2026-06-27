@@ -1,6 +1,32 @@
 # Changelog
 
-## [v0.28.0-dev] — 2026-06-27
+## [Unreleased] — v0.28.1-dev
+
+### Added
+
+- **mimi-kv**: 嵌入式 KV 存储 — TCP 协议、JSON 持久化、CLI 客户端
+
+### Fixed
+
+- **Type inference**: map builtins return proper types instead of `unknown`
+  - `map_new` → `Record`
+  - `map_get` → `(bool, Any)` tuple
+  - `map_set` → `Record`
+  - `map_remove` → `Record`
+  - `map_from_list` → `Record`
+  - `from_json` → `Record` (was `string`)
+  - `keys`/`values` → `List<string>` (was `List<unknown>`)
+
+### Known Gaps (documented)
+
+- `const` keyword not supported at top level
+- `Record` not a valid type annotation
+- `as i32`/`as i64` cast not supported
+- Map operations in codegen return 0 (interpreter works correctly)
+
+---
+
+## [v0.28.0] — 2026-06-27
 
 ### Added (New Builtins)
 

@@ -1,0 +1,99 @@
+// mimi-kv client: CLI client for the mimi-kv server
+// Connects to server via TCP, sends commands, displays responses
+
+const DEFAULT_HOST: string = "127.0.0.1"
+const DEFAULT_PORT: i32 = 6380
+const MAX_RECV: i32 = 4096
+
+// Send a command and receive response
+func send_command(fd: i32, cmd: string) -> string {
+    let _ = send(fd, cmd + "\n")
+    recv(fd, MAX_RECV)
+}
+
+// Format a response for display
+func format_response(resp: string) -> string {
+    if str_starts_with(resp, "+") {
+        return "OK: " + str_substring(resp, 1, len(resp) - 1)
+    }
+    if str_starts_with(resp, "-") {
+        return "ERR: " + str_substring(resp, 1, len(resp) - 1)
+    }
+    if str_starts_with(resp, "$") {
+        if resp == "$NOT_FOUND\n" { return "(nil)" }
+        return str_substring(resp, 1, len(resp) - 1)
+    }
+    if str_starts_with(resp, "*") {
+        let inner = str_substring(resp, 1, len(resp) - 1)
+        if inner == "" { return "(empty list)" }
+        let items = str_split(inner, ",")
+        let mut result = ""
+        let i = 0
+        while i < len(items) {
+            if i > 0 { result = result + "\n" }
+            result = result + to_string(i + 1) + ") " + items[i]
+            i = i + 1
+        }
+        return result
+    }
+    resp
+}
+
+// Interactive REPL
+func repl(fd: i32) -> i32 {
+    println("Connected to mimi-kv. Type 'quit' to exit.")
+    println("Commands: GET key | SET key value | DEL key | EXISTS key")
+    println("          KEYS | COUNT | SAVE | LOAD | CLEAR | PING | QUIT")
+    println("")
+
+    let running = true
+    while running {
+        print("mimi-kv> ")
+        let input = input_line()
+        if input == "" { continue }
+
+        let trimmed = str_trim(input)
+        if trimmed == "quit" || trimmed == "exit" {
+            let _ = send_command(fd, "QUIT")
+            running = false
+        } else {
+            let response = send_command(fd, trimmed)
+            println(format_response(response))
+        }
+    }
+
+    0
+}
+
+// Main entry point
+func main() -> i32 {
+    let host = DEFAULT_HOST
+    let port = DEFAULT_PORT
+
+    // Check for command-line arguments
+    let arg_count = cli_args()
+    if len(arg_count) >= 2 {
+        host = arg_count[0]
+        let parsed = str_parse_int(arg_count[1])
+        if parsed.0 { port = parsed.1 }
+    }
+
+    println("mimi-kv client — connecting to " + host + ":" + to_string(port))
+
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 {
+        println("Failed to create socket")
+        return 1
+    }
+
+    let connect_result = connect(fd, host, port)
+    if connect_result < 0 {
+        println("Failed to connect to " + host + ":" + to_string(port))
+        close_fd(fd)
+        return 1
+    }
+
+    let result = repl(fd)
+    close_fd(fd)
+    result
+}

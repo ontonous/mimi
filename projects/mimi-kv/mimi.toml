@@ -1,0 +1,8 @@
+[package]
+name = "mimi-kv"
+version = "0.1.0"
+description = "Embedded key-value store with TCP protocol and JSON persistence"
+authors = ["ontonous"]
+license = "Apache-2.0"
+
+[dependencies]
