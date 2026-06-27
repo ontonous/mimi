@@ -3506,6 +3506,7 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
 }
 
 /// Frees a MimiExecResult allocated by mimi_exec.
+/// stdout/stderr are allocated by alloc_c_string (libc::malloc), so must use libc::free.
 #[no_mangle]
 pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     if res.is_null() {
@@ -3514,11 +3515,24 @@ pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     unsafe {
         let r = Box::from_raw(res);
         if !r.stdout.is_null() {
-            let _ = std::ffi::CString::from_raw(r.stdout);
+            libc::free(r.stdout as *mut std::ffi::c_void);
         }
         if !r.stderr.is_null() {
-            let _ = std::ffi::CString::from_raw(r.stderr);
+            libc::free(r.stderr as *mut std::ffi::c_void);
         }
+    }
+}
+
+/// Frees only the MimiExecResult struct, NOT the stdout/stderr strings.
+/// Used by codegen after extracting string pointers into ExecResult struct.
+#[no_mangle]
+pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
+    if res.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(res);
+        // stdout/stderr are NOT freed — they're owned by the ExecResult struct
     }
 }
 
@@ -3529,6 +3543,17 @@ pub struct MimiStatResult {
     pub modified: i64,
     pub is_file: i64,
     pub is_dir: i64,
+}
+
+/// Frees a MimiStatResult allocated by mimi_file_stat.
+#[no_mangle]
+pub extern "C" fn mimi_file_stat_free(res: *mut MimiStatResult) {
+    if res.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(res);
+    }
 }
 
 /// Stats a file. Returns a heap-allocated MimiStatResult, or null on error.

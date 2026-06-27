@@ -1498,9 +1498,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let stderr_str = self.wrap_c_string(stderr_raw)?;
 
-        // Note: we intentionally do NOT free the MimiExecResult here because
-        // the stdout/stderr pointers are shared with the ExecResult struct.
-        // The runtime struct leaks (small, per-exec call). This is acceptable.
+        // Free the runtime struct (not the strings — they're owned by ExecResult)
+        let free_struct_fn = self.module.get_function("mimi_exec_free_struct")
+            .ok_or_else(|| "mimi_exec_free_struct not declared".to_string())?;
+        self.builder.build_call(
+            free_struct_fn,
+            &[BasicMetadataValueEnum::PointerValue(res_ptr)],
+            "exec_free_struct",
+        ).map_err(|e| CompileError::LlvmError(format!("exec_free_struct error: {}", e)))?;
 
         // Build ExecResult LLVM struct { i32, {i8*,i64}, {i8*,i64} }
         let string_ty = self.context.struct_type(
@@ -1670,10 +1675,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.build_store(s3, isd_val)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
-        // Free the stat result if non-null
-        let free_fn = self.module.get_function("free")
-            .ok_or_else(|| "free not declared".to_string())?;
-        // Use select to get the actual pointer or a dummy (free handles null gracefully)
+        // Free the stat result (uses Rust allocator via Box::from_raw)
+        let free_fn = self.module.get_function("mimi_file_stat_free")
+            .ok_or_else(|| "mimi_file_stat_free not declared".to_string())?;
         self.builder.build_call(
             free_fn,
             &[BasicMetadataValueEnum::PointerValue(stat_ptr)],

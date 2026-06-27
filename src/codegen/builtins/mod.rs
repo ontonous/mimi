@@ -955,6 +955,18 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_exec_free_struct(res: i8*) — frees struct only, not strings
+    module.add_function(
+        "mimi_exec_free_struct",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_file_stat_free(res: i8*)
+    module.add_function(
+        "mimi_file_stat_free",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_file_stat(path: i8*, err_out: i8**) -> i8* (MimiStatResult*)
     module.add_function(
         "mimi_file_stat",

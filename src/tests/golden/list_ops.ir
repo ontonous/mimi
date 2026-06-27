@@ -211,6 +211,10 @@ declare ptr @mimi_exec(ptr)
 
 declare void @mimi_exec_free(ptr)
 
+declare void @mimi_exec_free_struct(ptr)
+
+declare void @mimi_file_stat_free(ptr)
+
 declare ptr @mimi_file_stat(ptr, ptr)
 
 declare i64 @mimi_append_file(ptr, ptr)
