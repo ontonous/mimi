@@ -304,6 +304,24 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_to_string_i64(i64) → i8* (heap-allocated string, Rust Display)
+    module.add_function(
+        "mimi_to_string_i64",
+        i8_ptr.fn_type(
+            &[BasicMetadataTypeEnum::IntType(i64)],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_to_string_f64(f64) → i8* (heap-allocated string, Rust Display)
+    module.add_function(
+        "mimi_to_string_f64",
+        i8_ptr.fn_type(
+            &[BasicMetadataTypeEnum::FloatType(ctx.f64_type())],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 
     // Regex functions
     // mimi_regex_match(text, pattern) -> int (0 or 1)

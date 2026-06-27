@@ -63,6 +63,10 @@ declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
 declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
+declare ptr @mimi_to_string_i64(i64)
+
+declare ptr @mimi_to_string_f64(double)
+
 declare i32 @mimi_regex_match(ptr, ptr)
 
 declare ptr @mimi_regex_find(ptr, ptr)

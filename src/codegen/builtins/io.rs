@@ -1484,27 +1484,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicMetadataValueEnum::PointerValue(pv) => {
                     call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
                 }
-                _ => {
-                    // For non-string args, use to_string to convert
-                    let to_string_fn = self.module.get_function("mimi_to_string")
-                        .ok_or_else(|| "mimi_to_string not declared".to_string())?;
+                BasicMetadataValueEnum::IntValue(iv) => {
+                    let to_i64_fn = self.module.get_function("mimi_to_string_i64")
+                        .ok_or_else(|| "mimi_to_string_i64 not declared".to_string())?;
                     let str_result = self.builder.build_call(
-                        to_string_fn,
-                        &[args[i].clone()],
-                        "to_str",
+                        to_i64_fn,
+                        &[BasicMetadataValueEnum::IntValue(*iv)],
+                        "to_str_i64",
                     ).map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_to_string returned void")?;
-                    match str_result {
-                        BasicValueEnum::PointerValue(pv) => {
-                            call_args.push(BasicMetadataValueEnum::PointerValue(pv));
-                        }
-                        _ => {
-                            call_args.push(BasicMetadataValueEnum::PointerValue(
-                                i8_ptr.const_null(),
-                            ));
-                        }
-                    }
+                        .ok_or("mimi_to_string_i64 returned void")?
+                        .into_pointer_value();
+                    call_args.push(BasicMetadataValueEnum::PointerValue(str_result));
+                }
+                BasicMetadataValueEnum::FloatValue(fv) => {
+                    let to_f64_fn = self.module.get_function("mimi_to_string_f64")
+                        .ok_or_else(|| "mimi_to_string_f64 not declared".to_string())?;
+                    let str_result = self.builder.build_call(
+                        to_f64_fn,
+                        &[BasicMetadataValueEnum::FloatValue(*fv)],
+                        "to_str_f64",
+                    ).map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_to_string_f64 returned void")?
+                        .into_pointer_value();
+                    call_args.push(BasicMetadataValueEnum::PointerValue(str_result));
+                }
+                _ => {
+                    call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
                 }
             }
         }

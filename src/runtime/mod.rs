@@ -3614,6 +3614,16 @@ pub fn base64_decode_str(input: &str) -> Result<String, ()> {
 }
 
 #[no_mangle]
+pub extern "C" fn mimi_to_string_i64(val: i64) -> *mut std::ffi::c_char {
+    alloc_c_string(&val.to_string())
+}
+
+#[no_mangle]
+pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
+    alloc_c_string(&val.to_string())
+}
+
+#[no_mangle]
 pub extern "C" fn mimi_str_format(
     num_args: i64,
     template: *const std::ffi::c_char,

@@ -4675,4 +4675,53 @@ fn dual_string_list_index() {
     );
 }
 
+#[test]
+fn dual_format_int() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = 42
+            let msg = format("x={}", x)
+            println(msg)
+            0
+        }
+    "#,
+        "x=42"
+    );
+}
+
+#[test]
+fn dual_format_float() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let pi = 3.14
+            let msg = format("pi={}", pi)
+            println(msg)
+            0
+        }
+    "#,
+        "pi=3.14"
+    );
+}
+
+#[test]
+fn dual_format_mixed() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = 42
+            let s = "hello"
+            let msg = format("{}-{}", s, x)
+            println(msg)
+            0
+        }
+    "#,
+        "hello-42"
+    );
+}
+
 
