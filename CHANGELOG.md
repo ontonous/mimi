@@ -1,5 +1,30 @@
 # Changelog
 
+## [v0.28.4] — 2026-06-28
+
+### Added
+
+- **G-83**: `from_json::<Record>` 类型化反序列化 codegen 支持
+- **G-84**: `Set<T>` 方法返回类型跟踪（insert/remove 结果自动注册为 Set 类型）
+- **G-86**: `map`/`filter` 支持内联闭包（`fn(x) -> T { body }`）
+
+### Fixed
+
+- **G-81**: Record 字段 `List<T>` 类型推断与索引（load struct value before storing）
+- **G-82**: `match` bool literal 类型不匹配（i1→i64 zext 修复 regex_match）
+- **G-85**: `str_trim` 空白字符串堆损坏（trimmed_len 负值下溢 → memcpy 越界）
+- **P0**: `from_json::<Record>` string 字段 null 指针防护
+- **P0**: `mimi_connect` freeaddrinfo 泄漏 + 变量遮蔽修复
+- **P1**: `from_json` bool 字段 i1→i64 存储一致性
+- **P1**: `get_jump_buf` 信号处理路径 Mutex→thread_local（async-signal-safe）
+- **P1**: `SharedHandle::release` Relaxed→Release 内存排序
+- **P2**: `compile_record_expr` 加载启发式增强（AST + 类型推断双保险）
+
+### Code Review
+
+- CODEGEN 模块严格审查：修复 P0/P1/P2 共 6 项
+- FFI 模块严格审查：修复 P0/P1 共 5 项
+
 ## [v0.28.3] — 2026-06-28
 
 ### Added
