@@ -37,7 +37,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen(s)
         let strlen_fn = self
@@ -169,34 +169,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Return string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "repeat_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, total)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        self.register_heap_alloc(buf);
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_trim(
         &self,
@@ -222,7 +197,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen(s)
         let strlen_fn = self
@@ -469,34 +444,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "trim_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, trimmed_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        self.register_heap_alloc(buf);
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_upper(
         &self,
@@ -522,7 +472,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen, malloc copy + toupper each char
         let strlen_fn = self
@@ -650,34 +600,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
-        // Return string struct
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "upper_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, s_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        self.register_heap_alloc(buf);
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_lower(
         &self,
@@ -703,7 +628,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let strlen_fn = self
             .module
@@ -827,33 +752,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "lower_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, s_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        self.register_heap_alloc(buf);
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_substring(
         &self,
@@ -898,7 +799,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // len = end - start
         let sub_len = self
@@ -955,34 +856,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "sub_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, sub_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer (not struct) for consistency with other string builtins
+        self.register_heap_alloc(buf);
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_split(
         &self,
