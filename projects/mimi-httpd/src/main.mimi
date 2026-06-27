@@ -1,0 +1,160 @@
+// mimi-httpd: Lightweight HTTP micro service framework
+// Built entirely in Mimi — demonstrates networking, routing, JSON, error handling
+
+type HttpRequest {
+    method: string
+    path: string
+    body: string
+    headers: string
+}
+
+type HttpResponse {
+    status: i32
+    content_type: string
+    body: string
+}
+
+func parse_method(raw: string) -> string {
+    if str_starts_with(raw, "GET") { "GET" }
+    else if str_starts_with(raw, "POST") { "POST" }
+    else if str_starts_with(raw, "PUT") { "PUT" }
+    else if str_starts_with(raw, "DELETE") { "DELETE" }
+    else { "UNKNOWN" }
+}
+
+func parse_path(raw: string) -> string {
+    let parts = str_split(raw, " ")
+    if len(parts) > 1 { parts[1] }
+    else { "/" }
+}
+
+func parse_http_request(raw: string) -> HttpRequest {
+    let lines = str_split(raw, "\r\n")
+    let mut first_line = ""
+    if len(lines) > 0 { first_line = lines[0] }
+
+    let method = parse_method(first_line)
+    let path = parse_path(first_line)
+
+    let mut body = ""
+    let mut i = 0
+    let mut found_empty = false
+    while i < len(lines) {
+        if lines[i] == "" {
+            found_empty = true
+        } else if found_empty {
+            body = body + lines[i]
+        }
+        i = i + 1
+    }
+
+    HttpRequest { method: method, path: path, body: body, headers: first_line }
+}
+
+func build_response(resp: HttpResponse) -> string {
+    let mut status_text = "OK"
+    if resp.status == 404 { status_text = "Not Found" }
+    else if resp.status == 405 { status_text = "Method Not Allowed" }
+    else if resp.status == 500 { status_text = "Internal Server Error" }
+
+    let mut r = "HTTP/1.1 " + to_string(resp.status) + " " + status_text + "\r\n"
+    r = r + "Content-Type: " + resp.content_type + "\r\n"
+    r = r + "Content-Length: " + to_string(len(resp.body)) + "\r\n"
+    r = r + "Connection: close\r\n"
+    r = r + "\r\n"
+    r = r + resp.body
+    r
+}
+
+func json_response(status: i32, data: string) -> HttpResponse {
+    HttpResponse { status: status, content_type: "application/json", body: data }
+}
+
+func text_response(status: i32, text: string) -> HttpResponse {
+    HttpResponse { status: status, content_type: "text/plain", body: text }
+}
+
+func route_request(req: HttpRequest) -> HttpResponse {
+    if req.path == "/health" && req.method == "GET" {
+        return json_response(200, "{\"status\":\"ok\",\"framework\":\"mimi-httpd\"}")
+    }
+    if req.path == "/" && req.method == "GET" {
+        return text_response(200, "Welcome to mimi-httpd v1.0!")
+    }
+    if req.path == "/echo" && req.method == "POST" {
+        return json_response(200, "{\"echo\":\"" + req.body + "\"}")
+    }
+    if req.path == "/stats" && req.method == "GET" {
+        return json_response(200, "{\"uptime\":\"running\",\"version\":\"1.0\"}")
+    }
+    if str_starts_with(req.path, "/hash/") && req.method == "GET" {
+        let hash_input = str_substring(req.path, 5, len(req.path))
+        let hash = sha256(hash_input)
+        return json_response(200, "{\"input\":\"" + hash_input + "\",\"sha256\":\"" + hash + "\"}")
+    }
+    if str_starts_with(req.path, "/base64/") && req.method == "GET" {
+        let b64_input = str_substring(req.path, 8, len(req.path))
+        let encoded = base64_encode(b64_input)
+        return json_response(200, "{\"input\":\"" + b64_input + "\",\"base64\":\"" + encoded + "\"}")
+    }
+    json_response(404, "{\"error\":\"not found\",\"path\":\"" + req.path + "\"}")
+}
+
+func handle_client(client_fd: i64) {
+    let raw = recv(client_fd, 4096)
+    if raw == "" {
+        close_fd(client_fd)
+        return
+    }
+    let req = parse_http_request(raw)
+    let resp = route_request(req)
+    let response_str = build_response(resp)
+    send(client_fd, response_str)
+    close_fd(client_fd)
+}
+
+func main() -> i32 {
+    println("=== mimi-httpd v1.0 ===")
+    println("Starting HTTP micro service...")
+
+    let port = 3000
+    let fd = socket(2, 1, 0)
+    if fd < 0 {
+        println("Error: socket creation failed")
+        return 1
+    }
+    let ret = bind(fd, port)
+    if ret < 0 {
+        println("Error: bind failed on port", port)
+        close_fd(fd)
+        return 1
+    }
+    let ret2 = listen(fd, 10)
+    if ret2 < 0 {
+        println("Error: listen failed")
+        close_fd(fd)
+        return 1
+    }
+
+    println("Listening on http://localhost:" + to_string(port))
+    println("Endpoints:")
+    println("  GET  /           - Welcome message")
+    println("  GET  /health     - Health check")
+    println("  POST /echo       - Echo body")
+    println("  GET  /stats      - Server stats")
+    println("  GET  /hash/<s>   - SHA-256 hash")
+    println("  GET  /base64/<s> - Base64 encode")
+    println("")
+
+    let mut running = true
+    while running {
+        let client_fd = accept(fd)
+        if client_fd < 0 {
+            println("Warning: accept failed, retrying...")
+        } else {
+            handle_client(client_fd)
+        }
+    }
+
+    0
+}
