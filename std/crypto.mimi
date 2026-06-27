@@ -1,16 +1,7 @@
 // crypto.mimi — Cryptographic utilities
 //
-// ⚠ NOTE: Mimi strings are Unicode; hex encoding/decoding and hashing
-// require Rust builtins (pending implementation).
-//
-// Currently available:
-//   - is_valid_hex(s)  — check if string is valid hex
-//
-// Future (needs Rust builtins):
-//   - to_hex(data)     — encode string as hex
-//   - from_hex(hex)    — decode hex to string
-//   - sha256(data)     — SHA-256 hash
-//   - base64_encode / base64_decode
+// sha256, base64_encode, base64_decode are now builtins (implemented in runtime).
+// hex_encode/hex_decode can be implemented using string operations.
 
 // is_valid_hex: Returns true if s is valid hexadecimal.
 pub func is_valid_hex(s: string) -> bool {
@@ -21,4 +12,27 @@ pub func is_valid_hex(s: string) -> bool {
         if !valid { return false }
     }
     true
+}
+
+// hex_encode: Converts a string to its hex representation.
+// Each character becomes two hex digits.
+pub func hex_encode(s: string) -> string {
+    let mut result = ""
+    for i in range(0, len(s)) {
+        let code = char_code(str_char_at(s, i))
+        let hi = code / 16
+        let lo = code % 16
+        result = result + hex_digit(hi) + hex_digit(lo)
+    }
+    result
+}
+
+func hex_digit(n: i32) -> string {
+    if n < 10 { to_string(n) }
+    else if n == 10 { "a" }
+    else if n == 11 { "b" }
+    else if n == 12 { "c" }
+    else if n == 13 { "d" }
+    else if n == 14 { "e" }
+    else { "f" }
 }
