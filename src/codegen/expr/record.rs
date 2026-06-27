@@ -189,11 +189,45 @@ impl<'ctx> CodeGenerator<'ctx> {
         elems: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let string_struct_ty = self.context.struct_type(
+            &[BasicTypeEnum::PointerType(i8_ptr), BasicTypeEnum::IntType(i64_ty)],
+            false,
+        );
         let mut field_vals = Vec::new();
-        for e in elems {
-            field_vals.push(self.compile_expr(e, vars)?);
+        let mut field_tys = Vec::new();
+        for (_i, e) in elems.iter().enumerate() {
+            let val = self.compile_expr(e, vars)?;
+            // Wrap raw string pointers into {ptr, i64} struct for correct tuple layout
+            if let BasicValueEnum::PointerValue(pv) = val {
+                if self.expr_is_string(e) {
+                    let str_alloca = self.builder.build_alloca(string_struct_ty, "tuple_str")
+                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                    let ptr_gep = self.gep().build_struct_gep(string_struct_ty, str_alloca, 0, "str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.builder.build_store(ptr_gep, pv)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    let len_gep = self.gep().build_struct_gep(string_struct_ty, str_alloca, 1, "str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    let s_len = self.builder.build_call(
+                        self.module.get_function("strlen").ok_or_else(|| "strlen not declared".to_string())?,
+                        &[BasicMetadataValueEnum::PointerValue(pv)],
+                        "strlen_call",
+                    ).map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                        .try_as_basic_value_opt().ok_or("strlen returned void")?.into_int_value();
+                    self.builder.build_store(len_gep, s_len)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    let loaded = self.builder.build_load(string_struct_ty, str_alloca, "tuple_str_val")
+                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                    field_vals.push(loaded);
+                    field_tys.push(BasicTypeEnum::StructType(string_struct_ty));
+                    continue;
+                }
+            }
+            field_tys.push(val.get_type());
+            field_vals.push(val);
         }
-        let field_tys: Vec<BasicTypeEnum<'ctx>> = field_vals.iter().map(|v| v.get_type()).collect();
         let struct_ty = self.context.struct_type(&field_tys, false);
         self.tuple_type_stack.push(struct_ty);
         let alloca = self

@@ -890,7 +890,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
+                    // For tuple patterns, push the tuple type onto tuple_type_stack
+                    // so that compile_pattern_bind can load the struct correctly
+                    if let Pattern::Tuple(sub_pats) = pat {
+                        if sub_pats.len() > 0 {
+                            // Try to infer tuple type from declared type or init expression
+                            let tuple_ty = if let Some(Type::Tuple(elem_tys)) = &ty {
+                                let field_tys: Vec<BasicTypeEnum> = elem_tys.iter()
+                                    .map(|t| types::mimi_type_to_llvm(self.context, t)
+                                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())))
+                                    .collect();
+                                self.context.struct_type(&field_tys, false)
+                            } else {
+                                // Fallback: create a struct with i64 fields
+                                let field_tys: Vec<BasicTypeEnum> = sub_pats.iter()
+                                    .map(|_| BasicTypeEnum::IntType(self.context.i64_type()))
+                                    .collect();
+                                self.context.struct_type(&field_tys, false)
+                            };
+                            self.tuple_type_stack.push(tuple_ty);
+                        }
+                    }
                     self.compile_pattern_bind(pat, val, &mut vars)?;
+                    // Pop tuple type stack if we pushed it
+                    if let Pattern::Tuple(sub_pats) = pat {
+                        if sub_pats.len() > 0 {
+                            self.tuple_type_stack.pop();
+                        }
+                    }
                     if let Pattern::Variable(name) = pat {
                         if let Expr::Ident(fn_name) = init {
                             if self.module.get_function(fn_name.as_str()).is_some() {
