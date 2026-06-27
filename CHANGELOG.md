@@ -1,6 +1,18 @@
 # Changelog
 
-## [v0.28.0-dev] — 2026-06-27
+## [Unreleased] — v0.28.1-dev
+
+### Added
+
+- **mimi-kv**: 嵌入式 KV 存储 — TCP 协议、JSON 持久化、CLI 客户端
+
+### Fixed
+
+_(待填充)_
+
+---
+
+## [v0.28.0] — 2026-06-27
 
 ### Added (New Builtins)
 
