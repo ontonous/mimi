@@ -1,0 +1,186 @@
+// mimi-todo: CLI task tracker
+// Exercises: const, Record type annotations, Map ops, as cast, JSON persistence
+
+const DATA_FILE: string = "mimi-todo-data.json"
+const VERSION: string = "0.1.0"
+
+func make_task(status: string, detail: string) -> string {
+    status + "|" + detail
+}
+
+func parse_status(task: string) -> string {
+    let parts = str_split(task, "|")
+    if len(parts) > 0 { parts[0] } else { "unknown" }
+}
+
+func parse_detail(task: string) -> string {
+    let parts = str_split(task, "|")
+    if len(parts) > 1 { parts[1] } else { task }
+}
+
+func load_tasks() -> Record {
+    if file_exists(DATA_FILE) {
+        let rr = read_file(DATA_FILE)
+        if rr.is_ok() {
+            let json = rr.unwrap()
+            if json != "" && json_is_valid(json) {
+                return from_json(json)
+            }
+        }
+    }
+    map_new()
+}
+
+func save_tasks(tasks: Record) -> bool {
+    let json = to_json(tasks)
+    let wr = write_file(DATA_FILE, json)
+    wr.is_ok()
+}
+
+func cmd_add(tasks: Record, args: string) -> Record {
+    if args == "" {
+        println("Usage: todo add <description>")
+        return tasks
+    }
+    let id = map_size(tasks) + 1
+    let key = to_string(id)
+    let updated = map_set(tasks, key, make_task("pending", args))
+    println("Added task #" + key + ": " + args)
+    updated
+}
+
+func cmd_done(tasks: Record, args: string) -> Record {
+    if args == "" {
+        println("Usage: todo done <id>")
+        return tasks
+    }
+    let id_result = str_parse_int(args)
+    if !id_result.is_ok() {
+        println("Invalid task ID: " + args)
+        return tasks
+    }
+    let key = args
+    let r = map_get(tasks, key)
+    if !r.0 {
+        println("Task #" + key + " not found")
+        return tasks
+    }
+    let task = to_string(r.1)
+    let detail = parse_detail(task)
+    let updated = map_set(tasks, key, make_task("done", detail))
+    println("Marked task #" + key + " as done: " + detail)
+    updated
+}
+
+func cmd_list(tasks: Record) {
+    let ks = keys(tasks)
+    let n = len(ks)
+    if n == 0 {
+        println("No tasks.")
+        return
+    }
+    println("Tasks (" + to_string(n) + "):")
+    let mut i = 0
+    while i < n {
+        let key = ks[i]
+        let r = map_get(tasks, key)
+        if r.0 {
+            let task = to_string(r.1)
+            let status = parse_status(task)
+            let detail = parse_detail(task)
+            let marker = if status == "done" { "[x]" } else { "[ ]" }
+            println("  #" + key + " " + marker + " " + detail)
+        }
+        i = i + 1
+    }
+}
+
+func cmd_stats(tasks: Record) {
+    let total = map_size(tasks)
+    let ks = keys(tasks)
+    let mut done_count = 0
+    let mut i = 0
+    while i < len(ks) {
+        let r = map_get(tasks, ks[i])
+        if r.0 {
+            let task = to_string(r.1)
+            if parse_status(task) == "done" {
+                done_count = done_count + 1
+            }
+        }
+        i = i + 1
+    }
+    let pending = total - done_count
+    println("Statistics:")
+    println("  Total:   " + to_string(total))
+    println("  Done:    " + to_string(done_count))
+    println("  Pending: " + to_string(pending))
+    if total > 0 {
+        let pct = done_count * 100 / total
+        println("  Progress: " + to_string(pct) + "%")
+    }
+}
+
+func cmd_clear(tasks: Record) -> Record {
+    println("Cleared all tasks.")
+    map_new()
+}
+
+func main() -> i32 {
+    println("mimi-todo v" + VERSION + " — CLI task tracker")
+    println("Commands: add <desc> | done <id> | list | stats | clear | quit")
+    println("")
+
+    let mut tasks = load_tasks()
+    let count = map_size(tasks)
+    if count > 0 {
+        println("Loaded " + to_string(count) + " tasks from " + DATA_FILE)
+    }
+
+    let running = true
+    while running {
+        print("todo> ")
+        let input_result = input()
+        if !input_result.is_ok() { continue }
+        let line = input_result.unwrap()
+        if line == "" { continue }
+
+        let parts = str_split(str_trim(line), " ")
+        let cmd = if len(parts) > 0 { parts[0] } else { "" }
+        let mut args = ""
+        if len(parts) > 1 {
+            args = parts[1]
+            let mut j = 2
+            while j < len(parts) {
+                args = args + " " + parts[j]
+                j = j + 1
+            }
+        }
+
+        if cmd == "quit" || cmd == "exit" {
+            let _ = save_tasks(tasks)
+            println("Goodbye!")
+            break
+        }
+        if cmd == "add" {
+            tasks = cmd_add(tasks, args)
+            let _ = save_tasks(tasks)
+        }
+        if cmd == "done" {
+            tasks = cmd_done(tasks, args)
+            let _ = save_tasks(tasks)
+        }
+        if cmd == "list" {
+            cmd_list(tasks)
+        }
+        if cmd == "stats" {
+            cmd_stats(tasks)
+        }
+        if cmd == "clear" {
+            tasks = cmd_clear(tasks)
+            let _ = save_tasks(tasks)
+        }
+    }
+
+    0
+}
