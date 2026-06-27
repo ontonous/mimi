@@ -80,12 +80,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let int_val = call_try_basic_value(&result)
             .ok_or("mimi_map_has_key returned void".to_string())?
             .into_int_value();
-        let const_val = int_val.get_zero_extended_constant().unwrap_or(0);
-        Ok(self.context.bool_type().const_int(const_val, false).into())
+        Ok(BasicValueEnum::IntValue(int_val))
     }
 
     pub(super) fn compile_map_get(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
@@ -136,9 +135,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_map_has_key returned void".to_string())?
             .into_int_value();
         let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
         let tuple_ty = self.context.struct_type(
             &[
-                BasicTypeEnum::IntType(self.context.bool_type()),
+                BasicTypeEnum::IntType(i32_ty),
                 BasicTypeEnum::IntType(i64_ty),
             ],
             false,
@@ -151,12 +151,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(tuple_ty, tuple_alloca, 0, "found_field")
             .map_err(|e| format!("gep error: {}", e))?;
-        let found_val = self
-            .builder
-            .build_int_z_extend(found_int, self.context.bool_type(), "found_ext")
-            .map_err(|e| format!("zext error: {}", e))?;
         self.builder
-            .build_store(found_gep, found_val)
+            .build_store(found_gep, found_int)
             .map_err(|e| format!("store error: {}", e))?;
         let value_gep = self
             .gep()
@@ -165,6 +161,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(value_gep, value_handle)
             .map_err(|e| format!("store error: {}", e))?;
+        self.tuple_type_stack.push(tuple_ty);
         Ok(tuple_alloca.into())
     }
 
@@ -202,8 +199,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "map_set_call",
             )
             .map_err(|e| format!("map_set error: {}", e))?;
-        let const_val = map_handle.get_zero_extended_constant().unwrap_or(0);
-        Ok(self.context.i64_type().const_int(const_val, false).into())
+        Ok(BasicValueEnum::IntValue(map_handle))
     }
 
     pub(super) fn compile_map_remove(
@@ -235,8 +231,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "map_remove_call",
             )
             .map_err(|e| format!("map_remove error: {}", e))?;
-        let const_val = map_handle.get_zero_extended_constant().unwrap_or(0);
-        Ok(self.context.i64_type().const_int(const_val, false).into())
+        Ok(BasicValueEnum::IntValue(map_handle))
     }
 
     pub(super) fn compile_map_from_list(
