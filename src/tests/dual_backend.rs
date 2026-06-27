@@ -4822,4 +4822,38 @@ fn dual_set_contains() {
     );
 }
 
+#[test]
+fn dual_map_inline_closure() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3]
+            let ys = map(xs, fn(x: i32) -> i32 { x * 2 })
+            println(ys[0])
+            println(ys[1])
+            println(ys[2])
+            0
+        }
+    "#,
+        "2\n4\n6"
+    );
+}
+
+#[test]
+fn dual_filter_inline_closure() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3, 4, 5]
+            let evens = filter(xs, fn(x: i32) -> bool { x % 2 == 0 })
+            println(len(evens))
+            0
+        }
+    "#,
+        "2"
+    );
+}
+
 

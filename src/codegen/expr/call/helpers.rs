@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -577,19 +577,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::PointerValue(pv) => pv,
                     _ => return Err("map/filter: first arg must be a list".into()),
                 };
-                // Resolve function name from second arg (must be an identifier)
-                let fn_name = match &args[1] {
-                    Expr::Ident(n) => n.clone(),
+                // Resolve function from second arg (identifier, lambda, or variable)
+                enum FnRef<'ctx> {
+                    Named(inkwell::values::FunctionValue<'ctx>),
+                    Indirect {
+                        fn_ptr: inkwell::values::PointerValue<'ctx>,
+                        env_ptr: inkwell::values::PointerValue<'ctx>,
+                    },
+                }
+                let fn_ref = match &args[1] {
+                    Expr::Ident(n) => {
+                        let f = self.module.get_function(n)
+                            .ok_or_else(|| format!("map/filter: function '{}' not compiled", n))?;
+                        FnRef::Named(f)
+                    }
+                    Expr::Lambda { params, ret, body } => {
+                        let closure_val = self.compile_lambda_expr(params, ret, body, vars)?;
+                        let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
+                        FnRef::Indirect { fn_ptr, env_ptr }
+                    }
                     _ => {
-                        return Err(
-                            "map/filter: second arg must be a function name (identifier)".into(),
-                        )
+                        let val = self.compile_expr(&args[1], vars)?;
+                        match val {
+                            BasicValueEnum::PointerValue(fp) => {
+                                let null_env = self.context.ptr_type(inkwell::AddressSpace::default()).const_null();
+                                FnRef::Indirect { fn_ptr: fp, env_ptr: null_env }
+                            }
+                            _ => return Err("map/filter: second arg must be a function name, lambda, or function pointer".into()),
+                        }
                     }
                 };
-                let fn_llvm = self
-                    .module
-                    .get_function(&fn_name)
-                    .ok_or_else(|| format!("map/filter: function '{}' not compiled", fn_name))?;
                 let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_ty = self.context.i64_type();
                 let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(
@@ -725,16 +742,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                // Call the function: fn(elem)
-                let fn_call = self
-                    .builder
-                    .build_call(
-                        fn_llvm,
-                        &[BasicMetadataValueEnum::IntValue(elem.into_int_value())],
-                        "fn_call",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                let result = call_try_basic_value(&fn_call).ok_or("function returned void")?;
+                // Call the function: fn(elem) or fn(env_ptr, elem)
+                let result = match &fn_ref {
+                    FnRef::Named(fn_llvm) => {
+                        let fn_call = self
+                            .builder
+                            .build_call(
+                                *fn_llvm,
+                                &[BasicMetadataValueEnum::IntValue(elem.into_int_value())],
+                                "fn_call",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                        call_try_basic_value(&fn_call).ok_or("function returned void")?
+                    }
+                    FnRef::Indirect { fn_ptr, env_ptr } => {
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let indirect_fn_type = i64_ty.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64_ty),
+                            ],
+                            false,
+                        );
+                        let fn_ptr_typed = self.builder.build_pointer_cast(
+                            *fn_ptr,
+                            i8_ptr,
+                            "fn_typed",
+                        ).map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
+                        let call_args = vec![
+                            BasicMetadataValueEnum::PointerValue(*env_ptr),
+                            BasicMetadataValueEnum::IntValue(elem.into_int_value()),
+                        ];
+                        let fn_call = self
+                            .builder
+                            .build_indirect_call(indirect_fn_type, fn_ptr_typed, &call_args, "fn_call")
+                            .map_err(|e| CompileError::LlvmError(format!("indirect call: {}", e)))?;
+                        call_try_basic_value(&fn_call).ok_or("function returned void")?
+                    }
+                };
                 if is_map {
                     // For map: store result to output array
                     let out_elem_ptr = {

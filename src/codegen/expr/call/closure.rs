@@ -5,7 +5,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Extract {fn_ptr, env_ptr} from a closure value (StructValue or PointerValue).
-    fn extract_closure_ptrs(
+    pub(in crate::codegen) fn extract_closure_ptrs(
         &self,
         closure_val: BasicValueEnum<'ctx>,
     ) -> Result<
