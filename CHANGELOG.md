@@ -87,18 +87,6 @@
 - `dual_mimi_opt_consistency`, `dual_shared_let_basic`, `dual_if_expr_shared_no_else`, `dual_multi_ensures_unique_bb` — L1 regression tests for codegen fixes
 - `dual_arena_closure_no_extra_capture`, `dual_block_closure_no_extra_capture`, `dual_parasteps_let_spawn_await` — L1 regression tests for P0 fixes
 
-## [Unreleased] — v0.27.7-dev
-
-### Code Quality
-
-- **QUAL-2**: `compile_arena_block` didn't push/pop `cap_scope`, causing arena-local capabilities to leak to outer scope; fixed with `push_cap_scope`/`pop_cap_scope` around `compile_block`
-- **QUAL-5**: Multiple contract asserts in one function caused duplicate `BasicBlock` names (`contract_pass`/`contract_fail`); fixed with `contract_bb_counter` for unique naming
-
-### Tests
-
-- `dual_mimi_opt_consistency`, `dual_shared_let_basic`, `dual_if_expr_shared_no_else`, `dual_multi_ensures_unique_bb` — L1 regression tests for codegen fixes
-- `dual_arena_closure_no_extra_capture`, `dual_block_closure_no_extra_capture`, `dual_parasteps_let_spawn_await` — L1 regression tests for P0 fixes
-
 ## [v0.27.5] — 2026-06-26
 
 ### Bug Fixes (Correctness)
@@ -264,8 +252,6 @@
 ### Fixed
 - **Bug 3**: Expected type propagated through Expr::If branches (C3 bidirectional checking)
 - **Bug 2**: Confirmed resolved by v0.26 unification architecture — reset() called per function
-
-## [Unreleased] — v0.25.7-dev
 
 ## [v0.25.3] — 2026-06-25
 
@@ -745,7 +731,7 @@
 - Item 2: transmute 'static field ordering enforced via layout test (🟠)
 - Item 8: fork async-signal-safety documented on both fork isolation functions (🟠)
 
-## [0.7.0] - 2026-06-xx
+## [0.7.0] - 2026-06-17
 
 ### Added
 - Z3 formal verification: cross-module ensures propagation, Expr::Match encoding, string length constraints
@@ -755,7 +741,7 @@
 - P0.1: Expr::Call unconstrained variables → false positives fix (🔴)
 - P0.2: verify_func_call_silent missing Failed assertion fix (🔴)
 
-## [0.6.0] - 2026-05-xx
+## [0.6.0] - 2026-06-16
 
 ### Added
 - Windows target support (x86_64-pc-windows-gnu)
@@ -763,14 +749,14 @@
 - Regex builtins (match, find, replace)
 - String contract runtime assertions
 
-## [0.5.0] - 2026-04-xx
+## [0.5.0] - 2026-06-16
 
 ### Added
 - Parasteps spawn+await via pthread (codegen)
 - Contract verification (Z3)
 - CI/CD: GitHub Actions (test/clippy/fmt/valgrind/ASan/UBSan/Miri/fuzz/cppcheck)
 
-## [0.4.0] - 2026-03-xx
+## [0.4.0] - 2026-06-16
 
 ### Added
 - Error system: String → Diagnostic replacement
@@ -778,14 +764,14 @@
 - Write-write race detection (W005)
 - Shared parameter contract warnings (E0502)
 
-## [0.3.0] - 2026-02-xx
+## [0.3.0] - 2026-06-16
 
 ### Added
 - Package management
 - Documentation generation pipeline
 - Dual backend (interpreter + codegen) baseline
 
-## [0.2.0] - 2026-01-xx
+## [0.2.0] - 2026-06-15
 
 ### Added
 - Basic language features
@@ -793,7 +779,7 @@
 - Contract system foundations
 - MimiSpec integration
 
-## [0.1.0] - 2025-12-xx
+## [0.1.0] - 2026-06-15
 
 ### Added
 - Initial prototype

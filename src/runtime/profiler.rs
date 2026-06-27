@@ -38,11 +38,7 @@ impl ProfileEntry {
     }
 
     pub fn avg_ns(&self) -> u64 {
-        if self.call_count == 0 {
-            0
-        } else {
-            self.total_ns / self.call_count
-        }
+        self.total_ns.checked_div(self.call_count).unwrap_or(0)
     }
 }
 
@@ -127,7 +123,7 @@ pub fn profiler_report() {
     }
 
     let mut entries: Vec<(&String, &ProfileEntry)> = profiler.entries.iter().collect();
-    entries.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.1.total_ns));
 
     eprintln!("\n=== Mimi Profile Report ===");
     eprintln!("{:<40} {:>10} {:>14} {:>14} {:>14}",
