@@ -244,6 +244,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> String {
         match expr {
+            Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => "string".to_string(),
             Expr::Ident(name) => {
                 // Look up variable's type name from our tracking map
                 if let Some(ty_name) = self.var_type_names.get(name) {
