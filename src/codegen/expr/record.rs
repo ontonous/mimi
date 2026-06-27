@@ -221,7 +221,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let mut field_vals = Vec::new();
         let mut field_tys = Vec::new();
-        for (_i, e) in elems.iter().enumerate() {
+        for e in elems.iter() {
             let val = self.compile_expr(e, vars)?;
             // Wrap raw string pointers into {ptr, i64} struct for correct tuple layout
             if let BasicValueEnum::PointerValue(pv) = val {

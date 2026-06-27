@@ -147,19 +147,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Binary(BinOp::Add, lhs, _) => self.expr_is_string(lhs),
             Expr::If { then_, else_, .. } => {
                 // Check if either branch returns a string
-                if let Some(last) = then_.last() {
-                    if let Stmt::Expr(e) = last {
-                        if self.expr_is_string(e) {
-                            return true;
-                        }
+                if let Some(Stmt::Expr(e)) = then_.last() {
+                    if self.expr_is_string(e) {
+                        return true;
                     }
                 }
                 if let Some(else_block) = else_ {
-                    if let Some(last) = else_block.last() {
-                        if let Stmt::Expr(e) = last {
-                            if self.expr_is_string(e) {
-                                return true;
-                            }
+                    if let Some(Stmt::Expr(e)) = else_block.last() {
+                        if self.expr_is_string(e) {
+                            return true;
                         }
                     }
                 }

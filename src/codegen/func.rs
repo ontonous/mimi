@@ -910,7 +910,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // For tuple patterns, push the tuple type onto tuple_type_stack
                     // so that compile_pattern_bind can load the struct correctly
                     if let Pattern::Tuple(sub_pats) = pat {
-                        if sub_pats.len() > 0 {
+                        if !sub_pats.is_empty() {
                             // Try to infer tuple type from declared type or init expression
                             let tuple_ty = if let Some(Type::Tuple(elem_tys)) = &ty {
                                 let field_tys: Vec<BasicTypeEnum> = elem_tys.iter()
@@ -931,7 +931,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_pattern_bind(pat, val, &mut vars)?;
                     // Pop tuple type stack if we pushed it
                     if let Pattern::Tuple(sub_pats) = pat {
-                        if sub_pats.len() > 0 {
+                        if !sub_pats.is_empty() {
                             self.tuple_type_stack.pop();
                         }
                     }

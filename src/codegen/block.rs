@@ -223,7 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Pattern::Variable(name) = pat {
                         if let Some(Type::Name(tn, args)) = &ty {
                             if tn == "List" && !args.is_empty() {
-                                if let Some(full) = self.get_full_type_name(ty.as_ref().unwrap()) {
+                                if let Some(full) = self.get_full_type_name(ty.as_ref().expect("ty is Some")) {
                                     self.var_type_names.insert(name.clone(), full);
                                 }
                             } else {
