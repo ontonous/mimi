@@ -205,6 +205,16 @@ declare i64 @mimi_mkdir_p(ptr)
 
 declare i64 @mimi_remove_file(ptr)
 
+declare ptr @mimi_exec(ptr)
+
+declare void @mimi_exec_free(ptr)
+
+declare ptr @mimi_file_stat(ptr, ptr)
+
+declare i64 @mimi_append_file(ptr, ptr)
+
+declare i64 @mimi_set_env(ptr, ptr)
+
 declare ptr @mimi_sha256(ptr)
 
 declare ptr @mimi_base64_encode(ptr)
