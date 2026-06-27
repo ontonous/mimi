@@ -255,12 +255,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_store(alloca, param_val)
                     .map_err(|e| CompileError::LlvmError(format!("store param: {}", e)))?;
                 vars.insert(param.name.clone(), (alloca, ty));
-                let param_ty_name = match &param.ty {
-                    Type::Name(tn, _) => Some(tn.clone()),
-                    _ => None,
-                };
-                if let Some(ref tn) = param_ty_name {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &param.ty {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&param.ty) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 // Register list element type for List<T> params where T is a struct
                 self.register_list_elem_type(&param.name, &param.ty);
@@ -475,8 +477,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
-                if let Type::Name(tn, _) = &param.ty {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &param.ty {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&param.ty) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 if let Type::DynTrait(_) = &param.ty {
                     self.var_type_names
@@ -780,8 +788,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Track type info for simple Variable patterns
                     if let Pattern::Variable(name) = pat {
-                        if let Some(Type::Name(tn, _)) = &ty {
-                            self.var_type_names.insert(name.clone(), tn.clone());
+                        if let Some(ty_ref) = &ty {
+                            if let Type::Name(tn, args) = ty_ref {
+                                if tn == "List" && !args.is_empty() {
+                                    // Store full List<T> type for element reconstruction
+                                    if let Some(full) = self.get_full_type_name(ty_ref) {
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                } else {
+                                    self.var_type_names.insert(name.clone(), tn.clone());
+                                }
+                            }
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
@@ -1308,8 +1325,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 // Track type name for method dispatch
                 let resolved_param = self.resolve_type(&param.ty);
-                if let Type::Name(tn, _) = &resolved_param {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &resolved_param {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&resolved_param) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 if let Type::DynTrait(_) = &resolved_param {
                     self.var_type_names

@@ -455,6 +455,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Get the full type name including generics for a variable (for list element reconstruction).
+    pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
+        if let Type::Name(tn, args) = ty {
+            if args.is_empty() {
+                Some(tn.clone())
+            } else {
+                let inner: Vec<String> = args.iter().filter_map(|a| self.get_full_type_name(a)).collect();
+                if inner.len() == args.len() {
+                    Some(format!("{}<{}>", tn, inner.join(", ")))
+                } else {
+                    Some(tn.clone())
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     /// G2: Find the ordinal index of an enum variant name across all registered types.
     pub(super) fn find_variant_ordinal(&self, name: &str) -> Result<u64, CompileError> {
         for td in self.type_defs.values() {
