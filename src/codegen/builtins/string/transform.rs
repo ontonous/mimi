@@ -170,7 +170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         // Return raw pointer for consistency
-        self.register_heap_alloc(buf);
+        
         Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_trim(
@@ -223,10 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let fwd_loop = self.context.append_basic_block(function, "trim_fwd");
         let fwd_body = self.context.append_basic_block(function, "trim_fwd_body");
         let fwd_done = self.context.append_basic_block(function, "trim_fwd_done");
-        let start_alloca = self
-            .builder
-            .build_alloca(i64_ty, "start")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let start_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "start")?;
         self.builder
             .build_store(start_alloca, zero)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -312,10 +309,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let bwd_loop = self.context.append_basic_block(function, "trim_bwd");
         let bwd_body = self.context.append_basic_block(function, "trim_bwd_body");
         let bwd_done = self.context.append_basic_block(function, "trim_bwd_done");
-        let end_alloca = self
-            .builder
-            .build_alloca(i64_ty, "end")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let end_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "end")?;
         self.builder
             .build_store(end_alloca, s_len)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -445,7 +439,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         // Return raw pointer for consistency
-        self.register_heap_alloc(buf);
+        
         Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_upper(
@@ -601,7 +595,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
         // Return raw pointer for consistency
-        self.register_heap_alloc(buf);
+        
         Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_lower(
@@ -753,7 +747,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
         // Return raw pointer for consistency
-        self.register_heap_alloc(buf);
+        
         Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_substring(
@@ -857,7 +851,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
         // Return raw pointer (not struct) for consistency with other string builtins
-        self.register_heap_alloc(buf);
+        
         Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_split(
