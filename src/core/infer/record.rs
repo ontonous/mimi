@@ -20,7 +20,8 @@ impl<'a> Checker<'a> {
                         .collect();
                     for (name, value) in fields.iter().map(|f| (&f.name, &f.value)) {
                         if let Some(expected_ty) = expected.get(name) {
-                            let actual_ty = self.infer_expr(value, scopes);
+                            // Use check_expr to propagate expected type (enables empty list inference)
+                            let actual_ty = self.check_expr(expected_ty, value, scopes);
                             if !same_type(expected_ty, &actual_ty) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0247,

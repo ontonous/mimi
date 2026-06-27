@@ -57,6 +57,8 @@ declare ptr @mimi_str_concat(ptr, ptr)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
+declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
+
 declare i32 @mimi_regex_match(ptr, ptr)
 
 declare ptr @mimi_regex_find(ptr, ptr)

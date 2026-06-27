@@ -255,12 +255,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_store(alloca, param_val)
                     .map_err(|e| CompileError::LlvmError(format!("store param: {}", e)))?;
                 vars.insert(param.name.clone(), (alloca, ty));
-                let param_ty_name = match &param.ty {
-                    Type::Name(tn, _) => Some(tn.clone()),
-                    _ => None,
-                };
-                if let Some(ref tn) = param_ty_name {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &param.ty {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&param.ty) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 // Register list element type for List<T> params where T is a struct
                 self.register_list_elem_type(&param.name, &param.ty);
@@ -475,8 +477,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
-                if let Type::Name(tn, _) = &param.ty {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &param.ty {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&param.ty) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 if let Type::DynTrait(_) = &param.ty {
                     self.var_type_names
@@ -780,8 +788,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Track type info for simple Variable patterns
                     if let Pattern::Variable(name) = pat {
-                        if let Some(Type::Name(tn, _)) = &ty {
-                            self.var_type_names.insert(name.clone(), tn.clone());
+                        if let Some(ty_ref) = &ty {
+                            if let Type::Name(tn, args) = ty_ref {
+                                if tn == "List" && !args.is_empty() {
+                                    // Store full List<T> type for element reconstruction
+                                    if let Some(full) = self.get_full_type_name(ty_ref) {
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                } else {
+                                    self.var_type_names.insert(name.clone(), tn.clone());
+                                }
+                            }
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
@@ -873,7 +890,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
+                    // For tuple patterns, push the tuple type onto tuple_type_stack
+                    // so that compile_pattern_bind can load the struct correctly
+                    if let Pattern::Tuple(sub_pats) = pat {
+                        if sub_pats.len() > 0 {
+                            // Try to infer tuple type from declared type or init expression
+                            let tuple_ty = if let Some(Type::Tuple(elem_tys)) = &ty {
+                                let field_tys: Vec<BasicTypeEnum> = elem_tys.iter()
+                                    .map(|t| types::mimi_type_to_llvm(self.context, t)
+                                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())))
+                                    .collect();
+                                self.context.struct_type(&field_tys, false)
+                            } else {
+                                // Fallback: create a struct with i64 fields
+                                let field_tys: Vec<BasicTypeEnum> = sub_pats.iter()
+                                    .map(|_| BasicTypeEnum::IntType(self.context.i64_type()))
+                                    .collect();
+                                self.context.struct_type(&field_tys, false)
+                            };
+                            self.tuple_type_stack.push(tuple_ty);
+                        }
+                    }
                     self.compile_pattern_bind(pat, val, &mut vars)?;
+                    // Pop tuple type stack if we pushed it
+                    if let Pattern::Tuple(sub_pats) = pat {
+                        if sub_pats.len() > 0 {
+                            self.tuple_type_stack.pop();
+                        }
+                    }
                     if let Pattern::Variable(name) = pat {
                         if let Expr::Ident(fn_name) = init {
                             if self.module.get_function(fn_name.as_str()).is_some() {
@@ -1308,8 +1352,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 // Track type name for method dispatch
                 let resolved_param = self.resolve_type(&param.ty);
-                if let Type::Name(tn, _) = &resolved_param {
-                    self.var_type_names.insert(param.name.clone(), tn.clone());
+                if let Type::Name(tn, args) = &resolved_param {
+                    if tn == "List" && !args.is_empty() {
+                        if let Some(full) = self.get_full_type_name(&resolved_param) {
+                            self.var_type_names.insert(param.name.clone(), full);
+                        }
+                    } else {
+                        self.var_type_names.insert(param.name.clone(), tn.clone());
+                    }
                 }
                 if let Type::DynTrait(_) = &resolved_param {
                     self.var_type_names

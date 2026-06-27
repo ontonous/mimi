@@ -14,8 +14,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_repeat expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_repeat: first arg must be string".to_string(),
@@ -31,7 +37,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen(s)
         let strlen_fn = self
@@ -163,34 +169,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Return string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "repeat_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, total)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_trim(
         &self,
@@ -201,8 +182,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_trim expects 1 argument".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_trim: first arg must be string".to_string(),
@@ -210,7 +197,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen(s)
         let strlen_fn = self
@@ -236,10 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let fwd_loop = self.context.append_basic_block(function, "trim_fwd");
         let fwd_body = self.context.append_basic_block(function, "trim_fwd_body");
         let fwd_done = self.context.append_basic_block(function, "trim_fwd_done");
-        let start_alloca = self
-            .builder
-            .build_alloca(i64_ty, "start")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let start_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "start")?;
         self.builder
             .build_store(start_alloca, zero)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -325,10 +309,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let bwd_loop = self.context.append_basic_block(function, "trim_bwd");
         let bwd_body = self.context.append_basic_block(function, "trim_bwd_body");
         let bwd_done = self.context.append_basic_block(function, "trim_bwd_done");
-        let end_alloca = self
-            .builder
-            .build_alloca(i64_ty, "end")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let end_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "end")?;
         self.builder
             .build_store(end_alloca, s_len)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -457,34 +438,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "trim_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, trimmed_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_upper(
         &self,
@@ -495,8 +451,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_to_upper expects 1 argument".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_to_upper: first arg must be string".to_string(),
@@ -504,7 +466,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // strlen, malloc copy + toupper each char
         let strlen_fn = self
@@ -632,34 +594,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
-        // Return string struct
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "upper_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, s_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_to_lower(
         &self,
@@ -670,8 +607,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_to_lower expects 1 argument".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_to_lower: first arg must be string".to_string(),
@@ -679,7 +622,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let strlen_fn = self
             .module
@@ -803,33 +746,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(done_bb);
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "lower_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, s_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer for consistency
+        
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_substring(
         &self,
@@ -840,8 +759,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_substring expects 3 arguments (s, start, end)".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        // Handle both string representations:
+        // - PointerValue: char* directly (literal strings)
+        // - StructValue: {i8*, i64} (Record field access, builtin results)
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_substring: first arg must be string".to_string(),
@@ -865,7 +793,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ty = self.context.i8_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         // len = end - start
         let sub_len = self
@@ -922,34 +850,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(null_pos, i8_ty.const_int(0, false))
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let str_alloca = self
-            .builder
-            .build_alloca(string_ty, "sub_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, sub_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(str_alloca.into())
+        // Return raw pointer (not struct) for consistency with other string builtins
+        
+        Ok(buf.into())
     }
     pub(in crate::codegen) fn compile_str_split(
         &self,
@@ -960,16 +863,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_split expects 2 arguments (string, delimiter)".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_split: first arg must be string".to_string(),
                 ))
             }
         };
-        let delim_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let delim_ptr = match &args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_split: second arg must be string".to_string(),
@@ -1116,24 +1031,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_replace expects 3 arguments".to_string(),
             ));
         }
-        let s_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let s_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_replace: first arg must be string".to_string(),
                 ))
             }
         };
-        let from_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let from_ptr = match &args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_replace: second arg must be string".to_string(),
                 ))
             }
         };
-        let to_ptr = match args[2] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
+        let to_ptr = match &args[2] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => {
+                self.builder
+                    .build_extract_value(*sv, 0, "str_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                    .into_pointer_value()
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_replace: third arg must be string".to_string(),

@@ -1,5 +1,42 @@
 # Changelog
 
+## [v0.28.3] — 2026-06-28
+
+### Added
+
+- **mimi-markdown**: Markdown→HTML 转换器项目（1009 行 Mimi 代码）
+  - 支持标题、段落、粗体、斜体、行内代码、删除线、链接、图片
+  - 围栏代码块、有序/无序列表、引用、水平线、表格
+  - HTML 转义、CLI 工具函数、47 个测试
+- **G-74**: 字符串比较运算符 `<` `>` `<=` `>=` codegen 支持
+- **G-76**: `const` 声明 codegen 支持
+- **G-79**: 高阶函数 codegen 支持（map/filter/reduce 接受命名函数）
+- **G-80**: `format()` 内置函数 codegen 支持（`mimi_str_format` 运行时函数）
+- **G-81**: `is_ok`/`is_err`/`is_some`/`is_none` 布尔值归一化（i8→i1→i64）
+
+### Fixed
+
+- **G-64**: codegen string builtins 接受 Record 字段值
+- **G-65**: `let mut xs: List<T> = []` 空类型化列表
+- **G-66**: 嵌套作用域允许变量遮蔽
+- **G-68**: `push()` 支持 Record/StructValue 类型
+- **G-69**: `List<T>` 变量 var_type_names 存储完整泛型类型名
+- **G-70**: if/else 表达式内嵌套函数调用（string builtins 返回 raw ptr）
+- **G-71**: 大文件 codegen segfault（OptimizationLevel::Aggressive → Default）
+- **G-72**: if/else 分支允许同名变量
+- **G-73**: Record 构造器内空列表从字段类型推断
+- **G-78**: 元组解构含字符串字段（wrap string into {ptr,i64} struct）
+
+### Known Gaps
+
+- `format()` 仅支持字符串参数（int/float 需先用 `to_string` 转换）
+- `map`/`filter`/`reduce` 仅支持命名函数，不支持闭包
+- `from_json::<T>` 类型化反序列化仅解释器
+- `Set<T>` 操作仅解释器
+- 前向声明/模块系统未实现
+
+---
+
 ## [v0.28.2] — 2026-06-27
 
 ### Added

@@ -25,6 +25,15 @@ impl<'a> Checker<'a> {
                     self.infer_expr(expr, scopes)
                 }
             }
+            // Empty list literal in List<T> context → infer List<T>
+            Expr::List(elems) if elems.is_empty() => {
+                if let Type::Name(name, _inner) = expected {
+                    if name == "List" {
+                        return expected.clone();
+                    }
+                }
+                self.infer_expr(expr, scopes)
+            }
             // C3: block — check last expression against expected type
             Expr::Block(block) => {
                 if let Some(Stmt::Expr(e)) = block.last() {

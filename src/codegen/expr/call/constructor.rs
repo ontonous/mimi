@@ -331,9 +331,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         match method {
             "is_ok" | "is_some" => {
+                // Truncate i8 to i1 (bool), then extend to i64 for uniform representation
+                let bool_i1 = self
+                    .builder
+                    .build_int_truncate(disc, self.context.bool_type(), "is_ok_trunc")
+                    .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
                 let bool_val = self
                     .builder
-                    .build_int_z_extend(disc, self.context.bool_type(), "is_ok_ext")
+                    .build_int_z_extend(bool_i1, self.context.i64_type(), "is_ok_ext")
                     .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
                 Ok(BasicValueEnum::IntValue(bool_val))
             }
@@ -342,9 +347,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_not(disc, "is_err_not")
                     .map_err(|e| CompileError::LlvmError(format!("not error: {}", e)))?;
+                // Truncate i8 to i1 (bool), then extend to i64 for uniform representation
+                let bool_i1 = self
+                    .builder
+                    .build_int_truncate(not_disc, self.context.bool_type(), "is_err_trunc")
+                    .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
                 let bool_val = self
                     .builder
-                    .build_int_z_extend(not_disc, self.context.bool_type(), "is_err_ext")
+                    .build_int_z_extend(bool_i1, self.context.i64_type(), "is_err_ext")
                     .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
                 Ok(BasicValueEnum::IntValue(bool_val))
             }

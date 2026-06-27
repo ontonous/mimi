@@ -210,6 +210,8 @@ pub struct CodeGenerator<'ctx> {
     /// Key: original function name. Value: wrapper fn(i8*, params...) -> ret.
     /// Used when passing a named function where func(T)->U is expected.
     closure_wrappers: HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    /// Const values declared at top level (for codegen const support).
+    const_values: HashMap<String, crate::ast::Expr>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -281,6 +283,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_callback_tls: Vec::new(),
             list_elem_llvm_types: HashMap::new(),
             closure_wrappers: HashMap::new(),
+            const_values: HashMap::new(),
         }
     }
 
@@ -290,6 +293,34 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
         self.builder.get_insert_block()?.get_parent()
+    }
+
+    /// Create an alloca at the function entry block (not at the current insertion point).
+    /// This ensures allocas are in the entry block, which is required for proper
+    /// stack frame management when called from inside if/else branches or loops.
+    pub(super) fn entry_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let function = self.current_function()
+            .ok_or_else(|| "entry_alloca: no current function".to_string())?;
+        let entry = function.get_first_basic_block()
+            .ok_or_else(|| "entry_alloca: no entry block".to_string())?;
+        let saved = self.builder.get_insert_block();
+        // Position at the start of the entry block
+        if let Some(first_instr) = entry.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry);
+        }
+        let alloca = self.builder.build_alloca(ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        // Restore original position
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        Ok(alloca)
     }
 
     fn block_has_terminator(&self) -> bool {
@@ -452,6 +483,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
+        }
+    }
+
+    /// Get the full type name including generics for a variable (for list element reconstruction).
+    pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
+        if let Type::Name(tn, args) = ty {
+            if args.is_empty() {
+                Some(tn.clone())
+            } else {
+                let inner: Vec<String> = args.iter().filter_map(|a| self.get_full_type_name(a)).collect();
+                if inner.len() == args.len() {
+                    Some(format!("{}<{}>", tn, inner.join(", ")))
+                } else {
+                    Some(tn.clone())
+                }
+            }
+        } else {
+            None
         }
     }
 
@@ -919,7 +968,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &triple_ref,
                 &cpu,
                 &features,
-                OptimizationLevel::Aggressive,
+                OptimizationLevel::None,
                 reloc_mode,
                 CodeModel::Default,
             )

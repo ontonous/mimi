@@ -284,6 +284,26 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_format(num_args, template, arg0..arg7) → i8* (heap-allocated string)
+    module.add_function(
+        "mimi_str_format",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 
     // Regex functions
     // mimi_regex_match(text, pattern) -> int (0 or 1)
@@ -1007,9 +1027,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         match name {
             "println" => self.compile_println(args),
             "print" => self.compile_print(args),
-            "format" => Err(CompileError::BuiltinError(
-                "'format' is a runtime-only function, not available in codegen".to_string(),
-            )),
+            "format" => self.compile_format(args),
             "eprintln" => self.compile_eprintln(args),
             "assert" => self.compile_assert(args),
             "assert_eq" => self.compile_assert_eq(args),

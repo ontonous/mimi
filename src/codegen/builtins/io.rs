@@ -1454,4 +1454,75 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_base64_decode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_base64_decode", args)
     }
+
+    pub(super) fn compile_format(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.is_empty() {
+            return Err(CompileError::WrongArgCount(
+                "format expects at least 1 argument (template string)".to_string(),
+            ));
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        // Convert all arguments to string pointers
+        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        // First arg: number of format arguments
+        call_args.push(BasicMetadataValueEnum::IntValue(
+            i64_ty.const_int((args.len() - 1) as u64, false),
+        ));
+        // Second arg: template string
+        match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
+            }
+            _ => return Err(CompileError::TypeMismatch(
+                "format: first arg must be a string template".to_string(),
+            )),
+        }
+        // Remaining args: convert to string pointers (up to 8)
+        for i in 1..args.len().min(9) {
+            match &args[i] {
+                BasicMetadataValueEnum::PointerValue(pv) => {
+                    call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
+                }
+                _ => {
+                    // For non-string args, use to_string to convert
+                    let to_string_fn = self.module.get_function("mimi_to_string")
+                        .ok_or_else(|| "mimi_to_string not declared".to_string())?;
+                    let str_result = self.builder.build_call(
+                        to_string_fn,
+                        &[args[i].clone()],
+                        "to_str",
+                    ).map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_to_string returned void")?;
+                    match str_result {
+                        BasicValueEnum::PointerValue(pv) => {
+                            call_args.push(BasicMetadataValueEnum::PointerValue(pv));
+                        }
+                        _ => {
+                            call_args.push(BasicMetadataValueEnum::PointerValue(
+                                i8_ptr.const_null(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Pad with null pointers if less than 8 args
+        while call_args.len() < 10 {
+            call_args.push(BasicMetadataValueEnum::PointerValue(
+                i8_ptr.const_null(),
+            ));
+        }
+        let format_fn = self.module.get_function("mimi_str_format")
+            .ok_or_else(|| "mimi_str_format not declared".to_string())?;
+        let result = self.builder.build_call(
+            format_fn,
+            &call_args,
+            "format_call",
+        ).map_err(|e| CompileError::LlvmError(format!("format error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_format returned void")?;
+        Ok(result)
+    }
 }

@@ -428,57 +428,129 @@ impl<'ctx> CodeGenerator<'ctx> {
                     _ => Err("ne requires same types".into()),
                 },
             },
-            BinOp::Lt => match (lhs, rhs) {
-                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::SLT, l, r, "lt")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
-                    .builder
-                    .build_float_compare(inkwell::FloatPredicate::OLT, l, r, "flt")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                _ => Err("lt requires same numeric types".into()),
+            BinOp::Lt => match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
+                (Some(l), Some(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLT, cmp, zero, "strlt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into())
+                }
+                _ => match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLT, l, r, "lt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
+                        .builder
+                        .build_float_compare(inkwell::FloatPredicate::OLT, l, r, "flt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    _ => Err("lt requires same numeric types".into()),
+                },
             },
-            BinOp::Gt => match (lhs, rhs) {
-                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::SGT, l, r, "gt")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
-                    .builder
-                    .build_float_compare(inkwell::FloatPredicate::OGT, l, r, "fgt")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                _ => Err("gt requires same numeric types".into()),
+            BinOp::Gt => match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
+                (Some(l), Some(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGT, cmp, zero, "strgt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into())
+                }
+                _ => match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SGT, l, r, "gt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
+                        .builder
+                        .build_float_compare(inkwell::FloatPredicate::OGT, l, r, "fgt")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    _ => Err("gt requires same numeric types".into()),
+                },
             },
-            BinOp::Le => match (lhs, rhs) {
-                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::SLE, l, r, "le")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
-                    .builder
-                    .build_float_compare(inkwell::FloatPredicate::OLE, l, r, "fle")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                _ => Err("le requires same numeric types".into()),
+            BinOp::Le => match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
+                (Some(l), Some(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLE, cmp, zero, "strle")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into())
+                }
+                _ => match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLE, l, r, "le")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
+                        .builder
+                        .build_float_compare(inkwell::FloatPredicate::OLE, l, r, "fle")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    _ => Err("le requires same numeric types".into()),
+                },
             },
-            BinOp::Ge => match (lhs, rhs) {
-                (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::SGE, l, r, "ge")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
-                    .builder
-                    .build_float_compare(inkwell::FloatPredicate::OGE, l, r, "fge")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-                    .into()),
-                _ => Err("ge requires same numeric types".into()),
+            BinOp::Ge => match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
+                (Some(l), Some(r)) => {
+                    let strcmp_fn = self.module.get_function("strcmp")
+                        .ok_or_else(|| "strcmp not declared".to_string())?;
+                    let result = self.builder.build_call(strcmp_fn, &[
+                        BasicMetadataValueEnum::PointerValue(l),
+                        BasicMetadataValueEnum::PointerValue(r),
+                    ], "strcmp_call")
+                        .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| "strcmp returned void".to_string())?;
+                    let cmp = result.into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGE, cmp, zero, "strge")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into())
+                }
+                _ => match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SGE, l, r, "ge")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => Ok(self
+                        .builder
+                        .build_float_compare(inkwell::FloatPredicate::OGE, l, r, "fge")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                        .into()),
+                    _ => Err("ge requires same numeric types".into()),
+                },
             },
             BinOp::And => match (lhs, rhs) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self

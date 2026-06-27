@@ -16,6 +16,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         base_var: Option<&str>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         if let Some(var_name) = base_var {
+            // Check if the list element type is a struct (stored as pointer to struct)
             if let Some(&BasicTypeEnum::StructType(sty)) = self.list_elem_llvm_types.get(var_name) {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let elem_ptr = self
@@ -27,6 +28,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
                     .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
                 return Ok(Some(struct_val));
+            }
+            // Check if the list element type is string (stored as raw i8* pointer)
+            if let Some(type_name) = self.var_type_names.get(var_name) {
+                if type_name == "List<string>" {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let elem_ptr = self
+                        .builder
+                        .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                    return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+                }
             }
         }
         Ok(None)
@@ -66,6 +78,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let obj_type = self.infer_object_type(obj_expr, vars);
         if obj_type.is_empty() {
             return Ok(None);
+        }
+        // Handle List<string> — elements are raw i8* pointers
+        if obj_type == "List<string>" {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let elem_ptr = self
+                .builder
+                .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+            return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
         }
         if let Some(elem_ty) = crate::codegen::extract_list_elem_type(&obj_type) {
             let llvm_ty = if let Type::Name(name, _) = &elem_ty {

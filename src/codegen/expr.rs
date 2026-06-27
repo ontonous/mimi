@@ -210,6 +210,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else if let Some(function) = self.module.get_function(name) {
             // First-class function reference: return function pointer as value
             Ok(function.as_global_value().as_pointer_value().into())
+        } else if let Some(const_expr) = self.const_values.get(name).cloned() {
+            // Const value: compile the expression
+            self.compile_expr(&const_expr, vars)
         } else {
             Err(format!("undefined variable '{}'", name).into())
         }
@@ -241,6 +244,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> String {
         match expr {
+            Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => "string".to_string(),
             Expr::Ident(name) => {
                 // Look up variable's type name from our tracking map
                 if let Some(ty_name) = self.var_type_names.get(name) {

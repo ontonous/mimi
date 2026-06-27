@@ -545,19 +545,18 @@ impl<'a> Checker<'a> {
                 mut_,
                 ref_,
             } => {
-                // Shadowing detection
+                // Shadowing detection: only check current scope (allow nested scope shadowing)
                 if let Pattern::Variable(name) = pat {
-                    for scope in self.var_scopes.iter().rev() {
-                        if scope.contains_key(name) {
+                    if let Some(current_scope) = self.var_scopes.last() {
+                        if current_scope.contains_key(name) {
                             self.errors.push(
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0403,
-                                    format!("variable '{}' shadows an outer variable", name),
+                                    format!("variable '{}' already defined in this scope", name),
                                     Span::single(self.current_line, self.current_col),
                                 )
-                                .with_help("rename the inner variable to avoid shadowing"),
+                                .with_help("rename the variable or use assignment to update"),
                             );
-                            break;
                         }
                     }
                     if let Some(s) = self.var_scopes.last_mut() {
@@ -692,9 +691,15 @@ impl<'a> Checker<'a> {
                         format!("if condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
+                // Push new scope for then branch
+                self.var_scopes.push(HashMap::new());
                 self.check_block(then_, ret, scopes);
+                self.var_scopes.pop();
                 if let Some(else_) = else_ {
+                    // Push new scope for else branch
+                    self.var_scopes.push(HashMap::new());
                     self.check_block(else_, ret, scopes);
+                    self.var_scopes.pop();
                 }
             }
             Stmt::While { cond, body } => {
