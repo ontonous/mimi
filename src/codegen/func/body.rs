@@ -400,35 +400,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Err(CompileError::LlvmError("data must be pointer".to_string()));
             };
 
-            let elem_ptr = {
-                self.gep().build_in_bounds_gep(
-                    BasicTypeEnum::IntType(self.context.i64_type()),
-                    data_pv,
-                    &[idx_iv],
-                    "elem",
-                )
-            }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let elem = self
-                .builder
-                .build_load(
-                    BasicTypeEnum::IntType(self.context.i64_type()),
-                    elem_ptr,
-                    "elem_val",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+            // G-41 fix: determine element type from iterable expression
+            let elem_is_string = self.is_string_list_iterable(iterable, vars);
 
-            let elem_alloca = self
-                .builder
-                .build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
-                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-            self.builder
-                .build_store(elem_alloca, elem)
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-            vars.insert(
-                var.to_string(),
-                (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())),
-            );
+            if elem_is_string {
+                // String list: data contains *mut c_char pointers
+                // Load element as pointer, then wrap into Mimi string struct
+                let elem_ptr = {
+                    self.gep().build_in_bounds_gep(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        data_pv,
+                        &[idx_iv],
+                        "elem",
+                    )
+                }
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let raw_str_ptr = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        elem_ptr,
+                        "raw_str_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                    .into_pointer_value();
+                // Wrap C string into Mimi string struct {ptr, len}
+                let mimi_str = self.wrap_c_string(raw_str_ptr)?;
+                let str_ty = mimi_str.get_type();
+                let elem_alloca = self
+                    .builder
+                    .build_alloca(str_ty, var)
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder
+                    .build_store(elem_alloca, mimi_str)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                vars.insert(var.to_string(), (elem_alloca, str_ty));
+            } else {
+                // Non-string list: elements are i64 values
+                let elem_ptr = {
+                    self.gep().build_in_bounds_gep(
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        data_pv,
+                        &[idx_iv],
+                        "elem",
+                    )
+                }
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let elem = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        elem_ptr,
+                        "elem_val",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                let elem_alloca = self
+                    .builder
+                    .build_alloca(BasicTypeEnum::IntType(self.context.i64_type()), var)
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder
+                    .build_store(elem_alloca, elem)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                vars.insert(
+                    var.to_string(),
+                    (elem_alloca, BasicTypeEnum::IntType(self.context.i64_type())),
+                );
+            }
 
             self.compile_block(body, vars)?;
 
@@ -465,6 +502,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.position_at_end(merge_bb);
         }
         Ok(())
+    }
+
+    /// G-41 helper: determine if a for-loop iterable produces string elements.
+    /// Checks var_types, var_type_names, and known builtin function names.
+    fn is_string_list_iterable(
+        &self,
+        iterable: &Expr,
+        _vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> bool {
+        // Direct function call: listdir, walk_dir, str_split always return List<string>
+        if let Expr::Call(callee, _) = iterable {
+            if let Expr::Ident(name) = callee.as_ref() {
+                match name.as_str() {
+                    "listdir" | "walk_dir" | "str_split" => return true,
+                    _ => {}
+                }
+            }
+        }
+        // Variable reference: check var_types and var_type_names
+        if let Expr::Ident(name) = iterable {
+            // Check Type object
+            if let Some(ty) = self.var_types.get(name) {
+                match ty {
+                    Type::Name(n, args) if n == "List" && !args.is_empty() => {
+                        return matches!(&args[0], Type::Name(inner, _) if inner == "string");
+                    }
+                    _ => {}
+                }
+            }
+            // Check string-based type name (populated by let-binding codegen)
+            if let Some(tn) = self.var_type_names.get(name) {
+                if tn == "List<string>" {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Shared implementation for Stmt::Assign — handles all target types

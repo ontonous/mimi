@@ -546,6 +546,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.var_types.insert(name.clone(), ret_ty.clone());
                     }
                 }
+                // G-41: Track return types for builtins that return List<string>
+                match fname.as_str() {
+                    "listdir" | "walk_dir" => {
+                        self.var_type_names.insert(name.clone(), "List<string>".to_string());
+                        self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                    }
+                    "str_split" => {
+                        self.var_type_names.insert(name.clone(), "List<string>".to_string());
+                        self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                    }
+                    _ => {}
+                }
             }
         }
 
