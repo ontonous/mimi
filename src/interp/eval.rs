@@ -5,6 +5,41 @@ mod helpers;
 mod stmt;
 
 impl<'a> Interpreter<'a> {
+    /// Cast a value to a target type
+    pub(crate) fn cast_value(&self, val: Value, target_type: &Type) -> Result<Value, InterpError> {
+        match target_type {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => match val {
+                    Value::Int(v) => Ok(Value::Int(v as i32 as i64)),
+                    Value::Float(v) => Ok(Value::Int(v as i64)),
+                    _ => Err(InterpError::new(format!("cannot cast {:?} to i32", val))),
+                },
+                "i64" => match val {
+                    Value::Int(v) => Ok(Value::Int(v)),
+                    Value::Float(v) => Ok(Value::Int(v as i64)),
+                    _ => Err(InterpError::new(format!("cannot cast {:?} to i64", val))),
+                },
+                "f64" => match val {
+                    Value::Int(v) => Ok(Value::Float(v as f64)),
+                    Value::Float(v) => Ok(Value::Float(v)),
+                    _ => Err(InterpError::new(format!("cannot cast {:?} to f64", val))),
+                },
+                "bool" => match val {
+                    Value::Int(v) => Ok(Value::Bool(v != 0)),
+                    _ => Err(InterpError::new(format!("cannot cast {:?} to bool", val))),
+                },
+                "string" => match val {
+                    Value::Int(v) => Ok(Value::String(v.to_string())),
+                    Value::Float(v) => Ok(Value::String(v.to_string())),
+                    Value::Bool(v) => Ok(Value::String(v.to_string())),
+                    _ => Err(InterpError::new(format!("cannot cast {:?} to string", val))),
+                },
+                _ => Err(InterpError::new(format!("unsupported cast target type: {}", name))),
+            },
+            _ => Err(InterpError::new(format!("unsupported cast target type: {:?}", target_type))),
+        }
+    }
+
     pub(crate) fn eval_block(&mut self, block: &Block) -> Result<Option<Value>, InterpError> {
         self.push_compensation_scope();
         let result = self.eval_block_inner(block);
@@ -247,6 +282,10 @@ impl<'a> Interpreter<'a> {
             Expr::MapLiteral { entries } => self.eval_map_literal(entries),
             Expr::SetLiteral(elems) => self.eval_set_literal(elems),
             Expr::NamedArg(_, value) => self.eval_expr(value),
+            Expr::Cast(inner, target_type) => {
+                let val = self.eval_expr(inner)?;
+                self.cast_value(val, target_type)
+            }
         }
     }
 }

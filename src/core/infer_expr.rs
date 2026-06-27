@@ -118,6 +118,10 @@ impl<'a> Checker<'a> {
             Expr::MapLiteral { entries } => self.infer_map_literal(entries, scopes),
             Expr::SetLiteral(elems) => self.infer_set_literal(elems, scopes),
             Expr::NamedArg(_, value) => self.infer_expr(value, scopes),
+            Expr::Cast(inner, target_type) => {
+                let _ = self.infer_expr(inner, scopes);
+                self.resolve_type(target_type)
+            }
         }
     }
 }

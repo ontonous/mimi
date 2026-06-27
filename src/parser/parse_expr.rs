@@ -403,6 +403,12 @@ impl Parser {
             self.advance();
             expr = expr.try_expr();
         }
+        // Type cast: expr as Type
+        if self.at(&TokenKind::As) {
+            self.advance();
+            let target_type = self.parse_type()?;
+            expr = Expr::Cast(Box::new(expr), target_type);
+        }
         Ok(expr)
     }
 
@@ -635,6 +641,12 @@ impl Parser {
             } else {
                 break;
             }
+        }
+        // Type cast: expr as Type
+        if self.at(&TokenKind::As) {
+            self.advance();
+            let target_type = self.parse_type()?;
+            e = Expr::Cast(Box::new(e), target_type);
         }
         Ok(e)
     }

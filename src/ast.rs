@@ -397,6 +397,8 @@ pub enum Expr {
     SetLiteral(Vec<Expr>),
     /// Named argument in function call: f(x = 5)
     NamedArg(String, Box<Expr>),
+    /// Type cast: expr as Type
+    Cast(Box<Expr>, Type),
 }
 
 impl Expr {
