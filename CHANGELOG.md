@@ -1,6 +1,17 @@
 # Changelog
 
-## [Unreleased] — v0.28.1-dev
+## [Unreleased] — v0.28.2-dev
+
+### Fixed
+
+- **P0**: Record/Any 作为合法类型注解
+- **P0**: codegen map 操作支持
+- **P1**: const 顶层常量
+- **P1**: as 类型转换
+
+---
+
+## [v0.28.1] — 2026-06-27
 
 ### Added
 
