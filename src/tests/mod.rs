@@ -8,6 +8,7 @@ pub(crate) mod basic_other;
 pub(crate) mod basic_tuples;
 pub(crate) mod boundary_stdlib;
 pub(crate) mod closures;
+pub(crate) mod codegen_boundary;
 
 pub(crate) mod actors;
 pub(crate) mod builtin_funcs;
@@ -19,6 +20,7 @@ pub(crate) mod error_handling;
 pub(crate) mod extern_blocks;
 pub(crate) mod generics;
 pub(crate) mod ownership;
+pub(crate) mod stdlib_comprehensive;
 pub(crate) mod strings;
 pub(crate) mod typecheck;
 pub(crate) mod visibility;
