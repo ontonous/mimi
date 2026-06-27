@@ -24,12 +24,16 @@ impl<'a> Checker<'a> {
                 return Type::Func(params.clone(), Box::new(ret));
             }
         }
-        // Check if it's a zero-argument constructor (enum variant without payload)
+        // Check if it's a function name (used as first-class value)
         if let Some((params, ret)) = self.funcs.get(name) {
             if params.is_empty() {
-                // Bug-2 fix: resolve TypeVars in constructor return type before returning.
-                // The ret type may contain TypeVars from inference that need to be resolved.
+                // Zero-argument constructor (enum variant without payload)
                 return self.unification.resolve(ret);
+            } else {
+                // Function reference: return func(T) -> U type
+                let resolved_params: Vec<Type> = params.iter().map(|p| self.unification.resolve(p)).collect();
+                let resolved_ret = self.unification.resolve(ret);
+                return Type::Func(resolved_params, Box::new(resolved_ret));
             }
         }
 
