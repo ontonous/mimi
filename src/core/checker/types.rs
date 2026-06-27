@@ -162,6 +162,8 @@ impl<'a> Checker<'a> {
             "Future".into(),
             "Result".into(),
             "Option".into(),
+            "Record".into(),
+            "Any".into(),
         ]
     }
 
