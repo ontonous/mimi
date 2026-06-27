@@ -212,6 +212,36 @@ enum Command {
         #[arg(long)]
         mimi_lib: Option<PathBuf>,
     },
+    /// Generate Rust FFI bindings from extern declarations
+    EmitRustBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Go CGO bindings from extern declarations
+    EmitGoBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Node.js N-API bindings from extern declarations
+    EmitNodeBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output path for TypeScript .d.ts type declarations
+        #[arg(long)]
+        ts: Option<PathBuf>,
+    },
+    /// Generate Java JNI bindings from extern declarations
+    EmitJavaBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output path for Java interface class
+        #[arg(long)]
+        java: Option<PathBuf>,
+    },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
         path: PathBuf,
@@ -371,6 +401,18 @@ fn main() {
             output,
             mimi_lib,
         } => emit::emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
+        Command::EmitRustBindings { path, output } => {
+            emit::emit_rust_bindings(path.as_deref(), output.as_deref())
+        }
+        Command::EmitGoBindings { path, output } => {
+            emit::emit_go_bindings(path.as_deref(), output.as_deref())
+        }
+        Command::EmitNodeBindings { path, output, ts } => {
+            emit::emit_node_bindings(path.as_deref(), output.as_deref(), ts.as_deref())
+        }
+        Command::EmitJavaBindings { path, output, java } => {
+            emit::emit_java_bindings(path.as_deref(), output.as_deref(), java.as_deref())
+        }
         Command::Promote { path, output } => promote::promote(&path, output.as_deref()),
         Command::Doc {
             path,

@@ -121,6 +121,148 @@ pub(crate) fn emit_py_bindings(
     Ok(())
 }
 
+pub(crate) fn emit_rust_bindings(
+    path: Option<&Path>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut extern_funcs = Vec::new();
+    let mut exported_funcs = Vec::new();
+    let mut type_defs = HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
+
+    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let gen = ffi::rust_bind::RustBindGenerator::new(type_defs, &pkg_name);
+    let bindings = gen.generate(&extern_funcs)
+        .map_err(|e| format!("failed to generate Rust bindings: {}", e))?;
+
+    match output {
+        Some(out_path) => {
+            fs::write(out_path, &bindings)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("Generated Rust bindings: {}", out_path.display());
+        }
+        None => println!("{}", bindings),
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_go_bindings(
+    path: Option<&Path>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut extern_funcs = Vec::new();
+    let mut type_defs = HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+
+    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let gen = ffi::go_bind::GoBindGenerator::new(type_defs, &pkg_name);
+    let bindings = gen.generate(&extern_funcs)
+        .map_err(|e| format!("failed to generate Go bindings: {}", e))?;
+
+    match output {
+        Some(out_path) => {
+            fs::write(out_path, &bindings)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("Generated Go bindings: {}", out_path.display());
+        }
+        None => println!("{}", bindings),
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_node_bindings(
+    path: Option<&Path>,
+    output: Option<&Path>,
+    ts_output: Option<&Path>,
+) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut extern_funcs = Vec::new();
+    let mut type_defs = HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+
+    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let gen = ffi::node_bind::NodeBindGenerator::new(type_defs, &pkg_name);
+    let bindings = gen.generate(&extern_funcs)
+        .map_err(|e| format!("failed to generate Node.js bindings: {}", e))?;
+
+    match output {
+        Some(out_path) => {
+            fs::write(out_path, &bindings)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("Generated Node.js N-API bindings: {}", out_path.display());
+        }
+        None => println!("{}", bindings),
+    }
+
+    // Generate TypeScript declarations
+    if let Some(ts_path) = ts_output {
+        let dts = gen.generate_dts(&extern_funcs)
+            .map_err(|e| format!("failed to generate TypeScript declarations: {}", e))?;
+        fs::write(ts_path, &dts)
+            .map_err(|e| format!("failed to write {}: {}", ts_path.display(), e))?;
+        println!("Generated TypeScript declarations: {}", ts_path.display());
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_java_bindings(
+    path: Option<&Path>,
+    output: Option<&Path>,
+    java_output: Option<&Path>,
+) -> Result<(), String> {
+    let path = resolve_path(path)?;
+    let source = fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens).parse_file()?;
+
+    let mut extern_funcs = Vec::new();
+    let mut type_defs = HashMap::new();
+    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+
+    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let gen = ffi::jni_bind::JniBindGenerator::new(type_defs, &pkg_name);
+    let c_bridge = gen.generate_c(&extern_funcs)
+        .map_err(|e| format!("failed to generate JNI C bridge: {}", e))?;
+
+    match output {
+        Some(out_path) => {
+            fs::write(out_path, &c_bridge)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+            println!("Generated JNI C bridge: {}", out_path.display());
+        }
+        None => println!("{}", c_bridge),
+    }
+
+    // Generate Java interface class
+    if let Some(java_path) = java_output {
+        let java_class = gen.generate_java(&extern_funcs)
+            .map_err(|e| format!("failed to generate Java class: {}", e))?;
+        fs::write(java_path, &java_class)
+            .map_err(|e| format!("failed to write {}: {}", java_path.display(), e))?;
+        println!("Generated Java class: {}", java_path.display());
+    }
+    Ok(())
+}
+
 fn collect_extern_and_types(
     file: &File,
     extern_funcs: &mut Vec<ast::ExternFunc>,
