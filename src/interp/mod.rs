@@ -91,6 +91,8 @@ pub struct Interpreter<'a> {
     func_index: HashMap<String, FuncDef>,
     /// O(1) actor lookup index: name -> ActorDef
     actor_index: HashMap<String, ActorDef>,
+    /// Global constants defined at top level
+    globals: HashMap<String, Value>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -174,6 +176,7 @@ impl<'a> Interpreter<'a> {
             recursion_depth: 0,
             func_index,
             actor_index,
+            globals: HashMap::new(),
         }
     }
 
@@ -727,6 +730,7 @@ impl<'a> Interpreter<'a> {
 
     pub fn run(&mut self) -> Result<Value, InterpError> {
         self.eval_comptime_funcs()?;
+        self.eval_consts()?;
         let main = self
             .find_function("main")
             .ok_or_else(|| InterpError::new("no main() function found"))?;
@@ -747,6 +751,24 @@ impl<'a> Interpreter<'a> {
         for func in funcs {
             let result = self.call_func(&func, vec![])?;
             self.comptime_results.insert(func.name.clone(), result);
+        }
+        Ok(())
+    }
+
+    /// Evaluate top-level const declarations at startup
+    fn eval_consts(&mut self) -> Result<(), InterpError> {
+        let consts: Vec<(String, Expr)> = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Const { name, value, .. } => Some((name.clone(), value.clone())),
+                _ => None,
+            })
+            .collect();
+        for (name, expr) in consts {
+            let val = self.eval_expr(&expr)?;
+            self.globals.insert(name, val);
         }
         Ok(())
     }
@@ -875,7 +897,8 @@ impl<'a> Interpreter<'a> {
                 return Some(v.clone());
             }
         }
-        None
+        // Check globals
+        self.globals.get(name).cloned()
     }
 
     fn is_mutable(&self, name: &str) -> bool {

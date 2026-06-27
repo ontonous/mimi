@@ -103,6 +103,20 @@ impl Parser {
                 a.pub_ = pub_;
                 Ok(Item::Actor(a))
             }
+            TokenKind::Const => {
+                self.advance(); // consume `const`
+                let name = self.expect_ident()?;
+                let ty = if self.at(&TokenKind::Colon) {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                self.expect(TokenKind::Eq, "`=` after const name")?;
+                let value = self.parse_expr(0)?;
+                self.match_semi();
+                Ok(Item::Const { name, ty, value, pub_ })
+            }
             TokenKind::Cap => Ok(Item::Cap(self.parse_cap_def()?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl_def()?)),
