@@ -114,6 +114,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(iv),
             BasicMetadataValueEnum::FloatValue(fv) => BasicValueEnum::FloatValue(fv),
             BasicMetadataValueEnum::PointerValue(pv) => BasicValueEnum::PointerValue(pv),
+            BasicMetadataValueEnum::StructValue(sv) => {
+                // StructValue: allocate on heap, store struct, return pointer
+                let sty = sv.get_type();
+                let alloca = self.builder.build_alloca(sty, "push_struct_tmp")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                self.builder.build_store(alloca, sv)
+                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                BasicValueEnum::PointerValue(alloca)
+            }
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "push: unsupported element type".to_string(),
