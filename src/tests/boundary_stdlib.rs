@@ -173,6 +173,111 @@ fn boundary_path_dirname_simple() {
 
 // ====== Codegen boundary tests ======
 
+// ====== Additional codegen boundary tests ======
+
+#[test]
+fn codegen_boundary_is_dir() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            if is_dir(".") { println("dir") } else { println("not") }
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "dir");
+}
+
+#[test]
+fn codegen_boundary_is_file() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            if is_file("examples/hello.mimi") { println("file") } else { println("not") }
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "file");
+}
+
+#[test]
+fn codegen_boundary_path_ext() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            println(path_ext("test.mimi"))
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "mimi");
+}
+
+#[test]
+fn codegen_boundary_path_basename() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            println(path_basename("/a/b/c.txt"))
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "c.txt");
+}
+
+#[test]
+fn codegen_boundary_path_dirname() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            println(path_dirname("/a/b/c.txt"))
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "/a/b");
+}
+
+#[test]
+fn codegen_boundary_mkdir_p() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            if mkdir_p("/tmp/mimi_cg_test") { println("ok") } else { println("fail") }
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "ok");
+    std::fs::remove_dir("/tmp/mimi_cg_test").ok();
+}
+
+#[test]
+fn codegen_boundary_for_loop_listdir() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            let entries = listdir("examples")
+            let mut count = 0
+            for e in entries {
+                count = count + 1
+            }
+            println(count)
+            0
+        }
+    "#).expect("codegen failed");
+    let n: i32 = out.trim().parse().unwrap_or(0);
+    assert!(n > 10, "expected many entries, got {}", n);
+}
+
+#[test]
+fn codegen_boundary_sha256_empty() {
+    if !can_codegen() { return; }
+    let out = compile_and_run(r#"
+        func main() -> i32 {
+            println(sha256(""))
+            0
+        }
+    "#).expect("codegen failed");
+    assert_eq!(out.trim(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
 fn can_codegen() -> bool {
     std::process::Command::new("cc").arg("--version").output().is_ok()
 }
