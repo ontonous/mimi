@@ -3612,3 +3612,36 @@ pub fn base64_decode_str(input: &str) -> Result<String, ()> {
     }
     String::from_utf8(output).map_err(|_| ())
 }
+
+#[no_mangle]
+pub extern "C" fn mimi_str_format(
+    num_args: i64,
+    template: *const std::ffi::c_char,
+    arg0: *const std::ffi::c_char,
+    arg1: *const std::ffi::c_char,
+    arg2: *const std::ffi::c_char,
+    arg3: *const std::ffi::c_char,
+    arg4: *const std::ffi::c_char,
+    arg5: *const std::ffi::c_char,
+    arg6: *const std::ffi::c_char,
+    arg7: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let tmpl = unsafe { cstr_to_string(template) };
+    let args = [arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7];
+    let mut result = String::new();
+    let mut rest = tmpl.as_str();
+    let mut arg_idx = 0;
+    while let Some(pos) = rest.find("{}") {
+        result.push_str(&rest[..pos]);
+        if arg_idx < num_args as usize && arg_idx < args.len() {
+            let arg_str = unsafe { cstr_to_string(args[arg_idx]) };
+            result.push_str(&arg_str);
+            arg_idx += 1;
+        } else {
+            result.push_str("{}");
+        }
+        rest = &rest[pos + 2..];
+    }
+    result.push_str(rest);
+    alloc_c_string(&result)
+}
