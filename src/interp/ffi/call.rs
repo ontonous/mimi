@@ -36,7 +36,7 @@ fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
 // ===================== #[no_panic] Signal / Panic Protection =====================
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, Ordering};
+
 
 /// Wrapper for *mut SigJmpBuf that implements Send + Sync.
 /// Raw pointers are !Send/!Sync by default, but jump buffers are
@@ -48,24 +48,22 @@ unsafe impl Sync for JmpBufPtr {}
 /// FFI-7: Global map of jump buffers keyed by thread ID.
 ///
 /// REPLACES thread_local! { static FFI_CRASH_JUMP_BUF: AtomicPtr<SigJmpBuf> }
+/// which was NOT per-thread in a multi-threaded context.
 ///
-/// Rationale: Rust's thread-local storage uses pthread_getspecific internally,
-/// pthread_getspecific is NOT async-signal-safe (it acquires a mutex internally).
-/// A signal handler must ONLY use async-signal-safe functions.
+/// Design: Two maps for crash-recovery FFI calls:
+/// 1. FFI_CRASH_JUMP_BUFFERS  — HashMap<JmpBufPtr> for main thread (set/clear via Mutex)
+/// 2. THREAD_JUMP_BUF         — thread_local Cell for signal handler read (async-signal-safe)
 ///
-/// Solution: Two maps:
-/// 1. FFI_CRASH_JUMP_BUFFERS — Mutex<HashMap> for main thread store/clear (via set/clear_jump_buf)
-/// 2. FFI_CRASH_JUMP_ATOMIC  — HashMap<AtomicPtr> for signal handler read (via get_jump_buf)
-///
-/// set_jump_buf writes to BOTH maps (main thread), get_jump_buf reads only the atomic map.
-/// This ensures the signal handler path uses only async-signal-safe atomic loads.
+/// set_jump_buf writes to BOTH maps (main thread), get_jump_buf reads only the thread-local.
+/// This ensures the signal handler path uses only async-signal-safe operations.
 static FFI_CRASH_JUMP_BUFFERS: std::sync::OnceLock<
     std::sync::Mutex<HashMap<u64, JmpBufPtr>>,
 > = std::sync::OnceLock::new();
 
-static FFI_CRASH_JUMP_ATOMIC: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<u64, AtomicPtr<SigJmpBuf>>>
-> = std::sync::OnceLock::new();
+// Thread-local jump buffer for signal handler access (async-signal-safe).
+thread_local! {
+    static THREAD_JUMP_BUF: std::cell::Cell<*mut SigJmpBuf> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
 
 fn with_jump_buffers<R, F: FnOnce(&mut HashMap<u64, JmpBufPtr>) -> R>(f: F) -> R {
     let map = FFI_CRASH_JUMP_BUFFERS
@@ -80,13 +78,8 @@ fn set_jump_buf(buf: *mut SigJmpBuf) {
     with_jump_buffers(|map| {
         map.insert(tid, JmpBufPtr(buf));
     });
-    // Also update the atomic map so the signal handler can see it.
-    {
-        let atomic_map = FFI_CRASH_JUMP_ATOMIC
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-        let mut guard = atomic_map.lock().unwrap();
-        guard.insert(tid, AtomicPtr::new(buf));
-    }
+    // Also update thread-local so the signal handler can see it (async-signal-safe).
+    THREAD_JUMP_BUF.with(|cell| cell.set(buf));
 }
 
 /// Clear the jump buffer for the current thread (main thread only).
@@ -95,34 +88,20 @@ fn clear_jump_buf() {
     with_jump_buffers(|map| {
         map.remove(&tid);
     });
-    // Also clear the atomic map entry.
-    {
-        let atomic_map = FFI_CRASH_JUMP_ATOMIC
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-        let mut guard = atomic_map.lock().unwrap();
-        guard.remove(&tid);
-    }
+    // Also clear thread-local.
+    THREAD_JUMP_BUF.with(|cell| cell.set(std::ptr::null_mut()));
 }
 
 /// Get the jump buffer for the current thread (signal handler path).
-/// Async-signal-safe: only atomic loads and pthread_self.
-/// NO mutex, NO RefCell — these are not async-signal-safe.
+/// Async-signal-safe: thread_local + Cell::get are signal-safe.
 fn get_jump_buf() -> *mut SigJmpBuf {
-    let tid = unsafe { libc::pthread_self() as u64 };
-    FFI_CRASH_JUMP_ATOMIC
-        .get()
-        .and_then(|map| {
-            let guard = map.lock().ok()?;
-            guard.get(&tid).map(|atomic| atomic.load(Ordering::Relaxed))
-        })
-        .unwrap_or(std::ptr::null_mut())
+    THREAD_JUMP_BUF.with(|cell| cell.get())
 }
 
 /// Signal handler for C-level crashes (SIGSEGV, SIGABRT, etc.).
 /// FFI-7: Async-signal-safe operations ONLY:
 /// - libc::signal (POSIX-mandated signal-safe)
-/// - libc::pthread_self (async-signal-safe per POSIX)
-/// - AtomicPtr load (hardware atomic, signal-safe)
+/// - thread_local Cell::get (async-signal-safe)
 /// - siglongjmp (async-signal-safe per POSIX)
 ///   NO mutex, NO pthread_getspecific, NO RefCell.
 extern "C" fn ffi_crash_signal_handler(

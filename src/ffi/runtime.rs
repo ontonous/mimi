@@ -190,8 +190,20 @@ impl SharedHandle {
 
     /// Release: decrement the C-side strong reference count.  Returns `true`
     /// if the count reached zero (caller should free the handle).
+    /// Uses Release ordering to ensure all writes to managed data are visible
+    /// before the count reaches zero (matching mimi_rc_release pattern).
     pub fn release(&self) -> bool {
-        self.strong.fetch_sub(1, Ordering::Relaxed) == 1
+        self.strong.fetch_sub(1, Ordering::Release) == 1
+    }
+
+    /// Acquire fence after release returns true — ensures visibility of
+    /// all writes made before the last release.
+    pub fn release_with_fence(&self) -> bool {
+        let reached_zero = self.strong.fetch_sub(1, Ordering::Release) == 1;
+        if reached_zero {
+            std::sync::atomic::fence(Ordering::Acquire);
+        }
+        reached_zero
     }
 
     /// Get the current C-side reference count.
