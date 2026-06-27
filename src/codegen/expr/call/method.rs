@@ -1143,13 +1143,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ).map_err(|e| CompileError::LlvmError(format!("json_as_bool: {}", e)))?;
                                         let iv = self.expect_basic_value(&r, "json_as_bool")?.into_int_value();
                                         let one = self.context.i64_type().const_int(1, false);
+                                        let bv = self.builder.build_int_compare(inkwell::IntPredicate::EQ, iv, one, "to_bool")
+                                            .map_err(|e| CompileError::LlvmError(format!("to_bool: {}", e)))?;
                                         BasicValueEnum::IntValue(
-                                            self.builder.build_int_compare(inkwell::IntPredicate::EQ, iv, one, "to_bool")
-                                                .map_err(|e| CompileError::LlvmError(format!("to_bool: {}", e)))?
+                                            self.builder.build_int_z_extend(bv, self.context.i64_type(), "bool_ext")
+                                                .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?
                                         )
                                     }
                                     crate::ast::Type::Name(ref n, _) if n == "string" => {
-                                        // raw_val is already the string value
+                                        // Null check: json_get_string returns null for missing fields
+                                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                                        let null_ptr = i8_ptr_ty.const_null();
+                                        let is_null = self.builder.build_int_compare(
+                                            inkwell::IntPredicate::EQ, raw_val, null_ptr, "is_null"
+                                        ).map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
                                         let strlen_fn = self.module.get_function("strlen")
                                             .ok_or("strlen not declared")?;
                                         let len = self.builder.build_call(strlen_fn,
@@ -1159,9 +1166,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .try_as_basic_value_opt()
                                             .ok_or("strlen returned void")?
                                             .into_int_value();
+                                        let safe_len = self.builder.build_select(
+                                            is_null, self.context.i64_type().const_int(0, false), len, "safe_len"
+                                        ).map_err(|e| CompileError::LlvmError(format!("select: {}", e)))?.into_int_value();
+                                        let safe_ptr = self.builder.build_select(
+                                            is_null, null_ptr, raw_val, "safe_ptr"
+                                        ).map_err(|e| CompileError::LlvmError(format!("select: {}", e)))?.into_pointer_value();
                                         let str_ty = self.context.struct_type(
                                             &[
-                                                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                                                BasicTypeEnum::PointerType(i8_ptr_ty),
                                                 BasicTypeEnum::IntType(self.context.i64_type()),
                                             ],
                                             false,
@@ -1170,11 +1183,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
                                         let ptr_gep = self.gep().build_struct_gep(str_ty, str_alloca, 0, "s_ptr")
                                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                                        self.builder.build_store(ptr_gep, raw_val)
+                                        self.builder.build_store(ptr_gep, safe_ptr)
                                             .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                                         let len_gep = self.gep().build_struct_gep(str_ty, str_alloca, 1, "s_len")
                                             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                                        self.builder.build_store(len_gep, len)
+                                        self.builder.build_store(len_gep, safe_len)
                                             .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                                         self.builder.build_load(str_ty, str_alloca, "str_val")
                                             .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?
@@ -1193,7 +1206,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     Err(CompileError::Generic(format!(
-                        "from_json::<{}> codegen not yet implemented", type_name
+                        "from_json::<{}>: unsupported type (only Record types with scalar/string fields are supported)", type_name
                     )))
                 }
                 _ => Err(CompileError::Generic(format!(

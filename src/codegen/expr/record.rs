@@ -33,12 +33,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                 let field_ty = sty.get_field_type_at_index(i as u32)
                     .ok_or_else(|| CompileError::LlvmError(format!("field {} type", i)))?;
-                // List expressions return PointerValue (alloca of list struct).
-                // Record struct fields expect the struct value itself, so load.
+                // When a PointerValue (alloca) is stored into a struct-typed field,
+                // check if the value's inferred type is a compound type that needs loading.
                 let store_val = if let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) = (&val, field_ty) {
+                    // Check if the expression produces a compound value that needs loading
                     let needs_load = matches!(&field.value,
                         Expr::List(_) | Expr::Tuple(_) | Expr::Comprehension { .. }
-                    );
+                        | Expr::SetLiteral(_) | Expr::Block(_)
+                    ) || {
+                        let val_type = self.infer_object_type(&field.value, vars);
+                        val_type.starts_with("List") || val_type.starts_with("Set")
+                            || val_type.starts_with("Option") || val_type.starts_with("Result")
+                            || self.type_defs.contains_key(&val_type)
+                    };
                     if needs_load {
                         self.builder.build_load(field_ty, *pv, &format!("load_{}", field.name))
                             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
