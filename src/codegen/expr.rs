@@ -210,6 +210,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else if let Some(function) = self.module.get_function(name) {
             // First-class function reference: return function pointer as value
             Ok(function.as_global_value().as_pointer_value().into())
+        } else if let Some(const_expr) = self.const_values.get(name).cloned() {
+            // Const value: compile the expression
+            self.compile_expr(&const_expr, vars)
         } else {
             Err(format!("undefined variable '{}'", name).into())
         }

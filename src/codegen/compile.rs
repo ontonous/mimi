@@ -83,6 +83,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .or_default()
                         .insert(imp.trait_name.clone(), imp.methods.clone());
                 }
+                Item::Const { name, value, .. } => {
+                    // Store const for later reference
+                    self.const_values.insert(name.clone(), value.clone());
+                }
                 _ => {}
             }
             Ok(())

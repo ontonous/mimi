@@ -210,6 +210,8 @@ pub struct CodeGenerator<'ctx> {
     /// Key: original function name. Value: wrapper fn(i8*, params...) -> ret.
     /// Used when passing a named function where func(T)->U is expected.
     closure_wrappers: HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    /// Const values declared at top level (for codegen const support).
+    const_values: HashMap<String, crate::ast::Expr>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -281,6 +283,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_callback_tls: Vec::new(),
             list_elem_llvm_types: HashMap::new(),
             closure_wrappers: HashMap::new(),
+            const_values: HashMap::new(),
         }
     }
 
