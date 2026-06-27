@@ -87,9 +87,9 @@ impl GoBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| self.mimi_type_to_c(&contract, i))
+            .map(|(i, _p)| self.mimi_type_to_c(contract, i))
             .collect();
-        let ret = self.ret_type_to_c(&contract);
+        let ret = self.ret_type_to_c(contract);
         writeln!(out, "extern {} {}({});", ret, func.name, params.join(", "))
     }
 
@@ -103,9 +103,9 @@ impl GoBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| format!("{} {}", p.name, self.mimi_type_to_go(&contract, i)))
+            .map(|(i, p)| format!("{} {}", p.name, self.mimi_type_to_go(contract, i)))
             .collect();
-        let go_ret = self.ret_type_to_go(&contract);
+        let go_ret = self.ret_type_to_go(contract);
 
         // Build C call arguments with conversions
         let mut conversions = String::new();

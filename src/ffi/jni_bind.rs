@@ -111,12 +111,12 @@ impl JniBindGenerator {
         writeln!(
             out,
             "JNIEXPORT {} JNICALL Java_{}_{}(JNIEnv *env, jclass cls",
-            self.ret_type_to_jni(&contract),
+            self.ret_type_to_jni(contract),
             java_class,
             func.name
         )?;
         for (i, p) in func.params.iter().enumerate() {
-            write!(out, ", {} {}", self.mimi_type_to_jni(&contract, i), sanitize_java_name(&p.name))?;
+            write!(out, ", {} {}", self.mimi_type_to_jni(contract, i), sanitize_java_name(&p.name))?;
         }
         writeln!(out, ") {{")?;
 

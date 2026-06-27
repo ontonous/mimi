@@ -65,23 +65,23 @@ impl Profiler {
 
 /// Initialize the profiler. Call once at program start.
 pub fn profiler_init() {
-    let mut guard = PROFILER.lock().unwrap();
-    *guard = Some(Profiler::new());
+    if let Ok(mut guard) = PROFILER.lock() {
+        *guard = Some(Profiler::new());
+    }
 }
 
 /// Check if profiling is enabled.
 pub fn profiler_is_enabled() -> bool {
     PROFILER
         .lock()
-        .unwrap()
-        .as_ref()
-        .map(|p| p.enabled)
+        .ok()
+        .and_then(|p| p.as_ref().map(|pr| pr.enabled))
         .unwrap_or(false)
 }
 
 /// Record a function call with its duration.
 pub fn profiler_record(name: &str, duration_ns: u64) {
-    let mut guard = PROFILER.lock().unwrap();
+    let Ok(mut guard) = PROFILER.lock() else { return };
     if let Some(profiler) = guard.as_mut() {
         if profiler.enabled {
             let entry = profiler.entries.entry(name.to_string()).or_insert_with(ProfileEntry::new);
@@ -114,7 +114,7 @@ impl Drop for ProfileTimer {
 
 /// Print the profiling report to stderr.
 pub fn profiler_report() {
-    let guard = PROFILER.lock().unwrap();
+    let Ok(guard) = PROFILER.lock() else { return };
     let profiler = match guard.as_ref() {
         Some(p) => p,
         None => return,

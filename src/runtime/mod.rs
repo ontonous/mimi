@@ -3262,7 +3262,7 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
             .filter_map(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|s| alloc_c_string(s))
+                    .map(alloc_c_string)
             })
             .collect(),
         Err(_) => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
@@ -3309,18 +3309,12 @@ pub extern "C" fn mimi_path_join(
     let a_str = if a.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(a) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(a) }.to_str().unwrap_or("")
     };
     let b_str = if b.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(b) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(b) }.to_str().unwrap_or("")
     };
     let joined = std::path::Path::new(a_str)
         .join(b_str)
@@ -3452,9 +3446,7 @@ pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c
     let input = if data.is_null() {
         b"".as_slice()
     } else {
-        match unsafe { CStr::from_ptr(data) }.to_bytes() {
-            b => b,
-        }
+        unsafe { CStr::from_ptr(data) }.to_bytes()
     };
     let hash = sha256_bytes(input);
     let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
@@ -3591,6 +3583,7 @@ pub extern "C" fn mimi_base64_decode(data: *const std::ffi::c_char) -> *mut std:
     }
 }
 
+#[allow(clippy::result_unit_err)]
 pub fn base64_decode_str(input: &str) -> Result<String, ()> {
     const REV: [i8; 128] = {
         let mut table = [-1i8; 128];

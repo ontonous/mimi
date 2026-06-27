@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, Type, TypeDef};
-use crate::ffi::contract::{FfiArgContract, FfiContract, ERRNO_CHECK_FUNC_NAMES};
+use crate::ast::{ExternFunc, TypeDef};
+use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// Rust binding generator — produces a `.rs` file with extern "C" declarations.
 pub struct RustBindGenerator {
@@ -111,9 +111,9 @@ impl RustBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| format!("{}: {}", p.name, self.mimi_type_to_rust(&contract, i)))
+            .map(|(i, p)| format!("{}: {}", p.name, self.mimi_type_to_rust(contract, i)))
             .collect();
-        let ret = self.ret_type_to_rust(&contract);
+        let ret = self.ret_type_to_rust(contract);
         writeln!(out, "    pub fn {}({}) -> {};", func.name, params.join(", "), ret)
     }
 
@@ -128,12 +128,11 @@ impl RustBindGenerator {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let rust_ty = self.mimi_type_to_rust_safe(&contract, i);
+                let rust_ty = self.mimi_type_to_rust_safe(contract, i);
                 format!("{}: {}", p.name, rust_ty)
             })
             .collect();
-        let ret = self.ret_type_to_rust_safe(&contract);
-        let args: Vec<String> = func.params.iter().map(|p| p.name.clone()).collect();
+        let ret = self.ret_type_to_rust_safe(contract);
 
         // For string parameters, convert &str to *const c_char
         let mut conversions = String::new();
