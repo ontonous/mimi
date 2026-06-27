@@ -1,11 +1,12 @@
 # Changelog
 
-## [Unreleased] — v0.28.2-dev
+## [v0.28.2] — 2026-06-27
 
 ### Added
 
 - **const keyword**: 顶层常量声明 (`const PORT: i32 = 6380`)
 - **as type cast**: 类型转换表达式 (`x as i64`, `3.14 as i32`)
+- **desc{}/rule{} blocks**: 自然语言文档块语法（多行描述/约束）
 - **mimi-todo**: CLI 任务跟踪器项目
 
 ### Fixed
@@ -15,6 +16,8 @@
 - **P1**: const 顶层常量（lexer + parser + typeck + interpreter）
 - **P1**: as 类型转换（lexer + parser + typeck + interpreter + codegen）
 - **Bug**: parse_ident_primary 缺少 as cast 处理（`x as i64` 失败）
+- **Bug**: desc/rule 可用作变量名（keyword-as-identifier fallback in pattern parser）
+- **Bug**: recovery_mode 路径缺少 desc{}/rule{} 块语法支持
 
 ---
 
