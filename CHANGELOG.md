@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — v0.28.3-dev
+
+### Added
+
+- **mimi-markdown**: Markdown→HTML 转换器项目（~1300 行 Mimi 代码）
+
+---
+
 ## [v0.28.2] — 2026-06-27
 
 ### Added
