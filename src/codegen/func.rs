@@ -878,6 +878,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names.insert(name.clone(), "List<string>".to_string());
                                                 self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
                                             }
+                                            "exec" => {
+                                                self.var_type_names.insert(name.clone(), "ExecResult".to_string());
+                                            }
+                                            "file_stat" => {
+                                                self.var_type_names.insert(name.clone(), "StatResult".to_string());
+                                            }
+                                            "append_file" => {
+                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                            }
+                                            "set_env" => {
+                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                            }
                                             _ => {}
                                         }
                                     }

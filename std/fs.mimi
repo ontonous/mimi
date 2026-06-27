@@ -103,3 +103,15 @@ pub func file_size(path: string) -> Result<i32, string> {
 pub func write_lines(path: string, xs: List<string>) -> Result<unit, string> {
     write_file(path, str_join(xs, "\n"))
 }
+
+// stat: Returns file metadata (size, modified timestamp, is_file, is_dir).
+// Returns size=-1 if the file does not exist.
+pub func stat(path: string) -> StatResult {
+    file_stat(path)
+}
+
+// append: Appends content to a file. Creates the file if it does not exist.
+// Returns true on success, false on failure.
+pub func append(path: string, content: string) -> bool {
+    append_file(path, content)
+}

@@ -3445,6 +3445,194 @@ pub extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
     if std::fs::remove_file(path_str).is_ok() { 1 } else { 0 }
 }
 
+// ─── Process & advanced file operations ─────────────────────────
+
+/// Result of executing a shell command.
+#[repr(C)]
+pub struct MimiExecResult {
+    pub exit_code: i64,
+    pub stdout: *mut std::ffi::c_char,
+    pub stderr: *mut std::ffi::c_char,
+}
+
+/// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
+/// Caller must free with `mimi_exec_free`.
+#[no_mangle]
+pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
+    if cmd.is_null() {
+        let res = Box::new(MimiExecResult {
+            exit_code: -1,
+            stdout: alloc_c_string(""),
+            stderr: alloc_c_string("exec error: null command"),
+        });
+        return Box::into_raw(res);
+    }
+    let cmd_str = match unsafe { CStr::from_ptr(cmd) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            let res = Box::new(MimiExecResult {
+                exit_code: -1,
+                stdout: alloc_c_string(""),
+                stderr: alloc_c_string(&format!("exec error: {}", e)),
+            });
+            return Box::into_raw(res);
+        }
+    };
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd_str)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            let res = Box::new(MimiExecResult {
+                exit_code: exit_code as i64,
+                stdout: alloc_c_string(&stdout),
+                stderr: alloc_c_string(&stderr),
+            });
+            Box::into_raw(res)
+        }
+        Err(e) => {
+            let res = Box::new(MimiExecResult {
+                exit_code: -1,
+                stdout: alloc_c_string(""),
+                stderr: alloc_c_string(&format!("exec error: {}", e)),
+            });
+            Box::into_raw(res)
+        }
+    }
+}
+
+/// Frees a MimiExecResult allocated by mimi_exec.
+#[no_mangle]
+pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
+    if res.is_null() {
+        return;
+    }
+    unsafe {
+        let r = Box::from_raw(res);
+        if !r.stdout.is_null() {
+            let _ = std::ffi::CString::from_raw(r.stdout);
+        }
+        if !r.stderr.is_null() {
+            let _ = std::ffi::CString::from_raw(r.stderr);
+        }
+    }
+}
+
+/// Result of stat-ing a file.
+#[repr(C)]
+pub struct MimiStatResult {
+    pub size: i64,
+    pub modified: i64,
+    pub is_file: i64,
+    pub is_dir: i64,
+}
+
+/// Stats a file. Returns a heap-allocated MimiStatResult, or null on error.
+/// On error, sets *err_out to an allocated error string (caller must free with mimi_string_free).
+#[no_mangle]
+pub extern "C" fn mimi_file_stat(
+    path: *const std::ffi::c_char,
+    err_out: *mut *mut std::ffi::c_char,
+) -> *mut MimiStatResult {
+    if path.is_null() {
+        if !err_out.is_null() {
+            unsafe { *err_out = alloc_c_string("file_stat error: null path") };
+        }
+        return std::ptr::null_mut();
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            if !err_out.is_null() {
+                unsafe { *err_out = alloc_c_string(&format!("file_stat error: {}", e)) };
+            }
+            return std::ptr::null_mut();
+        }
+    };
+    match std::fs::metadata(path_str) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let res = Box::new(MimiStatResult {
+                size: meta.len() as i64,
+                modified,
+                is_file: if meta.is_file() { 1 } else { 0 },
+                is_dir: if meta.is_dir() { 1 } else { 0 },
+            });
+            if !err_out.is_null() {
+                unsafe { *err_out = std::ptr::null_mut() };
+            }
+            Box::into_raw(res)
+        }
+        Err(e) => {
+            if !err_out.is_null() {
+                unsafe { *err_out = alloc_c_string(&format!("file_stat error: {}", e)) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Appends content to a file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn mimi_append_file(
+    path: *const std::ffi::c_char,
+    content: *const std::ffi::c_char,
+) -> i64 {
+    if path.is_null() || content.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let content_str = match unsafe { CStr::from_ptr(content) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path_str)
+    {
+        Ok(mut file) => {
+            if file.write_all(content_str.as_bytes()).is_ok() { 1 } else { 0 }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Sets an environment variable. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn mimi_set_env(
+    key: *const std::ffi::c_char,
+    value: *const std::ffi::c_char,
+) -> i64 {
+    if key.is_null() || value.is_null() {
+        return 0;
+    }
+    let key_str = match unsafe { CStr::from_ptr(key) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let value_str = match unsafe { CStr::from_ptr(value) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    // SAFETY: set_var is unsafe in newer Rust editions; safe for single-threaded Mimi programs
+    unsafe { std::env::set_var(key_str, value_str) };
+    1
+}
+
 // ─── Crypto operations ─────────────────────────────────────────
 
 /// SHA-256 hash — returns hex string (64 chars).

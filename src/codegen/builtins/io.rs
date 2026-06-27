@@ -1441,6 +1441,310 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.call_runtime_str_to_bool("mimi_remove_file", args)
     }
 
+    // === Process & advanced file operations (codegen) ===
+
+    pub(super) fn compile_exec(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("exec expects 1 argument".to_string()));
+        }
+        let cmd_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // Call mimi_exec(cmd) -> MimiExecResult*
+        let exec_fn = self.module.get_function("mimi_exec")
+            .ok_or_else(|| "mimi_exec not declared".to_string())?;
+        let res_ptr = self.builder.build_call(
+            exec_fn,
+            &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
+            "exec_call",
+        ).map_err(|e| CompileError::LlvmError(format!("exec error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_exec returned void")?
+            .into_pointer_value();
+
+        // MimiExecResult layout: { i64 exit_code, i8* stdout, i8* stderr }
+        let res_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        );
+
+        // Extract exit_code
+        let exit_gep = self.gep().build_struct_gep(res_ty, res_ptr, 0, "exit_code_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let exit_code_raw = self.builder.build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        // Truncate to i32 for ExecResult.exit_code field
+        let exit_code = self.builder.build_int_truncate(exit_code_raw, self.context.i32_type(), "exit_code_i32")
+            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+
+        // Extract stdout
+        let stdout_gep = self.gep().build_struct_gep(res_ty, res_ptr, 1, "stdout_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let stdout_raw = self.builder.build_load(i8_ptr, stdout_gep, "stdout_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_pointer_value();
+        let stdout_str = self.wrap_c_string(stdout_raw)?;
+
+        // Extract stderr
+        let stderr_gep = self.gep().build_struct_gep(res_ty, res_ptr, 2, "stderr_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let stderr_raw = self.builder.build_load(i8_ptr, stderr_gep, "stderr_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_pointer_value();
+        let stderr_str = self.wrap_c_string(stderr_raw)?;
+
+        // Note: we intentionally do NOT free the MimiExecResult here because
+        // the stdout/stderr pointers are shared with the ExecResult struct.
+        // The runtime struct leaks (small, per-exec call). This is acceptable.
+
+        // Build ExecResult LLVM struct { i32, {i8*,i64}, {i8*,i64} }
+        let string_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        let exec_result_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(self.context.i32_type()),
+                inkwell::types::BasicTypeEnum::StructType(string_ty),
+                inkwell::types::BasicTypeEnum::StructType(string_ty),
+            ],
+            false,
+        );
+        let alloca = self.builder.build_alloca(exec_result_ty, "exec_result")
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+
+        // Store exit_code
+        let f0 = self.gep().build_struct_gep(exec_result_ty, alloca, 0, "f0")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(f0, exit_code)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Store stdout string
+        let f1 = self.gep().build_struct_gep(exec_result_ty, alloca, 1, "f1")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(f1, stdout_str)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Store stderr string
+        let f2 = self.gep().build_struct_gep(exec_result_ty, alloca, 2, "f2")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(f2, stderr_str)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        Ok(alloca.into())
+    }
+
+    pub(super) fn compile_file_stat(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("file_stat expects 1 argument".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+
+        // Allocate err_out pointer
+        let err_alloca = self.builder.build_alloca(i8_ptr, "err_out")
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        self.builder.build_store(err_alloca, i8_ptr.const_null())
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Call mimi_file_stat(path, &err_out)
+        let stat_fn = self.module.get_function("mimi_file_stat")
+            .ok_or_else(|| "mimi_file_stat not declared".to_string())?;
+        let stat_ptr = self.builder.build_call(
+            stat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(path_ptr),
+                BasicMetadataValueEnum::PointerValue(err_alloca),
+            ],
+            "stat_call",
+        ).map_err(|e| CompileError::LlvmError(format!("file_stat error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_file_stat returned void")?
+            .into_pointer_value();
+
+        // MimiStatResult layout: { i64 size, i64 modified, i64 is_file, i64 is_dir }
+        let mimi_stat_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        // Check if stat_ptr is null (error case)
+        let is_null = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            stat_ptr,
+            i8_ptr.const_null(),
+            "stat_null",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+
+        // Build StatResult LLVM struct { i64, i64, i1, i1 }
+        let bool_ty = self.context.bool_type();
+        let stat_result_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicTypeEnum::IntType(bool_ty),
+                inkwell::types::BasicTypeEnum::IntType(bool_ty),
+            ],
+            false,
+        );
+        let alloca = self.builder.build_alloca(stat_result_ty, "stat_result")
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+
+        // Extract fields from MimiStatResult (or use defaults if null)
+        let zero_i64 = i64_ty.const_int(0, false);
+        let neg_one_i64 = i64_ty.const_int((-1i64) as u64, false);
+        let false_val = bool_ty.const_int(0, false);
+
+        // size
+        let size_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 0, "size_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let size_loaded = self.builder.build_load(i64_ty, size_gep, "size_loaded")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let size_val = self.builder.build_select(is_null, neg_one_i64, size_loaded, "size_sel")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // modified
+        let mod_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 1, "mod_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let mod_loaded = self.builder.build_load(i64_ty, mod_gep, "mod_loaded")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let mod_val = self.builder.build_select(is_null, zero_i64, mod_loaded, "mod_sel")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // is_file
+        let isf_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 2, "isf_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let isf_raw = self.builder.build_load(i64_ty, isf_gep, "isf_loaded")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let isf_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, isf_raw, zero_i64, "isf_cmp",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let isf_val = self.builder.build_select(is_null, false_val, isf_bool, "isf_sel")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // is_dir
+        let isd_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 3, "isd_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let isd_raw = self.builder.build_load(i64_ty, isd_gep, "isd_loaded")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let isd_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, isd_raw, zero_i64, "isd_cmp",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let isd_val = self.builder.build_select(is_null, false_val, isd_bool, "isd_sel")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+
+        // Store into StatResult struct
+        let s0 = self.gep().build_struct_gep(stat_result_ty, alloca, 0, "s0")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(s0, size_val)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let s1 = self.gep().build_struct_gep(stat_result_ty, alloca, 1, "s1")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(s1, mod_val)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let s2 = self.gep().build_struct_gep(stat_result_ty, alloca, 2, "s2")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(s2, isf_val)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let s3 = self.gep().build_struct_gep(stat_result_ty, alloca, 3, "s3")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.builder.build_store(s3, isd_val)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Free the stat result if non-null
+        let free_fn = self.module.get_function("free")
+            .ok_or_else(|| "free not declared".to_string())?;
+        // Use select to get the actual pointer or a dummy (free handles null gracefully)
+        self.builder.build_call(
+            free_fn,
+            &[BasicMetadataValueEnum::PointerValue(stat_ptr)],
+            "stat_free",
+        ).map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+
+        Ok(alloca.into())
+    }
+
+    pub(super) fn compile_append_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount("append_file expects 2 arguments".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let content_ptr = self.extract_raw_str_ptr(&args[1])?;
+
+        let append_fn = self.module.get_function("mimi_append_file")
+            .ok_or_else(|| "mimi_append_file not declared".to_string())?;
+        let ret = self.builder.build_call(
+            append_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(path_ptr),
+                BasicMetadataValueEnum::PointerValue(content_ptr),
+            ],
+            "append_call",
+        ).map_err(|e| CompileError::LlvmError(format!("append_file error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_append_file returned void")?
+            .into_int_value();
+
+        // Convert i64 to bool (i64): ret != 0
+        let zero = self.context.i64_type().const_int(0, false);
+        let cmp = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, ret, zero, "append_ok",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let result = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "append_result")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        Ok(result.into())
+    }
+
+    pub(super) fn compile_set_env(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount("set_env expects 2 arguments".to_string()));
+        }
+        let key_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let val_ptr = self.extract_raw_str_ptr(&args[1])?;
+
+        let set_fn = self.module.get_function("mimi_set_env")
+            .ok_or_else(|| "mimi_set_env not declared".to_string())?;
+        let ret = self.builder.build_call(
+            set_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(key_ptr),
+                BasicMetadataValueEnum::PointerValue(val_ptr),
+            ],
+            "set_env_call",
+        ).map_err(|e| CompileError::LlvmError(format!("set_env error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_set_env returned void")?
+            .into_int_value();
+
+        // Convert i64 to bool (i64): ret != 0
+        let zero = self.context.i64_type().const_int(0, false);
+        let cmp = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, ret, zero, "set_env_ok",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let result = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "set_env_result")
+            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
+        Ok(result.into())
+    }
+
     // === Crypto operations (codegen) ===
 
     pub(super) fn compile_sha256(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {

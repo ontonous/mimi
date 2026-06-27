@@ -164,6 +164,8 @@ impl<'a> Checker<'a> {
             "Option".into(),
             "Record".into(),
             "Any".into(),
+            "ExecResult".into(),
+            "StatResult".into(),
         ]
     }
 

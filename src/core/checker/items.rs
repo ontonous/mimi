@@ -19,11 +19,49 @@ impl<'a> Checker<'a> {
                 self.use_imports.push(name);
             }
         }
+        // Register built-in Record types used by builtins
+        self.register_builtin_types();
         for item in &self.file.items {
             self.collect_item_decls(item);
         }
         // Check for type alias cycles
         self.check_alias_cycles();
+    }
+
+    fn register_builtin_types(&mut self) {
+        // ExecResult { exit_code: i32, stdout: string, stderr: string }
+        if !self.types.contains_key("ExecResult") {
+            let td = TypeDef {
+                name: "ExecResult".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field { name: "exit_code".to_string(), ty: Type::Name("i32".to_string(), vec![]) },
+                    Field { name: "stdout".to_string(), ty: Type::Name("string".to_string(), vec![]) },
+                    Field { name: "stderr".to_string(), ty: Type::Name("string".to_string(), vec![]) },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("ExecResult".to_string(), td);
+        }
+        // StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }
+        if !self.types.contains_key("StatResult") {
+            let td = TypeDef {
+                name: "StatResult".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field { name: "size".to_string(), ty: Type::Name("i64".to_string(), vec![]) },
+                    Field { name: "modified".to_string(), ty: Type::Name("i64".to_string(), vec![]) },
+                    Field { name: "is_file".to_string(), ty: Type::Name("bool".to_string(), vec![]) },
+                    Field { name: "is_dir".to_string(), ty: Type::Name("bool".to_string(), vec![]) },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("StatResult".to_string(), td);
+        }
     }
 
     /// Detect type alias cycles: type A = B; type B = A;

@@ -318,6 +318,115 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    // === Process & advanced file operations ===
+
+    pub(crate) fn builtin_exec(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("exec expects 1 argument (command)"));
+        }
+        match &args[0] {
+            Value::String(cmd) => {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output();
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        let exit_code = out.status.code().unwrap_or(-1);
+                        let mut fields = std::collections::HashMap::new();
+                        fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+                        fields.insert("stdout".to_string(), Value::String(stdout));
+                        fields.insert("stderr".to_string(), Value::String(stderr));
+                        Ok(Value::Record(Some("ExecResult".to_string()), fields))
+                    }
+                    Err(e) => {
+                        let mut fields = std::collections::HashMap::new();
+                        fields.insert("exit_code".to_string(), Value::Int(-1));
+                        fields.insert("stdout".to_string(), Value::String(String::new()));
+                        fields.insert(
+                            "stderr".to_string(),
+                            Value::String(format!("exec error: {}", e)),
+                        );
+                        Ok(Value::Record(Some("ExecResult".to_string()), fields))
+                    }
+                }
+            }
+            _ => Err(InterpError::new("exec expects a string command")),
+        }
+    }
+
+    pub(crate) fn builtin_file_stat(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("file_stat expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                let mut fields = std::collections::HashMap::new();
+                match std::fs::metadata(path) {
+                    Ok(meta) => {
+                        fields.insert("size".to_string(), Value::Int(meta.len() as i64));
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        fields.insert("modified".to_string(), Value::Int(modified));
+                        fields.insert("is_file".to_string(), Value::Bool(meta.is_file()));
+                        fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
+                    }
+                    Err(_) => {
+                        fields.insert("size".to_string(), Value::Int(-1));
+                        fields.insert("modified".to_string(), Value::Int(0));
+                        fields.insert("is_file".to_string(), Value::Bool(false));
+                        fields.insert("is_dir".to_string(), Value::Bool(false));
+                    }
+                }
+                Ok(Value::Record(Some("StatResult".to_string()), fields))
+            }
+            _ => Err(InterpError::new("file_stat expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_append_file(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "append_file expects 2 arguments (path, content)",
+            ));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(path), Value::String(content)) => {
+                use std::io::Write;
+                let ok = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(content.as_bytes()))
+                    .is_ok();
+                Ok(Value::Bool(ok))
+            }
+            _ => Err(InterpError::new("append_file expects (string, string)")),
+        }
+    }
+
+    pub(crate) fn builtin_set_env(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "set_env expects 2 arguments (key, value)",
+            ));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(key), Value::String(value)) => {
+                // SAFETY: set_var is unsafe in Rust 2024+, but safe in practice for single-threaded use
+                unsafe { std::env::set_var(key, value) };
+                Ok(Value::Bool(true))
+            }
+            _ => Err(InterpError::new("set_env expects (string, string)")),
+        }
+    }
+
     // === Crypto operations ===
 
     pub(crate) fn builtin_sha256(&self, args: Vec<Value>) -> Result<Value, InterpError> {

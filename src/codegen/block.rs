@@ -315,6 +315,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
+                                        // Track return types for builtins
+                                        match func_name.as_str() {
+                                            "listdir" | "walk_dir" | "str_split" => {
+                                                self.var_type_names.insert(name.clone(), "List<string>".to_string());
+                                                self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                                            }
+                                            "exec" => {
+                                                self.var_type_names.insert(name.clone(), "ExecResult".to_string());
+                                            }
+                                            "file_stat" => {
+                                                self.var_type_names.insert(name.clone(), "StatResult".to_string());
+                                            }
+                                            "append_file" => {
+                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                            }
+                                            "set_env" => {
+                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                             } else if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {

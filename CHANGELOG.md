@@ -2,7 +2,20 @@
 
 ## [Unreleased] — 0.28.5-dev
 
-> 进程与文件基础设施：exec、file_stat、append_file、set_env 内置函数。
+### Added
+
+- **G-87**: `exec(command)` 进程执行内置函数 — 返回 `ExecResult { exit_code: i32, stdout: string, stderr: string }`
+- **G-88**: `file_stat(path)` 文件元数据内置函数 — 返回 `StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }`
+- **G-89**: `append_file(path, content)` 文件追加写入内置函数 — 返回 `bool`
+- **G-90**: `set_env(key, value)` 环境变量设置内置函数 — 返回 `bool`
+- `ExecResult`/`StatResult` 内置 Record 类型注册（typeck + codegen）
+- `std/fs.mimi`: `stat()` 和 `append()` 包装函数
+- `std/env.mimi`: `set()` 包装函数
+- 7 个 L1 双后端测试：exec_basic/exec_stdout/exec_exit_code/file_stat_file/file_stat_dir/append_file/set_env
+
+### Changed
+
+- 21 个 golden IR 文件更新（新增运行时函数声明）
 
 ## [v0.28.4] — 2026-06-28
 

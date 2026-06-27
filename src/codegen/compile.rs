@@ -56,6 +56,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile_file(&mut self, file: &File) -> MimiResult<()> {
+        // Register built-in Record types used by builtins
+        self.register_builtin_record_types()?;
+
         // First pass: collect type definitions, function definitions, and cap definitions
         Self::process_items(&file.items, &mut |item| {
             match item {
@@ -129,6 +132,85 @@ impl<'ctx> CodeGenerator<'ctx> {
                     eprintln!("warning: comptime function '{}' was not compiled", f.name);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Register built-in Record types used by builtin functions (exec, file_stat, etc.)
+    /// so that field access and struct construction work in codegen.
+    fn register_builtin_record_types(&mut self) -> MimiResult<()> {
+        use inkwell::types::BasicTypeEnum;
+        let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
+        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+        let bool_ty = BasicTypeEnum::IntType(self.context.bool_type());
+        let string_ty = {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            BasicTypeEnum::StructType(
+                self.context
+                    .struct_type(&[BasicTypeEnum::PointerType(i8_ptr), i64_ty], false),
+            )
+        };
+        // ExecResult { exit_code: i32, stdout: string, stderr: string }
+        if !self.type_defs.contains_key("ExecResult") {
+            let exec_ty = crate::ast::TypeDef {
+                name: "ExecResult".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field {
+                        name: "exit_code".to_string(),
+                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "stdout".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "stderr".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context.struct_type(&[i32_ty, string_ty, string_ty], false),
+            );
+            self.type_llvm.insert("ExecResult".to_string(), llvm_ty);
+            self.type_defs.insert("ExecResult".to_string(), exec_ty);
+        }
+        // StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }
+        if !self.type_defs.contains_key("StatResult") {
+            let stat_ty = crate::ast::TypeDef {
+                name: "StatResult".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field {
+                        name: "size".to_string(),
+                        ty: crate::ast::Type::Name("i64".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "modified".to_string(),
+                        ty: crate::ast::Type::Name("i64".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "is_file".to_string(),
+                        ty: crate::ast::Type::Name("bool".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "is_dir".to_string(),
+                        ty: crate::ast::Type::Name("bool".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context.struct_type(&[i64_ty, i64_ty, bool_ty, bool_ty], false),
+            );
+            self.type_llvm.insert("StatResult".to_string(), llvm_ty);
+            self.type_defs.insert("StatResult".to_string(), stat_ty);
         }
         Ok(())
     }

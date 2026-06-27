@@ -942,6 +942,56 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+    // ========== Process & advanced file operations ==========
+    // mimi_exec(cmd: i8*) -> i8* (MimiExecResult*)
+    module.add_function(
+        "mimi_exec",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_exec_free(res: i8*)
+    module.add_function(
+        "mimi_exec_free",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_file_stat(path: i8*, err_out: i8**) -> i8* (MimiStatResult*)
+    module.add_function(
+        "mimi_file_stat",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_append_file(path: i8*, content: i8*) -> i64
+    module.add_function(
+        "mimi_append_file",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_set_env(key: i8*, value: i8*) -> i64
+    module.add_function(
+        "mimi_set_env",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+
     // ========== Crypto runtime functions ==========
     // mimi_sha256(data: i8*) -> i8* (hex string)
     module.add_function(
@@ -975,6 +1025,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
+        | "exec" | "file_stat" | "append_file" | "set_env"
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
@@ -1065,6 +1116,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             "walk_dir" => self.compile_walk_dir(args),
             "mkdir_p" => self.compile_mkdir_p(args),
             "remove_file" => self.compile_remove_file(args),
+            "exec" => self.compile_exec(args),
+            "file_stat" => self.compile_file_stat(args),
+            "append_file" => self.compile_append_file(args),
+            "set_env" => self.compile_set_env(args),
             "sha256" => self.compile_sha256(args),
             "base64_encode" => self.compile_base64_encode(args),
             "base64_decode" => self.compile_base64_decode(args),

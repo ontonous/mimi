@@ -680,6 +680,40 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            "exec" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "exec expects 1 argument (command)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("ExecResult".into(), vec![]);
+            }
+            "file_stat" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "file_stat expects 1 argument (path)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("StatResult".into(), vec![]);
+            }
+            "append_file" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "append_file expects 2 arguments (path, content)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "set_env" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "set_env expects 2 arguments (key, value)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
             "sha256" | "base64_encode" => {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "sha256/base64_encode expects 1 argument");
