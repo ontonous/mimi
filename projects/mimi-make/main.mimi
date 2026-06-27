@@ -1,0 +1,262 @@
+// mimi-make: A lightweight build tool for Mimi projects
+//
+// Usage: mimi run main.mimi [target]
+//
+// Known gap: push() inside if/while or through helper functions doesn't work.
+// Workaround: parse and push at top level, skip empty rules during iteration.
+
+// === Data types ===
+
+type Rule {
+    target: string,
+    deps: List<string>,
+    commands: List<string>,
+}
+
+type BuildFile {
+    variables: Record,
+    rules: List<Rule>,
+}
+
+// === Parser helpers ===
+
+func is_blank(line: string) -> bool {
+    str_trim(line) == ""
+}
+
+func is_comment(line: string) -> bool {
+    if len(line) == 0 { return false }
+    str_char_at(line, 0) == "#"
+}
+
+func is_variable(line: string) -> bool {
+    let trimmed = str_trim(line)
+    let eq = str_index_of(trimmed, "=")
+    if !eq.is_some() { return false }
+    !str_contains(trimmed, ":")
+}
+
+func is_continuation(line: string) -> bool {
+    if len(line) == 0 { return false }
+    str_char_at(line, 0) == "\t"
+}
+
+func find_char(s: string, ch: string) -> i32 {
+    let result = str_index_of(s, ch)
+    if result.is_some() { result.unwrap() } else { -1 }
+}
+
+func parse_variable(line: string) -> (string, string) {
+    let trimmed = str_trim(line)
+    let eq_pos = find_char(trimmed, "=")
+    let name = str_trim(str_substring(trimmed, 0, eq_pos))
+    let value = str_trim(str_substring(trimmed, eq_pos + 1, len(trimmed)))
+    (name, value)
+}
+
+func make_rule(line: string) -> Rule {
+    let empty = Rule { target: "", deps: [], commands: [] }
+    if is_blank(line) || is_comment(line) || is_continuation(line) { return empty }
+    if !str_contains(line, ":") { return empty }
+    let trimmed = str_trim(line)
+    let colon_pos = find_char(trimmed, ":")
+    let target = str_trim(str_substring(trimmed, 0, colon_pos))
+    let rest = str_trim(str_substring(trimmed, colon_pos + 1, len(trimmed)))
+    let deps: List<string> = if is_blank(rest) { [] } else { str_split(rest, " ") }
+    Rule { target: target, deps: deps, commands: [] }
+}
+
+// === Build file parsing (top-level push only) ===
+
+func parse_build_file(path: string) -> BuildFile {
+    let result = read_file(path)
+    if !result.is_ok() {
+        println("Error: cannot read " + path)
+        return BuildFile { variables: map_new(), rules: [] }
+    }
+    let content = result.unwrap()
+    let lines = str_split(content, "\n")
+    let n = len(lines)
+
+    let mut vars = map_new()
+    let mut rules: List<Rule> = []
+
+    // Parse and push at top level (one call per line, max 20 lines)
+    let r0  = if n > 0  { parse_one(lines, 0, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r1  = if n > 1  { parse_one(lines, 1, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r2  = if n > 2  { parse_one(lines, 2, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r3  = if n > 3  { parse_one(lines, 3, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r4  = if n > 4  { parse_one(lines, 4, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r5  = if n > 5  { parse_one(lines, 5, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r6  = if n > 6  { parse_one(lines, 6, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r7  = if n > 7  { parse_one(lines, 7, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r8  = if n > 8  { parse_one(lines, 8, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r9  = if n > 9  { parse_one(lines, 9, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r10 = if n > 10 { parse_one(lines, 10, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r11 = if n > 11 { parse_one(lines, 11, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r12 = if n > 12 { parse_one(lines, 12, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r13 = if n > 13 { parse_one(lines, 13, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r14 = if n > 14 { parse_one(lines, 14, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r15 = if n > 15 { parse_one(lines, 15, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r16 = if n > 16 { parse_one(lines, 16, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r17 = if n > 17 { parse_one(lines, 17, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r18 = if n > 18 { parse_one(lines, 18, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let r19 = if n > 19 { parse_one(lines, 19, vars) } else { Rule { target: "", deps: [], commands: [] } }
+
+    // Push all at top level
+    push(rules, r0)
+    push(rules, r1)
+    push(rules, r2)
+    push(rules, r3)
+    push(rules, r4)
+    push(rules, r5)
+    push(rules, r6)
+    push(rules, r7)
+    push(rules, r8)
+    push(rules, r9)
+    push(rules, r10)
+    push(rules, r11)
+    push(rules, r12)
+    push(rules, r13)
+    push(rules, r14)
+    push(rules, r15)
+    push(rules, r16)
+    push(rules, r17)
+    push(rules, r18)
+    push(rules, r19)
+
+    BuildFile { variables: vars, rules: rules }
+}
+
+func parse_one(lines: List<string>, i: i32, vars: Record) -> Rule {
+    let line = lines[i]
+    if is_variable(line) {
+        let pair = parse_variable(line)
+        map_set(vars, pair.0, pair.1)
+    }
+    make_rule(line)
+}
+
+// === Build engine ===
+
+func find_rule(rules: List<Rule>, target: string) -> Rule {
+    let mut i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if r.target == target {
+            return r
+        }
+        i = i + 1
+    }
+    Rule { target: "", deps: [], commands: [] }
+}
+
+func count_rules(rules: List<Rule>) -> i32 {
+    let mut count = 0
+    let mut i = 0
+    while i < len(rules) {
+        if rules[i].target != "" {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+func needs_rebuild(target: string, deps: List<string>) -> bool {
+    if !file_exists(target) {
+        return true
+    }
+    let target_stat = file_stat(target)
+    let target_time = target_stat.modified
+
+    let mut i = 0
+    while i < len(deps) {
+        let dep = deps[i]
+        if file_exists(dep) {
+            let dep_stat = file_stat(dep)
+            if dep_stat.modified > target_time {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+func build_target(target: string, bf: BuildFile, visited: Record) -> bool {
+    let v = map_get(visited, target)
+    if v.0 {
+        return true
+    }
+
+    let r = find_rule(bf.rules, target)
+
+    if r.target == "" {
+        if file_exists(target) {
+            return true
+        }
+        println("mimi-make: no rule to make target '" + target + "'")
+        return false
+    }
+
+    let mut i = 0
+    while i < len(r.deps) {
+        let ok = build_target(r.deps[i], bf, visited)
+        if !ok {
+            return false
+        }
+        i = i + 1
+    }
+
+    if !needs_rebuild(target, r.deps) {
+        return true
+    }
+
+    i = 0
+    while i < len(r.commands) {
+        let cmd = r.commands[i]
+        println("  > " + cmd)
+        let result = exec(cmd)
+        if result.exit_code != 0 {
+            println("mimi-make: command failed (exit " + to_string(result.exit_code) + ")")
+            if len(result.stderr) > 0 {
+                println("  stderr: " + result.stderr)
+            }
+            return false
+        }
+        i = i + 1
+    }
+
+    map_set(visited, target, true)
+    true
+}
+
+// === Main ===
+
+func main() -> i32 {
+    let build_file = "Makefile"
+    let target = "all"
+
+    let bf = parse_build_file(build_file)
+    let num_rules = count_rules(bf.rules)
+    println("mimi-make: found " + to_string(num_rules) + " rules in " + build_file)
+
+    if num_rules == 0 {
+        return 1
+    }
+
+    println("mimi-make: building '" + target + "'")
+
+    let visited = map_new()
+    let ok = build_target(target, bf, visited)
+
+    let mut exit_code = 0
+    if ok {
+        println("mimi-make: done")
+    } else {
+        println("mimi-make: failed")
+        exit_code = 1
+    }
+    exit_code
+}
