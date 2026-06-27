@@ -578,7 +578,7 @@ impl<'a> Interpreter<'a> {
             Value::Cap(_) => "cap".into(),
             Value::Actor(_) => "actor".into(),
             Value::Future(_) => "future".into(),
-            Value::ArenaRef(_, _) => "arena_ref".into(),
+            Value::ArenaRef(_, _, _) => "arena_ref".into(),
             Value::ArenaBlock(_) => "arena_block".into(),
             Value::WeakShared(_) | Value::WeakLocal(_) => "weak".into(),
             Value::Allocator(_) => "Allocator".into(),

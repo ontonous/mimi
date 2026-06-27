@@ -4193,4 +4193,204 @@ fn dual_arena_let_shadowing() {
     );
 }
 
+// ====== Directory & path operations (G-01~G-04 fixes) ======
+
+#[test]
+fn dual_path_join() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(path_join("a", "b"))
+            println(path_join("/usr", "lib"))
+            println(path_join("", "x"))
+            0
+        }
+    "#,
+        "a/b\n/usr/lib\nx"
+    );
+}
+
+#[test]
+fn dual_path_ext() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(path_ext("file.txt"))
+            println(path_ext("archive.tar.gz"))
+            0
+        }
+    "#,
+        "txt\ngz"
+    );
+}
+
+#[test]
+fn dual_path_basename() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(path_basename("/a/b/c.txt"))
+            println(path_basename("file.txt"))
+            0
+        }
+    "#,
+        "c.txt\nfile.txt"
+    );
+}
+
+#[test]
+fn dual_path_dirname() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(path_dirname("/a/b/c.txt"))
+            println(path_dirname("file.txt"))
+            0
+        }
+    "#,
+        "/a/b"
+    );
+}
+
+#[test]
+fn dual_is_dir() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            if is_dir(".") { println("dir") } else { println("not") }
+            if is_dir("/nonexistent_path_xyz") { println("dir") } else { println("not") }
+            0
+        }
+    "#,
+        "dir\nnot"
+    );
+}
+
+#[test]
+fn dual_is_file() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            if is_file("/etc/hostname") { println("file") } else { println("not") }
+            if is_file(".") { println("file") } else { println("not") }
+            0
+        }
+    "#,
+        "file\nnot"
+    );
+}
+
+#[test]
+fn dual_listdir() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let entries = listdir("examples")
+            let n = len(entries)
+            if n > 0 { println("has_entries") } else { println("empty") }
+            0
+        }
+    "#,
+        "has_entries"
+    );
+}
+
+#[test]
+fn dual_mkdir_p_and_remove() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            mkdir_p("/tmp/mimi_test_dual_dir")
+            if is_dir("/tmp/mimi_test_dual_dir") { println("created") } else { println("fail") }
+            0
+        }
+    "#,
+        "created"
+    );
+}
+
+#[test]
+fn dual_walk_dir() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let files = walk_dir("examples")
+            let n = len(files)
+            if n > 10 { println("many") } else { println("few") }
+            0
+        }
+    "#,
+        "many"
+    );
+}
+
+#[test]
+fn dual_path_join_chain() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let p = path_join(path_join("a", "b"), "c")
+            println(p)
+            0
+        }
+    "#,
+        "a/b/c"
+    );
+}
+
+// ====== Crypto operations (G-24 fix) ======
+
+#[test]
+fn dual_sha256_hello() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(sha256("hello"))
+            0
+        }
+    "#,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+}
+
+#[test]
+fn dual_sha256_empty() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(sha256(""))
+            0
+        }
+    "#,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+#[test]
+fn dual_base64_roundtrip() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let encoded = base64_encode("Hello, World!")
+            println(encoded)
+            0
+        }
+    "#,
+        "SGVsbG8sIFdvcmxkIQ=="
+    );
+}
+
 

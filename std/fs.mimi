@@ -1,3 +1,29 @@
+// fs.mimi — Filesystem operations
+//
+// Built-in functions (no import needed):
+//   file_exists(path) -> bool
+//   read_file(path) -> Result<string, string>
+//   write_file(path, content) -> Result<unit, string>
+//   listdir(path) -> List<string>
+//   walk_dir(path) -> List<string>
+//   is_dir(path) -> bool
+//   is_file(path) -> bool
+//   mkdir_p(path) -> bool
+//   remove_file(path) -> bool
+//
+// Stdlib wrapper functions (defined below):
+//   exists, read, write, read_lines, file_size, write_lines
+//
+// Example:
+//   if file_exists("config.txt") {
+//       let content = read_file("config.txt")
+//       println(content)
+//   }
+//   let entries = listdir(".")
+//   for e in entries { println(e) }
+//   mkdir_p("/tmp/mydir/sub")
+//   write_file("/tmp/mydir/test.txt", "hello")
+
 // FsOps: Trait for filesystem operations on string paths.
 trait FsOps {
     func exists() -> bool

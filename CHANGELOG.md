@@ -1,5 +1,59 @@
 # Changelog
 
+## [v0.28.0-dev] — 2026-06-27
+
+### Added (New Builtins)
+
+- **G-01**: `listdir(path)` — list directory contents
+- **G-02**: `walk_dir(path)` — recursive directory traversal
+- **G-03**: `is_dir(path)`, `is_file(path)` — path type detection
+- **G-04**: `path_join`, `path_ext`, `path_basename`, `path_dirname` — path utilities
+- **G-05**: `mkdir_p(path)` — recursive directory creation
+- **G-08**: `remove_file(path)` — file deletion
+- **G-24**: `sha256(data)`, `base64_encode(data)`, `base64_decode(data)` — cryptographic primitives (pure Rust, no external deps)
+
+### Added (FFI Multi-Language Bindings)
+
+- `mimi emit-rust-bindings` — Rust `extern "C"` + safe wrappers
+- `mimi emit-go-bindings` — Go CGO bindings
+- `mimi emit-node-bindings` — Node.js N-API + TypeScript `.d.ts`
+- `mimi emit-java-bindings` — Java JNI bridge + interface class
+- `mimi emit-cpp-bindings` — C++ RAII `MimiString` class
+- `mimi bindgen <file> -o <dir>` — generate all 7 language bindings at once
+
+### Added (Tooling)
+
+- `mimi stat [path]` — directory statistics subcommand
+- `mimi run --profile` — function-level performance profiler
+- `mimi-config` library — lightweight config file parser (third-party)
+
+### Added (Documentation)
+
+- `docs/ffi-type-mapping.md` — 8-language type mapping matrix + error propagation
+- `syntax-reference.md` updated to v0.28.0 with directory/path/crypto builtins
+- Runnable examples in `std/fs.mimi`, `std/crypto.mimi`, `std/net.mimi`, `std/json.mimi`
+
+### Fixed (Codegen)
+
+- **G-41**: Codegen string list iteration — `for entry in listdir(...)` now correctly loads string elements as pointers and wraps into Mimi string structs; previously returned garbage integers
+
+### Fixed (Refactoring)
+
+- **Arena use-after-reset**: Added `generation` counter to `Arena`; `ArenaRef(arena_id, idx, generation)` now validated on access; stale refs after `arena_reset()` trigger error instead of silent data corruption
+- **Type checker double traversal**: `check_func` no longer re-checks the last expression; `check_block_with_implicit_return` returns the type directly
+
+### Fixed (Code Quality)
+
+- All Clippy warnings eliminated (`cargo clippy -- -D warnings` clean)
+- 134 robustness boundary tests added (deep nesting, edge cases, error paths, stress scenarios)
+- Cargo.lock dependencies updated
+
+### Tests
+
+- **2383 passed**, 0 failed, 21 ignored (from 2249, +134)
+
+---
+
 ## [v0.27.6] — 2026-06-26
 
 ### Bug Fixes (Correctness)

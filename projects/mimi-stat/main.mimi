@@ -1,0 +1,137 @@
+// mimi-stat: 完整的文件统计 CLI 工具
+// 用 Mimi 语言编写，展示语言能力，发现并修复语言缺口
+
+// === 数据类型 ===
+type StatResult {
+    total_files: i32
+    total_dirs: i32
+    total_bytes: i32
+    by_extension: string
+}
+
+// === 核心函数 ===
+
+func format_size(bytes: i32) -> string {
+    if bytes > 1048576 {
+        to_string(bytes / 1048576) + " MB"
+    } else if bytes > 1024 {
+        to_string(bytes / 1024) + " KB"
+    } else {
+        to_string(bytes) + " B"
+    }
+}
+
+func scan_directory(dir: string) -> string {
+    let entries = listdir(dir)
+    let mut file_count = 0
+    let mut dir_count = 0
+
+    for entry in entries {
+        let full = path_join(dir, entry)
+        if is_dir(full) {
+            dir_count = dir_count + 1
+        } else {
+            file_count = file_count + 1
+        }
+    }
+
+    // Build report
+    let mut report = "Directory: " + dir + "\n"
+    report = report + "  Files: " + to_string(file_count) + "\n"
+    report = report + "  Directories: " + to_string(dir_count) + "\n"
+    report = report + "  Total entries: " + to_string(len(entries)) + "\n"
+    report
+}
+
+func deep_scan(dir: string, depth: i32) -> string {
+    if depth <= 0 { return "" }
+
+    let mut report = ""
+    let entries = listdir(dir)
+
+    for entry in entries {
+        let full = path_join(dir, entry)
+        if is_dir(full) {
+            report = report + "  [D] " + full + "\n"
+            let sub_report = deep_scan(full, depth - 1)
+            report = report + sub_report
+        } else {
+            let ext = path_ext(entry)
+            report = report + "  [F] " + full
+            if ext != "" {
+                report = report + " (." + ext + ")"
+            }
+            report = report + "\n"
+        }
+    }
+    report
+}
+
+// === 哈希工具 ===
+
+func hash_demo() -> string {
+    sha256("hello mimi-stat")
+}
+
+func base64_demo() -> string {
+    base64_encode("Hello from mimi-stat!")
+}
+
+// === 路径分析 ===
+
+func analyze_path(p: string) -> string {
+    let mut info = "Path: " + p + "\n"
+    info = info + "  exists: " + to_string(file_exists(p)) + "\n"
+    info = info + "  is_dir: " + to_string(is_dir(p)) + "\n"
+    info = info + "  is_file: " + to_string(is_file(p)) + "\n"
+    info = info + "  ext: " + path_ext(p) + "\n"
+    info = info + "  basename: " + path_basename(p) + "\n"
+    info = info + "  dirname: " + path_dirname(p) + "\n"
+    info
+}
+
+// === 主程序 ===
+
+func main() -> i32 {
+    println("╔══════════════════════════════════════╗")
+    println("║       mimi-stat v1.0                 ║")
+    println("║  File Statistics Tool in Mimi        ║")
+    println("╚══════════════════════════════════════╝")
+    println("")
+
+    // 1. 当前目录扫描
+    println("── Current Directory ──")
+    let report = scan_directory(".")
+    println(report)
+
+    // 2. 递归扫描 examples/ (深度 2)
+    println("── Deep Scan: examples/ ──")
+    let deep = deep_scan("examples", 2)
+    println(deep)
+
+    // 3. 路径分析
+    println("── Path Analysis ──")
+    println(analyze_path("Cargo.toml"))
+    println(analyze_path("examples"))
+
+    // 4. SHA-256 哈希演示
+    println("── SHA-256 Hashing ──")
+    let hash = hash_demo()
+    println("  sha256('hello mimi-stat') =", hash)
+
+    // 5. Base64 编码演示
+    println("── Base64 Encoding ──")
+    let b64 = base64_demo()
+    println("  base64('Hello from mimi-stat!') =", b64)
+
+    // 6. 创建临时目录测试
+    println("")
+    println("── Temp Directory Test ──")
+    let created = mkdir_p("/tmp/mimi_stat_demo/sub1/sub2")
+    println("  mkdir_p created:", created)
+    println("  dir exists:", is_dir("/tmp/mimi_stat_demo/sub1/sub2"))
+
+    println("")
+    println("Done. All features working!")
+    0
+}

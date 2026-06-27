@@ -161,6 +161,207 @@ impl<'a> Interpreter<'a> {
             _ => Err(InterpError::new("file_exists expects a string path")),
         }
     }
+    // === Directory & path operations ===
+
+    pub(crate) fn builtin_listdir(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("listdir expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                match std::fs::read_dir(path) {
+                    Ok(rd) => {
+                        let entries: Vec<Value> = rd
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| e.file_name().to_str().map(|s| Value::String(s.to_string())))
+                            .collect();
+                        Ok(Value::List(entries))
+                    }
+                    Err(_) => Ok(Value::List(vec![])),
+                }
+            }
+            _ => Err(InterpError::new("listdir expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_is_dir(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("is_dir expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
+            _ => Err(InterpError::new("is_dir expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_is_file(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("is_file expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
+            _ => Err(InterpError::new("is_file expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_path_join(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("path_join expects 2 arguments (a, b)"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(a), Value::String(b)) => {
+                let joined = std::path::Path::new(a).join(b).to_string_lossy().into_owned();
+                Ok(Value::String(joined))
+            }
+            _ => Err(InterpError::new("path_join expects (string, string)")),
+        }
+    }
+
+    pub(crate) fn builtin_path_ext(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("path_ext expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                let ext = std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(Value::String(ext))
+            }
+            _ => Err(InterpError::new("path_ext expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_path_basename(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("path_basename expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(Value::String(name))
+            }
+            _ => Err(InterpError::new("path_basename expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_path_dirname(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("path_dirname expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                let dir = std::path::Path::new(path)
+                    .parent()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(Value::String(dir))
+            }
+            _ => Err(InterpError::new("path_dirname expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_walk_dir(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("walk_dir expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                let mut results = Vec::new();
+                Self::walk_dir_recursive_impl(path, &mut results);
+                Ok(Value::List(results.into_iter().map(Value::String).collect()))
+            }
+            _ => Err(InterpError::new("walk_dir expects a string path")),
+        }
+    }
+
+    fn walk_dir_recursive_impl(dir: &str, results: &mut Vec<String>) {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let path_str = path.to_string_lossy().into_owned();
+            if path.is_dir() {
+                Self::walk_dir_recursive_impl(&path_str, results);
+            } else {
+                results.push(path_str);
+            }
+        }
+    }
+
+    pub(crate) fn builtin_mkdir_p(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("mkdir_p expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => Ok(Value::Bool(std::fs::create_dir_all(path).is_ok())),
+            _ => Err(InterpError::new("mkdir_p expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_remove_file(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("remove_file expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => Ok(Value::Bool(std::fs::remove_file(path).is_ok())),
+            _ => Err(InterpError::new("remove_file expects a string path")),
+        }
+    }
+
+    // === Crypto operations ===
+
+    pub(crate) fn builtin_sha256(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("sha256 expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                let hash = crate::runtime::sha256_bytes(data.as_bytes());
+                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(hex))
+            }
+            _ => Err(InterpError::new("sha256 expects a string")),
+        }
+    }
+
+    pub(crate) fn builtin_base64_encode(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("base64_encode expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                let encoded = crate::runtime::base64_encode_bytes(data.as_bytes());
+                Ok(Value::String(encoded))
+            }
+            _ => Err(InterpError::new("base64_encode expects a string")),
+        }
+    }
+
+    pub(crate) fn builtin_base64_decode(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("base64_decode expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                match crate::runtime::base64_decode_str(data) {
+                    Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
+                    Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String("invalid base64".to_string())])),
+                }
+            }
+            _ => Err(InterpError::new("base64_decode expects a string")),
+        }
+    }
+
     // === I/O (stderr) ===
     pub(crate) fn builtin_eprintln(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();

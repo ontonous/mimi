@@ -1302,4 +1302,156 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         Ok(())
     }
+
+    // === Directory & path operations (codegen) ===
+
+    fn call_runtime_str_to_bool(
+        &self,
+        runtime_fn_name: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(format!("{} expects 1 argument", runtime_fn_name)));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let fn_val = self.module.get_function(runtime_fn_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
+        let result = self.builder.build_call(
+            fn_val,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            &format!("{}_call", runtime_fn_name),
+        ).map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
+        let ret = result.try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", runtime_fn_name)))?;
+        Ok(ret)
+    }
+
+    fn call_runtime_str_to_str(
+        &self,
+        runtime_fn_name: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(format!("{} expects 1 argument", runtime_fn_name)));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let fn_val = self.module.get_function(runtime_fn_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
+        let result = self.builder.build_call(
+            fn_val,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            &format!("{}_call", runtime_fn_name),
+        ).map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
+        let raw_ptr = result.try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", runtime_fn_name)))?;
+        // Wrap raw C string into Mimi string struct {ptr, len}
+        self.wrap_c_string(raw_ptr.into_pointer_value())
+    }
+
+    pub(super) fn compile_listdir(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("listdir expects 1 argument".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let fn_val = self.module.get_function("mimi_listdir")
+            .ok_or("mimi_listdir not declared")?;
+        let result = self.builder.build_call(
+            fn_val,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            "listdir_call",
+        ).map_err(|e| CompileError::LlvmError(format!("listdir: {}", e)))?;
+        let list_ptr = result.try_as_basic_value_opt()
+            .ok_or("listdir returned void")?;
+        // Return as opaque pointer (MimiList*)
+        Ok(list_ptr)
+    }
+
+    pub(super) fn compile_is_dir(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_bool("mimi_is_dir", args)
+    }
+
+    pub(super) fn compile_is_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_bool("mimi_is_file", args)
+    }
+
+    pub(super) fn compile_path_join(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount("path_join expects 2 arguments".to_string()));
+        }
+        let a_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let b_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let fn_val = self.module.get_function("mimi_path_join")
+            .ok_or("mimi_path_join not declared")?;
+        let result = self.builder.build_call(
+            fn_val,
+            &[
+                BasicMetadataValueEnum::PointerValue(a_ptr),
+                BasicMetadataValueEnum::PointerValue(b_ptr),
+            ],
+            "path_join_call",
+        ).map_err(|e| CompileError::LlvmError(format!("path_join: {}", e)))?;
+        let raw_ptr = result.try_as_basic_value_opt()
+            .ok_or("path_join returned void")?;
+        self.wrap_c_string(raw_ptr.into_pointer_value())
+    }
+
+    pub(super) fn compile_path_ext(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_path_ext", args)
+    }
+
+    pub(super) fn compile_path_basename(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_path_basename", args)
+    }
+
+    pub(super) fn compile_path_dirname(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_path_dirname", args)
+    }
+
+    pub(super) fn compile_walk_dir(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("walk_dir expects 1 argument".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let fn_val = self.module.get_function("mimi_walk_dir")
+            .ok_or("mimi_walk_dir not declared")?;
+        let result = self.builder.build_call(
+            fn_val,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            "walk_dir_call",
+        ).map_err(|e| CompileError::LlvmError(format!("walk_dir: {}", e)))?;
+        let list_ptr = result.try_as_basic_value_opt()
+            .ok_or("walk_dir returned void")?;
+        Ok(list_ptr)
+    }
+
+    pub(super) fn compile_mkdir_p(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_bool("mimi_mkdir_p", args)
+    }
+
+    pub(super) fn compile_remove_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_bool("mimi_remove_file", args)
+    }
+
+    // === Crypto operations (codegen) ===
+
+    pub(super) fn compile_sha256(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_sha256", args)
+    }
+
+    pub(super) fn compile_base64_encode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_base64_encode", args)
+    }
+
+    pub(super) fn compile_base64_decode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_base64_decode", args)
+    }
 }

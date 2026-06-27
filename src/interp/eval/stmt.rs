@@ -64,7 +64,8 @@ impl<'a> Interpreter<'a> {
             let arena_id = self.arenas.len() - 1;
             let slot_index = self.arenas[arena_id].slots.len();
             self.arenas[arena_id].slots.push(v.clone());
-            Value::ArenaRef(arena_id, slot_index)
+            let gen = self.arenas[arena_id].generation;
+            Value::ArenaRef(arena_id, slot_index, gen)
         } else {
             v.clone()
         };
@@ -356,6 +357,7 @@ impl<'a> Interpreter<'a> {
         self.arenas.push(Arena {
             id: arena_id,
             slots: Vec::new(),
+            generation: 0,
         });
         self.arena_depth += 1;
         self.push_scope();
@@ -386,9 +388,15 @@ impl<'a> Interpreter<'a> {
         }
 
         // If the result is a direct ArenaRef into the same arena, extract the value
-        if let Ok(Some(Value::ArenaRef(id, slot))) = &result {
+        if let Ok(Some(Value::ArenaRef(id, slot, gen))) = &result {
             if *id == arena_id {
-                if let Some(Arena { slots, .. }) = self.arenas.get(*id) {
+                if let Some(Arena { slots, generation, .. }) = self.arenas.get(*id) {
+                    if *gen != *generation {
+                        // Stale ArenaRef from before a reset — treat as invalid
+                        self.arena_depth -= 1;
+                        self.arenas.pop();
+                        return Err(InterpError::new("arena: use-after-reset detected"));
+                    }
                     if let Some(val) = slots.get(*slot) {
                         let extracted = val.clone();
                         self.arena_depth -= 1;
@@ -431,6 +439,7 @@ impl<'a> Interpreter<'a> {
                 let arena = Arena {
                     id: arena_id,
                     slots: Vec::new(),
+                    generation: 0,
                 };
                 self.arenas.push(arena);
                 self.arena_depth += 1;

@@ -1,16 +1,29 @@
 // crypto.mimi — Cryptographic utilities
 //
-// ⚠ NOTE: Mimi strings are Unicode; hex encoding/decoding and hashing
-// require Rust builtins (pending implementation).
+// Built-in functions (no import needed):
+//   sha256(data: string) -> string              — SHA-256 hash (hex, 64 chars)
+//   base64_encode(data: string) -> string        — Base64 encoding
+//   base64_decode(data: string) -> Result<string, string> — Base64 decoding
 //
-// Currently available:
-//   - is_valid_hex(s)  — check if string is valid hex
+// Stdlib functions (defined below):
+//   is_valid_hex(s) -> bool
+//   hex_encode(s) -> string
 //
-// Future (needs Rust builtins):
-//   - to_hex(data)     — encode string as hex
-//   - from_hex(hex)    — decode hex to string
-//   - sha256(data)     — SHA-256 hash
-//   - base64_encode / base64_decode
+// Example:
+//   let hash = sha256("hello")
+//   // hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+//
+//   let encoded = base64_encode("Hello, World!")
+//   // encoded = "SGVsbG8sIFdvcmxkIQ=="
+//
+//   let decoded = base64_decode(encoded)
+//   match decoded {
+//       Ok(s) => println(s),   // "Hello, World!"
+//       Err(e) => println(e)
+//   }
+//
+//   let hex = hex_encode("ABC")
+//   // hex = "414243"
 
 // is_valid_hex: Returns true if s is valid hexadecimal.
 pub func is_valid_hex(s: string) -> bool {
@@ -21,4 +34,27 @@ pub func is_valid_hex(s: string) -> bool {
         if !valid { return false }
     }
     true
+}
+
+// hex_encode: Converts a string to its hex representation.
+// Each character becomes two hex digits.
+pub func hex_encode(s: string) -> string {
+    let mut result = ""
+    for i in range(0, len(s)) {
+        let code = char_code(str_char_at(s, i))
+        let hi = code / 16
+        let lo = code % 16
+        result = result + hex_digit(hi) + hex_digit(lo)
+    }
+    result
+}
+
+func hex_digit(n: i32) -> string {
+    if n < 10 { to_string(n) }
+    else if n == 10 { "a" }
+    else if n == 11 { "b" }
+    else if n == 12 { "c" }
+    else if n == 13 { "d" }
+    else if n == 14 { "e" }
+    else { "f" }
 }

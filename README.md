@@ -4,9 +4,9 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.27.6-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.0--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2236%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2383%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
@@ -82,11 +82,11 @@ Mimi is the production compiler backend for the **MimiSpec** intent-description 
 | **Generics & Lifetimes** | `<T: Clone>` bounds, lifetime elision, recursive types |
 | **Option / Result** | `Option<T>` full path + `Result<T, E>` + `?` operator |
 | **ADT & Pattern Matching** | Enums/records/tuples, `match` exhaustiveness, `while let` |
-| **FFI** | `extern "C"`, `repr(C)` struct-by-value, callbacks, pybind11/C header export |
+| **FFI** | `extern "C"`, `repr(C)` struct-by-value, callbacks, multi-language binding generation (C/C++/Rust/Go/Node.js/Java/Python/TypeScript) via `mimi bindgen` |
 | **async** | `async fn` → Future state machine + Executor cooperative scheduling |
 | **LSP** | Language server: completion, hover, goto-definition, contract lens |
 | **Package Management** | `mimi.toml` + registry + git dependencies + dependency tree |
-| **Standard Library** | 21 modules: io, fs, net, json, csv, crypto, regex, template, and more |
+| **Standard Library** | 23 modules: io, fs, net, json, csv, crypto (SHA-256/Base64), regex, template, paths, and more |
 | **MimiSpec Integration** | `.mms` parsing, `mms{}` placeholders, rule consistency checking |
 | **Compile Targets** | Native x86_64, cross-compilation to Windows, shared library `.so` |
 
@@ -133,7 +133,7 @@ func main() -> i32 {
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
-# 2236 passed, 0 failed, 21 ignored
+# 2383 passed, 0 failed, 21 ignored
 ```
 
 ---
@@ -254,7 +254,15 @@ func main() {
 | `mimi mms <files>` | Process MimiSpec files |
 | `mimi stats <file>` | Usage statistics |
 | `mimi emit-c-headers <file>` | Emit C headers |
-| `mimi emit-py-bindings <file>` | Emit Python bindings |
+| `mimi emit-cpp-bindings <file>` | Emit C++ RAII bindings |
+| `mimi emit-rust-bindings <file>` | Emit Rust FFI bindings |
+| `mimi emit-go-bindings <file>` | Emit Go CGO bindings |
+| `mimi emit-node-bindings <file>` | Emit Node.js N-API bindings + TypeScript `.d.ts` |
+| `mimi emit-java-bindings <file>` | Emit Java JNI bindings |
+| `mimi emit-py-bindings <file>` | Emit Python pybind11 bindings |
+| `mimi bindgen <file> -o <dir>` | Generate all language bindings at once |
+| `mimi stat [path]` | Directory statistics (files, dirs, extensions) |
+| `mimi run --profile <file>` | Run with function-level profiling |
 
 ---
 
@@ -262,7 +270,7 @@ func main() {
 
 ```
 mimi/
-├── src/                   # Rust source code (~108k lines, 287 files)
+├── src/                   # Rust source code
 │   ├── main.rs            # CLI entry point
 │   ├── lib.rs             # Library entry point
 │   ├── ast.rs             # AST definitions
@@ -272,10 +280,10 @@ mimi/
 │   ├── interp/            # Interpreter backend
 │   ├── codegen/           # LLVM codegen backend
 │   ├── verifier/          # Z3 formal verifier
-│   ├── ffi/               # FFI system
+│   ├── ffi/               # FFI system (C/C++/Rust/Go/Node.js/Java/Python bindings)
 │   ├── lsp/               # LSP server
 │   ├── contracts.rs       # Contract extraction
-│   ├── runtime/           # Rust runtime (~2.2k lines)
+│   ├── runtime/           # Rust runtime + profiler
 │   ├── fmt.rs             # Formatter
 │   ├── lint.rs            # Linter
 │   ├── manifest.rs        # Package manifest
@@ -302,6 +310,7 @@ mimi/
 
 | Version | Highlight |
 |---|---|
+| **v0.28** 🚀 | Use-driven evolution: dir/path/crypto builtins, multi-language FFI (7 langs), profiler, `mimi stat`/`mimi bindgen`, 2 design defect fixes |
 | **v0.27** 🔨 | Audit fixes: P0/P1/P2/P3 safety & correctness (arena, FFI, JSON, runtime) |
 | **v0.26** | Type unification engine + bidirectional inference + FFI P0/P1 security fixes |
 | **v0.25** | Type system refactor: TypeId Arena + Checker fixes + Newtype/ADT codegen |

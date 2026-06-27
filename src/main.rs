@@ -8,6 +8,8 @@ use mimi::diagnostic::format::format_simple_error;
 
 #[path = "main/add.rs"]
 mod add;
+#[path = "main/bindgen.rs"]
+mod bindgen;
 #[path = "main/build.rs"]
 mod build;
 #[path = "main/check.rs"]
@@ -42,6 +44,8 @@ mod run;
 mod search;
 #[path = "main/stats.rs"]
 mod stats;
+#[path = "main/tool_stat.rs"]
+mod tool_stat;
 #[path = "main/test.rs"]
 mod test;
 #[path = "main/tree.rs"]
@@ -52,7 +56,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.27.6", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.28.0-dev", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
@@ -91,6 +95,9 @@ enum Command {
         /// Strict mode: only compile $/$$ locked fragments
         #[arg(long)]
         strict: bool,
+        /// Profile mode: track function call counts and durations
+        #[arg(long)]
+        profile: bool,
         /// Watch mode: re-run on file changes
         #[arg(long, short)]
         watch: bool,
@@ -212,6 +219,42 @@ enum Command {
         #[arg(long)]
         mimi_lib: Option<PathBuf>,
     },
+    /// Generate Rust FFI bindings from extern declarations
+    EmitRustBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Go CGO bindings from extern declarations
+    EmitGoBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Node.js N-API bindings from extern declarations
+    EmitNodeBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output path for TypeScript .d.ts type declarations
+        #[arg(long)]
+        ts: Option<PathBuf>,
+    },
+    /// Generate C++ RAII bindings from extern declarations
+    EmitCppBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Java JNI bindings from extern declarations
+    EmitJavaBindings {
+        path: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output path for Java interface class
+        #[arg(long)]
+        java: Option<PathBuf>,
+    },
     /// Promote a .mms file to .mimi (clean placeholders, validate locks)
     Promote {
         path: PathBuf,
@@ -228,6 +271,25 @@ enum Command {
         /// Output file (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Analyze directory statistics (files, dirs, extensions)
+    Stat {
+        /// Directory to analyze (default: current directory)
+        path: Option<PathBuf>,
+        /// Recursive scan depth (default: 1)
+        #[arg(short, long, default_value_t = 1)]
+        depth: u32,
+        /// Show SHA-256 hashes of files
+        #[arg(long)]
+        hash: bool,
+    },
+    /// Generate FFI bindings for all supported languages
+    Bindgen {
+        /// .mimi file with extern declarations
+        path: PathBuf,
+        /// Output directory for generated bindings
+        #[arg(short, long, default_value = "bindings")]
+        output: PathBuf,
     },
     /// Parse and process .mms files (MimiSpec)
     Mms {
@@ -293,6 +355,7 @@ fn main() {
             allocator,
             strict,
             watch,
+            profile,
         } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
             run::run(
@@ -302,6 +365,7 @@ fn main() {
                 &allocator,
                 strict,
                 watch,
+                profile,
             )
         }
         Command::Test {
@@ -371,6 +435,21 @@ fn main() {
             output,
             mimi_lib,
         } => emit::emit_py_bindings(path.as_deref(), output.as_deref(), mimi_lib.as_deref()),
+        Command::EmitRustBindings { path, output } => {
+            emit::emit_rust_bindings(path.as_deref(), output.as_deref())
+        }
+        Command::EmitGoBindings { path, output } => {
+            emit::emit_go_bindings(path.as_deref(), output.as_deref())
+        }
+        Command::EmitNodeBindings { path, output, ts } => {
+            emit::emit_node_bindings(path.as_deref(), output.as_deref(), ts.as_deref())
+        }
+        Command::EmitCppBindings { path, output } => {
+            emit::emit_cpp_bindings(path.as_deref(), output.as_deref())
+        }
+        Command::EmitJavaBindings { path, output, java } => {
+            emit::emit_java_bindings(path.as_deref(), output.as_deref(), java.as_deref())
+        }
         Command::Promote { path, output } => promote::promote(&path, output.as_deref()),
         Command::Doc {
             path,
@@ -385,6 +464,13 @@ fn main() {
             latex,
         } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
+        Command::Stat { path, depth, hash } => {
+            let dir = path.as_deref().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+            tool_stat::run(&dir, depth, hash)
+        }
+        Command::Bindgen { path, output } => {
+            bindgen::run(&path, &output)
+        }
         Command::Install { all } => install::install(all),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),

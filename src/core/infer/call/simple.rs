@@ -628,6 +628,74 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            "listdir" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "listdir expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+            }
+            "is_dir" | "is_file" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "is_dir/is_file expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "path_join" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "path_join expects 2 arguments");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "path_ext" | "path_basename" | "path_dirname" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "path_ext/basename/dirname expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "walk_dir" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "walk_dir expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+            }
+            "mkdir_p" | "remove_file" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "mkdir_p/remove_file expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "sha256" | "base64_encode" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "sha256/base64_encode expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "base64_decode" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "base64_decode expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("string".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
             "str_split" => {
                 if args.len() != 2 {
                     self.emit_code(

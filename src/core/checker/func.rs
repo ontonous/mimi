@@ -80,11 +80,11 @@ impl<'a> Checker<'a> {
                 ).with_help("add a return statement or make the last expression return the appropriate type")
             );
         }
-        self.check_block(&func.body, &ret, &mut scopes);
+        // check_block_with_implicit_return returns the type of the last expression
+        // to avoid redundant re-checking (refactoring: eliminate double traversal)
+        let implicit_return_ty = self.check_block_with_implicit_return(&func.body, &ret, &mut scopes);
         // Implicit return type check: last expression must match declared return type
-        if let Some(Stmt::Expr(last_expr)) = func.body.last() {
-            // C3: use check_expr with return type as expected for implicit return
-            let last_ty = self.check_expr(&ret, last_expr, &mut scopes);
+        if let Some(last_ty) = implicit_return_ty {
             // Resolve through unification table before further comparison
             let last_ty = self.unification.resolve(&last_ty);
             // Unwrap shared/aliasing wrappers for return type compatibility

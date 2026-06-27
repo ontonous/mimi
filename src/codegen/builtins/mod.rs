@@ -835,6 +835,94 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+
+    // ========== Directory & path runtime functions ==========
+    // mimi_listdir(path: i8*) -> MimiList* (i8*)
+    module.add_function(
+        "mimi_listdir",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_is_dir(path: i8*) -> bool (i64)
+    module.add_function(
+        "mimi_is_dir",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_is_file(path: i8*) -> bool (i64)
+    module.add_function(
+        "mimi_is_file",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_path_join(a: i8*, b: i8*) -> i8*
+    module.add_function(
+        "mimi_path_join",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_path_ext(path: i8*) -> i8*
+    module.add_function(
+        "mimi_path_ext",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_path_basename(path: i8*) -> i8*
+    module.add_function(
+        "mimi_path_basename",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_path_dirname(path: i8*) -> i8*
+    module.add_function(
+        "mimi_path_dirname",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_walk_dir(path: i8*) -> MimiList* (i8*)
+    module.add_function(
+        "mimi_walk_dir",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_mkdir_p(path: i8*) -> bool (i64)
+    module.add_function(
+        "mimi_mkdir_p",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_remove_file(path: i8*) -> bool (i64)
+    module.add_function(
+        "mimi_remove_file",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ========== Crypto runtime functions ==========
+    // mimi_sha256(data: i8*) -> i8* (hex string)
+    module.add_function(
+        "mimi_sha256",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_base64_encode(data: i8*) -> i8*
+    module.add_function(
+        "mimi_base64_encode",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_base64_decode(data: i8*) -> i8*
+    module.add_function(
+        "mimi_base64_decode",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 pub fn is_builtin(name: &str) -> bool {
@@ -847,6 +935,9 @@ pub fn is_builtin(name: &str) -> bool {
         | "int_to_string" | "float_to_string" | "string_to_int"
         | "exit" | "lexer" | "parse" | "ast_eval"
         | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
+        | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
+        | "walk_dir" | "mkdir_p" | "remove_file"
+        | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
@@ -928,6 +1019,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             "file_exists" => self.compile_file_exists(args),
             "read_file" => self.compile_read_file(args),
             "write_file" => self.compile_write_file(args),
+            "listdir" => self.compile_listdir(args),
+            "is_dir" => self.compile_is_dir(args),
+            "is_file" => self.compile_is_file(args),
+            "path_join" => self.compile_path_join(args),
+            "path_ext" => self.compile_path_ext(args),
+            "path_basename" => self.compile_path_basename(args),
+            "path_dirname" => self.compile_path_dirname(args),
+            "walk_dir" => self.compile_walk_dir(args),
+            "mkdir_p" => self.compile_mkdir_p(args),
+            "remove_file" => self.compile_remove_file(args),
+            "sha256" => self.compile_sha256(args),
+            "base64_encode" => self.compile_base64_encode(args),
+            "base64_decode" => self.compile_base64_decode(args),
             "to_string" | "int_to_string" | "float_to_string" => self.compile_to_string(args),
             "char_code" => self.compile_char_code(args),
             "chr" => self.compile_chr(args),
