@@ -1440,4 +1440,18 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_remove_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_bool("mimi_remove_file", args)
     }
+
+    // === Crypto operations (codegen) ===
+
+    pub(super) fn compile_sha256(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_sha256", args)
+    }
+
+    pub(super) fn compile_base64_encode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_base64_encode", args)
+    }
+
+    pub(super) fn compile_base64_decode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.call_runtime_str_to_str("mimi_base64_decode", args)
+    }
 }

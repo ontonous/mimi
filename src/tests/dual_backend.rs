@@ -4348,4 +4348,49 @@ fn dual_path_join_chain() {
     );
 }
 
+// ====== Crypto operations (G-24 fix) ======
+
+#[test]
+fn dual_sha256_hello() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(sha256("hello"))
+            0
+        }
+    "#,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+}
+
+#[test]
+fn dual_sha256_empty() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(sha256(""))
+            0
+        }
+    "#,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+#[test]
+fn dual_base64_roundtrip() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let encoded = base64_encode("Hello, World!")
+            println(encoded)
+            0
+        }
+    "#,
+        "SGVsbG8sIFdvcmxkIQ=="
+    );
+}
+
 

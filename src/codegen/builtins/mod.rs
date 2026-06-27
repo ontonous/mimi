@@ -903,6 +903,26 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+
+    // ========== Crypto runtime functions ==========
+    // mimi_sha256(data: i8*) -> i8* (hex string)
+    module.add_function(
+        "mimi_sha256",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_base64_encode(data: i8*) -> i8*
+    module.add_function(
+        "mimi_base64_encode",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_base64_decode(data: i8*) -> i8*
+    module.add_function(
+        "mimi_base64_decode",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 pub fn is_builtin(name: &str) -> bool {
@@ -917,6 +937,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
+        | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
@@ -1008,6 +1029,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "walk_dir" => self.compile_walk_dir(args),
             "mkdir_p" => self.compile_mkdir_p(args),
             "remove_file" => self.compile_remove_file(args),
+            "sha256" => self.compile_sha256(args),
+            "base64_encode" => self.compile_base64_encode(args),
+            "base64_decode" => self.compile_base64_decode(args),
             "to_string" | "int_to_string" | "float_to_string" => self.compile_to_string(args),
             "char_code" => self.compile_char_code(args),
             "chr" => self.compile_chr(args),

@@ -197,6 +197,12 @@ declare i64 @mimi_mkdir_p(ptr)
 
 declare i64 @mimi_remove_file(ptr)
 
+declare ptr @mimi_sha256(ptr)
+
+declare ptr @mimi_base64_encode(ptr)
+
+declare ptr @mimi_base64_decode(ptr)
+
 define i64 @main() {
 entry:
   %x = alloca i64, align 8

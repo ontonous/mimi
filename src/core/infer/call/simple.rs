@@ -677,6 +677,25 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            "sha256" | "base64_encode" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "sha256/base64_encode expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "base64_decode" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "base64_decode expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Result(
+                    Box::new(Type::Name("string".into(), vec![])),
+                    Box::new(Type::Name("string".into(), vec![])),
+                );
+            }
             "str_split" => {
                 if args.len() != 2 {
                     self.emit_code(

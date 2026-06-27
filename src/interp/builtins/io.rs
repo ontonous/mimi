@@ -318,6 +318,50 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    // === Crypto operations ===
+
+    pub(crate) fn builtin_sha256(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("sha256 expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                let hash = crate::runtime::sha256_bytes(data.as_bytes());
+                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(hex))
+            }
+            _ => Err(InterpError::new("sha256 expects a string")),
+        }
+    }
+
+    pub(crate) fn builtin_base64_encode(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("base64_encode expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                let encoded = crate::runtime::base64_encode_bytes(data.as_bytes());
+                Ok(Value::String(encoded))
+            }
+            _ => Err(InterpError::new("base64_encode expects a string")),
+        }
+    }
+
+    pub(crate) fn builtin_base64_decode(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("base64_decode expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(data) => {
+                match crate::runtime::base64_decode_str(data) {
+                    Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
+                    Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String("invalid base64".to_string())])),
+                }
+            }
+            _ => Err(InterpError::new("base64_decode expects a string")),
+        }
+    }
+
     // === I/O (stderr) ===
     pub(crate) fn builtin_eprintln(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
