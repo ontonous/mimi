@@ -485,7 +485,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
             }
             "has_key" => {
                 if args.len() != 2 {
@@ -500,7 +500,7 @@ impl<'a> Checker<'a> {
                 return Type::Name("bool".into(), vec![]);
             }
             "map_new" => {
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Name("Record".into(), vec![]);
             }
             "map_get" => {
                 if args.len() != 2 {
@@ -512,7 +512,10 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Tuple(vec![
+                    Type::Name("bool".into(), vec![]),
+                    Type::Name("Any".into(), vec![]),
+                ]);
             }
             "map_set" => {
                 if args.len() != 3 {
@@ -525,7 +528,7 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[1], scopes);
                     self.infer_expr(&args[2], scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Name("Record".into(), vec![]);
             }
             "map_remove" => {
                 if args.len() != 2 {
@@ -537,7 +540,7 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Name("Record".into(), vec![]);
             }
             "map_size" => {
                 if args.len() != 1 {
@@ -559,7 +562,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Name("Record".into(), vec![]);
             }
             "print" => {
                 for a in args {
@@ -956,7 +959,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Name("string".into(), vec![]);
+                return Type::Name("Record".into(), vec![]);
             }
             "json_is_valid" => {
                 if args.len() != 1 {
