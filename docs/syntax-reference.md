@@ -303,6 +303,7 @@ array[start..end]           // 切片
 array[..end]                // 半开切片
 array[start..]              // 半开切片
 expr?                       // 错误传播（Try）
+expr as Type                // 类型转换（i32/i64/f64/bool/string）
 ```
 
 ### 3.5 副作用表达式
@@ -380,6 +381,16 @@ let ref x = expr          // Arena 引用绑定
 let (a, b) = expr         // 解构绑定
 let x;                    // 声明而不初始化（后需赋值）
 ```
+
+### 4.1b Const 常量
+
+```
+const PORT: i32 = 6380              // 顶层常量
+const NAME: string = "mimi-kv"      // 字符串常量
+const PI: f64 = 3.14159             // 浮点常量
+```
+
+`const` 在顶层声明常量，启动时求值，全局可用。类型标注可选（自动推断）。
 
 ### 4.2 赋值
 
@@ -555,8 +566,16 @@ $(expr)                          // Quote 插值
 ### 4.14 元数据
 
 ```
-desc "描述文本"                    // 描述元数据
-rule "规则文本"                    // 规则元数据（MimiSpec 层）
+desc "描述文本"                    // 描述元数据（单行）
+desc {                             // 描述元数据（多行块）
+    自然语言描述
+    支持多行文本
+}
+rule "规则文本"                    // 规则元数据（单行）
+rule {                             // 规则元数据（多行块）
+    约束条件
+    自然语言描述
+}
 mms { 意图内容 }                   // MimiSpec 块
 ```
 
@@ -847,22 +866,21 @@ stmt ::= ... ";"                     // 显式分号结束
 "or"    ≡ "||"
 "not"   ≡ "!"
 
-## 12. 已知限制（v0.28.1）
+## 12. 已知限制（v0.28.2）
 
 ### 12.1 不支持的语法
 
 | 语法 | 状态 | 替代方案 |
 |------|------|---------|
-| `const X: T = v` | ❌ 不支持 | 使用 `let` 或内联值 |
-| `as i32` / `as i64` | ❌ 不支持 | 使用 `to_int()` 或避免类型转换 |
-| `Record` 类型注解 | ❌ 不支持 | 让类型推断自动推导 |
-| `Any` 类型注解 | ❌ 不支持 | 让类型推断自动推导 |
+| 嵌套 tuple 访问 `t.1.1` | ❌ 不支持 | 用解构 `let (a, b) = t; let (c, d) = b; d` |
 
 ### 12.2 Codegen 不支持的功能
 
 | 功能 | Interpreter | Codegen | 说明 |
 |------|-------------|---------|------|
-| Map 操作 | ✅ | ❌ | codegen 返回 0，map handle 未正确传递 |
 | from_json | ✅ | ❌ | codegen 返回 graceful error |
+| Set 操作 | ✅ | ❌ | codegen 返回 graceful error |
+| sort_f64 / sort_str | ✅ | ❌ | codegen 返回 graceful error |
+| const 代码生成 | ✅ | ❌ | Item::Const 在 codegen 中被忽略 |
 | Set 操作 | ✅ | ❌ | codegen 返回 graceful error |
 ```

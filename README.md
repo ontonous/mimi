@@ -4,9 +4,9 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.28.0--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.2--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2383%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2388%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
@@ -310,6 +310,8 @@ mimi/
 
 | Version | Highlight |
 |---|---|
+| **v0.28.2** | Usability: Record/Any type annotations, codegen map ops, `const`, `as` cast, `desc{}`/`rule{}` blocks |
+| **v0.28.1** | mimi-kv embedded store, map type inference fix, dual-backend map tests |
 | **v0.28** 🚀 | Use-driven evolution: dir/path/crypto builtins, multi-language FFI (7 langs), profiler, `mimi stat`/`mimi bindgen`, 2 design defect fixes |
 | **v0.27** 🔨 | Audit fixes: P0/P1/P2/P3 safety & correctness (arena, FFI, JSON, runtime) |
 | **v0.26** | Type unification engine + bidirectional inference + FFI P0/P1 security fixes |
