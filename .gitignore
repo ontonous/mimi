@@ -46,3 +46,6 @@ Thumbs.db
 # Internal development docs (not for public)
 AGENTS.md
 devdocs/
+
+# MiMoCode agent workspace
+.mimocode/
