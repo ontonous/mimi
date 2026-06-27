@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased] — 0.28.5-dev
+
+> 进程与文件基础设施：exec、file_stat、append_file、set_env 内置函数。
+
 ## [v0.28.4] — 2026-06-28
 
 ### Added
