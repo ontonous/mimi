@@ -968,7 +968,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &triple_ref,
                 &cpu,
                 &features,
-                OptimizationLevel::Aggressive,
+                OptimizationLevel::None,
                 reloc_mode,
                 CodeModel::Default,
             )
