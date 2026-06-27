@@ -39,7 +39,8 @@ impl<'a> Interpreter<'a> {
                     let arena_id = self.arenas.len() - 1;
                     let idx = self.arenas[arena_id].slots.len();
                     self.arenas[arena_id].slots.push(value.clone());
-                    Ok(Value::ArenaRef(arena_id, idx))
+                    let gen = self.arenas[arena_id].generation;
+                    Ok(Value::ArenaRef(arena_id, idx, gen))
                 }
                 AllocatorKind::Bump => {
                     // Bump allocator: same as arena (monotonic allocation)
@@ -51,7 +52,8 @@ impl<'a> Interpreter<'a> {
                     let arena_id = self.arenas.len() - 1;
                     let idx = self.arenas[arena_id].slots.len();
                     self.arenas[arena_id].slots.push(value.clone());
-                    Ok(Value::ArenaRef(arena_id, idx))
+                    let gen = self.arenas[arena_id].generation;
+                    Ok(Value::ArenaRef(arena_id, idx, gen))
                 }
             },
             _ => Err(InterpError::new(
@@ -61,10 +63,11 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn builtin_arena_reset(&mut self, _args: Vec<Value>) -> Result<Value, InterpError> {
-        // arena_reset() - reset all arena allocations
+        // arena_reset() - reset all arena allocations and invalidate stale ArenaRefs
         if !self.arenas.is_empty() {
             let arena_id = self.arenas.len() - 1;
             self.arenas[arena_id].slots.clear();
+            self.arenas[arena_id].generation += 1;
         }
         Ok(Value::Unit)
     }

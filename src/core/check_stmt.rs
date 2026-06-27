@@ -8,10 +8,22 @@ impl<'a> Checker<'a> {
         ret: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) {
+        self.check_block_with_implicit_return(block, ret, scopes);
+    }
+
+    /// Like check_block but returns the type of the last expression (if any)
+    /// to avoid redundant re-checking in check_func.
+    pub(crate) fn check_block_with_implicit_return(
+        &mut self,
+        block: &Block,
+        ret: &Type,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Option<Type> {
         // Push cap scope and borrow scope for block
         self.cap_vars.push(HashMap::new());
         self.push_borrow_scope();
         let mut seen_return = false;
+        let mut last_expr_type = None;
         for (i, stmt) in block.iter().enumerate() {
             // Unreachable code detection
             if seen_return {
@@ -29,11 +41,16 @@ impl<'a> Checker<'a> {
                 self.release_borrows_at_last_use(block, i);
             }
             self.check_stmt(stmt, ret, scopes);
+            // Track the type of the last expression for implicit return
+            if let Stmt::Expr(e) = stmt {
+                last_expr_type = Some(self.infer_expr(e, scopes));
+            }
         }
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
         self.pop_borrow_scope();
         self.cap_vars.pop();
+        last_expr_type
     }
 
     /// Check that a statement doesn't capture local_shared variables from outer scope

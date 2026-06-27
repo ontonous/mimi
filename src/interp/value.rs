@@ -192,7 +192,7 @@ pub enum Value {
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
     Error(String),
-    ArenaRef(usize, usize),
+    ArenaRef(usize, usize, u64),  // (arena_id, slot_idx, generation)
     ArenaBlock(usize),
     QuoteAst(Box<QuotedAst>),
     Newtype(Box<Value>),
@@ -334,6 +334,9 @@ impl std::fmt::Debug for CBufferInner {
 pub struct Arena {
     pub id: usize,
     pub slots: Vec<Value>,
+    /// Generation counter: incremented on reset. ArenaRef values with stale
+    /// generation are invalidated to prevent use-after-reset bugs.
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -465,7 +468,7 @@ impl ActorHandle {
 
 impl Value {
     pub fn is_arena_ref(&self) -> bool {
-        matches!(self, Value::ArenaRef(_, _))
+        matches!(self, Value::ArenaRef(_, _, _))
     }
 
     pub fn is_arena_block(&self) -> bool {
@@ -565,7 +568,7 @@ impl std::fmt::Display for Value {
             }
             Value::Future(_) => write!(f, "Future(...)"),
             Value::Error(msg) => write!(f, "Error({})", msg),
-            Value::ArenaRef(id, idx) => write!(f, "ArenaRef({}, {})", id, idx),
+            Value::ArenaRef(id, idx, gen) => write!(f, "ArenaRef({}, {}, gen={})", id, idx, gen),
             Value::ArenaBlock(id) => write!(f, "ArenaBlock({})", id),
             Value::QuoteAst(_) => write!(f, "QuoteAst(...)"),
             Value::Newtype(v) => write!(f, "Newtype({})", v),
@@ -674,7 +677,7 @@ pub(crate) fn contains_local_shared(v: &Value) -> bool {
 
 pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
     match v {
-        Value::ArenaRef(id, _) => *id == arena_id,
+        Value::ArenaRef(id, _, _) => *id == arena_id,
         Value::List(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
         Value::Set(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
         Value::Tuple(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
@@ -945,7 +948,7 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Cap(_) => "cap",
         Value::Actor(_) => "actor",
         Value::Future(_) => "future",
-        Value::ArenaRef(_, _) => "arena_ref",
+        Value::ArenaRef(_, _, _) => "arena_ref",
         Value::ArenaBlock(_) => "arena_block",
         Value::WeakShared(_) | Value::WeakLocal(_) => "weak",
         Value::Allocator(_) => "allocator",
