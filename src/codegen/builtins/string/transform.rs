@@ -390,10 +390,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_sub(end, start, "trimmed_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
+        // Clamp to 0 if start >= end (all-whitespace string)
+        let zero = i64_ty.const_int(0, false);
+        let is_negative = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLE, trimmed_len, zero, "is_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let safe_len = self
+            .builder
+            .build_select(is_negative, zero, trimmed_len, "safe_len")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
         // malloc + memcpy
         let alloc_size = self
             .builder
-            .build_int_add(trimmed_len, i64_ty.const_int(1, false), "alloc_size")
+            .build_int_add(safe_len, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
         let malloc_fn = self
             .module
@@ -415,6 +426,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        // Only memcpy if safe_len > 0
+        let should_copy = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, safe_len, zero, "should_copy")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let copy_bb = self.context.append_basic_block(function, "trim_copy");
+        let done_bb = self.context.append_basic_block(function, "trim_done");
+        self.builder
+            .build_conditional_branch(should_copy, copy_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(copy_bb);
         let memcpy_fn = self
             .module
             .get_function("memcpy")
@@ -425,14 +447,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(buf),
                     BasicMetadataValueEnum::PointerValue(src),
-                    BasicMetadataValueEnum::IntValue(trimmed_len),
+                    BasicMetadataValueEnum::IntValue(safe_len),
                 ],
                 "memcpy_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.builder.position_at_end(done_bb);
         let null_pos = {
             self.gep()
-                .build_in_bounds_gep(i8_ty, buf, &[trimmed_len], "null")
+                .build_in_bounds_gep(i8_ty, buf, &[safe_len], "null")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.builder
