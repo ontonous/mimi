@@ -3,6 +3,8 @@
 // This module provides all runtime symbols needed by LLVM-codegened Mimi programs,
 // replacing the previous C implementation (mimi_runtime.c). Every function is
 // `#[no_mangle] pub extern "C"` so it can be linked from generated machine code.
+
+pub mod profiler;
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:
 //   - Item 1: Thread pool TOCTOU — use Rust `Mutex` + `Condvar` (already fixed in ffi/runtime.rs)

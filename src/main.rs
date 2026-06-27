@@ -91,6 +91,9 @@ enum Command {
         /// Strict mode: only compile $/$$ locked fragments
         #[arg(long)]
         strict: bool,
+        /// Profile mode: track function call counts and durations
+        #[arg(long)]
+        profile: bool,
         /// Watch mode: re-run on file changes
         #[arg(long, short)]
         watch: bool,
@@ -323,6 +326,7 @@ fn main() {
             allocator,
             strict,
             watch,
+            profile,
         } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
             run::run(
@@ -332,6 +336,7 @@ fn main() {
                 &allocator,
                 strict,
                 watch,
+                profile,
             )
         }
         Command::Test {

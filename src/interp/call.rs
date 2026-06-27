@@ -53,6 +53,13 @@ impl<'a> Interpreter<'a> {
         self.push_call(&func.name);
         self.push_scope();
 
+        // Profiling: start timer
+        let _profile_timer = if crate::runtime::profiler::profiler_is_enabled() {
+            Some(crate::runtime::profiler::ProfileTimer::new(&func.name))
+        } else {
+            None
+        };
+
         // Snapshot parameters for old() in ensures
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(filled_args) {

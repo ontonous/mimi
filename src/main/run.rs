@@ -13,13 +13,21 @@ pub(crate) fn run(
     allocator: &str,
     strict: bool,
     watch: bool,
+    profile: bool,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    if watch {
+    if profile {
+        mimi::runtime::profiler::profiler_init();
+    }
+    let result = if watch {
         run_watch(&path, verify_contracts, verify_ffi, allocator, strict)
     } else {
         run_once(&path, verify_contracts, verify_ffi, allocator, strict)
+    };
+    if profile {
+        mimi::runtime::profiler::profiler_report();
     }
+    result
 }
 
 fn run_once(
