@@ -1827,10 +1827,10 @@ pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64
     // Resolve address
     let port_str = format!("{}", port);
     let hints = unsafe {
-        let mut h: libc::addrinfo = std::mem::zeroed();
-        h.ai_family = libc::AF_UNSPEC;
-        h.ai_socktype = libc::SOCK_STREAM;
-        h
+        let mut hints_raw: libc::addrinfo = std::mem::zeroed();
+        hints_raw.ai_family = libc::AF_UNSPEC;
+        hints_raw.ai_socktype = libc::SOCK_STREAM;
+        hints_raw
     };
     let mut res: *mut libc::addrinfo = std::ptr::null_mut();
     let c_host = CString::new(h.as_str()).unwrap_or_default();
@@ -1843,7 +1843,10 @@ pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
-            None => return -1,
+            None => {
+                libc::freeaddrinfo(res);
+                return -1;
+            }
         };
         let r = libc::connect(fd_i32, (*res).ai_addr, (*res).ai_addrlen);
         if r == 0 {
@@ -3082,6 +3085,9 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
 /// Spawn a future on a real thread (used by codegen `spawn expr`).
 /// The poll function is called on a new thread, which sets completed=1 when done.
 /// Returns the future pointer (same as input).
+/// Note: JoinHandle is intentionally dropped (detached thread). The future's
+/// completion is tracked via `mimi_future_set_completed`. Process exit while
+/// the thread is running will kill the thread abruptly.
 #[no_mangle]
 pub extern "C" fn mimi_spawn_future(
     future: *mut std::ffi::c_void,
@@ -3091,9 +3097,11 @@ pub extern "C" fn mimi_spawn_future(
         return std::ptr::null_mut();
     }
     let future_addr = future as usize;
-    std::thread::spawn(move || {
+    let _handle = std::thread::spawn(move || {
         unsafe { poll_fn(future_addr as *mut std::ffi::c_void) };
     });
+    // _handle is dropped here — thread is detached. This is intentional:
+    // completion is signaled via mimi_future_set_completed, not JoinHandle.
     future
 }
 
