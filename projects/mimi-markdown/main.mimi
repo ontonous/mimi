@@ -431,17 +431,152 @@ func parse_blockquote(p: MdParser) -> (MdBlock, MdParser) {
     (block, cur)
 }
 
+// Check if a line looks like a table row (contains |)
+func is_table_row(line: string) -> bool {
+    str_contains(str_trim(line), "|")
+}
+
+// Check if a line is a table separator (|---|---|)
+func is_table_separator(line: string) -> bool {
+    let trimmed = str_trim(line)
+    if !str_contains(trimmed, "|") {
+        return false
+    }
+    let mut i = 0
+    let l = len(trimmed)
+    let mut has_dash = false
+    while i < l {
+        let ch = str_char_at(trimmed, i)
+        if ch == "-" {
+            has_dash = true
+        } else if ch != "|" && ch != " " && ch != "-" && ch != ":" {
+            return false
+        }
+        i = i + 1
+    }
+    has_dash
+}
+
+// Split a table row by | into cells
+func split_table_row(line: string) -> List<string> {
+    let trimmed = str_trim(line)
+    // Remove leading and trailing |
+    let content = if str_starts_with(trimmed, "|") {
+        str_substring(trimmed, 1, len(trimmed))
+    } else {
+        trimmed
+    }
+    let with_end = if str_ends_with(content, "|") {
+        str_substring(content, 0, len(content) - 1)
+    } else {
+        content
+    }
+    let parts = str_split(with_end, "|")
+    let mut cells: List<string> = []
+    let l = len(parts)
+    let mut i = 0
+    while i < l {
+        push(cells, str_trim(parts[i]))
+        i = i + 1
+    }
+    cells
+}
+
+// Parse a table block
+func parse_table(p: MdParser) -> (MdBlock, MdParser) {
+    let mut cur = p
+    let mut rows: List<string> = []
+    let mut is_first = true
+    let mut is_header_done = false
+    while !at_end(cur) {
+        let line = rest_of_line(cur)
+        if !is_table_row(line) {
+            break
+        }
+        if is_first && is_table_separator(line) {
+            // First line is separator (unusual, skip)
+            is_header_done = true
+            cur = read_line(cur).1
+            is_first = false
+            continue
+        }
+        if !is_header_done && is_table_separator(line) {
+            is_header_done = true
+            cur = read_line(cur).1
+            continue
+        }
+        push(rows, line)
+        cur = read_line(cur).1
+        is_first = false
+    }
+    let mut empty: List<string> = []
+    let block = MdBlock { tag: "table", content: "", level: 0, language: "", items: rows, ordered: false }
+    (block, cur)
+}
+
+// Render a table to HTML
+func render_table(items: List<string>) -> string {
+    if len(items) == 0 {
+        return ""
+    }
+    let mut html = "<table>\n"
+    let l = len(items)
+    let mut i = 0
+    while i < l {
+        let cells = split_table_row(items[i])
+        let tag = if i == 0 { "th" } else { "td" }
+        html = html + "<tr>"
+        let cl = len(cells)
+        let mut j = 0
+        while j < cl {
+            html = html + "<" + tag + ">" + render_inline(cells[j]) + "</" + tag + ">"
+            j = j + 1
+        }
+        html = html + "</tr>\n"
+        i = i + 1
+    }
+    html = html + "</table>"
+    html
+}
+
 // Parse all blocks from source text
 func parse_blocks(src: string) -> List<MdBlock> {
     let mut blocks: List<MdBlock> = []
     let mut p = skip_blank_lines(make_parser(src))
     while !at_end(p) {
         let line = rest_of_line(p)
-        if is_heading(line) {
+        if is_blank_line(line) {
+            p = skip_blank_lines(read_line(p).1)
+        } else if is_heading(line) {
             push(blocks, parse_heading(line))
             p = skip_blank_lines(read_line(p).1)
-        } else {
+        } else if is_code_fence(line) {
+            let code_r = parse_code_fence(p)
+            push(blocks, code_r.0)
+            p = skip_blank_lines(code_r.1)
+        } else if is_unordered_list_item(line) {
+            let ul_r = parse_unordered_list(p)
+            push(blocks, ul_r.0)
+            p = skip_blank_lines(ul_r.1)
+        } else if is_ordered_list_item(line) {
+            let ol_r = parse_ordered_list(p)
+            push(blocks, ol_r.0)
+            p = skip_blank_lines(ol_r.1)
+        } else if is_hr(line) {
+            push(blocks, empty_block("hr"))
             p = skip_blank_lines(read_line(p).1)
+        } else if str_starts_with(str_trim(line), ">") {
+            let bq_r = parse_blockquote(p)
+            push(blocks, bq_r.0)
+            p = skip_blank_lines(bq_r.1)
+        } else if is_table_row(line) && !is_table_separator(line) {
+            let tbl_r = parse_table(p)
+            push(blocks, tbl_r.0)
+            p = skip_blank_lines(tbl_r.1)
+        } else {
+            let para_r = parse_paragraph(p)
+            push(blocks, para_r.0)
+            p = skip_blank_lines(para_r.1)
         }
     }
     blocks
@@ -451,13 +586,40 @@ func parse_blocks(src: string) -> List<MdBlock> {
 // HTML Renderer
 // ============================================================
 
+// Render list items to HTML
+func render_list_items(items: List<string>, tag: string) -> string {
+    let mut html = "<" + tag + ">\n"
+    let l = len(items)
+    let mut i = 0
+    while i < l {
+        html = html + "<li>" + render_inline(items[i]) + "</li>\n"
+        i = i + 1
+    }
+    html = html + "</" + tag + ">"
+    html
+}
+
 // Render a single block to HTML
 func render_block(block: MdBlock) -> string {
     if block.tag == "heading" {
         let lvl = to_string(block.level)
-        "<h" + lvl + ">" + block.content + "</h" + lvl + ">"
+        "<h" + lvl + ">" + render_inline(block.content) + "</h" + lvl + ">"
     } else if block.tag == "paragraph" {
-        "<p>" + block.content + "</p>"
+        "<p>" + render_inline(block.content) + "</p>"
+    } else if block.tag == "code" {
+        if block.language != "" {
+            "<pre><code class=\"language-" + block.language + "\">" + escape_html(block.content) + "</code></pre>"
+        } else {
+            "<pre><code>" + escape_html(block.content) + "</code></pre>"
+        }
+    } else if block.tag == "ul" {
+        render_list_items(block.items, "ul")
+    } else if block.tag == "ol" {
+        render_list_items(block.items, "ol")
+    } else if block.tag == "blockquote" {
+        "<blockquote>" + render_inline(block.content) + "</blockquote>"
+    } else if block.tag == "table" {
+        render_table(block.items)
     } else if block.tag == "hr" {
         "<hr>"
     } else {
@@ -481,11 +643,71 @@ func render_html(blocks: List<MdBlock>) -> string {
 }
 
 // ============================================================
-// Tests
+// CLI & File I/O
 // ============================================================
 
+// Get file extension from path
+func get_extension(path: string) -> string {
+    let l = len(path)
+    let mut i = l - 1
+    while i >= 0 {
+        if str_char_at(path, i) == "." {
+            return str_substring(path, i + 1, l)
+        }
+        if str_char_at(path, i) == "/" {
+            return ""
+        }
+        i = i - 1
+    }
+    ""
+}
+
+// Check if path ends with .md
+func is_markdown_file(path: string) -> bool {
+    let ext = get_extension(path)
+    ext == "md" || ext == "markdown" || ext == "mdown"
+}
+
+// Generate output filename from input
+func output_path(input: string) -> string {
+    let l = len(input)
+    let mut i = l - 1
+    while i >= 0 {
+        if str_char_at(input, i) == "." {
+            return str_substring(input, 0, i) + ".html"
+        }
+        i = i - 1
+    }
+    input + ".html"
+}
+
+// Convert markdown string to HTML with full document wrapper
+func to_full_html(title: string, body: string) -> string {
+    let mut html = "<!DOCTYPE html>\n<html>\n<head>\n"
+    html = html + "<meta charset=\"utf-8\">\n"
+    html = html + "<title>" + escape_html(title) + "</title>\n"
+    html = html + "</head>\n<body>\n"
+    html = html + body
+    html = html + "\n</body>\n</html>"
+    html
+}
+
+// Extract title from blocks (first heading or filename)
+func extract_title(blocks: List<MdBlock>) -> string {
+    let l = len(blocks)
+    let mut i = 0
+    while i < l {
+        let b = blocks[i]
+        if b.tag == "heading" && b.level == 1 {
+            return b.content
+        }
+        i = i + 1
+    }
+    "Document"
+}
+
 // ============================================================
-// Main
+// Tests
 // ============================================================
 
 
@@ -640,8 +862,148 @@ func test_full_document() {
     println(html)
 }
 
+func test_table_basic() {
+    let src = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_table_simple() {
+    let src = "Name | Age\n-----|-----\nAlice | 30\nBob | 25"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_mixed_content() {
+    let src = "# Hello\n\nA paragraph with **bold** and *italic*.\n\n- list item\n\n> quote\n\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_inline_code_escaping() {
+    let html = render_inline("Use `<div>` tags")
+    println(html)
+}
+
+func test_link_with_title() {
+    let html = render_inline("[Google](https://google.com)")
+    println(html)
+}
+
+func test_image_rendering() {
+    let html = render_inline("![Logo](logo.png)")
+    println(html)
+}
+
+func test_strikethrough_rendering() {
+    let html = render_inline("This is ~~wrong~~ correct")
+    println(html)
+}
+
+func test_nested_emphasis() {
+    let html = render_inline("This is **bold with *italic* inside**")
+    println(html)
+}
+
+func test_multiple_links() {
+    let html = render_inline("Visit [Google](https://google.com) or [GitHub](https://github.com)")
+    println(html)
+}
+
+func test_code_block_with_language() {
+    let src = "```python\ndef hello():\n    print('hi')\n```"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_nested_list() {
+    let src = "- Item 1\n- Item 2\n- Item 3"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_blockquote_with_formatting() {
+    let src = "> This is **bold** in a quote"
+    let blocks = parse_blocks(src)
+    let html = render_html(blocks)
+    println(html)
+}
+
+func test_horizontal_rule_variants() {
+    let src = "---\n\n***\n\n___"
+    let blocks = parse_blocks(src)
+    println(len(blocks))
+}
+
+func test_empty_document() {
+    let blocks = parse_blocks("")
+    println(len(blocks))
+}
+
+func test_only_whitespace() {
+    let blocks = parse_blocks("   \n\n   \n")
+    println(len(blocks))
+}
+
+func test_get_extension() {
+    println(get_extension("file.md"))
+    println(get_extension("file.markdown"))
+    println(get_extension("file.txt"))
+    println(get_extension("noext"))
+}
+
+func test_is_markdown_file() {
+    println(is_markdown_file("README.md"))
+    println(is_markdown_file("doc.markdown"))
+    println(is_markdown_file("file.txt"))
+}
+
+func test_output_path() {
+    println(output_path("input.md"))
+    println(output_path("doc.markdown"))
+    println(output_path("file.txt"))
+}
+
+func test_extract_title() {
+    let src = "# My Title\n\nSome content"
+    let blocks = parse_blocks(src)
+    println(extract_title(blocks))
+}
+
+func test_escape_html_special_chars() {
+    println(escape_html("a&b<c>d\"e"))
+}
+
+func test_find_closing_basic() {
+    let pos = find_closing("hello **world** end", 7, "**")
+    println(pos)
+}
+
+func test_find_closing_not_found() {
+    let pos = find_closing("no markers here", 0, "**")
+    println(pos)
+}
+
+func test_render_inline_empty() {
+    let html = render_inline("")
+    println(len(html))
+}
+
+func test_render_inline_plain() {
+    let html = render_inline("just plain text")
+    println(html)
+}
+
 func main() -> i32 {
-    println("test")
+    println("mimi-markdown v0.1.0")
+    println("Markdown to HTML converter")
+    println("")
+    println("Usage: mimi-markdown <input.md> [output.html]")
     0
 }
 
