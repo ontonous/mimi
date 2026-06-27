@@ -1,3 +1,24 @@
+// json.mimi — JSON operations
+//
+// Built-in functions (no import needed):
+//   to_json(value) -> string                    — Serialize to JSON
+//   from_json(s) -> value                       — Parse JSON (interp only)
+//   json_get_string(json, key) -> string        — Get string field
+//   json_get_int(json, key) -> i64              — Get integer field
+//   json_get_element(json, index) -> value      — Get array element
+//   json_get_bool(json, key) -> bool            — Get boolean field
+//   json_get_float(json, key) -> f64            — Get float field
+//   json_is_valid(s) -> bool                    — Validate JSON
+//   json_array_length(json) -> i32              — Array length
+//
+// Example:
+//   let data = "{\"name\":\"Mimi\",\"version\":1}"
+//   if json_is_valid(data) {
+//       let name = json_get_string(data, "name")   // "Mimi"
+//       let ver = json_get_int(data, "version")     // 1
+//   }
+//   let serialized = to_json(42)  // "42"
+
 // JsonExt: Trait for JSON string operations.
 trait JsonExt {
     func from_json() -> string

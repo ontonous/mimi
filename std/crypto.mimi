@@ -1,7 +1,29 @@
 // crypto.mimi — Cryptographic utilities
 //
-// sha256, base64_encode, base64_decode are now builtins (implemented in runtime).
-// hex_encode/hex_decode can be implemented using string operations.
+// Built-in functions (no import needed):
+//   sha256(data: string) -> string              — SHA-256 hash (hex, 64 chars)
+//   base64_encode(data: string) -> string        — Base64 encoding
+//   base64_decode(data: string) -> Result<string, string> — Base64 decoding
+//
+// Stdlib functions (defined below):
+//   is_valid_hex(s) -> bool
+//   hex_encode(s) -> string
+//
+// Example:
+//   let hash = sha256("hello")
+//   // hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+//
+//   let encoded = base64_encode("Hello, World!")
+//   // encoded = "SGVsbG8sIFdvcmxkIQ=="
+//
+//   let decoded = base64_decode(encoded)
+//   match decoded {
+//       Ok(s) => println(s),   // "Hello, World!"
+//       Err(e) => println(e)
+//   }
+//
+//   let hex = hex_encode("ABC")
+//   // hex = "414243"
 
 // is_valid_hex: Returns true if s is valid hexadecimal.
 pub func is_valid_hex(s: string) -> bool {

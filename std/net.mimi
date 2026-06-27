@@ -1,3 +1,36 @@
+// net.mimi — Networking utilities
+//
+// Built-in functions (no import needed):
+//   socket(domain, type, protocol) -> i32
+//   bind(fd, port) -> i32
+//   listen(fd, backlog) -> i32
+//   accept(fd) -> i32
+//   connect(fd, host, port) -> i32
+//   send(fd, data) -> i32
+//   recv(fd, buf_size) -> string
+//   close_fd(fd) -> i32
+//   http_get(url) -> string
+//   http_post(url, body) -> string
+//
+// Stdlib wrappers (defined below):
+//   tcp_socket(), tcp_connect(), tcp_listen(), tcp_accept()
+//   tcp_send(), tcp_recv(), fetch(), fetch_post()
+//
+// Example — HTTP client:
+//   let response = fetch("https://example.com")
+//   if response.is_ok() { println(response.unwrap()) }
+//
+// Example — TCP server:
+//   let fd = tcp_listen(8080, 5)
+//   if fd.is_ok() {
+//       let client = tcp_accept(fd.unwrap())
+//       if client.is_ok() {
+//           let data = tcp_recv(client.unwrap(), 4096)
+//           tcp_send(client.unwrap(), "HTTP/1.1 200 OK\r\n\r\nHello!")
+//           close_fd(client.unwrap())
+//       }
+//   }
+
 // Networking utilities — wraps socket builtins
 
 // Structured network error type
