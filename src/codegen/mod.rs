@@ -295,6 +295,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.get_insert_block()?.get_parent()
     }
 
+    /// Create an alloca at the function entry block (not at the current insertion point).
+    /// This ensures allocas are in the entry block, which is required for proper
+    /// stack frame management when called from inside if/else branches or loops.
+    pub(super) fn entry_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let function = self.current_function()
+            .ok_or_else(|| "entry_alloca: no current function".to_string())?;
+        let entry = function.get_first_basic_block()
+            .ok_or_else(|| "entry_alloca: no entry block".to_string())?;
+        let saved = self.builder.get_insert_block();
+        // Position at the start of the entry block
+        if let Some(first_instr) = entry.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry);
+        }
+        let alloca = self.builder.build_alloca(ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        // Restore original position
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        Ok(alloca)
+    }
+
     fn block_has_terminator(&self) -> bool {
         self.builder
             .get_insert_block()
