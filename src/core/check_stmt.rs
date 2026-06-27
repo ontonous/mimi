@@ -257,7 +257,8 @@ impl<'a> Checker<'a> {
             | Expr::Await(e)
             | Expr::Try(e)
             | Expr::Old(e)
-            | Expr::TypeOf(e) => {
+            | Expr::TypeOf(e)
+            | Expr::Cast(e, _) => {
                 self.collect_shared_writes_in_expr(e, scopes, writes);
             }
             Expr::Call(callee, args) => {
@@ -478,7 +479,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_parasteps_safe(&f.value, scopes);
                 }
             }
-            Expr::Try(e) | Expr::Old(e) | Expr::TypeOf(e) => {
+            Expr::Try(e) | Expr::Old(e) | Expr::TypeOf(e) | Expr::Cast(e, _) => {
                 self.check_expr_parasteps_safe(e, scopes);
             }
             Expr::SliceExpr { target, start, end } => {

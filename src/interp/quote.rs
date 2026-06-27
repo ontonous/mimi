@@ -333,6 +333,10 @@ impl<'a> Interpreter<'a> {
                 name.clone(),
                 Box::new(self.quote_expr(value)?),
             )),
+            Expr::Cast(inner, _target_type) => {
+                // Cast is not supported in quote context, just quote the inner expression
+                self.quote_expr(inner)
+            }
         }
     }
 

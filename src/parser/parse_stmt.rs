@@ -6,7 +6,7 @@ impl Parser {
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
         match self.peek_kind() {
-            TokenKind::Let => self.parse_let(),
+            TokenKind::Let | TokenKind::Const => self.parse_let(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => {
                 self.advance();
@@ -327,11 +327,19 @@ impl Parser {
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(TokenKind::Let, "`let`")?;
-        let mut_ = self.at(&TokenKind::Mut);
-        if mut_ {
+        let is_const = self.at(&TokenKind::Const);
+        if is_const {
             self.advance();
+        } else {
+            self.expect(TokenKind::Let, "`let`")?;
         }
+        let mut_ = if is_const {
+            false
+        } else {
+            let m = self.at(&TokenKind::Mut);
+            if m { self.advance(); }
+            m
+        };
         let ref_ = self.at(&TokenKind::Ref);
         if ref_ {
             self.advance();

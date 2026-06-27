@@ -1,6 +1,24 @@
 # Changelog
 
-## [Unreleased] — v0.28.1-dev
+## [Unreleased] — v0.28.2-dev
+
+### Added
+
+- **const keyword**: 顶层常量声明 (`const PORT: i32 = 6380`)
+- **as type cast**: 类型转换表达式 (`x as i64`, `3.14 as i32`)
+- **mimi-todo**: CLI 任务跟踪器项目
+
+### Fixed
+
+- **P0**: Record/Any 作为合法类型注解（函数签名中可用）
+- **P0**: codegen map 操作支持（map_set/get/remove/has_key 返回正确值）
+- **P1**: const 顶层常量（lexer + parser + typeck + interpreter）
+- **P1**: as 类型转换（lexer + parser + typeck + interpreter + codegen）
+- **Bug**: parse_ident_primary 缺少 as cast 处理（`x as i64` 失败）
+
+---
+
+## [v0.28.1] — 2026-06-27
 
 ### Added
 

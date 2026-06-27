@@ -1,0 +1,8 @@
+[package]
+name = "mimi-todo"
+version = "0.1.0"
+description = "CLI task tracker built in Mimi"
+authors = ["ontonous"]
+license = "Apache-2.0"
+
+[dependencies]

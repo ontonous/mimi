@@ -22,6 +22,7 @@ pub enum Item {
     Trait(TraitDef),
     Impl(ImplDef),
     ExternBlock(ExternBlock),
+    Const { name: String, ty: Option<Type>, value: Expr, pub_: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +397,8 @@ pub enum Expr {
     SetLiteral(Vec<Expr>),
     /// Named argument in function call: f(x = 5)
     NamedArg(String, Box<Expr>),
+    /// Type cast: expr as Type
+    Cast(Box<Expr>, Type),
 }
 
 impl Expr {

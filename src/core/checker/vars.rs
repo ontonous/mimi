@@ -43,6 +43,10 @@ impl<'a> Checker<'a> {
                 return Type::Name(name.into(), vec![]);
             }
         }
+        // Check if it's a top-level constant
+        if let Some(const_ty) = self.const_types.get(name) {
+            return self.unification.resolve(const_ty);
+        }
         // Built-in bare None constructor (only if no user-defined None variant exists)
         if name == "None" {
             let has_user_none = self.types.values().any(|t| {

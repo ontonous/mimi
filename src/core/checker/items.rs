@@ -504,6 +504,17 @@ impl<'a> Checker<'a> {
                     self.funcs.insert(func.name.clone(), (params, ret));
                 }
             }
+            Item::Const { name, ty, value, .. } => {
+                // Infer the type of the constant value
+                let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
+                let value_ty = self.infer_expr(value, &mut scopes);
+                let const_ty = if let Some(declared_ty) = ty {
+                    self.resolve_type(declared_ty)
+                } else {
+                    value_ty
+                };
+                self.const_types.insert(name.clone(), const_ty);
+            }
         }
     }
     pub(crate) fn check_item(&mut self, item: &Item) {
@@ -675,6 +686,24 @@ impl<'a> Checker<'a> {
             }
             Item::ExternBlock(_) => {
                 // Extern blocks are collected but not type-checked in v1.1
+            }
+            Item::Const { name, ty, value, .. } => {
+                let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
+                let value_ty = self.infer_expr(value, &mut scopes);
+                if let Some(declared_ty) = ty {
+                    let resolved = self.resolve_type(declared_ty);
+                    if !same_type(&resolved, &value_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0209,
+                            format!(
+                                "const '{}' declared type {} does not match value type {}",
+                                name,
+                                fmt_type(&resolved),
+                                fmt_type(&value_ty)
+                            ),
+                        );
+                    }
+                }
             }
         }
     }

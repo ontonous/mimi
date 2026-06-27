@@ -72,6 +72,8 @@ pub(crate) struct Checker<'a> {
     /// same_type() for structural comparisons which is O(N). This is known tech debt.
     /// Integration would require replacing Type equality checks with TypeId comparisons.
     arena: TypeArena,
+    /// Top-level constant types: name -> type
+    pub(crate) const_types: HashMap<String, Type>,
 }
 
 #[allow(dead_code)]
@@ -111,6 +113,7 @@ impl<'a> Checker<'a> {
             current_col: 0,
             unification: UnificationTable::new(),
             arena: TypeArena::new(),
+            const_types: HashMap::new(),
         }
     }
 

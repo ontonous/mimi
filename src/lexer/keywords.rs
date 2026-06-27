@@ -16,6 +16,7 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Actor
             | TokenKind::Newtype
             | TokenKind::Let
+            | TokenKind::Const
             | TokenKind::Mut
             | TokenKind::Ref
             | TokenKind::Shared
@@ -76,6 +77,7 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "actor" => TokenKind::Actor,
         "newtype" => TokenKind::Newtype,
         "let" => TokenKind::Let,
+        "const" => TokenKind::Const,
         "mut" => TokenKind::Mut,
         "ref" => TokenKind::Ref,
         "shared" => TokenKind::Shared,

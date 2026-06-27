@@ -370,5 +370,6 @@ fn item_name(item: &Item) -> Option<&str> {
         Item::Trait(t) => Some(&t.name),
         Item::Impl(i) => Some(i.type_name.as_str()),
         Item::ExternBlock(_) => None,
+        Item::Const { name, .. } => Some(name),
     }
 }
