@@ -145,6 +145,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 matches!(name.as_str(), "to_string")
             }
             Expr::Binary(BinOp::Add, lhs, _) => self.expr_is_string(lhs),
+            Expr::If { then_, else_, .. } => {
+                // Check if either branch returns a string
+                if let Some(last) = then_.last() {
+                    if let Stmt::Expr(e) = last {
+                        if self.expr_is_string(e) {
+                            return true;
+                        }
+                    }
+                }
+                if let Some(else_block) = else_ {
+                    if let Some(last) = else_block.last() {
+                        if let Stmt::Expr(e) = last {
+                            if self.expr_is_string(e) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }

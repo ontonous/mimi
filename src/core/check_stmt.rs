@@ -691,9 +691,15 @@ impl<'a> Checker<'a> {
                         format!("if condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
+                // Push new scope for then branch
+                self.var_scopes.push(HashMap::new());
                 self.check_block(then_, ret, scopes);
+                self.var_scopes.pop();
                 if let Some(else_) = else_ {
+                    // Push new scope for else branch
+                    self.var_scopes.push(HashMap::new());
                     self.check_block(else_, ret, scopes);
+                    self.var_scopes.pop();
                 }
             }
             Stmt::While { cond, body } => {
