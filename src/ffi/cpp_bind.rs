@@ -131,9 +131,9 @@ impl CppBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| format!("{} {}", self.mimi_type_to_c(&contract, i), p.name))
+            .map(|(i, p)| format!("{} {}", self.mimi_type_to_c(contract, i), p.name))
             .collect();
-        let ret = self.ret_type_to_c(&contract);
+        let ret = self.ret_type_to_c(contract);
         writeln!(out, "    {} {}({});", ret, func.name, params.join(", "))
     }
 
@@ -147,15 +147,15 @@ impl CppBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| format!("{} {}", self.mimi_type_to_cpp(&contract, i), p.name))
+            .map(|(i, p)| format!("{} {}", self.mimi_type_to_cpp(contract, i), p.name))
             .collect();
-        let ret_cpp = self.ret_type_to_cpp(&contract);
+        let ret_cpp = self.ret_type_to_cpp(contract);
 
         // Build call arguments with conversions
         let mut conversions = String::new();
         let mut c_args = Vec::new();
         for (i, p) in func.params.iter().enumerate() {
-            match &contract.args[i] {
+            match contract.args[i] {
                 FfiArgContract::StringBorrow => {
                     writeln!(conversions, "        auto {}_cstr = {}.c_str();", p.name, p.name)?;
                     c_args.push(format!("{}_cstr", p.name));
@@ -165,7 +165,7 @@ impl CppBindGenerator {
                     c_args.push(format!("{}_cstr", p.name));
                 }
                 _ => {
-                    c_args.push(format!("static_cast<{}>({})", self.mimi_type_to_c(&contract, i), p.name));
+                    c_args.push(format!("static_cast<{}>({})", self.mimi_type_to_c(contract, i), p.name));
                 }
             }
         }
@@ -192,7 +192,7 @@ impl CppBindGenerator {
 
     fn mimi_type_to_c(&self, contract: &FfiContract, index: usize) -> String {
         if index >= contract.args.len() { return "void*".to_string(); }
-        match &contract.args[index] {
+        match contract.args[index] {
             FfiArgContract::Int => "int64_t".to_string(),
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "const char*".to_string(),
@@ -218,7 +218,7 @@ impl CppBindGenerator {
 
     fn mimi_type_to_cpp(&self, contract: &FfiContract, index: usize) -> String {
         if index >= contract.args.len() { return "void*".to_string(); }
-        match &contract.args[index] {
+        match contract.args[index] {
             FfiArgContract::Int => "int64_t".to_string(),
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow => "const std::string&".to_string(),
