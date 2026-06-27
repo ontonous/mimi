@@ -838,6 +838,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if obj_type == "Result" || obj_type == "Option" {
                                         self.var_type_names.insert(name.clone(), obj_type);
                                     }
+                                } else if matches!(method_name.as_str(), "insert" | "remove") {
+                                    let obj_type = self.infer_object_type(obj, &vars);
+                                    if obj_type.starts_with("Set") || obj_type == "set" {
+                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    }
                                 }
                             } else if let Expr::Ident(func_name) = callee.as_ref() {
                                 match func_name.as_str() {

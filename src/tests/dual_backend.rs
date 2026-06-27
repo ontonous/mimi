@@ -4806,4 +4806,20 @@ fn dual_from_json_record() {
     );
 }
 
+#[test]
+fn dual_set_contains() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s: Set<i32> = {1, 2, 3}
+            println(s.contains(2))
+            println(s.contains(4))
+            0
+        }
+    "#,
+        "1\n0"
+    );
+}
+
 
