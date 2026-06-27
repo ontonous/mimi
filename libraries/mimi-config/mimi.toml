@@ -1,0 +1,8 @@
+[package]
+name = "mimi-config"
+version = "0.1.0"
+description = "Lightweight configuration file parser for Mimi"
+license = "Apache-2.0"
+authors = ["ontonous"]
+
+[dependencies]

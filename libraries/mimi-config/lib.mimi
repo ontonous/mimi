@@ -1,0 +1,93 @@
+// mimi-config: Lightweight config parser for Mimi
+// Parses key=value format with [section] support
+
+type Config {
+    keys: List<string>
+    values: List<string>
+}
+
+func empty_str_list() -> List<string> {
+    str_split("", "|")
+}
+
+// parse_file: Parse a config file.
+// Usage: parse_text(read_file(path))  — caller handles Result
+pub func parse_file(text: string) -> Config {
+    parse_text(text)
+}
+
+// parse_text: Parse config text into a Config.
+pub func parse_text(text: string) -> Config {
+    let lines = str_split(text, "\n")
+    let mut cfg_keys = empty_str_list()
+    let mut cfg_values = empty_str_list()
+    let mut section = ""
+
+    let mut i = 0
+    while i < len(lines) {
+        let line = str_trim(lines[i])
+
+        if len(line) == 0 || str_starts_with(line, "#") || str_starts_with(line, ";") {
+            i = i + 1
+            continue
+        }
+
+        if str_starts_with(line, "[") && str_ends_with(line, "]") {
+            section = str_substring(line, 1, len(line) - 1)
+            i = i + 1
+            continue
+        }
+
+        if str_contains(line, "=") {
+            let parts = str_split(line, "=")
+            if len(parts) >= 2 {
+                let key = str_trim(parts[0])
+                let value = str_trim(parts[1])
+                let mut full_key = key
+                if len(section) > 0 {
+                    full_key = section + "." + key
+                }
+                push(cfg_keys, full_key)
+                push(cfg_values, value)
+            }
+        }
+
+        i = i + 1
+    }
+
+    Config { keys: cfg_keys, values: cfg_values }
+}
+
+// get: Get a string value by key. Returns "" if not found.
+pub func get(config: Config, key: string) -> string {
+    let mut i = 0
+    while i < len(config.keys) {
+        if config.keys[i] == key {
+            return config.values[i]
+        }
+        i = i + 1
+    }
+    ""
+}
+
+// get_section: Get a value from a specific section.
+pub func get_section(config: Config, section: string, key: string) -> string {
+    get(config, section + "." + key)
+}
+
+// has: Check if a key exists.
+pub func has(config: Config, key: string) -> bool {
+    let mut i = 0
+    while i < len(config.keys) {
+        if config.keys[i] == key {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// size: Number of entries.
+pub func size(config: Config) -> i32 {
+    len(config.keys)
+}
