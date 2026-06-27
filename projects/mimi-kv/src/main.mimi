@@ -1,0 +1,169 @@
+// mimi-kv: Embedded key-value store with TCP protocol and JSON persistence
+// Built entirely in Mimi — demonstrates networking, data structures, file I/O, JSON
+
+func ok_msg(msg: string) -> string { "+OK " + msg + "\n" }
+func err_msg(msg: string) -> string { "-ERR " + msg + "\n" }
+func val_msg(val: string) -> string { "$" + val + "\n" }
+func not_found_msg() -> string { "$NOT_FOUND\n" }
+
+func parse_command(line: string) -> (string, string, string) {
+    let trimmed = str_trim(line)
+    let parts = str_split(trimmed, " ")
+    let n = len(parts)
+    if n == 0 { return ("", "", "") }
+
+    let cmd = str_to_upper(parts[0])
+    let mut key = ""
+    let mut val = ""
+
+    if n > 1 { key = parts[1] }
+    if n > 2 {
+        val = parts[2]
+        let mut j = 3
+        while j < n {
+            val = val + " " + parts[j]
+            j = j + 1
+        }
+    }
+    (cmd, key, val)
+}
+
+func main() -> i32 {
+    println("mimi-kv v0.1.0 — embedded key-value store")
+
+    let mut data = map_new()
+    let mut count = 0
+
+    // Auto-load if data file exists
+    if file_exists("mimi-kv-data.json") {
+        let rr = read_file("mimi-kv-data.json")
+        if rr.is_ok() {
+            let json = rr.unwrap()
+            if json != "" && json_is_valid(json) {
+                data = from_json(json)
+                let lk = keys(data)
+                count = len(lk)
+                println("Loaded " + to_string(count) + " keys")
+            }
+        }
+    }
+
+    let server_fd = socket(2, 1, 0)
+    if server_fd < 0 { println("Socket failed") return 1 }
+
+    if bind(server_fd, 6380) < 0 {
+        println("Bind failed on port 6380")
+        close_fd(server_fd)
+        return 1
+    }
+
+    if listen(server_fd, 16) < 0 {
+        println("Listen failed")
+        close_fd(server_fd)
+        return 1
+    }
+
+    println("Listening on port 6380")
+    println("Commands: GET SET DEL EXISTS KEYS COUNT SAVE LOAD CLEAR QUIT")
+
+    let running = true
+    while running {
+        let cfd = accept(server_fd)
+        if cfd < 0 {
+            println("Accept failed, retrying...")
+        } else {
+            let raw = recv(cfd, 4096)
+            if raw != "" {
+                let (cmd, key, val) = parse_command(raw)
+                if cmd == "PING" {
+                    let _ = send(cfd, "+PONG\n")
+                }
+                if cmd == "SET" && key != "" && val != "" {
+                    let existed = has_key(data, key)
+                    data = map_set(data, key, val)
+                    if !existed { count = count + 1 }
+                    let _ = send(cfd, ok_msg("stored"))
+                }
+                if cmd == "GET" && key != "" {
+                    let r = map_get(data, key)
+                    if r.0 {
+                        let _ = send(cfd, val_msg(to_string(r.1)))
+                    } else {
+                        let _ = send(cfd, not_found_msg())
+                    }
+                }
+                if cmd == "DEL" && key != "" {
+                    if has_key(data, key) {
+                        data = map_remove(data, key)
+                        count = count - 1
+                        let _ = send(cfd, ok_msg("deleted"))
+                    } else {
+                        let _ = send(cfd, not_found_msg())
+                    }
+                }
+                if cmd == "EXISTS" && key != "" {
+                    if has_key(data, key) {
+                        let _ = send(cfd, val_msg("1"))
+                    } else {
+                        let _ = send(cfd, val_msg("0"))
+                    }
+                }
+                if cmd == "KEYS" {
+                    let ak = keys(data)
+                    let mut res = "*"
+                    let mut ki = 0
+                    while ki < len(ak) {
+                        if ki > 0 { res = res + "," }
+                        res = res + ak[ki]
+                        ki = ki + 1
+                    }
+                    let _ = send(cfd, res + "\n")
+                }
+                if cmd == "COUNT" {
+                    let _ = send(cfd, val_msg(to_string(count)))
+                }
+                if cmd == "SAVE" {
+                    let save_json = to_json(data)
+                    let wr = write_file("mimi-kv-data.json", save_json)
+                    if wr.is_ok() {
+                        let _ = send(cfd, ok_msg("saved"))
+                    } else {
+                        let _ = send(cfd, err_msg("save failed"))
+                    }
+                }
+                if cmd == "LOAD" {
+                    if file_exists("mimi-kv-data.json") {
+                        let rr2 = read_file("mimi-kv-data.json")
+                        if rr2.is_ok() {
+                            let json2 = rr2.unwrap()
+                            if json2 != "" && json_is_valid(json2) {
+                                data = from_json(json2)
+                                let lk2 = keys(data)
+                                count = len(lk2)
+                                let _ = send(cfd, ok_msg("loaded"))
+                            } else {
+                                let _ = send(cfd, err_msg("invalid data"))
+                            }
+                        } else {
+                            let _ = send(cfd, err_msg("read failed"))
+                        }
+                    } else {
+                        let _ = send(cfd, err_msg("no data file"))
+                    }
+                }
+                if cmd == "CLEAR" {
+                    data = map_new()
+                    count = 0
+                    let _ = send(cfd, ok_msg("cleared"))
+                }
+                if cmd == "QUIT" {
+                    let _ = send(cfd, "+BYE\n")
+                }
+            }
+            close_fd(cfd)
+        }
+    }
+
+    close_fd(server_fd)
+    0
+}
