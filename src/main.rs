@@ -8,6 +8,8 @@ use mimi::diagnostic::format::format_simple_error;
 
 #[path = "main/add.rs"]
 mod add;
+#[path = "main/bindgen.rs"]
+mod bindgen;
 #[path = "main/build.rs"]
 mod build;
 #[path = "main/check.rs"]
@@ -42,6 +44,8 @@ mod run;
 mod search;
 #[path = "main/stats.rs"]
 mod stats;
+#[path = "main/tool_stat.rs"]
+mod tool_stat;
 #[path = "main/test.rs"]
 mod test;
 #[path = "main/tree.rs"]
@@ -268,6 +272,25 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Analyze directory statistics (files, dirs, extensions)
+    Stat {
+        /// Directory to analyze (default: current directory)
+        path: Option<PathBuf>,
+        /// Recursive scan depth (default: 1)
+        #[arg(short, long, default_value_t = 1)]
+        depth: u32,
+        /// Show SHA-256 hashes of files
+        #[arg(long)]
+        hash: bool,
+    },
+    /// Generate FFI bindings for all supported languages
+    Bindgen {
+        /// .mimi file with extern declarations
+        path: PathBuf,
+        /// Output directory for generated bindings
+        #[arg(short, long, default_value = "bindings")]
+        output: PathBuf,
+    },
     /// Parse and process .mms files (MimiSpec)
     Mms {
         /// .mms file(s) to parse; use - for stdin
@@ -441,6 +464,13 @@ fn main() {
             latex,
         } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
+        Command::Stat { path, depth, hash } => {
+            let dir = path.as_deref().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+            tool_stat::run(&dir, depth, hash)
+        }
+        Command::Bindgen { path, output } => {
+            bindgen::run(&path, &output)
+        }
         Command::Install { all } => install::install(all),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),

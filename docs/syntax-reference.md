@@ -1,7 +1,7 @@
 # Mimi 语法参考
 
 > 本文档描述 Mimi 语言的完整语法，可作为自举实现的语法底本。
-> 版本: v0.22.4-dev
+> 版本: v0.28.0-dev
 > 数据来源: `src/lexer/`, `src/parser/`, `src/ast.rs`
 
 ## 1. 词法
@@ -735,6 +735,29 @@ cap_def ::= "cap" ident (
 regex_match(text: string, pattern: string) -> bool
 regex_find(text: string, pattern: string) -> string
 regex_replace(text: string, pattern: string, replacement: string) -> string
+```
+
+目录与路径操作（v0.28.0 新增）：
+
+```
+listdir(path: string) -> List<string>        // 列出目录内容
+walk_dir(path: string) -> List<string>       // 递归遍历所有文件
+is_dir(path: string) -> bool                 // 是否目录
+is_file(path: string) -> bool                // 是否文件
+path_join(a: string, b: string) -> string    // 路径拼接
+path_ext(path: string) -> string             // 文件扩展名（不含点）
+path_basename(path: string) -> string        // 文件名
+path_dirname(path: string) -> string         // 父目录
+mkdir_p(path: string) -> bool                // 递归创建目录
+remove_file(path: string) -> bool            // 删除文件
+```
+
+加密操作（v0.28.0 新增）：
+
+```
+sha256(data: string) -> string               // SHA-256 哈希（hex 输出，64 字符）
+base64_encode(data: string) -> string        // Base64 编码
+base64_decode(data: string) -> Result<string, string>  // Base64 解码
 ```
 
 List/Map 方法（通过隐式 trait 调用）：
