@@ -46,16 +46,26 @@ impl Parser {
             TokenKind::Desc => {
                 let span = crate::span::Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                Ok(Stmt::Desc(s, span))
+                if self.at(&TokenKind::LBrace) {
+                    let s = self.parse_brace_block_content()?;
+                    Ok(Stmt::Desc(s, span))
+                } else {
+                    let s = self.expect_string()?;
+                    self.match_semi();
+                    Ok(Stmt::Desc(s, span))
+                }
             }
             TokenKind::Rule => {
                 let span = crate::span::Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                Ok(Stmt::Rule(s, span))
+                if self.at(&TokenKind::LBrace) {
+                    let s = self.parse_brace_block_content()?;
+                    Ok(Stmt::Rule(s, span))
+                } else {
+                    let s = self.expect_string()?;
+                    self.match_semi();
+                    Ok(Stmt::Rule(s, span))
+                }
             }
             TokenKind::Ellipsis => {
                 self.advance();
@@ -205,6 +215,49 @@ impl Parser {
         self.expect(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block()?;
         Ok(Stmt::Alloc { kind, body })
+    }
+
+    /// Parse content inside { ... } as raw text (for desc/rule blocks)
+    fn parse_brace_block_content(&mut self) -> Result<String, ParseError> {
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut text = String::new();
+        let mut depth = 1;
+        let mut first_line = None;
+        let mut first_col = None;
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let tok = self.peek();
+            match &tok.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            let t = tok.kind.source_text();
+            if t == "\n" {
+                text.push('\n');
+            } else if !t.is_empty() {
+                if first_line.is_none() {
+                    first_line = Some(tok.line);
+                    first_col = Some(tok.col);
+                }
+                let base_col = first_col.unwrap_or(0);
+                let relative_col = tok.col.saturating_sub(base_col);
+                if text.ends_with('\n') || text.is_empty() {
+                    text.push_str(&" ".repeat(relative_col));
+                } else {
+                    text.push(' ');
+                }
+                text.push_str(t);
+            }
+            self.advance();
+        }
+        self.expect(TokenKind::RBrace, "`}`")?;
+        self.match_semi();
+        Ok(text.trim().to_string())
     }
 
     fn parse_mms_block(&mut self) -> Result<Stmt, ParseError> {
@@ -608,17 +661,27 @@ impl Parser {
             if self.at(&TokenKind::Desc) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                stmts.push(Stmt::Desc(s, span));
+                if self.at(&TokenKind::LBrace) {
+                    let s = self.parse_brace_block_content()?;
+                    stmts.push(Stmt::Desc(s, span));
+                } else {
+                    let s = self.expect_string()?;
+                    self.match_semi();
+                    stmts.push(Stmt::Desc(s, span));
+                }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                let s = self.expect_string()?;
-                self.match_semi();
-                stmts.push(Stmt::Rule(s, span));
+                if self.at(&TokenKind::LBrace) {
+                    let s = self.parse_brace_block_content()?;
+                    stmts.push(Stmt::Rule(s, span));
+                } else {
+                    let s = self.expect_string()?;
+                    self.match_semi();
+                    stmts.push(Stmt::Rule(s, span));
+                }
                 continue;
             }
             stmts.push(self.parse_stmt()?);
@@ -701,7 +764,11 @@ impl Parser {
             if self.at(&TokenKind::Desc) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                if let Ok(s) = self.expect_string() {
+                if self.at(&TokenKind::LBrace) {
+                    if let Ok(s) = self.parse_brace_block_content() {
+                        stmts.push(Stmt::Desc(s, span));
+                    }
+                } else if let Ok(s) = self.expect_string() {
                     stmts.push(Stmt::Desc(s, span));
                 }
                 continue;
@@ -709,7 +776,11 @@ impl Parser {
             if self.at(&TokenKind::Rule) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                if let Ok(s) = self.expect_string() {
+                if self.at(&TokenKind::LBrace) {
+                    if let Ok(s) = self.parse_brace_block_content() {
+                        stmts.push(Stmt::Rule(s, span));
+                    }
+                } else if let Ok(s) = self.expect_string() {
                     stmts.push(Stmt::Rule(s, span));
                 }
                 continue;
