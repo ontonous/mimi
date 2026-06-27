@@ -878,6 +878,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
+                        } else if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
+                            if let Some(ta) = turbo_type_args.first() {
+                                if let Type::Name(tn, args) = ta {
+                                    if tn == "List" && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        }
+                                    } else {
+                                        self.var_type_names.insert(name.clone(), tn.clone());
+                                    }
+                                }
+                            }
                         }
                         // Track list element type for nested List<List<T>> indexing
                         if let Some(decl_ty) = &ty {

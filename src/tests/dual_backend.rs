@@ -4785,4 +4785,25 @@ fn dual_record_list_i32_field() {
     );
 }
 
+#[test]
+fn dual_from_json_record() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        type Person {
+            name: string,
+            age: i32
+        }
+        func main() -> i32 {
+            let json_str = "{\"name\": \"Alice\", \"age\": 30}"
+            let p = from_json::<Person>(json_str)
+            println(p.name)
+            println(p.age)
+            0
+        }
+    "#,
+        "Alice\n30"
+    );
+}
+
 

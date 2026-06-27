@@ -1085,6 +1085,117 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
                     Ok(ret)
                 }
+                Type::Name(type_name, _) => {
+                    // Record type: deserialize JSON object into struct fields
+                    if let Some(td) = self.type_defs.get(type_name) {
+                        if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                            let llvm_ty = *self.type_llvm.get(type_name)
+                                .ok_or_else(|| CompileError::Generic(format!("type '{}' not registered", type_name)))?;
+                            let sty = match llvm_ty {
+                                BasicTypeEnum::StructType(s) => s,
+                                _ => return Err(CompileError::Generic(format!("type '{}' is not a struct", type_name))),
+                            };
+                            let alloca = self.builder.build_alloca(sty, type_name)
+                                .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                            let json_get_fn = self.module.get_function("json_get_string")
+                                .ok_or("json_get_string not declared")?;
+                            let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                            let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                            let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                            for (i, field) in fields.iter().enumerate() {
+                                let key_global = self.builder.build_global_string_ptr(&field.name, "field_key")
+                                    .map_err(|e| CompileError::LlvmError(format!("global str: {}", e)))?;
+                                let raw_val = self.builder.build_call(
+                                    json_get_fn,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                        BasicMetadataValueEnum::PointerValue(key_global.as_pointer_value()),
+                                    ],
+                                    "json_field",
+                                ).map_err(|e| CompileError::LlvmError(format!("json_get: {}", e)))?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("json_get_string returned void")?
+                                    .into_pointer_value();
+                                let gep = self.gep().build_struct_gep(sty, alloca, i as u32, &field.name)
+                                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                                let field_val = match field.ty {
+                                    crate::ast::Type::Name(ref n, _) if n == "i32" || n == "i64" => {
+                                        let f = json_as_i64_fn.ok_or("mimi_json_as_i64 not declared")?;
+                                        let r = self.builder.build_call(f,
+                                            &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                                            "as_i64",
+                                        ).map_err(|e| CompileError::LlvmError(format!("json_as_i64: {}", e)))?;
+                                        BasicValueEnum::IntValue(self.expect_basic_value(&r, "json_as_i64")?.into_int_value())
+                                    }
+                                    crate::ast::Type::Name(ref n, _) if n == "f64" || n == "f32" => {
+                                        let f = json_as_f64_fn.ok_or("mimi_json_as_f64 not declared")?;
+                                        let r = self.builder.build_call(f,
+                                            &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                                            "as_f64",
+                                        ).map_err(|e| CompileError::LlvmError(format!("json_as_f64: {}", e)))?;
+                                        BasicValueEnum::FloatValue(self.expect_basic_value(&r, "json_as_f64")?.into_float_value())
+                                    }
+                                    crate::ast::Type::Name(ref n, _) if n == "bool" => {
+                                        let f = json_as_bool_fn.ok_or("mimi_json_as_bool not declared")?;
+                                        let r = self.builder.build_call(f,
+                                            &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                                            "as_bool",
+                                        ).map_err(|e| CompileError::LlvmError(format!("json_as_bool: {}", e)))?;
+                                        let iv = self.expect_basic_value(&r, "json_as_bool")?.into_int_value();
+                                        let one = self.context.i64_type().const_int(1, false);
+                                        BasicValueEnum::IntValue(
+                                            self.builder.build_int_compare(inkwell::IntPredicate::EQ, iv, one, "to_bool")
+                                                .map_err(|e| CompileError::LlvmError(format!("to_bool: {}", e)))?
+                                        )
+                                    }
+                                    crate::ast::Type::Name(ref n, _) if n == "string" => {
+                                        // raw_val is already the string value
+                                        let strlen_fn = self.module.get_function("strlen")
+                                            .ok_or("strlen not declared")?;
+                                        let len = self.builder.build_call(strlen_fn,
+                                            &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                                            "strlen",
+                                        ).map_err(|e| CompileError::LlvmError(format!("strlen: {}", e)))?
+                                            .try_as_basic_value_opt()
+                                            .ok_or("strlen returned void")?
+                                            .into_int_value();
+                                        let str_ty = self.context.struct_type(
+                                            &[
+                                                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                                                BasicTypeEnum::IntType(self.context.i64_type()),
+                                            ],
+                                            false,
+                                        );
+                                        let str_alloca = self.builder.build_alloca(str_ty, "str_val")
+                                            .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                                        let ptr_gep = self.gep().build_struct_gep(str_ty, str_alloca, 0, "s_ptr")
+                                            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                                        self.builder.build_store(ptr_gep, raw_val)
+                                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                                        let len_gep = self.gep().build_struct_gep(str_ty, str_alloca, 1, "s_len")
+                                            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                                        self.builder.build_store(len_gep, len)
+                                            .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                                        self.builder.build_load(str_ty, str_alloca, "str_val")
+                                            .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?
+                                    }
+                                    _ => {
+                                        return Err(CompileError::Generic(format!(
+                                            "from_json::<{}>: unsupported field type {:?}",
+                                            type_name, field.ty
+                                        )));
+                                    }
+                                };
+                                self.builder.build_store(gep, field_val)
+                                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                            }
+                            return Ok(alloca.into());
+                        }
+                    }
+                    Err(CompileError::Generic(format!(
+                        "from_json::<{}> codegen not yet implemented", type_name
+                    )))
+                }
                 _ => Err(CompileError::Generic(format!(
                     "from_json::<{:?}> codegen not yet implemented",
                     type_args[0]
