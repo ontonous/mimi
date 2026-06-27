@@ -4,7 +4,25 @@
 
 ### Added
 
-- **mimi-markdown**: Markdown→HTML 转换器项目（~1300 行 Mimi 代码）
+- **mimi-markdown**: Markdown→HTML 转换器项目（647 行 Mimi 代码）
+  - 支持标题、段落、粗体、斜体、行内代码、删除线、链接、图片
+  - 围栏代码块、有序/无序列表、引用、水平线
+  - HTML 转义
+
+### Fixed
+
+- **G-64**: codegen string builtins 接受 Record 字段值（str_substring, str_trim 等）
+- **G-65**: `let mut xs: List<string> = []` 空类型化列表现在可以工作
+- **G-66**: 嵌套作用域允许变量遮蔽（仅同作用域重定义报错）
+- **G-68**: `push()` 支持 Record/StructValue 类型
+- **G-69**: `List<T>` 变量的 var_type_names 存储完整泛型类型名
+- **G-70**: codegen inline if/else 表达式在 while 循环内导致 segfault（变通：使用 let mut + 赋值）
+
+### Known Gaps
+
+- **G-69**: codegen 第二次构建同一文件 segfault（LLVM 状态未重置）
+- **G-65**: `let mut xs: List<T> = []` 在 Record 构造器字段内不工作（需要先声明变量）
+- **G-70**: `let x = if cond { a } else { b }` 在 while 循环内导致 codegen segfault
 
 ---
 
