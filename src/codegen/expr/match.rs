@@ -744,7 +744,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })?;
                     let lit_val = match lit {
                         Lit::Int(n) => self.context.i64_type().const_int(*n as u64, true),
-                        Lit::Bool(b) => self.context.bool_type().const_int(*b as u64, false),
+                        Lit::Bool(b) => {
+                            let b_val = self.context.bool_type().const_int(*b as u64, false);
+                            self.builder
+                                .build_int_z_extend(b_val, self.context.i64_type(), "bool_ext")
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                        }
                         Lit::Unit => self.context.i64_type().const_int(0, false),
                         _ => return Err("unsupported match literal type".into()),
                     };

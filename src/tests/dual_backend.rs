@@ -3149,7 +3149,6 @@ fn dual_rule_requires_via_contract_ok() {
 // ─── 19. Regex builtins (6 tests) ─────────────────────────────
 
 #[test]
-#[ignore = "regex_match returns 0 with OptimizationLevel::None — pre-existing codegen issue"]
 fn dual_regex_match() {
     if !can_link() {
         return;
