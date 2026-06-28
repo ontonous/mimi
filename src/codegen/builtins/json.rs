@@ -309,6 +309,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.expect_basic_value(&result, "json_get_int")
     }
 
+    pub(super) fn compile_json_array_length(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(
+                "json_array_length expects 1 argument".into(),
+            ));
+        }
+        let json_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let func = self
+            .module
+            .get_function("json_array_length")
+            .ok_or_else(|| "codegen: json_array_length not declared".to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(json_ptr)],
+                "json_array_length_call",
+            )
+            .map_err(|e| format!("json_array_length error: {}", e))?
+            .try_as_basic_value_opt()
+            .ok_or("json_array_length returned void")?;
+        Ok(result)
+    }
+
     pub(super) fn compile_json_get_element(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

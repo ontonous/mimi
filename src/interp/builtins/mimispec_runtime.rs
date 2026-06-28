@@ -1,4 +1,6 @@
 use super::*;
+use crate::runtime::{mimi_lexer_tokenize, mimi_parse_source};
+use std::ffi::CString;
 
 impl<'a> Interpreter<'a> {
     // === MimiSpec runtime ===
@@ -7,25 +9,21 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("lexer expects 1 argument (source string)"));
         }
         match &args[0] {
-            Value::String(source) => match mimispec::tokenize(source) {
-                Ok(tokens) => {
-                    let token_values: Vec<Value> = tokens
-                        .iter()
-                        .map(|t| {
-                            Value::Record(None, {
-                                let mut fields = std::collections::HashMap::new();
-                                fields
-                                    .insert("kind".into(), Value::String(format!("{:?}", t.kind)));
-                                fields.insert("line".into(), Value::Int(t.line as i64));
-                                fields.insert("col".into(), Value::Int(t.col as i64));
-                                fields
-                            })
-                        })
-                        .collect();
-                    Ok(Value::List(token_values))
+            Value::String(source) => {
+                let c_source = CString::new(source.as_str()).map_err(|_| {
+                    InterpError::new("lexer: source contains null bytes")
+                })?;
+                let result_ptr = mimi_lexer_tokenize(c_source.as_ptr());
+                if result_ptr.is_null() {
+                    return Ok(Value::String("[]".to_string()));
                 }
-                Err(e) => Err(InterpError::new(format!("lexer error: {}", e))),
-            },
+                let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+                // SAFETY: result_ptr was just allocated by mimi_lexer_tokenize via alloc_c_string/malloc
+                unsafe { libc::free(result_ptr as *mut libc::c_void) };
+                Ok(Value::String(result))
+            }
             _ => Err(InterpError::new("lexer expects a string source")),
         }
     }
@@ -36,30 +34,19 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(source) => {
-                let result = mimispec::parse(source);
-                if result.errors.is_empty() {
-                    // Convert AST to a simple record representation
-                    let mut fields = std::collections::HashMap::new();
-                    fields.insert("imports".into(), Value::List(vec![]));
-                    fields.insert("rules".into(), Value::List(vec![]));
-                    fields.insert("fragments".into(), Value::List(vec![]));
-                    Ok(Value::Record(Some("MmsAst".into()), fields))
-                } else {
-                    let errors: Vec<Value> = result
-                        .errors
-                        .iter()
-                        .map(|e| {
-                            Value::Record(None, {
-                                let mut fields = std::collections::HashMap::new();
-                                fields.insert("message".into(), Value::String(e.to_string()));
-                                fields.insert("line".into(), Value::Int(e.line as i64));
-                                fields.insert("col".into(), Value::Int(e.col as i64));
-                                fields
-                            })
-                        })
-                        .collect();
-                    Ok(Value::Tuple(vec![Value::Bool(false), Value::List(errors)]))
+                let c_source = CString::new(source.as_str()).map_err(|_| {
+                    InterpError::new("parse: source contains null bytes")
+                })?;
+                let result_ptr = mimi_parse_source(c_source.as_ptr());
+                if result_ptr.is_null() {
+                    return Ok(Value::String(r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string()));
                 }
+                // SAFETY: result_ptr was just allocated by mimi_parse_source via alloc_c_string/malloc
+                let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { libc::free(result_ptr as *mut libc::c_void) };
+                Ok(Value::String(result))
             }
             _ => Err(InterpError::new("parse expects a string source")),
         }

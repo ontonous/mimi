@@ -7,6 +7,7 @@ pub mod network;
 pub mod string;
 pub mod time_env;
 
+use crate::codegen::CallSiteValueExt;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
@@ -640,6 +641,12 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // json_array_length(json: i8*) -> i64
+    module.add_function(
+        "json_array_length",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // json_get_element(json: i8*, index: i64) -> i8*
     module.add_function(
         "json_get_element",
@@ -1104,6 +1111,18 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_lexer_tokenize(source: i8*) -> i8* (JSON array of tokens)
+    module.add_function(
+        "mimi_lexer_tokenize",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_parse_source(source: i8*) -> i8* (JSON AST)
+    module.add_function(
+        "mimi_parse_source",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 pub fn is_builtin(name: &str) -> bool {
@@ -1135,7 +1154,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "getenv" | "args"
         | "option_value_or"
         | "to_json" | "from_json"
-        | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid"
+        | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
         // Network builtins
         | "socket" | "connect" | "bind" | "listen" | "accept"
         | "send" | "recv" | "close_fd"
@@ -1263,6 +1282,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "json_is_valid" => self.compile_is_valid_json(args),
             "json_get_string" => self.compile_json_get_string(args),
             "json_get_int" => self.compile_json_get_int(args),
+            "json_array_length" => self.compile_json_array_length(args),
             "json_get_element" => self.compile_json_get_element(args),
             "range" => self.compile_range(args),
             "len" => self.compile_len(args),
@@ -1296,10 +1316,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "close_fd" => self.compile_close_fd(args),
             "http_get" => self.compile_http_get(args),
             "http_post" => self.compile_http_post(args),
-            "lexer" | "parse" => Err(CompileError::BuiltinError(format!(
-                "'{}' is a runtime-only function, not available in codegen",
-                name
-            ))),
+            "lexer" => self.compile_lexer(args),
+            "parse" => self.compile_parse(args),
             "from_int" => self.compile_from_int(args),
             "regex_match" => self.compile_regex_match(args),
             "regex_find" => self.compile_regex_find(args),
@@ -1340,6 +1358,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name
             ))),
         }
+    }
+
+    fn compile_lexer(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("lexer expects 1 argument (source string)".to_string()));
+        }
+        let source_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            _ => return Err(CompileError::TypeMismatch("lexer: first arg must be a string".to_string())),
+        };
+        let func = self.module.get_function("mimi_lexer_tokenize")
+            .ok_or_else(|| "mimi_lexer_tokenize not declared".to_string())?;
+        let result = self.builder.build_call(
+            func,
+            &[BasicMetadataValueEnum::PointerValue(source_ptr)],
+            "lexer_call",
+        ).map_err(|e| CompileError::LlvmError(format!("lexer error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_lexer_tokenize returned void")?;
+        self.wrap_c_string(result.into_pointer_value())
+    }
+
+    fn compile_parse(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("parse expects 1 argument (source string)".to_string()));
+        }
+        let source_ptr = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            _ => return Err(CompileError::TypeMismatch("parse: first arg must be a string".to_string())),
+        };
+        let func = self.module.get_function("mimi_parse_source")
+            .ok_or_else(|| "mimi_parse_source not declared".to_string())?;
+        let result = self.builder.build_call(
+            func,
+            &[BasicMetadataValueEnum::PointerValue(source_ptr)],
+            "parse_call",
+        ).map_err(|e| CompileError::LlvmError(format!("parse error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_parse_source returned void")?;
+        self.wrap_c_string(result.into_pointer_value())
     }
 
     /// G2: Convert an integer to an enum tag value.

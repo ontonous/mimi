@@ -158,6 +158,17 @@ impl Parser {
         }
     }
 
+    /// Check if the current token is `||` or `&&`, skipping any leading newlines.
+    /// Only skips newlines when the operator is found, to avoid consuming SIF terminators.
+    pub(crate) fn try_skip_newlines_for_boolean_op(&mut self) -> bool {
+        let saved = self.pos;
+        self.skip_newlines();
+        let found = matches!(self.peek_kind(), TokenKind::OrOr | TokenKind::AndAnd);
+        if !found {
+            self.pos = saved;
+        }
+        found
+    }
     /// Check if current position is `alloc(Arena) {` or `alloc(System) {` or `alloc(Bump) {`
     pub(crate) fn is_alloc_block(&self) -> bool {
         if !self.at(&TokenKind::Alloc) {

@@ -1,40 +1,49 @@
 # Changelog
 
-## [Unreleased] — 0.28.6-dev
+## [Unreleased] — 0.28.8-dev
 
 ### Added
 
-- **G-91**: `read_file_bytes(path)` — reads entire file as raw bytes (lossy UTF-8)
-- **G-92**: `read_file_partial(path, max_bytes)` — reads first N bytes from file
-- **G-93**: `write_file_bytes(path, data)` — writes raw byte data to file
-- **G-94**: `read_lines_each(path, callback)` — line-by-line processing with closure callback (interp-only, BufReader O(1) memory per line)
-- **G-95**: `read_lines_json(path)` — reads file line-by-line, returns JSON array of lines
-- **G-96**: `regex_find_all(text, pattern)` — finds all non-overlapping matches, returns JSON array
-- **G-97**: `regex_capture_groups(text, pattern)` — extracts capture groups, returns JSON array (interp uses regex crate, codegen uses custom engine)
-- **G-98**: `sort_f64` codegen — bubble sort via `mimi_sort_f64_inplace` runtime function
-- **G-99**: `sort_str` codegen — graceful no-op (string struct swap too complex for codegen)
-- **mimi-log** project: log analyzer demonstrating data pipeline builtins (~170 lines Mimi)
+### Changed
+
+### Fixed
+
+## [v0.28.7] — 2026-06-29
+
+### Added
+
+- **G-100**: `parse(source)` codegen 支持 — 运行时 `mimi_parse_source` 解析 Mimi 源码为 JSON AST
+- **G-101**: `lexer(source)` codegen 支持 — 运行时 `mimi_lexer_tokenize` 词法分析为 JSON tokens
+- **G-102**: `ast_walk(ast, visitor)` AST 遍历框架 — 基于 Record AST 的递归访问器
+- **G-103**: `format()` 整数/浮点数格式说明符 — `{:d}` `{:f}` 支持
+- **G-104**: 模块前向声明 `module Name;` 语法
+- **G-105**: `Map<K,V>` 泛型映射类型 — 类型化 map 操作
+- **mimi-lint** 项目: Mimi 代码静态检查器 (~1200 行 Mimi)
+- **`json_array_length(json_str)` 内置函数** — 运行时无依赖 JSON 数组长度计算
+- **mimi-lint** 项目: `projects/mimi-lint/src/main.mimi` 完成（W001/W002/W004/W005/W006 规则）
+- 多行 `||`/`&&` 布尔链（`a\n|| b` 和 `a ||\nb`）
+- 多行函数调用（`f(\n  a,\n  b\n)`）
+- 多行切片/索引（`xs[\n  1 ..\n  3\n]`）
 
 ### Changed
 
-- 21 golden IR files updated (new runtime function declarations)
-
-- **G-87**: `exec(command)` 进程执行内置函数 — 返回 `ExecResult { exit_code: i32, stdout: string, stderr: string }`
-- **G-88**: `file_stat(path)` 文件元数据内置函数 — 返回 `StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }`
-- **G-89**: `append_file(path, content)` 文件追加写入内置函数 — 返回 `bool`
-- **G-90**: `set_env(key, value)` 环境变量设置内置函数 — 返回 `bool`
-- `ExecResult`/`StatResult` 内置 Record 类型注册（typeck + codegen）
-- `std/fs.mimi`: `stat()` 和 `append()` 包装函数
-- `std/env.mimi`: `set()` 包装函数
-- 7 个 L1 双后端测试：exec_basic/exec_stdout/exec_exit_code/file_stat_file/file_stat_dir/append_file/set_env
+- **`push()` 返回 `unit`** 而非 `List<T>` — 防止 `x = push(x, e)` 模式，强制使用 `let mut` + 语句式 push
+- **`json_get_string`** 缺失键返回 `""` 而非报错；数组/对象值返回 JSON 序列化
+- **`json_get_element`** 越界返回 `""` 而非报错
+- **解析器 SIF** 改进: `parse_args()` 内部跳过换行；二元运算后跳过换行；括号/方括号内跳过换行
+- **`extract_list_type`** 辅助函数移除（push 类型变更后废弃）
+- 31 个 golden IR 文件更新（`json_array_length` 运行时函数声明）
+- Clippy 零警告（`if_same_then_else` + `nonminimal_bool` 修复）
 
 ### Fixed
 
 - **P0**: `push()` 在 if/while 块内不再错误地传播返回值，修复 eval_block 回归导致 return/break 值丢失（Bug 1）
-- **P0**: push() 类型检查器返回 `List<T>` 而非 `unit`，支持辅助函数模式（Bug 2）
+- **P0**: push() 类型检查器返回正确的 `unit` 类型（Bug 2）
 - **Bug 3**: 空列表 `[]` 在赋值中继承变量声明的元素类型
 - **Bug 5**: `args()` 现在转发 `--` 后的 CLI 参数
 - **Bug 6**: `[] as List<T>` 语法解析和运行时支持
+- **Bug**: `parse_expr_inner` 中无条件 `skip_newlines()` 导致 `*x = 1\n*y = 2` 被误解析为 `1 * y = 2`
+- **Bug**: `json_get_string` 对字符串值返回带引号的原始 JSON 而非解引用的纯文本
 
 ### Added
 
@@ -45,14 +54,16 @@
 ### Added (Projects)
 
 - **mimi-make**: 轻量级构建工具（Makefile 解析、增量构建、依赖递归）
+- **mimi-lint**: 静态代码检查器（snake_case 命名、空函数体、不可达代码、圈复杂度、函数长度）
 
 ### Known Gaps (discovered via mimi-make)
 
 - **BUG-PUSH-PASS**: `push()` 通过辅助函数调用不修改原列表（列表按值传递，非按引用）
 
-### Changed
+### Tests
 
-- 21 个 golden IR 文件更新（新增运行时函数声明）
+- 13 个新测试：6 个多行表达式（`dual_multiline_*`）、2 个 push 语义（`dual_push_*`）、5 个 `json_array_length`
+- 测试总数: **2444** 通过, 0 失败, 23 忽略
 
 ## [v0.28.4] — 2026-06-28
 

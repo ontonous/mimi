@@ -5170,3 +5170,143 @@ fn dual_read_lines_each() {
         interp::Value::Int(3)
     );
 }
+
+// ─── v0.28.7: multiline expressions ──────────────────────────
+
+#[test]
+fn dual_multiline_or_operator_after_newline() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = false
+            let b = true
+            let x = a
+                || b
+            let r = if x { 1 } else { 0 }
+            println(r); 0
+        }
+        "#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_multiline_or_rhs_after_newline() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = false
+            let b = true
+            let x = a ||
+                b
+            let r = if x { 1 } else { 0 }
+            println(r); 0
+        }
+        "#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_multiline_and_chain() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = true &&
+                true &&
+                false
+            let r = if x { 1 } else { 0 }
+            println(r); 0
+        }
+        "#,
+        "0"
+    );
+}
+
+#[test]
+fn dual_multiline_func_call() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func add(a: i32, b: i32) -> i32 { a + b }
+        func main() -> i32 {
+            let r = add(
+                1,
+                2
+            )
+            println(r); 0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_multiline_slice() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3, 4, 5]
+            let r = len(xs[
+                1 ..
+                3
+            ])
+            println(r); 0
+        }
+        "#,
+        "2"
+    );
+}
+
+#[test]
+fn dual_multiline_index() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3, 4, 5]
+            let r = xs[
+                2
+            ]
+            println(r); 0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_push_as_statement() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut xs = [1, 2]
+            push(xs, 3)
+            let r = len(xs)
+            println(r); 0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_push_in_block_no_leak() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut xs = [1, 2]
+            if true { push(xs, 3) } else { push(xs, 4) }
+            let r = len(xs)
+            println(r); 0
+        }
+        "#,
+        "3"
+    );
+}

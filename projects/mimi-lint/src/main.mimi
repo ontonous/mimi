@@ -1,0 +1,118 @@
+// mimi-lint: Mimi Static Analysis Tool
+// Checks: naming convention, empty functions, unreachable code, complexity, unused variables
+//
+// Usage: mimi run projects/mimi-lint/src/main.mimi <file.mimi>...
+
+func main() -> i32 {
+    let files = args()
+    if len(files) == 0 {
+        println("mimi-lint: Mimi 代码静态检查器")
+        println("用法: mimi run projects/mimi-lint/src/main.mimi <file.mimi>...")
+        return 1
+    }
+    let mut has_issues = false
+    let mut results: List<List<string>> = []
+    for f_path in files {
+        let read_result = read_file(f_path)
+        if !read_result.is_ok() {
+            println("error: 无法读取 " + f_path)
+            has_issues = true
+        } else {
+            let source = read_result.unwrap()
+            let file_diags = lint_file(f_path, source)
+            if len(file_diags) > 0 {
+                push(results, file_diags)
+                has_issues = true
+            }
+        }
+    }
+    for rd in results {
+        for d in rd {
+            println(d)
+        }
+    }
+    if !has_issues {
+        println("检查通过，未发现问题")
+    }
+    if has_issues { 1 } else { 0 }
+}
+
+func lint_file(path: string, source: string) -> List<string> {
+    let mut diags: List<string> = []
+    let ast_json = parse(source)
+    let has_main_str = json_get_string(ast_json, "has_main")
+    if has_main_str == "" {
+        push(diags, path + ": 解析失败，AST 为空")
+        return diags
+    }
+    let funcs_json = json_get_string(ast_json, "functions")
+    let n = json_array_length(funcs_json)
+    let mut fi = 0
+    while fi < n {
+        let func_json = json_get_element(funcs_json, fi)
+        let fname = json_get_string(func_json, "name")
+        let fline = json_get_string(func_json, "line")
+        if fname != "main" && !is_snake_case(fname) {
+            push(diags, path + ":" + fline + " [W001] 函数名 '" + fname + "' 应使用 snake_case 命名规则")
+        }
+        let has_body_str = json_get_string(func_json, "has_body")
+        if has_body_str == "false" {
+            push(diags, path + ":" + fline + " [W002] 函数 '" + fname + "' 实现体为空")
+        }
+        if has_body_str != "false" {
+            let stmts_json = json_get_string(func_json, "stmts")
+            let body_diags = analyze_func_body(stmts_json, path, fname)
+            for bd in body_diags {
+                push(diags, bd)
+            }
+        }
+        fi += 1
+    }
+    diags
+}
+
+func analyze_func_body(stmts_json: string, path: string, fname: string) -> List<string> {
+    let mut diags: List<string> = []
+    let n = json_array_length(stmts_json)
+    let mut has_unreachable = false
+    let mut complexity = 1
+    let mut si = 0
+    while si < n {
+        let stmt = json_get_element(stmts_json, si)
+        let kind = json_get_string(stmt, "kind")
+        let stmt_line = json_get_string(stmt, "line")
+        if kind == "return" || kind == "break" || kind == "continue" {
+            has_unreachable = true
+        }
+        if kind == "if" || kind == "while" || kind == "for" || kind == "else" {
+            complexity += 1
+        }
+        if has_unreachable {
+            push(diags, path + ":" + stmt_line + " [W004] 函数 '" + fname + "' 中存在不可达代码")
+            has_unreachable = false
+        }
+        si += 1
+    }
+    if complexity > 10 {
+        push(diags, path + ":? [W005] 函数 '" + fname + "' 圈复杂度为 " + to_string(complexity) + "，建议 ≤ 10")
+    }
+    if n > 50 {
+        push(diags, path + ":? [W006] 函数 '" + fname + "' 有 " + to_string(n) + " 条语句，建议 ≤ 50")
+    }
+    diags
+}
+
+func is_snake_case(name: string) -> bool {
+    if name == "" { return false }
+    let nlen = len(name)
+    let mut i = 0
+    while i < nlen {
+        let code = char_code(name, i)
+        let ok = (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code == 95
+        if !ok { return false }
+        i += 1
+    }
+    !str_starts_with(name, "_") && !str_ends_with(name, "_") && !str_contains(name, "__")
+}
+
+

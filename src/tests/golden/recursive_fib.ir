@@ -131,6 +131,8 @@ declare ptr @json_get_string(ptr, ptr)
 
 declare i64 @json_get_int(ptr, ptr)
 
+declare i64 @json_array_length(ptr)
+
 declare ptr @json_get_element(ptr, i64)
 
 declare i64 @mimi_json_as_i64(ptr)
@@ -238,6 +240,10 @@ declare ptr @mimi_sha256(ptr)
 declare ptr @mimi_base64_encode(ptr)
 
 declare ptr @mimi_base64_decode(ptr)
+
+declare ptr @mimi_lexer_tokenize(ptr)
+
+declare ptr @mimi_parse_source(ptr)
 
 define i64 @fib(i64 %0) {
 entry:

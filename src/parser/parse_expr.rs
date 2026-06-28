@@ -22,6 +22,8 @@ impl Parser {
                 lhs = self.desugar_pipe(lhs, rhs)?;
                 continue;
             }
+            // Skip newlines before low-precedence boolean operators (multiline ||/&& chains)
+            self.try_skip_newlines_for_boolean_op();
             let (op, prec, right_assoc) = match self.peek_kind() {
                 TokenKind::OrOr => (BinOp::Or, 1, false),
                 TokenKind::AndAnd => (BinOp::And, 2, false),
@@ -49,6 +51,8 @@ impl Parser {
                 break;
             }
             self.advance();
+            // Skip newlines after binary operator before RHS (multiline expressions)
+            self.skip_newlines();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let rhs = self.parse_expr(next_min)?;
             lhs = lhs.binary(op, rhs);
@@ -68,6 +72,8 @@ impl Parser {
                 lhs = self.desugar_pipe(lhs, rhs)?;
                 continue;
             }
+            // Skip newlines before low-precedence boolean operators (multiline ||/&& chains)
+            self.try_skip_newlines_for_boolean_op();
             let (op, prec, right_assoc) = match self.peek_kind() {
                 TokenKind::OrOr => (BinOp::Or, 1, false),
                 TokenKind::AndAnd => (BinOp::And, 2, false),
@@ -378,6 +384,7 @@ impl Parser {
             if self.at(&TokenKind::LParen) {
                 self.advance();
                 let args = self.parse_args()?;
+                self.skip_newlines();
                 self.expect(TokenKind::RParen, "`)`")?;
                 expr = expr.call(args);
             } else if self.at(&TokenKind::Dot) {
@@ -414,10 +421,12 @@ impl Parser {
 
     fn parse_args(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut args = Vec::new();
+        self.skip_newlines();
         if self.at(&TokenKind::RParen) {
             return Ok(args);
         }
         loop {
+            self.skip_newlines();
             // Check for named arg: `ident = expr`
             if let Some(name) = self.peek_named_arg() {
                 self.expect_ident()?;
@@ -427,10 +436,12 @@ impl Parser {
             } else {
                 args.push(self.parse_expr(0)?);
             }
+            self.skip_newlines();
             if !self.at(&TokenKind::Comma) {
                 break;
             }
             self.advance();
+            self.skip_newlines();
         }
         Ok(args)
     }
@@ -456,27 +467,33 @@ impl Parser {
     /// Shared by the primary expression and identifier postfix paths.
     fn parse_slice_or_index(&mut self, target: Expr) -> Result<Expr, ParseError> {
         self.advance(); // skip [
+        self.skip_newlines();
         if self.at(&TokenKind::DotDot) {
             // expr[..end]
             self.advance();
+            self.skip_newlines();
             let end = if self.at(&TokenKind::RBracket) {
                 None
             } else {
                 Some(Box::new(self.parse_expr(0)?))
             };
+            self.skip_newlines();
             self.expect(TokenKind::RBracket, "`]`")?;
             Ok(target.with_slice(None, end))
         } else {
             // Parse start, stopping before `..` to handle slice syntax
             let first = self.parse_expr_without_range()?;
+            self.skip_newlines();
             if self.at(&TokenKind::DotDot) {
                 // expr[start..end] or expr[start..]
                 self.advance();
                 let end = if self.at(&TokenKind::RBracket) {
                     None
                 } else {
+                    self.skip_newlines();
                     Some(Box::new(self.parse_expr(0)?))
                 };
+                self.skip_newlines();
                 self.expect(TokenKind::RBracket, "`]`")?;
                 Ok(target.with_slice(Some(Box::new(first)), end))
             } else {

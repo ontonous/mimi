@@ -81,9 +81,9 @@ func main() -> f64 {
 fn builtin_push() {
     let src = r#"
 func main() -> i32 {
-    let a = [1, 2, 3];
-    let result = push(a, 4);
-    len(result)
+    let mut a = [1, 2, 3];
+    push(a, 4);
+    len(a)
 }
 "#;
     let v = run_source(src);
@@ -689,14 +689,15 @@ func main() -> i32 {
 #[test]
 fn builtin_push_via_helper() {
     let src = r#"
-func push_two(xs: List<i32>, a: i32, b: i32) -> List<i32> {
-    let ys = push(xs, a);
-    push(ys, b)
+func push_two(xs: List<i32>, a: i32, b: i32) -> i32 {
+    let mut ys = xs;
+    push(ys, a);
+    push(ys, b);
+    len(ys)
 }
 
 func main() -> i32 {
-    let result = push_two([1], 2, 3)
-    len(result)
+    push_two([1], 2, 3)
 }
 "#;
     let v = run_source(src);

@@ -443,20 +443,15 @@ impl<'a> Interpreter<'a> {
         match callee {
             Expr::Ident(name) => {
                 let result = self.call_named(name, vals)?;
-                // push(list, elem) mutates the list variable in place in the interpreter,
-                // matching the codegen semantics where the list pointer is modified.
+                // push(list, elem) mutates the list in place and returns Unit.
+                // Returning Unit prevents push from leaking as a block value.
                 if name == "push" && !args.is_empty() {
                     if let Expr::Ident(var_name) = &args[0] {
                         if let Value::List(_) = &result {
-                            // Only mutate the source variable if it was declared mut;
-                            // otherwise push behaves as a pure function returning a new list.
                             if self.is_mutable(var_name) {
                                 self.assign(var_name, result.clone())?;
-                                // Return Unit so push() as a block-ending expression
-                                // does not propagate a List value and shadow the
-                                // function's actual return value.
-                                return Ok(Value::Unit);
                             }
+                            return Ok(Value::Unit);
                         }
                     }
                 }

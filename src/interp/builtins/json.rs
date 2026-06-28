@@ -63,18 +63,9 @@ impl<'a> Interpreter<'a> {
                     })),
                     Some(serde_json::Value::Number(n)) => Ok(Value::String(n.to_string())),
                     Some(serde_json::Value::Null) => Ok(Value::String("null".into())),
-                    Some(serde_json::Value::Array(_)) => Err(InterpError::new(format!(
-                        "json_get_string: key '{}' is an array, not a string",
-                        key
-                    ))),
-                    Some(serde_json::Value::Object(_)) => Err(InterpError::new(format!(
-                        "json_get_string: key '{}' is an object, not a string",
-                        key
-                    ))),
-                    None => Err(InterpError::new(format!(
-                        "json_get_string: key '{}' not found",
-                        key
-                    ))),
+                    // For arrays, objects, and other types, return JSON representation
+                    Some(val) => Ok(Value::String(val.to_string())),
+                    None => Ok(Value::String(String::new())),
                 }
             }
             _ => Err(InterpError::new("json_get_string expects (string, string)")),
@@ -112,6 +103,23 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_json_array_length(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("json_array_length expects 1 argument"));
+        }
+        match &args[0] {
+            Value::String(json) => {
+                let jv: serde_json::Value = serde_json::from_str(json)
+                    .map_err(|e| InterpError::new(format!("json_array_length parse error: {}", e)))?;
+                match jv {
+                    serde_json::Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
+                    _ => Err(InterpError::new("json_array_length: value is not an array")),
+                }
+            }
+            _ => Err(InterpError::new("json_array_length expects a string")),
+        }
+    }
+
     pub(crate) fn builtin_json_get_element(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new("json_get_element expects 2 arguments"));
@@ -124,10 +132,7 @@ impl<'a> Interpreter<'a> {
                 let index = *idx as usize;
                 match jv.get(index) {
                     Some(val) => Ok(Value::String(val.to_string())),
-                    None => Err(InterpError::new(format!(
-                        "json_get_element: index {} out of bounds",
-                        index
-                    ))),
+                    None => Ok(Value::String(String::new())),
                 }
             }
             _ => Err(InterpError::new("json_get_element expects (string, int)")),

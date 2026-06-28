@@ -136,12 +136,13 @@ impl<'a> Checker<'a> {
             "push" => {
                 if args.len() != 2 {
                     self.emit_code(crate::diagnostic::codes::E0242, "push expects 2 arguments");
-                    return Type::Name("unit".into(), vec![]);
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
                 }
-                let list_ty = self.infer_expr(&args[0], scopes);
-                self.infer_expr(&args[1], scopes);
-                // push returns List<T> matching the first argument's element type
-                return extract_list_type(&list_ty);
+                // push mutates in place; returns Unit (not List) so block-ending
+                // push() doesn't propagate the list as the block's return value.
+                return Type::Name("unit".into(), vec![]);
             }
             "pop" => {
                 if args.len() != 1 {
@@ -268,7 +269,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+                return Type::Name("string".into(), vec![]);
             }
             "parse" => {
                 if args.len() != 1 {
@@ -279,7 +280,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                return Type::Name("string".into(), vec![]);
             }
             "args" => {
                 if !args.is_empty() {
@@ -1139,6 +1140,17 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i32".into(), vec![]);
             }
+            "json_array_length" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "json_array_length expects 1 argument",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
             "json_get_element" => {
                 if args.len() != 2 {
                     self.emit_code(
@@ -1647,20 +1659,4 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// Extract the return type of `push`.  If the argument type is a `List<T>`,
-/// returns `List<T>` (or `List<unknown>` as fallback).
-fn extract_list_type(ty: &Type) -> Type {
-    match ty {
-        Type::Name(name, args) if name == "List" => {
-            Type::Name("List".into(), args.clone())
-        }
-        Type::TypeVar(_) => {
-            // Not yet resolved — assume List with unknown element
-            Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])])
-        }
-        _ => {
-            // Fallback for non-List types (error will be caught elsewhere)
-            Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])])
-        }
-    }
-}
+
