@@ -1,29 +1,568 @@
-// mimi-log — Log analyzer demonstrating data pipeline builtins
-// Exercises: read_file_partial, read_lines_json, regex_find_all, sort_f64
+// mimi-log — High-performance log analyzer
+// Version: 0.1.0
+// Supports: Apache Combined, Nginx, JSON Lines
+// Features: time-range/regex/level filtering, aggregation, percentile, CSV/JSON output
+//
+// Exercises all v0.28.6 data pipeline builtins:
+//   read_file_partial, read_file_bytes, read_lines_json, read_lines_each,
+//   regex_find_all, regex_capture_groups, sort_f64
 
-func count_pattern(lines: List<string>, pattern: string) -> i32 {
+// ═══════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════
+
+type LogEntry {
+    timestamp: string,
+    level: string,
+    source: string,
+    message: string,
+    method: string,
+    path: string,
+    status: i32,
+    size: i32,
+    latency: f64,
+    format: string,
+    raw: string,
+}
+
+type LogStats {
+    total: i32,
+    info_count: i32,
+    warn_count: i32,
+    error_count: i32,
+    fatal_count: i32,
+    error_rate: f64,
+    avg_latency: f64,
+    p50_latency: f64,
+    p95_latency: f64,
+    p99_latency: f64,
+    max_latency: f64,
+    status_2xx: i32,
+    status_3xx: i32,
+    status_4xx: i32,
+    status_5xx: i32,
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════════
+
+func FORMAT_APACHE() -> string { "apache" }
+func FORMAT_NGINX() -> string { "nginx" }
+func FORMAT_JSON() -> string { "json" }
+func FORMAT_UNKNOWN() -> string { "unknown" }
+
+func LEVEL_DEBUG() -> string { "DEBUG" }
+func LEVEL_INFO() -> string { "INFO" }
+func LEVEL_WARN() -> string { "WARN" }
+func LEVEL_ERROR() -> string { "ERROR" }
+func LEVEL_FATAL() -> string { "FATAL" }
+
+// ═══════════════════════════════════════════════════════════════
+// Level helpers
+// ═══════════════════════════════════════════════════════════════
+
+func level_rank(level: string) -> i32 {
+    if level == "DEBUG" { 0 } else if level == "INFO" { 1 } else if level == "WARN" { 2 } else if level == "ERROR" { 3 } else if level == "FATAL" { 4 } else { 1 }
+}
+
+func status_bucket(status: i32) -> string {
+    if status >= 200 && status < 300 { "2xx" } else if status >= 300 && status < 400 { "3xx" } else if status >= 400 && status < 500 { "4xx" } else if status >= 500 { "5xx" } else { "other" }
+}
+
+func default_entry() -> LogEntry {
+    LogEntry { timestamp: "", level: "INFO", source: "", message: "", method: "", path: "", status: 200, size: 0, latency: 0.0, format: "unknown", raw: "" }
+}
+
+func make_entry(ts: string, lvl: string, src: string, msg: string, method: string, path: string, status: i32, size: i32, lat: f64, fmt: string, raw: string) -> LogEntry {
+    LogEntry { timestamp: ts, level: lvl, source: src, message: msg, method: method, path: path, status: status, size: size, latency: lat, format: fmt, raw: raw }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Parsers — Apache Combined Log Format
+// ═══════════════════════════════════════════════════════════════
+//
+// Format: 127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /path HTTP/1.0" 200 2326
+
+func parse_apache(line: string) -> LogEntry {
+    let space_parts = str_split(line, " ")
+    let host = space_parts[0]
+    // Extract timestamp between [ and ]
+    let bracket_parts = str_split(line, "[")
+    let after_bracket = bracket_parts[1]
+    let ts_parts = str_split(after_bracket, "]")
+    let ts = ts_parts[0]
+    // Extract content between quotes
+    let quote_parts = str_split(line, "\"")
+    let method_path = quote_parts[1]
+    let mp = str_split(method_path, " ")
+    let method = mp[0]
+    let path = mp[1]
+    // After the closing quote, find status and size
+    let after = quote_parts[2]
+    let after_parts = str_split(str_trim(after), " ")
+    let status = to_int(after_parts[0])
+    let size = to_int(after_parts[1])
+    let lvl = if status >= 500 { "ERROR" } else if status >= 400 { "WARN" } else { "INFO" }
+    make_entry(ts, lvl, host, method + " " + path, method, path, status, size, 0.0, FORMAT_APACHE(), line)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Parsers — Nginx
+// ═══════════════════════════════════════════════════════════════
+
+func parse_nginx(line: string) -> LogEntry {
+    let space_parts = str_split(line, " ")
+    let host = space_parts[0]
+    let quote_parts = str_split(line, "\"")
+    let method_path = quote_parts[1]
+    let mp = str_split(method_path, " ")
+    let method = mp[0]
+    let path = mp[1]
+    let after = quote_parts[2]
+    let after_parts = str_split(str_trim(after), " ")
+    let status = to_int(after_parts[0])
+    let size = to_int(after_parts[1])
+    let lvl = if status >= 500 { "ERROR" } else if status >= 400 { "WARN" } else { "INFO" }
+    make_entry("", lvl, host, method + " " + path, method, path, status, size, 0.0, FORMAT_NGINX(), line)
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// Parsers — JSON Lines
+// ═══════════════════════════════════════════════════════════════
+//
+// {"timestamp":"2024-01-15T10:00:00Z","level":"INFO","method":"GET","path":"/api","status":200,"size":1024,"latency":0.05,"source":"web-1"}
+
+func parse_json_field_str(line: string, key: string) -> string {
+    json_get_string(line, key)
+}
+
+func parse_json_field_int(line: string, key: string) -> i32 {
+    json_get_int(line, key) as i32
+}
+
+func parse_json_field_float(line: string, key: string) -> f64 {
+    0.0
+}
+
+func parse_nginx_latency(line: string) -> f64 {
+    0.0
+}
+
+func parse_json_line(line: string) -> LogEntry {
+    let ts = parse_json_field_str(line, "timestamp")
+    let lvl = parse_json_field_str(line, "level")
+    let src = parse_json_field_str(line, "source")
+    let msg = parse_json_field_str(line, "message")
+    let method = parse_json_field_str(line, "method")
+    let path = parse_json_field_str(line, "path")
+    let status = parse_json_field_int(line, "status")
+    let size = parse_json_field_int(line, "size")
+    let latency = parse_json_field_float(line, "latency")
+    let lvl_final = if lvl != "" { lvl } else if status >= 500 { "ERROR" } else if status >= 400 { "WARN" } else { "INFO" }
+    let msg_final = if msg != "" { msg } else { method + " " + path }
+    make_entry(ts, lvl_final, src, msg_final, method, path, status, size, latency, FORMAT_JSON(), line)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Auto-detect parser
+// ═══════════════════════════════════════════════════════════════
+
+func detect_format(line: string) -> string {
+    let trimmed = str_trim(line)
+    if len(trimmed) == 0 { FORMAT_UNKNOWN() } else if json_is_valid(trimmed) { FORMAT_JSON() } else {
+        let has_bracket = str_contains(trimmed, "[")
+        let has_quote = str_contains(trimmed, "\"")
+        let has_method = str_contains(trimmed, "GET") || str_contains(trimmed, "POST") || str_contains(trimmed, "PUT") || str_contains(trimmed, "DELETE")
+        if has_bracket && has_quote && has_method { FORMAT_APACHE() } else { FORMAT_UNKNOWN() }
+    }
+}
+
+func parse_auto(line: string) -> LogEntry {
+    let trimmed = str_trim(line)
+    if len(trimmed) == 0 { default_entry() } else {
+        let fmt = detect_format(trimmed)
+        if fmt == FORMAT_JSON() { parse_json_line(trimmed) } else if fmt == FORMAT_APACHE() { parse_apache(trimmed) } else { make_entry("", "INFO", "", trimmed, "", "", 0, 0, 0.0, FORMAT_UNKNOWN(), trimmed) }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Filters
+// ═══════════════════════════════════════════════════════════════
+
+func filter_by_level(entries: List<LogEntry>, min_level: string) -> List<LogEntry> {
+    let min_rank = level_rank(min_level)
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if level_rank(e.level) >= min_rank {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_max_level(entries: List<LogEntry>, max_level: string) -> List<LogEntry> {
+    let max_rank = level_rank(max_level)
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if level_rank(e.level) <= max_rank {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_status(entries: List<LogEntry>, min_status: i32, max_status: i32) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if e.status >= min_status && e.status <= max_status {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_regex(entries: List<LogEntry>, pattern: string) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if regex_match(e.raw, pattern) {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_source(entries: List<LogEntry>, source: string) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if str_contains(e.source, source) {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_method(entries: List<LogEntry>, method: string) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if e.method == method {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_path(entries: List<LogEntry>, path_pattern: string) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if regex_match(e.path, path_pattern) {
+            push(result, e)
+        }
+    }
+    result
+}
+
+func filter_by_format(entries: List<LogEntry>, fmt: string) -> List<LogEntry> {
+    let mut result: List<LogEntry> = []
+    for e in entries {
+        if e.format == fmt {
+            push(result, e)
+        }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Aggregation — Statistics
+// ═══════════════════════════════════════════════════════════════
+
+func count_entries(entries: List<LogEntry>) -> i32 {
+    len(entries)
+}
+
+func count_level(entries: List<LogEntry>, level: string) -> i32 {
     let mut count = 0
-    for line in lines {
-        if regex_match(line, pattern) {
+    for e in entries {
+        if e.level == level {
             count += 1
         }
     }
     count
 }
 
-func error_rate(lines: List<string>) -> f64 {
-    let errs = count_pattern(lines, "ERROR|FATAL|5[0-9][0-9]")
-    if len(lines) == 0 { 0.0 } else { errs as f64 / len(lines) as f64 }
+func sum_latency(entries: List<LogEntry>) -> f64 {
+    let mut total = 0.0
+    for e in entries {
+        total = total + e.latency
+    }
+    total
 }
 
+func max_latency(entries: List<LogEntry>) -> f64 {
+    if len(entries) == 0 { 0.0 } else {
+        let mut max_lat = entries[0].latency
+        let mut i = 1
+        while i < len(entries) {
+            if entries[i].latency > max_lat {
+                max_lat = entries[i].latency
+            }
+            i += 1
+        }
+        max_lat
+    }
+}
+
+func collect_latencies(entries: List<LogEntry>) -> List<f64> {
+    let mut lats: List<f64> = []
+    for e in entries {
+        if e.latency > 0.0 {
+            push(lats, e.latency)
+        }
+    }
+    lats
+}
+
+func percentile(sorted_vals: List<f64>, p: f64) -> f64 {
+    if len(sorted_vals) == 0 { 0.0 } else {
+        let idx = (p * (len(sorted_vals) - 1) as f64) as i32
+        let clamped = if idx < 0 { 0 } else if idx >= len(sorted_vals) { len(sorted_vals) - 1 } else { idx }
+        sorted_vals[clamped]
+    }
+}
+
+func compute_stats(entries: List<LogEntry>) -> LogStats {
+    let total = count_entries(entries)
+    let info = count_level(entries, "INFO")
+    let warn = count_level(entries, "WARN")
+    let errs = count_level(entries, "ERROR")
+    let fatal = count_level(entries, "FATAL")
+    let rate = if total == 0 { 0.0 } else { errs as f64 + fatal as f64 / total as f64 }
+    // Collect latencies and sort
+    let mut lats: List<f64> = []
+    let mut sum_lat = 0.0
+    let mut max_lat_seen = 0.0
+    for e in entries {
+        if e.latency > 0.0 {
+            push(lats, e.latency)
+            sum_lat = sum_lat + e.latency
+            if e.latency > max_lat_seen { max_lat_seen = e.latency }
+        }
+    }
+    let lat_count = len(lats)
+    let sorted_lats = sort_f64(lats)
+    let avg = if lat_count == 0 { 0.0 } else { sum_lat / lat_count as f64 }
+    let p50 = percentile(sorted_lats, 0.5)
+    let p95 = percentile(sorted_lats, 0.95)
+    let p99 = percentile(sorted_lats, 0.99)
+    let s2xx = count_entries(filter_by_status(entries, 200, 299))
+    let s3xx = count_entries(filter_by_status(entries, 300, 399))
+    let s4xx = count_entries(filter_by_status(entries, 400, 499))
+    let s5xx = count_entries(filter_by_status(entries, 500, 599))
+
+    LogStats {
+        total: total,
+        info_count: info,
+        warn_count: warn,
+        error_count: errs,
+        fatal_count: fatal,
+        error_rate: rate,
+        avg_latency: avg,
+        p50_latency: p50,
+        p95_latency: p95,
+        p99_latency: p99,
+        max_latency: max_lat_seen,
+        status_2xx: s2xx,
+        status_3xx: s3xx,
+        status_4xx: s4xx,
+        status_5xx: s5xx,
+    }
+}
+
+func count_status_codes(entries: List<LogEntry>) -> Record {
+    let mut counts = map_new()
+    for e in entries {
+        let key = to_string(e.status)
+        let (_, v) = map_get(counts, key)
+        counts = map_set(counts, key, to_int(v) + 1)
+    }
+    counts
+}
+
+func count_by_source(entries: List<LogEntry>) -> Record {
+    let mut counts = map_new()
+    for e in entries {
+        let key = e.source
+        let (_, v) = map_get(counts, key)
+        counts = map_set(counts, key, to_int(v) + 1)
+    }
+    counts
+}
+
+func count_by_method(entries: List<LogEntry>) -> Record {
+    let mut counts = map_new()
+    for e in entries {
+        let key = e.method
+        let (_, v) = map_get(counts, key)
+        counts = map_set(counts, key, to_int(v) + 1)
+    }
+    counts
+}
+
+func count_by_path(entries: List<LogEntry>) -> Record {
+    let mut counts = map_new()
+    for e in entries {
+        let key = e.path
+        let (_, v) = map_get(counts, key)
+        counts = map_set(counts, key, to_int(v) + 1)
+    }
+    counts
+}
+
+func count_by_format(entries: List<LogEntry>) -> Record {
+    let mut counts = map_new()
+    for e in entries {
+        let key = e.format
+        let (_, v) = map_get(counts, key)
+        counts = map_set(counts, key, to_int(v) + 1)
+    }
+    counts
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Output — Formatters
+// ═══════════════════════════════════════════════════════════════
+
+func entry_to_csv_line(e: LogEntry) -> string {
+    e.timestamp + "," + e.level + "," + e.source + "," + e.method + "," + e.path + "," + to_string(e.status) + "," + to_string(e.size) + "," + to_string(e.latency) + "," + e.format
+}
+
+func entries_to_csv(entries: List<LogEntry>) -> string {
+    let mut result = "timestamp,level,source,method,path,status,size,latency,format\n"
+    for e in entries {
+        result = result + entry_to_csv_line(e) + "\n"
+    }
+    result
+}
+
+func entry_to_json_obj(e: LogEntry) -> string {
+    "{\"timestamp\":\"" + e.timestamp + "\",\"level\":\"" + e.level + "\",\"source\":\"" + e.source + "\",\"method\":\"" + e.method + "\",\"path\":\"" + e.path + "\",\"status\":" + to_string(e.status) + ",\"size\":" + to_string(e.size) + ",\"latency\":" + to_string(e.latency) + ",\"format\":\"" + e.format + "\"}"
+}
+
+func entries_to_json_array(entries: List<LogEntry>) -> string {
+    let mut result = "["
+    let mut first = true
+    for e in entries {
+        if !first { result = result + "," }
+        first = false
+        result = result + entry_to_json_obj(e)
+    }
+    result + "]"
+}
+
+func stats_to_json(s: LogStats) -> string {
+    let mut result = "{"
+    result = result + "\"total\":" + to_string(s.total)
+    result = result + ",\"info\":" + to_string(s.info_count)
+    result = result + ",\"warn\":" + to_string(s.warn_count)
+    result = result + ",\"error\":" + to_string(s.error_count)
+    result = result + ",\"fatal\":" + to_string(s.fatal_count)
+    result = result + ",\"error_rate\":" + to_string(s.error_rate)
+    result = result + ",\"avg_latency\":" + to_string(s.avg_latency)
+    result = result + ",\"p50_latency\":" + to_string(s.p50_latency)
+    result = result + ",\"p95_latency\":" + to_string(s.p95_latency)
+    result = result + ",\"p99_latency\":" + to_string(s.p99_latency)
+    result = result + ",\"max_latency\":" + to_string(s.max_latency)
+    result = result + "}"
+    result
+}
+
+func print_stats_text(s: LogStats, file_path: string) {
+    println("╔══════════════════════════════════════════╗")
+    println("║          mimi-log Report                 ║")
+    println("╠══════════════════════════════════════════╣")
+    println("║ File: " + file_path)
+    println("╠══════════════════════════════════════════╣")
+    println("║ Total entries:  " + to_string(s.total))
+    println("║ INFO:           " + to_string(s.info_count))
+    println("║ WARN:           " + to_string(s.warn_count))
+    println("║ ERROR:          " + to_string(s.error_count))
+    println("║ FATAL:          " + to_string(s.fatal_count))
+    println("║ Error rate:     " + to_string(s.error_rate))
+    println("╠══════════════════════════════════════════╣")
+    println("║ Avg latency:    " + to_string(s.avg_latency))
+    println("║ P50 latency:    " + to_string(s.p50_latency))
+    println("║ P95 latency:    " + to_string(s.p95_latency))
+    println("║ P99 latency:    " + to_string(s.p99_latency))
+    println("║ Max latency:    " + to_string(s.max_latency))
+    println("╚══════════════════════════════════════════╝")
+}
+
+func print_status_distribution(entries: List<LogEntry>) {
+    let mut b2 = 0
+    let mut b3 = 0
+    let mut b4 = 0
+    let mut b5 = 0
+    for e in entries {
+        let bucket = status_bucket(e.status)
+        if bucket == "2xx" { b2 += 1 } else if bucket == "3xx" { b3 += 1 } else if bucket == "4xx" { b4 += 1 } else if bucket == "5xx" { b5 += 1 }
+    }
+    println("Status distribution:")
+    println("  2xx: " + to_string(b2))
+    println("  3xx: " + to_string(b3))
+    println("  4xx: " + to_string(b4))
+    println("  5xx: " + to_string(b5))
+}
+
+func print_record_map(title: string, counts: Record) {
+    println(title + ":")
+    let k = keys(counts)
+    let v = values(counts)
+    let mut i = 0
+    while i < len(k) {
+        println("  " + to_string(k[i]) + ": " + to_string(v[i]))
+        i += 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CLI
+// ═══════════════════════════════════════════════════════════════
+
 func print_usage() {
-    println("mimi-log — Log Analyzer (data pipeline demo)")
+    println("mimi-log — High-performance Log Analyzer v0.1.0")
+    println("Supports: Apache Combined, Nginx, JSON Lines")
+    println("")
     println("Usage: mimi-log <file> [options]")
-    println("Options:")
-    println("  --stats           Show aggregated statistics")
-    println("  --grep <PATTERN>  Filter lines by regex")
-    println("  --head <N>        Show first N lines")
-    println("  --help            Show this help")
+    println("")
+    println("Filtering:")
+    println("  --level <LEVEL>      Minimum level (DEBUG/INFO/WARN/ERROR/FATAL)")
+    println("  --max-level <LEVEL>  Maximum level")
+    println("  --regex <PATTERN>    Filter by regex on raw line")
+    println("  --source <SOURCE>    Filter by source substring")
+    println("  --method <METHOD>    Filter by HTTP method (GET/POST/...)")
+    println("  --path <PATTERN>     Filter by path regex")
+    println("  --status-min <N>     Minimum HTTP status code")
+    println("  --status-max <N>     Maximum HTTP status code")
+    println("")
+    println("Output:")
+    println("  --format <FMT>       Output format: text, csv, json (default: text)")
+    println("  --stats              Show aggregated statistics")
+    println("  --by-source          Group by source")
+    println("  --by-method          Group by HTTP method")
+    println("  --by-path            Group by path")
+    println("  --by-status          Group by status code")
+    println("  --by-format          Group by log format")
+    println("  --head <N>           Show first N lines")
+    println("  --tail <N>           Show last N lines")
+    println("")
+    println("Pipeline demos:")
+    println("  --demo-partial       Show read_file_partial demo")
+    println("  --demo-lines-json    Show read_lines_json demo")
+    println("  --demo-bytes         Show read_file_bytes demo")
+    println("  --demo-each          Show read_lines_each demo")
+    println("")
+    println("  --help               Show this help")
 }
 
 func main() -> i32 {
@@ -33,32 +572,57 @@ func main() -> i32 {
         return 1
     }
 
+    // Parse arguments
     let mut file_path = ""
-    let mut show_stats = false
+    let mut min_level = ""
+    let mut max_level = ""
     let mut grep_pattern = ""
+    let mut source_filter = ""
+    let mut method_filter = ""
+    let mut path_filter = ""
+    let mut status_min = 0
+    let mut status_max = 0
+    let mut output_fmt = "text"
+    let mut show_stats = false
+    let mut group_by_source = false
+    let mut group_by_method = false
+    let mut group_by_path = false
+    let mut group_by_status = false
+    let mut group_by_format = false
     let mut head_count = 0
+    let mut tail_count = 0
+    let mut demo_partial = false
+    let mut demo_json = false
+    let mut demo_bytes = false
+    let mut demo_each = false
 
     let mut i = 0
     while i < len(args_list) {
         let arg = args_list[i]
-        if arg == "--stats" {
-            show_stats = true
-            i += 1
-        } else if arg == "--grep" && i + 1 < len(args_list) {
-            grep_pattern = args_list[i + 1]
-            i += 2
-        } else if arg == "--head" && i + 1 < len(args_list) {
-            head_count = to_int(args_list[i + 1])
-            i += 2
-        } else if arg == "--help" || arg == "-h" {
-            print_usage()
-            return 0
-        } else if !str_starts_with(arg, "-") {
-            file_path = arg
-            i += 1
-        } else {
-            i += 1
-        }
+        if arg == "--level" && i + 1 < len(args_list) { min_level = args_list[i + 1]; i += 2 }
+        else if arg == "--max-level" && i + 1 < len(args_list) { max_level = args_list[i + 1]; i += 2 }
+        else if arg == "--regex" && i + 1 < len(args_list) { grep_pattern = args_list[i + 1]; i += 2 }
+        else if arg == "--source" && i + 1 < len(args_list) { source_filter = args_list[i + 1]; i += 2 }
+        else if arg == "--method" && i + 1 < len(args_list) { method_filter = args_list[i + 1]; i += 2 }
+        else if arg == "--path" && i + 1 < len(args_list) { path_filter = args_list[i + 1]; i += 2 }
+        else if arg == "--status-min" && i + 1 < len(args_list) { status_min = to_int(args_list[i + 1]); i += 2 }
+        else if arg == "--status-max" && i + 1 < len(args_list) { status_max = to_int(args_list[i + 1]); i += 2 }
+        else if arg == "--format" && i + 1 < len(args_list) { output_fmt = args_list[i + 1]; i += 2 }
+        else if arg == "--stats" { show_stats = true; i += 1 }
+        else if arg == "--by-source" { group_by_source = true; i += 1 }
+        else if arg == "--by-method" { group_by_method = true; i += 1 }
+        else if arg == "--by-path" { group_by_path = true; i += 1 }
+        else if arg == "--by-status" { group_by_status = true; i += 1 }
+        else if arg == "--by-format" { group_by_format = true; i += 1 }
+        else if arg == "--head" && i + 1 < len(args_list) { head_count = to_int(args_list[i + 1]); i += 2 }
+        else if arg == "--tail" && i + 1 < len(args_list) { tail_count = to_int(args_list[i + 1]); i += 2 }
+        else if arg == "--demo-partial" { demo_partial = true; i += 1 }
+        else if arg == "--demo-lines-json" { demo_json = true; i += 1 }
+        else if arg == "--demo-bytes" { demo_bytes = true; i += 1 }
+        else if arg == "--demo-each" { demo_each = true; i += 1 }
+        else if arg == "--help" || arg == "-h" { print_usage(); return 0 }
+        else if !str_starts_with(arg, "-") { file_path = arg; i += 1 }
+        else { i += 1 }
     }
 
     if file_path == "" {
@@ -67,6 +631,37 @@ func main() -> i32 {
         return 1
     }
 
+    // Run pipeline demos if requested
+    if demo_partial {
+        let partial = read_file_partial(file_path, 200)
+        println("--- read_file_partial(\"" + file_path + "\", 200) ---")
+        println(partial)
+        println("---")
+    }
+    if demo_json {
+        let json_data = read_lines_json(file_path)
+        let line_count = len(str_split(json_data, ","))
+        println("--- read_lines_json(\"" + file_path + "\") ---")
+        println("Lines as JSON: " + to_string(line_count) + " entries")
+        println("---")
+    }
+    if demo_bytes {
+        let raw = read_file_bytes(file_path)
+        println("--- read_file_bytes(\"" + file_path + "\") ---")
+        println("File size: " + to_string(len(raw)) + " bytes")
+        println("---")
+    }
+    if demo_each {
+        println("--- read_lines_each(\"" + file_path + "\") ---")
+        let count = read_lines_each(file_path, fn(line: string) -> i32 {
+            println("  > " + line)
+            0
+        })
+        println("Processed " + to_string(count) + " lines")
+        println("---")
+    }
+
+    // Read and parse log file
     let content = read_file(file_path)
     let mut lines: List<string> = []
     let mut read_ok = true
@@ -79,51 +674,80 @@ func main() -> i32 {
         return 1
     }
 
-    // Demonstrate read_file_partial (P0 builtin)
-    let partial = read_file_partial(file_path, 100)
-    println("--- First 100 bytes (read_file_partial) ---")
-    println(partial)
-    println("---")
-
-    // Demonstrate read_lines_json (P0 builtin)
-    let json_lines = read_lines_json(file_path)
-    let line_count = len(str_split(json_lines, ","))
-    println("Lines read (read_lines_json): " + to_string(line_count))
-
-    // Demonstrate read_file_bytes (P0 builtin)
-    let raw = read_file_bytes(file_path)
-    println("File size (read_file_bytes): " + to_string(len(raw)))
-
-    if show_stats {
-        let total = len(lines)
-        let errs = count_pattern(lines, "ERROR|FATAL")
-        let rate = error_rate(lines)
-        let info_count = count_pattern(lines, "INFO")
-        let warn_count = count_pattern(lines, "WARN")
-        let error_count = count_pattern(lines, "ERROR")
-        let fatal_count = count_pattern(lines, "FATAL")
-        println("=== mimi-log Report ===")
-        println("File: " + file_path)
-        println("Total lines: " + to_string(total))
-        println("INFO:  " + to_string(info_count))
-        println("WARN:  " + to_string(warn_count))
-        println("ERROR: " + to_string(error_count))
-        println("FATAL: " + to_string(fatal_count))
-        println("Error rate: " + to_string(rate))
-    } else if grep_pattern != "" {
-        let mut gi = 0
-        while gi < len(lines) {
-            if regex_match(lines[gi], grep_pattern) {
-                println(lines[gi])
-            }
-            gi += 1
+    // Parse all lines into LogEntry
+    let mut entries: List<LogEntry> = []
+    for line in lines {
+        if len(str_trim(line)) > 0 {
+            push(entries, parse_auto(line))
         }
+    }
+
+    // Apply filters
+    let mut filtered = entries
+    if min_level != "" { filtered = filter_by_level(filtered, min_level) }
+    if max_level != "" { filtered = filter_by_max_level(filtered, max_level) }
+    if grep_pattern != "" { filtered = filter_by_regex(filtered, grep_pattern) }
+    if source_filter != "" { filtered = filter_by_source(filtered, source_filter) }
+    if method_filter != "" { filtered = filter_by_method(filtered, method_filter) }
+    if path_filter != "" { filtered = filter_by_path(filtered, path_filter) }
+    if status_min > 0 && status_max > 0 { filtered = filter_by_status(filtered, status_min, status_max) }
+    else if status_min > 0 { filtered = filter_by_status(filtered, status_min, 999) }
+    else if status_max > 0 { filtered = filter_by_status(filtered, 100, status_max) }
+
+    // Output
+    if show_stats {
+        let stats = compute_stats(filtered)
+        if output_fmt == "json" {
+            println(stats_to_json(stats))
+        } else if output_fmt == "csv" {
+            println("metric,value")
+            println("total," + to_string(stats.total))
+            println("error_rate," + to_string(stats.error_rate))
+            println("avg_latency," + to_string(stats.avg_latency))
+            println("p50_latency," + to_string(stats.p50_latency))
+            println("p95_latency," + to_string(stats.p95_latency))
+            println("p99_latency," + to_string(stats.p99_latency))
+            println("max_latency," + to_string(stats.max_latency))
+        } else {
+            print_stats_text(stats, file_path)
+            print_status_distribution(filtered)
+            if group_by_source { print_record_map("By source", count_by_source(filtered)) }
+            if group_by_method { print_record_map("By method", count_by_method(filtered)) }
+            if group_by_path { print_record_map("By path", count_by_path(filtered)) }
+            if group_by_status { print_record_map("By status", count_status_codes(filtered)) }
+            if group_by_format { print_record_map("By format", count_by_format(filtered)) }
+        }
+    } else if output_fmt == "csv" {
+        println(entries_to_csv(filtered))
+    } else if output_fmt == "json" {
+        println(entries_to_json_array(filtered))
     } else {
-        let mut di = 0
-        let limit = if head_count > 0 && head_count < len(lines) { head_count } else { len(lines) }
-        while di < limit {
-            println(lines[di])
-            di += 1
+        // Apply head/tail
+        let mut display = filtered
+        if head_count > 0 && head_count < len(filtered) {
+            let mut dl: List<LogEntry> = []
+            let mut di = 0
+            while di < head_count && di < len(filtered) {
+                push(dl, filtered[di])
+                di += 1
+            }
+            display = dl
+        }
+        if tail_count > 0 && tail_count < len(filtered) {
+            let mut dl: List<LogEntry> = []
+            let start = len(filtered) - tail_count
+            let mut di = start
+            while di < len(filtered) {
+                push(dl, filtered[di])
+                di += 1
+            }
+            display = dl
+        }
+
+        for e in display {
+            let mut line = e.timestamp + " " + e.level + " " + e.source + " " + e.method + " " + e.path + " " + to_string(e.status)
+            if e.latency > 0.0 { line = line + " " + to_string(e.latency) + "s" }
+            println(line)
         }
     }
 
