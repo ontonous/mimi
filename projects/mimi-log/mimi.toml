@@ -1,0 +1,4 @@
+[package]
+name = "mimi-log"
+version = "0.1.0"
+description = "High-performance log analyzer with regex filtering, aggregation, and CSV/JSON output"

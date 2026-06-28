@@ -1,0 +1,131 @@
+// mimi-log — Log analyzer demonstrating data pipeline builtins
+// Exercises: read_file_partial, read_lines_json, regex_find_all, sort_f64
+
+func count_pattern(lines: List<string>, pattern: string) -> i32 {
+    let mut count = 0
+    for line in lines {
+        if regex_match(line, pattern) {
+            count += 1
+        }
+    }
+    count
+}
+
+func error_rate(lines: List<string>) -> f64 {
+    let errs = count_pattern(lines, "ERROR|FATAL|5[0-9][0-9]")
+    if len(lines) == 0 { 0.0 } else { errs as f64 / len(lines) as f64 }
+}
+
+func print_usage() {
+    println("mimi-log — Log Analyzer (data pipeline demo)")
+    println("Usage: mimi-log <file> [options]")
+    println("Options:")
+    println("  --stats           Show aggregated statistics")
+    println("  --grep <PATTERN>  Filter lines by regex")
+    println("  --head <N>        Show first N lines")
+    println("  --help            Show this help")
+}
+
+func main() -> i32 {
+    let args_list = args()
+    if len(args_list) == 0 {
+        print_usage()
+        return 1
+    }
+
+    let mut file_path = ""
+    let mut show_stats = false
+    let mut grep_pattern = ""
+    let mut head_count = 0
+
+    let mut i = 0
+    while i < len(args_list) {
+        let arg = args_list[i]
+        if arg == "--stats" {
+            show_stats = true
+            i += 1
+        } else if arg == "--grep" && i + 1 < len(args_list) {
+            grep_pattern = args_list[i + 1]
+            i += 2
+        } else if arg == "--head" && i + 1 < len(args_list) {
+            head_count = to_int(args_list[i + 1])
+            i += 2
+        } else if arg == "--help" || arg == "-h" {
+            print_usage()
+            return 0
+        } else if !str_starts_with(arg, "-") {
+            file_path = arg
+            i += 1
+        } else {
+            i += 1
+        }
+    }
+
+    if file_path == "" {
+        println("Error: no input file specified")
+        print_usage()
+        return 1
+    }
+
+    let content = read_file(file_path)
+    let mut lines: List<string> = []
+    let mut read_ok = true
+    match content {
+        Ok(data) => { lines = str_split(data, "\n") }
+        Err(_) => { read_ok = false }
+    }
+    if !read_ok {
+        println("Error: cannot read file: " + file_path)
+        return 1
+    }
+
+    // Demonstrate read_file_partial (P0 builtin)
+    let partial = read_file_partial(file_path, 100)
+    println("--- First 100 bytes (read_file_partial) ---")
+    println(partial)
+    println("---")
+
+    // Demonstrate read_lines_json (P0 builtin)
+    let json_lines = read_lines_json(file_path)
+    let line_count = len(str_split(json_lines, ","))
+    println("Lines read (read_lines_json): " + to_string(line_count))
+
+    // Demonstrate read_file_bytes (P0 builtin)
+    let raw = read_file_bytes(file_path)
+    println("File size (read_file_bytes): " + to_string(len(raw)))
+
+    if show_stats {
+        let total = len(lines)
+        let errs = count_pattern(lines, "ERROR|FATAL")
+        let rate = error_rate(lines)
+        let info_count = count_pattern(lines, "INFO")
+        let warn_count = count_pattern(lines, "WARN")
+        let error_count = count_pattern(lines, "ERROR")
+        let fatal_count = count_pattern(lines, "FATAL")
+        println("=== mimi-log Report ===")
+        println("File: " + file_path)
+        println("Total lines: " + to_string(total))
+        println("INFO:  " + to_string(info_count))
+        println("WARN:  " + to_string(warn_count))
+        println("ERROR: " + to_string(error_count))
+        println("FATAL: " + to_string(fatal_count))
+        println("Error rate: " + to_string(rate))
+    } else if grep_pattern != "" {
+        let mut gi = 0
+        while gi < len(lines) {
+            if regex_match(lines[gi], grep_pattern) {
+                println(lines[gi])
+            }
+            gi += 1
+        }
+    } else {
+        let mut di = 0
+        let limit = if head_count > 0 && head_count < len(lines) { head_count } else { len(lines) }
+        while di < limit {
+            println(lines[di])
+            di += 1
+        }
+    }
+
+    0
+}
