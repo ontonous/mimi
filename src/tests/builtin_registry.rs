@@ -97,6 +97,8 @@ mod tests {
         ("regex_match", true, true, true),
         ("regex_find", true, true, true),
         ("regex_replace", true, true, true),
+        ("regex_find_all", true, true, true),
+        ("regex_capture_groups", true, true, true),
         ("read_file_partial", true, true, true),
         ("read_file_bytes", true, true, true),
         ("write_file_bytes", true, true, true),

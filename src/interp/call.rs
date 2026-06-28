@@ -330,6 +330,8 @@ impl<'a> Interpreter<'a> {
             "regex_match" => self.builtin_regex_match(args),
             "regex_find" => self.builtin_regex_find(args),
             "regex_replace" => self.builtin_regex_replace(args),
+            "regex_find_all" => self.builtin_regex_find_all(args),
+            "regex_capture_groups" => self.builtin_regex_capture_groups(args),
             "str_index_of" => self.builtin_str_index_of(args),
             "option_value_or" => self.builtin_option_value_or(args),
             "keys" => self.builtin_keys(args),

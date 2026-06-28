@@ -861,6 +861,30 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            "regex_find_all" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "regex_find_all expects 2 arguments (text, pattern)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "regex_capture_groups" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "regex_capture_groups expects 2 arguments (text, pattern)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             "str_replace" => {
                 if args.len() != 3 {
                     self.emit_code(

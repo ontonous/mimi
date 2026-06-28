@@ -308,6 +308,72 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_regex_find_all(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "regex_find_all expects 2 arguments (text, pattern)",
+            ));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| {
+                    InterpError::new(format!(
+                        "regex_find_all: invalid pattern '{}': {}",
+                        pattern, e
+                    ))
+                })?;
+                let matches: Vec<String> = re
+                    .find_iter(s)
+                    .map(|m| m.as_str().to_string())
+                    .collect();
+                // Return JSON array string for consistency with codegen
+                let json = matches.iter().enumerate().map(|(i, m)| {
+                    if i > 0 { "," } else { "" }.to_string() + &format!("\"{}\"", m.replace('\\', "\\\\").replace('"', "\\\""))
+                }).collect::<String>();
+                Ok(Value::String(format!("[{}]", json)))
+            }
+            _ => Err(InterpError::new(
+                "regex_find_all expects (string, string)",
+            )),
+        }
+    }
+
+    pub(crate) fn builtin_regex_capture_groups(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "regex_capture_groups expects 2 arguments (text, pattern)",
+            ));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| {
+                    InterpError::new(format!(
+                        "regex_capture_groups: invalid pattern '{}': {}",
+                        pattern, e
+                    ))
+                })?;
+                match re.captures(s) {
+                    Some(caps) => {
+                        let groups: Vec<String> = (1..caps.len())
+                            .filter_map(|i| {
+                                caps.get(i).map(|m| m.as_str().to_string())
+                            })
+                            .collect();
+                        // Return JSON array string for consistency with codegen
+                        let json = groups.iter().enumerate().map(|(i, g)| {
+                            if i > 0 { "," } else { "" }.to_string() + &format!("\"{}\"", g.replace('\\', "\\\\").replace('"', "\\\""))
+                        }).collect::<String>();
+                        Ok(Value::String(format!("[{}]", json)))
+                    }
+                    None => Ok(Value::String("[]".to_string())),
+                }
+            }
+            _ => Err(InterpError::new(
+                "regex_capture_groups expects (string, string)",
+            )),
+        }
+    }
+
     pub(crate) fn builtin_char_code(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new(

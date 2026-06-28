@@ -1785,6 +1785,111 @@ pub extern "C" fn mimi_regex_replace(
     alloc_c_string(&result)
 }
 
+/// Finds all non-overlapping matches of pattern in text.
+/// Returns a JSON array of matched strings: ["match1","match2",...]
+#[no_mangle]
+pub extern "C" fn mimi_regex_find_all(
+    text: *const std::ffi::c_char,
+    pattern: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if text.is_null() || pattern.is_null() {
+        return alloc_c_string("[]");
+    }
+    let t = unsafe { cstr_to_string(text) };
+    let p = unsafe { cstr_to_string(pattern) };
+    // Use custom RegexEngine for find_all (iterative find_match)
+    let mut matches = Vec::new();
+    let mut cursor = 0;
+    let t_bytes = t.as_bytes();
+    let p_bytes = p.as_bytes();
+    loop {
+        if cursor >= t_bytes.len() { break; }
+        let mut found = false;
+        for start in cursor..t_bytes.len() {
+            let consumed = RegexEngine::match_here_with_depth(p_bytes, &t_bytes[start..], 0);
+            if consumed >= 0 {
+                let matched = std::str::from_utf8(&t_bytes[start..start + consumed as usize]).unwrap_or("");
+                matches.push(matched.to_string());
+                cursor = start + consumed as usize;
+                found = true;
+                break;
+            }
+        }
+        if !found { break; }
+    }
+    let mut result = String::from("[");
+    let mut first = true;
+    for m in &matches {
+        if !first { result.push(','); }
+        first = false;
+        result.push('"');
+        for ch in m.chars() {
+            match ch {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c < '\x20' => { result.push_str(&format!("\\u{:04x}", c as u32)); }
+                c => result.push(c),
+            }
+        }
+        result.push('"');
+    }
+    result.push(']');
+    alloc_c_string(&result)
+}
+
+/// Extracts capture groups from the first match of pattern in text.
+/// Returns a JSON array of capture group values: ["group1","group2",...]
+/// NOTE: The custom RegexEngine does not support capture groups.
+/// This returns "[]" for all inputs. Use from interpreter with regex crate for full support.
+#[no_mangle]
+pub extern "C" fn mimi_regex_capture_groups(
+    text: *const std::ffi::c_char,
+    pattern: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    // The custom RegexEngine doesn't support capture groups.
+    // Return empty array. Interpreter path uses regex crate for full support.
+    alloc_c_string("[]")
+}
+
+// ─── Sort helpers ────────────────────────────────────────────────
+
+/// Sorts an f64 list in place (ascending). data points to the raw element buffer.
+/// count is the number of elements. Each f64 is 8 bytes (stored as i64 bits).
+#[no_mangle]
+pub extern "C" fn mimi_sort_f64_inplace(
+    data: *mut u8,
+    count: i64,
+) {
+    if data.is_null() || count <= 1 {
+        return;
+    }
+    let elem_size: usize = 8;
+    let total_bytes = (count as usize) * elem_size;
+    let slice = unsafe { std::slice::from_raw_parts_mut(data, total_bytes) };
+    for i in 0..(count as usize) {
+        for j in 0..(count as usize) - 1 - i {
+            let a_off = j * elem_size;
+            let b_off = (j + 1) * elem_size;
+            let a_bits = u64::from_ne_bytes([
+                slice[a_off], slice[a_off+1], slice[a_off+2], slice[a_off+3],
+                slice[a_off+4], slice[a_off+5], slice[a_off+6], slice[a_off+7],
+            ]);
+            let b_bits = u64::from_ne_bytes([
+                slice[b_off], slice[b_off+1], slice[b_off+2], slice[b_off+3],
+                slice[b_off+4], slice[b_off+5], slice[b_off+6], slice[b_off+7],
+            ]);
+            if f64::from_bits(a_bits) > f64::from_bits(b_bits) {
+                for k in 0..elem_size {
+                    slice.swap(a_off + k, b_off + k);
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Network / Socket
 // ---------------------------------------------------------------------------

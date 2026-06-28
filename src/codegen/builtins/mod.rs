@@ -361,6 +361,43 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_regex_find_all(text, pattern) -> i8* (JSON array string)
+    module.add_function(
+        "mimi_regex_find_all",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_regex_capture_groups(text, pattern) -> i8* (JSON array string)
+    module.add_function(
+        "mimi_regex_capture_groups",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // mimi_sort_f64_inplace(data: i8*, count: i64) -> void
+    module.add_function(
+        "mimi_sort_f64_inplace",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 
     // mimi_try_exit(payload): print error and exit(1) for ? operator
     module.add_function(
@@ -1098,6 +1135,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "http_get" | "http_post"
         | "from_int"
         | "regex_match" | "regex_find" | "regex_replace"
+        | "regex_find_all" | "regex_capture_groups"
     )
 }
 
@@ -1258,6 +1296,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "regex_match" => self.compile_regex_match(args),
             "regex_find" => self.compile_regex_find(args),
             "regex_replace" => self.compile_regex_replace(args),
+            "regex_find_all" => self.compile_regex_find_all(args),
+            "regex_capture_groups" => self.compile_regex_capture_groups(args),
             "ast_eval" => {
                 // ast_eval on a compile-time folded quote block:
                 // quote! { 42 } evaluates directly to i64(42) at compile time,

@@ -689,4 +689,58 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("load opt: {}", e)))?;
         Ok(result)
     }
+
+    pub(in crate::codegen) fn compile_regex_find_all(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "regex_find_all expects 2 arguments (text, pattern)".to_string(),
+            ));
+        }
+        let text_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let pattern_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let func = self.module.get_function("mimi_regex_find_all")
+            .ok_or_else(|| "mimi_regex_find_all not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::PointerValue(text_ptr),
+                BasicMetadataValueEnum::PointerValue(pattern_ptr),
+            ],
+            "regex_find_all_call",
+        ).map_err(|e| CompileError::LlvmError(format!("regex_find_all error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_regex_find_all returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
+
+    pub(in crate::codegen) fn compile_regex_capture_groups(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "regex_capture_groups expects 2 arguments (text, pattern)".to_string(),
+            ));
+        }
+        let text_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let pattern_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let func = self.module.get_function("mimi_regex_capture_groups")
+            .ok_or_else(|| "mimi_regex_capture_groups not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::PointerValue(text_ptr),
+                BasicMetadataValueEnum::PointerValue(pattern_ptr),
+            ],
+            "regex_capture_groups_call",
+        ).map_err(|e| CompileError::LlvmError(format!("regex_capture_groups error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_regex_capture_groups returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
 }
