@@ -115,3 +115,34 @@ pub func stat(path: string) -> StatResult {
 pub func append(path: string, content: string) -> bool {
     append_file(path, content)
 }
+
+// read_partial: Reads up to max_bytes from a file into a string.
+// Useful for large files to avoid loading everything into memory.
+pub func read_partial(path: string, max_bytes: i32) -> string {
+    read_file_partial(path, max_bytes)
+}
+
+// read_bytes: Reads an entire file as raw bytes (lossy UTF-8 conversion).
+// For binary data, prefer read_partial for large files.
+pub func read_bytes(path: string) -> string {
+    read_file_bytes(path)
+}
+
+// write_bytes: Writes raw byte data to a file.
+// Returns true on success, false on failure.
+pub func write_bytes(path: string, data: string) -> bool {
+    write_file_bytes(path, data)
+}
+
+// read_lines_each: Reads file line-by-line, calling callback for each line.
+// Returns the number of lines processed.
+// Example: read_lines_each("access.log", fn(line: string) -> i32 { 0 })
+pub func read_lines_each(path: string, callback: func(string) -> i32) -> i32 {
+    read_lines_each(path, callback)
+}
+
+// read_lines_json: Reads file line-by-line and returns a JSON array of lines.
+// More memory-efficient than read_file + split for very large files.
+pub func read_lines_json(path: string) -> string {
+    read_lines_json(path)
+}

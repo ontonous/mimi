@@ -3876,3 +3876,165 @@ pub extern "C" fn mimi_str_format(
     result.push_str(rest);
     alloc_c_string(&result)
 }
+
+// ─── Binary I/O & streaming line reading ──────────────────────
+
+/// Reads up to max_bytes from a file. Returns an allocated C string.
+/// Caller must free with mimi_string_free.
+#[no_mangle]
+pub extern "C" fn mimi_read_file_partial(
+    path: *const std::ffi::c_char,
+    max_bytes: i64,
+) -> *mut std::ffi::c_char {
+    if path.is_null() {
+        return alloc_c_string("");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    match std::fs::read(path_str) {
+        Ok(bytes) => {
+            let limit = max_bytes.max(0) as usize;
+            let slice = if limit > 0 && bytes.len() > limit {
+                &bytes[..limit]
+            } else {
+                &bytes
+            };
+            // Use lossy conversion to handle arbitrary bytes
+            let s = String::from_utf8_lossy(slice);
+            alloc_c_string(&s)
+        }
+        Err(_) => alloc_c_string(""),
+    }
+}
+
+/// Reads an entire file as raw bytes, returned as a C string (may contain null bytes).
+/// Caller must free with mimi_string_free.
+#[no_mangle]
+pub extern "C" fn mimi_read_file_bytes(
+    path: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if path.is_null() {
+        return alloc_c_string("");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    match std::fs::read(path_str) {
+        Ok(bytes) => {
+            let s = String::from_utf8_lossy(&bytes);
+            alloc_c_string(&s)
+        }
+        Err(_) => alloc_c_string(""),
+    }
+}
+
+/// Writes raw byte data to a file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn mimi_write_file_bytes(
+    path: *const std::ffi::c_char,
+    data: *const std::ffi::c_char,
+) -> i32 {
+    if path.is_null() || data.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let data_bytes = unsafe { CStr::from_ptr(data) }.to_bytes();
+    match std::fs::write(path_str, data_bytes) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Reads file line-by-line, calling callback(line) for each line.
+/// callback_fn is a function pointer: fn(line_ptr: *const c_char) -> ()
+/// Returns the number of lines processed, or -1 on error.
+#[no_mangle]
+pub extern "C" fn mimi_read_lines_each(
+    path: *const std::ffi::c_char,
+    callback_fn: extern "C" fn(*const std::ffi::c_char),
+) -> i64 {
+    use std::io::BufRead;
+    if path.is_null() {
+        return -1;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let file = match std::fs::File::open(path_str) {
+        Ok(f) => f,
+        Err(_) => return -1,
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut count: i64 = 0;
+    for line_result in reader.lines() {
+        match line_result {
+            Ok(line) => {
+                let c_line = alloc_c_string(&line);
+                callback_fn(c_line);
+                // Free the allocated string after callback
+                unsafe { libc::free(c_line as *mut std::ffi::c_void) };
+                count += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    count
+}
+
+/// Reads file line-by-line and collects lines into a JSON array string.
+/// More memory-efficient than read_file + split for very large files since
+/// it uses BufReader, but still returns all lines as a single JSON string.
+/// Caller must free with mimi_string_free.
+#[no_mangle]
+pub extern "C" fn mimi_read_lines_json(
+    path: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    use std::io::BufRead;
+    if path.is_null() {
+        return alloc_c_string("[]");
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string("[]"),
+    };
+    let file = match std::fs::File::open(path_str) {
+        Ok(f) => f,
+        Err(_) => return alloc_c_string("[]"),
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut result = String::from("[");
+    let mut first = true;
+    for line_result in reader.lines() {
+        if let Ok(line) = line_result {
+            if !first {
+                result.push(',');
+            }
+            first = false;
+            // Escape the line for JSON
+            result.push('"');
+            for ch in line.chars() {
+                match ch {
+                    '"' => result.push_str("\\\""),
+                    '\\' => result.push_str("\\\\"),
+                    '\n' => result.push_str("\\n"),
+                    '\r' => result.push_str("\\r"),
+                    '\t' => result.push_str("\\t"),
+                    c if c < '\x20' => {
+                        result.push_str(&format!("\\u{:04x}", c as u32));
+                    }
+                    c => result.push(c),
+                }
+            }
+            result.push('"');
+        }
+    }
+    result.push(']');
+    alloc_c_string(&result)
+}

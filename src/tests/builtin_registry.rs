@@ -97,6 +97,11 @@ mod tests {
         ("regex_match", true, true, true),
         ("regex_find", true, true, true),
         ("regex_replace", true, true, true),
+        ("read_file_partial", true, true, true),
+        ("read_file_bytes", true, true, true),
+        ("write_file_bytes", true, true, true),
+        ("read_lines_each", false, true, true),
+        ("read_lines_json", true, true, true),
         ("exit", true, true, true),
         ("from_int", true, true, true),
         // lexer/parse are in is_builtin() but codegen returns a compile error

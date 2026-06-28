@@ -4969,4 +4969,85 @@ fn dual_set_env() {
     );
 }
 
+// === Phase 1: Binary I/O & streaming line reading L1 tests ===
 
+#[test]
+fn dual_read_file_bytes() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_bytes_test.txt", "hello bytes")
+            let data = read_file_bytes("/tmp/mimi_bytes_test.txt")
+            println(data)
+            0
+        }
+        "#,
+        "hello bytes"
+    );
+}
+
+#[test]
+fn dual_read_file_partial() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_partial_test.txt", "hello world")
+            let data = read_file_partial("/tmp/mimi_partial_test.txt", 5)
+            println(data)
+            0
+        }
+        "#,
+        "hello"
+    );
+}
+
+#[test]
+fn dual_write_file_bytes() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ok = write_file_bytes("/tmp/mimi_wb_test.txt", "bytes data")
+            println(ok)
+            0
+        }
+        "#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_read_lines_json() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_rljson_test.txt", "line1\nline2\nline3")
+            let json = read_lines_json("/tmp/mimi_rljson_test.txt")
+            println(json)
+            0
+        }
+        "#,
+        r#"["line1","line2","line3"]"#
+    );
+}
+
+#[test]
+fn dual_read_lines_each() {
+    if !can_link() { return; }
+    // read_lines_each is interp-only (closure callback not supported in codegen builtin path)
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            write_file("/tmp/mimi_rle_test.txt", "a\nb\nc")
+            let count = read_lines_each("/tmp/mimi_rle_test.txt", fn(line: string) -> i32 {
+                0
+            })
+            count
+        }
+        "#,
+        interp::Value::Int(3)
+    );
+}

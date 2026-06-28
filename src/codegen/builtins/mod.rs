@@ -1004,6 +1004,44 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+    // ========== Binary I/O & streaming line reading ==========
+    // mimi_read_file_partial(path: i8*, max_bytes: i64) -> i8*
+    module.add_function(
+        "mimi_read_file_partial",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_read_file_bytes(path: i8*) -> i8*
+    module.add_function(
+        "mimi_read_file_bytes",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_write_file_bytes(path: i8*, data: i8*) -> i64
+    module.add_function(
+        "mimi_write_file_bytes",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_read_lines_json(path: i8*) -> i8*
+    module.add_function(
+        "mimi_read_lines_json",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
     // ========== Crypto runtime functions ==========
     // mimi_sha256(data: i8*) -> i8* (hex string)
     module.add_function(
@@ -1038,6 +1076,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
         | "exec" | "file_stat" | "append_file" | "set_env"
+        | "read_file_partial" | "read_file_bytes" | "write_file_bytes" | "read_lines_json"
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
@@ -1133,6 +1172,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             "file_stat" => self.compile_file_stat(args),
             "append_file" => self.compile_append_file(args),
             "set_env" => self.compile_set_env(args),
+            "read_file_partial" => self.compile_read_file_partial(args),
+            "read_file_bytes" => self.compile_read_file_bytes(args),
+            "write_file_bytes" => self.compile_write_file_bytes(args),
+            "read_lines_json" => self.compile_read_lines_json(args),
             "sha256" => self.compile_sha256(args),
             "base64_encode" => self.compile_base64_encode(args),
             "base64_decode" => self.compile_base64_decode(args),

@@ -715,6 +715,49 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            "read_file_partial" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "read_file_partial expects 2 arguments (path, max_bytes)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "read_file_bytes" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "read_file_bytes expects 1 argument (path)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "write_file_bytes" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "write_file_bytes expects 2 arguments (path, data)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "read_lines_each" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "read_lines_each expects 2 arguments (path, callback)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
+            "read_lines_json" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "read_lines_json expects 1 argument (path)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
             "sha256" | "base64_encode" => {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "sha256/base64_encode expects 1 argument");

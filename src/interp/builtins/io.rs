@@ -427,6 +427,156 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    // === Binary I/O & streaming line reading ===
+
+    pub(crate) fn builtin_read_file_partial(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("read_file_partial expects 2 arguments (path, max_bytes)"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(path), Value::Int(max)) => {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let limit = (*max).max(0) as usize;
+                        let slice = if limit > 0 && bytes.len() > limit {
+                            &bytes[..limit]
+                        } else {
+                            &bytes
+                        };
+                        let s = String::from_utf8_lossy(slice).to_string();
+                        Ok(Value::String(s))
+                    }
+                    Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
+                }
+            }
+            _ => Err(InterpError::new("read_file_partial expects (string, int)")),
+        }
+    }
+
+    pub(crate) fn builtin_read_file_bytes(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("read_file_bytes expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let s = String::from_utf8_lossy(&bytes).to_string();
+                        Ok(Value::String(s))
+                    }
+                    Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
+                }
+            }
+            _ => Err(InterpError::new("read_file_bytes expects a string path")),
+        }
+    }
+
+    pub(crate) fn builtin_write_file_bytes(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("write_file_bytes expects 2 arguments (path, data)"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(path), Value::String(data)) => {
+                match std::fs::write(path, data.as_bytes()) {
+                    Ok(_) => Ok(Value::Bool(true)),
+                    Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
+                }
+            }
+            _ => Err(InterpError::new("write_file_bytes expects (string, string)")),
+        }
+    }
+
+    pub(crate) fn builtin_read_lines_each(&mut self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("read_lines_each expects 2 arguments (path, callback)"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(path), callback) => {
+                use std::io::BufRead;
+                let file = std::fs::File::open(path)
+                    .map_err(|e| InterpError::new(format!("read_lines_each: {}", e)))?;
+                let reader = std::io::BufReader::new(file);
+                let mut count: i64 = 0;
+                for line_result in reader.lines() {
+                    match line_result {
+                        Ok(line) => {
+                            if self.early_return.is_some() {
+                                break;
+                            }
+                            match callback {
+                                Value::Closure { params, body, captured, .. } => {
+                                    if params.len() >= 1 {
+                                        self.push_scope();
+                                        for (n, v) in captured {
+                                            self.bind(n, v.clone())?;
+                                        }
+                                        self.bind(&params[0].name, Value::String(line))?;
+                                        let _ = self.eval_block(body);
+                                        self.pop_scope();
+                                    }
+                                }
+                                _ => {
+                                    return Err(InterpError::new(
+                                        "read_lines_each expects a closure as second argument"
+                                    ));
+                                }
+                            }
+                            if self.early_return.is_some() {
+                                break;
+                            }
+                            count += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Ok(Value::Int(count))
+            }
+            _ => Err(InterpError::new("read_lines_each expects (string, closure)")),
+        }
+    }
+
+    pub(crate) fn builtin_read_lines_json(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("read_lines_json expects 1 argument (path)"));
+        }
+        match &args[0] {
+            Value::String(path) => {
+                use std::io::BufRead;
+                let file = std::fs::File::open(path)
+                    .map_err(|e| InterpError::new(format!("read_lines_json: {}", e)))?;
+                let reader = std::io::BufReader::new(file);
+                let mut result = String::from("[");
+                let mut first = true;
+                for line_result in reader.lines() {
+                    if let Ok(line) = line_result {
+                        if !first {
+                            result.push(',');
+                        }
+                        first = false;
+                        result.push('"');
+                        for ch in line.chars() {
+                            match ch {
+                                '"' => result.push_str("\\\""),
+                                '\\' => result.push_str("\\\\"),
+                                '\n' => result.push_str("\\n"),
+                                '\r' => result.push_str("\\r"),
+                                '\t' => result.push_str("\\t"),
+                                c if c < '\x20' => {
+                                    result.push_str(&format!("\\u{:04x}", c as u32));
+                                }
+                                c => result.push(c),
+                            }
+                        }
+                        result.push('"');
+                    }
+                }
+                result.push(']');
+                Ok(Value::String(result))
+            }
+            _ => Err(InterpError::new("read_lines_json expects a string path")),
+        }
+    }
+
     // === Crypto operations ===
 
     pub(crate) fn builtin_sha256(&self, args: Vec<Value>) -> Result<Value, InterpError> {

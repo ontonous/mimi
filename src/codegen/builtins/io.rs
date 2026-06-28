@@ -1840,4 +1840,96 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_str_format returned void")?;
         Ok(result)
     }
+
+    // === Binary I/O & streaming line reading (codegen) ===
+
+    pub(super) fn compile_read_file_partial(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount("read_file_partial expects 2 arguments".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let max_bytes = match args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err(CompileError::TypeMismatch("read_file_partial: max_bytes must be i64".into())),
+        };
+        let func = self.module.get_function("mimi_read_file_partial")
+            .ok_or_else(|| "mimi_read_file_partial not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::PointerValue(path_ptr),
+                BasicMetadataValueEnum::IntValue(max_bytes),
+            ],
+            "read_file_partial_call",
+        ).map_err(|e| CompileError::LlvmError(format!("read_file_partial error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_read_file_partial returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
+
+    pub(super) fn compile_read_file_bytes(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("read_file_bytes expects 1 argument".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let func = self.module.get_function("mimi_read_file_bytes")
+            .ok_or_else(|| "mimi_read_file_bytes not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            "read_file_bytes_call",
+        ).map_err(|e| CompileError::LlvmError(format!("read_file_bytes error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_read_file_bytes returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
+
+    pub(super) fn compile_write_file_bytes(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount("write_file_bytes expects 2 arguments".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let data_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let func = self.module.get_function("mimi_write_file_bytes")
+            .ok_or_else(|| "mimi_write_file_bytes not declared".to_string())?;
+        let result = self.builder.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::PointerValue(path_ptr),
+                BasicMetadataValueEnum::PointerValue(data_ptr),
+            ],
+            "write_file_bytes_call",
+        ).map_err(|e| CompileError::LlvmError(format!("write_file_bytes error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_write_file_bytes returned void")?
+            .into_int_value();
+        let zero = self.context.i64_type().const_int(0, false);
+        let cmp = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            result,
+            zero,
+            "write_file_bytes_ok",
+        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        Ok(cmp.into())
+    }
+
+    pub(super) fn compile_read_lines_json(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("read_lines_json expects 1 argument".to_string()));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let func = self.module.get_function("mimi_read_lines_json")
+            .ok_or_else(|| "mimi_read_lines_json not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+            "read_lines_json_call",
+        ).map_err(|e| CompileError::LlvmError(format!("read_lines_json error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_read_lines_json returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
 }
