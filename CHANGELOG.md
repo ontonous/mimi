@@ -1,8 +1,23 @@
 # Changelog
 
-## [Unreleased] — 0.28.5-dev
+## [Unreleased] — 0.28.6-dev
 
 ### Added
+
+- **G-91**: `read_file_bytes(path)` — reads entire file as raw bytes (lossy UTF-8)
+- **G-92**: `read_file_partial(path, max_bytes)` — reads first N bytes from file
+- **G-93**: `write_file_bytes(path, data)` — writes raw byte data to file
+- **G-94**: `read_lines_each(path, callback)` — line-by-line processing with closure callback (interp-only, BufReader O(1) memory per line)
+- **G-95**: `read_lines_json(path)` — reads file line-by-line, returns JSON array of lines
+- **G-96**: `regex_find_all(text, pattern)` — finds all non-overlapping matches, returns JSON array
+- **G-97**: `regex_capture_groups(text, pattern)` — extracts capture groups, returns JSON array (interp uses regex crate, codegen uses custom engine)
+- **G-98**: `sort_f64` codegen — bubble sort via `mimi_sort_f64_inplace` runtime function
+- **G-99**: `sort_str` codegen — graceful no-op (string struct swap too complex for codegen)
+- **mimi-log** project: log analyzer demonstrating data pipeline builtins (~170 lines Mimi)
+
+### Changed
+
+- 21 golden IR files updated (new runtime function declarations)
 
 - **G-87**: `exec(command)` 进程执行内置函数 — 返回 `ExecResult { exit_code: i32, stdout: string, stderr: string }`
 - **G-88**: `file_stat(path)` 文件元数据内置函数 — 返回 `StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }`
