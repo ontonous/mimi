@@ -527,7 +527,7 @@ impl<'a> Interpreter<'a> {
                             }
                             match callback {
                                 Value::Closure { params, body, captured, .. } => {
-                                    if params.len() >= 1 {
+                                    if !params.is_empty() {
                                         self.push_scope();
                                         for (n, v) in captured {
                                             self.bind(n, v.clone())?;
@@ -569,28 +569,24 @@ impl<'a> Interpreter<'a> {
                 let reader = std::io::BufReader::new(file);
                 let mut result = String::from("[");
                 let mut first = true;
-                for line_result in reader.lines() {
-                    if let Ok(line) = line_result {
-                        if !first {
-                            result.push(',');
-                        }
-                        first = false;
-                        result.push('"');
-                        for ch in line.chars() {
-                            match ch {
-                                '"' => result.push_str("\\\""),
-                                '\\' => result.push_str("\\\\"),
-                                '\n' => result.push_str("\\n"),
-                                '\r' => result.push_str("\\r"),
-                                '\t' => result.push_str("\\t"),
-                                c if c < '\x20' => {
-                                    result.push_str(&format!("\\u{:04x}", c as u32));
-                                }
-                                c => result.push(c),
+                for line in reader.lines().map_while(Result::ok) {
+                    if !first { result.push(','); }
+                    first = false;
+                    result.push('"');
+                    for ch in line.chars() {
+                        match ch {
+                            '"' => result.push_str("\\\""),
+                            '\\' => result.push_str("\\\\"),
+                            '\n' => result.push_str("\\n"),
+                            '\r' => result.push_str("\\r"),
+                            '\t' => result.push_str("\\t"),
+                            c if c < '\x20' => {
+                                result.push_str(&format!("\\u{:04x}", c as u32));
                             }
+                            c => result.push(c),
                         }
-                        result.push('"');
                     }
+                    result.push('"');
                 }
                 result.push(']');
                 Ok(Value::String(result))

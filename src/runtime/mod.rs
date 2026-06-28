@@ -1796,26 +1796,27 @@ pub extern "C" fn mimi_regex_find_all(
         return alloc_c_string("[]");
     }
     let t = unsafe { cstr_to_string(text) };
-    let p = unsafe { cstr_to_string(pattern) };
-    // Use custom RegexEngine for find_all (iterative find_match)
+let p = unsafe { cstr_to_string(pattern) };
     let mut matches = Vec::new();
     let mut cursor = 0;
     let t_bytes = t.as_bytes();
     let p_bytes = p.as_bytes();
     loop {
         if cursor >= t_bytes.len() { break; }
-        let mut found = false;
+        let mut found = -1;
+        let mut found_start = 0;
         for start in cursor..t_bytes.len() {
             let consumed = RegexEngine::match_here_with_depth(p_bytes, &t_bytes[start..], 0);
             if consumed >= 0 {
                 let matched = std::str::from_utf8(&t_bytes[start..start + consumed as usize]).unwrap_or("");
                 matches.push(matched.to_string());
-                cursor = start + consumed as usize;
-                found = true;
+                found = consumed;
+                found_start = start;
                 break;
             }
         }
-        if !found { break; }
+        if found < 0 { break; }
+        cursor = found_start + found as usize;
     }
     let mut result = String::from("[");
     let mut first = true;
@@ -1846,8 +1847,8 @@ pub extern "C" fn mimi_regex_find_all(
 /// This returns "[]" for all inputs. Use from interpreter with regex crate for full support.
 #[no_mangle]
 pub extern "C" fn mimi_regex_capture_groups(
-    text: *const std::ffi::c_char,
-    pattern: *const std::ffi::c_char,
+    #[allow(unused_variables)] text: *const std::ffi::c_char,
+    #[allow(unused_variables)] pattern: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
     // The custom RegexEngine doesn't support capture groups.
     // Return empty array. Interpreter path uses regex crate for full support.
@@ -4141,8 +4142,8 @@ pub extern "C" fn mimi_read_lines_json(
     let reader = std::io::BufReader::new(file);
     let mut result = String::from("[");
     let mut first = true;
-    for line_result in reader.lines() {
-        if let Ok(line) = line_result {
+    let mut lines = reader.lines();
+    while let Some(Ok(line)) = lines.next() {
             if !first {
                 result.push(',');
             }
@@ -4163,7 +4164,6 @@ pub extern "C" fn mimi_read_lines_json(
                 }
             }
             result.push('"');
-        }
     }
     result.push(']');
     alloc_c_string(&result)

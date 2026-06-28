@@ -629,7 +629,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
         // Call mimi_sort_f64_inplace(data, count)
