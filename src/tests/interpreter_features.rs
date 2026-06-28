@@ -285,9 +285,8 @@ func main() -> i32 {
 }
 "#);
     // Empty list might not be supported; test what happens
-    match v {
-        interp::Value::Int(n) => assert_eq!(n, 0),
-        _ => {} // may fail at type level
+    if let interp::Value::Int(n) = v {
+        assert_eq!(n, 0);
     }
 }
 

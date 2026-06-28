@@ -70,11 +70,11 @@ func main() -> i32 {
 fn builtin_abs_float() {
     let src = r#"
 func main() -> f64 {
-    abs(-3.14)
+    abs(-2.5)
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::Float(3.14));
+    assert_eq!(v, interp::Value::Float(2.5));
 }
 
 #[test]
@@ -655,11 +655,97 @@ func main() -> string {
 }
 
 #[test]
-fn builtin_sleep_zero() {
+fn builtin_push_in_if_block() {
     let src = r#"
 func main() -> i32 {
-    sleep(0);
-    42
+    let mut xs = [1, 2]
+    if true {
+        push(xs, 3)
+    }
+    len(xs)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(3));
+}
+
+#[test]
+fn builtin_push_in_while_loop() {
+    let src = r#"
+func main() -> i32 {
+    let mut xs = [0]
+    let mut i = 0
+    while i < 3 {
+        push(xs, i + 1)
+        i += 1
+    }
+    len(xs)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(4));
+}
+
+#[test]
+fn builtin_push_via_helper() {
+    let src = r#"
+func push_two(xs: List<i32>, a: i32, b: i32) -> List<i32> {
+    let ys = push(xs, a);
+    push(ys, b)
+}
+
+func main() -> i32 {
+    let result = push_two([1], 2, 3)
+    len(result)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(3));
+}
+
+#[test]
+fn builtin_option_value_or() {
+    let src = r#"
+func main() -> i32 {
+    let found = str_index_of("hello", "ell")
+    option_value_or(found, -1)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+#[test]
+fn builtin_option_value_or_default() {
+    let src = r#"
+func main() -> i32 {
+    let found = str_index_of("hello", "xyz")
+    option_value_or(found, -1)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(-1));
+}
+
+#[test]
+fn builtin_value_or_method() {
+    let src = r#"
+func main() -> i32 {
+    let found = str_index_of("hello", "xyz")
+    found.value_or(-1)
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(-1));
+}
+
+#[test]
+fn builtin_empty_list_as_type() {
+    let src = r#"
+func main() -> i32 {
+    let mut xs = [] as List<i32>
+    push(xs, 42)
+    xs[0]
 }
 "#;
     let v = run_source(src);

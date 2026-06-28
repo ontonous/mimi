@@ -22,9 +22,10 @@ impl<'a> Interpreter<'a> {
         if !args.is_empty() {
             return Err(InterpError::new("args expects 0 arguments"));
         }
-        let cli_args: Vec<Value> = std::env::args()
-            .skip(1) // skip program name
-            .map(Value::String)
+        let cli_args: Vec<Value> = self
+            .cli_args
+            .iter()
+            .map(|s| Value::String(s.clone()))
             .collect();
         Ok(Value::List(cli_args))
     }

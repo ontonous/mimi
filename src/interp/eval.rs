@@ -34,6 +34,11 @@ impl<'a> Interpreter<'a> {
                     Value::Bool(v) => Ok(Value::String(v.to_string())),
                     _ => Err(InterpError::new(format!("cannot cast {:?} to string", val))),
                 },
+                "List" => {
+                    // Type annotation for lists (e.g., `[] as List<string>`).
+                    // No runtime conversion needed — type checked at compile time.
+                    Ok(val)
+                }
                 _ => Err(InterpError::new(format!("unsupported cast target type: {}", name))),
             },
             _ => Err(InterpError::new(format!("unsupported cast target type: {:?}", target_type))),
@@ -85,9 +90,18 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                _ => {
+                _ if is_last => {
                     if let Some(v) = self.eval_stmt(stmt)? {
                         return Ok(Some(v));
+                    }
+                }
+                _ => {
+                    // Propagate control-flow signals (return/break values) but not
+                    // meaningless Unit values (e.g. push() as trailing expression in a block).
+                    if let Some(v) = self.eval_stmt(stmt)? {
+                        if v != Value::Unit {
+                            return Ok(Some(v));
+                        }
                     }
                 }
             }

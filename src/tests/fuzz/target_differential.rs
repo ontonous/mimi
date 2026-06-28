@@ -9,7 +9,7 @@
 //! - Interpreter: `func main() -> i32 { BODY }` → returns last-expr value
 //! - Codegen:     `func main() -> i32 { BODY; println(RESULT); 0 }`
 //!   where RESULT is the body's last expression.
-//! Then compares interp Value Display with codegen stdout.
+//!   Then compares interp Value Display with codegen stdout.
 //!
 //! Run: `PROPTEST_CASES=1000 cargo test fuzz::target_differential -- --nocapture --include-ignored`
 

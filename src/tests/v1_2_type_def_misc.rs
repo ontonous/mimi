@@ -301,15 +301,15 @@ func main() -> i32 {
 #[test]
 fn comptime_func_no_args() {
     let src = r#"
-comptime func pi() -> f64 {
-    3.14159
+comptime func half() -> f64 {
+    0.5
 }
 
 func main() -> f64 {
-    pi()
+    half()
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Float(3.14159));
+    assert_eq!(run_source(src), interp::Value::Float(0.5));
 }
 
 #[test]

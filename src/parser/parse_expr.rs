@@ -657,7 +657,7 @@ impl Parser {
         self.skip_newlines();
         let first_expr = if self.at(&TokenKind::RBracket) {
             self.advance();
-            return Ok(Expr::List(vec![]));
+            return self.parse_postfix(Expr::List(vec![]));
         } else {
             self.parse_expr(0)?
         };

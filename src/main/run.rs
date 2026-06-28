@@ -6,6 +6,7 @@ use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::{interp, lexer, loader, parser};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     path: Option<&Path>,
     verify_contracts: bool,
@@ -14,15 +15,16 @@ pub(crate) fn run(
     strict: bool,
     watch: bool,
     profile: bool,
+    extra_args: &[String],
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
     if profile {
         mimi::runtime::profiler::profiler_init();
     }
     let result = if watch {
-        run_watch(&path, verify_contracts, verify_ffi, allocator, strict)
+        run_watch(&path, verify_contracts, verify_ffi, allocator, strict, extra_args)
     } else {
-        run_once(&path, verify_contracts, verify_ffi, allocator, strict)
+        run_once(&path, verify_contracts, verify_ffi, allocator, strict, extra_args)
     };
     if profile {
         mimi::runtime::profiler::profiler_report();
@@ -36,6 +38,7 @@ fn run_once(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    extra_args: &[String],
 ) -> Result<(), String> {
     let source = fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -99,6 +102,7 @@ fn run_once(
         "bump" => interp::AllocatorKind::Bump,
         _ => interp::AllocatorKind::System,
     };
+    interp.cli_args = extra_args.to_vec();
     match interp.run() {
         Ok(value) => {
             println!("-> {}", value);
@@ -126,11 +130,12 @@ fn run_watch(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    extra_args: &[String],
 ) -> Result<(), String> {
     println!("Watching {} for changes...", path.display());
     let mut last_modified = get_mtime(path)?;
     // Run once first
-    let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict);
+    let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict, extra_args);
     loop {
         std::thread::sleep(Duration::from_millis(500));
         match get_mtime(path) {
@@ -138,7 +143,7 @@ fn run_watch(
                 last_modified = mtime;
                 println!("\n--- file changed, re-running ---");
                 print!("\x1B[2J\x1B[H");
-                let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict);
+                let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict, extra_args);
             }
             Err(e) => {
                 eprintln!("watch error: {}", e);

@@ -22,14 +22,14 @@ fn interp_ffi_float_identity() {
             func test_float_identity(x: f64) -> f64
         }
         func main() -> f64 {
-            test_float_identity(3.14)
+            test_float_identity(2.5)
         }
     "#,
     );
     std::env::remove_var("MIMI_FFI_LIB");
     let val = result.expect("src/tests/ffi_interp_e2e.rs:22 unwrap failed");
     match val {
-        interp::Value::Float(f) => assert!((f - 3.14).abs() < 0.001, "expected ~3.14, got {}", f),
+        interp::Value::Float(f) => assert!((f - 2.5).abs() < 0.001, "expected ~2.5, got {}", f),
         _ => panic!("expected Float, got {:?}", val),
     }
 }

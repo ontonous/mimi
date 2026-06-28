@@ -926,9 +926,8 @@ func main() -> i32 { 0 }
 #[test]
 fn verify_is_z3_available_not_panics() {
     // is_z3_available() should never panic regardless of Z3 installation.
-    let available = crate::verifier::is_z3_available();
+    let _available = crate::verifier::is_z3_available();
     // Just verify it returns a bool without panicking.
-    assert!(available || !available);
 }
 
 #[test]
@@ -1457,7 +1456,7 @@ func complex(x: i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let mut verifier = Verifier::with_timeout(1).expect("solver init");
-    let results = verify_source_with(&src, &mut verifier)
+    let results = verify_source_with(src, &mut verifier)
         .expect("src/verifier/tests.rs: verify_solver_pop_after_unknown");
     let f = results.iter().find(|r| r.func_name == "complex");
     assert!(f.is_some(), "complex should be present");

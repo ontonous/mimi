@@ -153,6 +153,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 _ => Err("unsupported cast to f64".into()),
             },
+            "List" => {
+                // Type annotation for lists — no runtime conversion needed
+                Ok(val)
+            }
             _ => Err(format!("unsupported cast target type: {}", target_name).into()),
         }
     }

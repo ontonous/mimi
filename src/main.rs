@@ -101,6 +101,9 @@ enum Command {
         /// Watch mode: re-run on file changes
         #[arg(long, short)]
         watch: bool,
+        /// Extra arguments forwarded to the program (after --)
+        #[arg(trailing_var_arg = true)]
+        extra_args: Vec<String>,
     },
     /// Run test functions (functions named test_*)
     Test {
@@ -356,6 +359,7 @@ fn main() {
             strict,
             watch,
             profile,
+            extra_args,
         } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
             run::run(
@@ -366,6 +370,7 @@ fn main() {
                 strict,
                 watch,
                 profile,
+                &extra_args,
             )
         }
         Command::Test {

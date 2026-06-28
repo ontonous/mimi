@@ -13,6 +13,28 @@
 - `std/env.mimi`: `set()` 包装函数
 - 7 个 L1 双后端测试：exec_basic/exec_stdout/exec_exit_code/file_stat_file/file_stat_dir/append_file/set_env
 
+### Fixed
+
+- **P0**: `push()` 在 if/while 块内不再错误地传播返回值，修复 eval_block 回归导致 return/break 值丢失（Bug 1）
+- **P0**: push() 类型检查器返回 `List<T>` 而非 `unit`，支持辅助函数模式（Bug 2）
+- **Bug 3**: 空列表 `[]` 在赋值中继承变量声明的元素类型
+- **Bug 5**: `args()` 现在转发 `--` 后的 CLI 参数
+- **Bug 6**: `[] as List<T>` 语法解析和运行时支持
+
+### Added
+
+- `option_value_or(option, default)` 内置函数
+- `.value_or(default)` 方法别名（Option/Result 类型）
+- `let mut` 函数参数的支持（checker + interpreter 完整）
+
+### Added (Projects)
+
+- **mimi-make**: 轻量级构建工具（Makefile 解析、增量构建、依赖递归）
+
+### Known Gaps (discovered via mimi-make)
+
+- **BUG-PUSH-PASS**: `push()` 通过辅助函数调用不修改原列表（列表按值传递，非按引用）
+
 ### Changed
 
 - 21 个 golden IR 文件更新（新增运行时函数声明）

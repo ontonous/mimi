@@ -2,7 +2,7 @@
 //! These tests verify that the type system correctly handles FFI-related types
 
 #[cfg(test)]
-mod type_system_verification {
+mod verification {
     use crate::ast::{ExternFunc, ExternParam, Type};
     use crate::core::check;
     use crate::ffi::contract::{FfiArgContract, FfiContract};

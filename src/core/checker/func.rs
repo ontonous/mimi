@@ -30,6 +30,10 @@ impl<'a> Checker<'a> {
                 }
             }
             scopes[0].insert(p.name.clone(), ty);
+            // Track mutable parameters for assignment checking
+            if let Some(s) = self.mut_vars.last_mut() {
+                s.insert(p.name.clone(), p.mut_);
+            }
         }
 
         // Check for contracts on shared-param functions (E0502)

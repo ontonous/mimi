@@ -43,9 +43,9 @@ fn corpus_float_zero() {
 
 #[test]
 fn corpus_float_negative() {
-    let src = r#"func main() -> f64 { -3.14 }"#;
+    let src = r#"func main() -> f64 { -2.5 }"#;
     let val = run_source(src);
-    assert_eq!(val, crate::interp::Value::Float(-3.14));
+    assert_eq!(val, crate::interp::Value::Float(-2.5));
 }
 
 /// String edge cases.

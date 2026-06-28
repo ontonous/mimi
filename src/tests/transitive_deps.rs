@@ -1,9 +1,7 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
-use super::*;
-
-fn setup_registry_pkg(reg: &PathBuf, name: &str, version: &str, deps: &[(&str, &str)]) {
+fn setup_registry_pkg(reg: &Path, name: &str, version: &str, deps: &[(&str, &str)]) {
     let pkg_dir = reg.join(name).join(version);
     fs::create_dir_all(&pkg_dir).expect("create pkg dir");
 

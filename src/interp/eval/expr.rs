@@ -452,6 +452,10 @@ impl<'a> Interpreter<'a> {
                             // otherwise push behaves as a pure function returning a new list.
                             if self.is_mutable(var_name) {
                                 self.assign(var_name, result.clone())?;
+                                // Return Unit so push() as a block-ending expression
+                                // does not propagate a List value and shadow the
+                                // function's actual return value.
+                                return Ok(Value::Unit);
                             }
                         }
                     }

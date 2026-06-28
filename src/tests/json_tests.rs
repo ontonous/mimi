@@ -360,8 +360,8 @@ fn json_from_json_typed_bool_false() {
 
 #[test]
 fn json_from_json_typed_f64() {
-    let v = run_source(r#"func main() -> f64 { from_json::<f64>("3.14") }"#);
-    assert_eq!(v, interp::Value::Float(3.14));
+    let v = run_source(r#"func main() -> f64 { from_json::<f64>("2.5") }"#);
+    assert_eq!(v, interp::Value::Float(2.5));
 }
 
 #[test]

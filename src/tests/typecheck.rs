@@ -772,6 +772,7 @@ func main() -> i32 {
     );
 }
 
+#[allow(dead_code)]
 fn warn_no_shared_no_parasteps_write() {
     // No shared vars in parasteps → no W005
     let src = r#"

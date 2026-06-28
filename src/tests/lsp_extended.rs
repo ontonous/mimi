@@ -329,7 +329,7 @@ fn diagnostic_multiple_errors() {
     "#,
     );
     if let Err(errors) = result {
-        assert!(errors.len() >= 1, "should have at least one error");
+        assert!(!errors.is_empty(), "should have at least one error");
     }
 }
 
@@ -361,7 +361,7 @@ fn references_type() {
     let text = "type Point { x: i32, y: i32 }\nfunc main() -> i32 { 42 }";
     let refs = server.compute_references(text, 0, 5, "file:///test.mimi", true);
     assert!(
-        refs.len() >= 1,
+        !refs.is_empty(),
         "should find at least 1 reference to 'Point'"
     );
 }
@@ -373,7 +373,7 @@ fn references_exclude_declaration() {
     let refs = server.compute_references(text, 0, 5, "file:///test.mimi", false);
     // Should find only usage, not declaration
     assert!(
-        refs.len() >= 1,
+        !refs.is_empty(),
         "should find at least 1 reference excluding declaration"
     );
 }
@@ -1041,12 +1041,12 @@ fn lsp_code_lens_verify_status_with_contracts() {
         .filter_map(|l| l["command"]["title"].as_str())
         .collect();
     assert!(
-        titles.iter().any(|t| t.contains(&"reference")),
+        titles.iter().any(|t| t.contains("reference")),
         "should have ref lens: {:?}",
         titles
     );
     assert!(
-        titles.iter().any(|t| t.contains(&"verify")
+        titles.iter().any(|t| t.contains("verify")
             || t.contains("✓")
             || t.contains("✗")
             || t.contains("?")),

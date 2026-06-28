@@ -48,7 +48,7 @@ fn test_parser_only_comments() {
 
 #[test]
 fn test_parser_deeply_nested_braces() {
-    let src = format!("{} main() -> i32 {{ 0 }}", "func ".to_string());
+    let src = format!("{} main() -> i32 {{ 0 }}", "func ");
     let tokens = lexer::Lexer::new(&src)
         .tokenize()
         .expect("src/tests/fuzz/target_parser.rs:48 unwrap failed");

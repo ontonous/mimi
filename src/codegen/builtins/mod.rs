@@ -1050,6 +1050,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_to_c_str" | "c_str_to_string"
         | "now" | "timestamp" | "now_ms" | "timestamp_ms" | "sleep"
         | "getenv" | "args"
+        | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid"
         // Network builtins

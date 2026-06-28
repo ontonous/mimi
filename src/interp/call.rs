@@ -64,7 +64,11 @@ impl<'a> Interpreter<'a> {
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(filled_args) {
             old_snapshots.insert(p.name.clone(), a.clone());
-            self.bind(&p.name, a)?;
+            if p.mut_ {
+                self.bind_mut(&p.name, a)?;
+            } else {
+                self.bind(&p.name, a)?;
+            }
         }
 
         // Extract and check requires conditions
@@ -322,6 +326,7 @@ impl<'a> Interpreter<'a> {
             "regex_find" => self.builtin_regex_find(args),
             "regex_replace" => self.builtin_regex_replace(args),
             "str_index_of" => self.builtin_str_index_of(args),
+            "option_value_or" => self.builtin_option_value_or(args),
             "keys" => self.builtin_keys(args),
             "values" => self.builtin_values(args),
             "has_key" => self.builtin_has_key(args),
@@ -871,8 +876,10 @@ impl<'a> Interpreter<'a> {
                         Err(InterpError::new(msg))
                     }
 
-                    ("Some", "unwrap_or") | ("Ok", "unwrap_or") => Ok(vals[0].clone()),
-                    ("None", "unwrap_or") | ("Err", "unwrap_or") => {
+                    ("Some", "unwrap_or") | ("Ok", "unwrap_or")
+                    | ("Some", "value_or") | ("Ok", "value_or") => Ok(vals[0].clone()),
+                    ("None", "unwrap_or") | ("Err", "unwrap_or")
+                    | ("None", "value_or") | ("Err", "value_or") => {
                         args.into_iter().next().ok_or_else(|| {
                             InterpError::new("unwrap_or requires a default value".to_string())
                         })
@@ -977,6 +984,22 @@ impl<'a> Interpreter<'a> {
             _ => Err(InterpError::new(format!(
                 "cannot call method '{}' on value {}",
                 method, obj
+            ))),
+        }
+    }
+
+    fn builtin_option_value_or(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("option_value_or expects 2 arguments (option, default)"));
+        }
+        match &args[0] {
+            Value::Variant(name, inner) if name == "Some" => {
+                Ok(inner.first().cloned().unwrap_or_else(|| args[1].clone()))
+            }
+            Value::Variant(name, _) if name == "None" => Ok(args[1].clone()),
+            _ => Err(InterpError::new(format!(
+                "option_value_or: first argument must be Option, got {}",
+                crate::interp::value::type_name(&args[0])
             ))),
         }
     }

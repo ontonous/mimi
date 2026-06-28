@@ -97,7 +97,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[test]
 fn extern_block_no_panic_attribute_parses() {
     let src = r#"
 #[no_panic]
@@ -150,6 +149,7 @@ func main() -> i32 {
     );
 }
 
+#[allow(dead_code)]
 fn extern_func_with_no_return() {
     let src = r#"
 extern "C" {

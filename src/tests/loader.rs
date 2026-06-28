@@ -201,7 +201,7 @@ func main() -> i32 { 42 }
     let _ = loader.load_main(&empty_path);
     let merged = loader.merge_all().expect("merge_all should succeed");
     assert!(
-        merged.items.len() >= 1,
+        !merged.items.is_empty(),
         "merge should include main function"
     );
     cleanup(&dir);

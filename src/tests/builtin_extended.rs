@@ -132,12 +132,12 @@ func main() -> i32 {
 fn builtin_to_float_from_string() {
     let src = r#"
 func main() -> f64 {
-    to_float("3.14")
+    to_float("2.5")
 }
 "#;
     let result = run_source(src);
     if let interp::Value::Float(f) = result {
-        assert!((f - 3.14).abs() < 1e-10);
+        assert!((f - 2.5).abs() < 1e-10);
     } else {
         panic!("expected float, got {:?}", result);
     }

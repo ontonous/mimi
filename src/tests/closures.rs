@@ -297,13 +297,13 @@ func main() -> i32 {
 fn move_semantics_float_copy() {
     let src = r#"
 func main() -> f64 {
-    let x = 3.14;
+    let x = 1.5;
     let y = x;
     x + y
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::Float(6.28));
+    assert_eq!(v, interp::Value::Float(3.0));
 }
 
 #[test]

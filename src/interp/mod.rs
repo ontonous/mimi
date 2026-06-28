@@ -93,6 +93,8 @@ pub struct Interpreter<'a> {
     actor_index: HashMap<String, ActorDef>,
     /// Global constants defined at top level
     globals: HashMap<String, Value>,
+    /// CLI arguments forwarded to the program
+    pub cli_args: Vec<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -177,6 +179,7 @@ impl<'a> Interpreter<'a> {
             func_index,
             actor_index,
             globals: HashMap::new(),
+            cli_args: Vec::new(),
         }
     }
 

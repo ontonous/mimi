@@ -887,7 +887,7 @@ impl<'a> Checker<'a> {
                 scopes.pop();
             }
             Stmt::Assign { target, value } => {
-                let value_ty = self.infer_expr(value, scopes);
+                let mut value_ty = self.infer_expr(value, scopes);
                 match target {
                     Expr::Ident(name) => {
                         // Check mutability
@@ -910,6 +910,9 @@ impl<'a> Checker<'a> {
                             );
                         }
                         let target_ty = self.lookup_var(name, scopes);
+                        // Re-check value with expected type so empty lists (and other
+                        // context-sensitive literals) inherit the variable's element type.
+                        value_ty = self.check_expr(&target_ty, value, scopes);
                         // C2: use unification for assignment type checking
                         if self.unification.unify(&target_ty, &value_ty).is_err() {
                             self.errors.push(

@@ -98,7 +98,7 @@ pub(crate) mod benchmarks;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 
 /// Cache the compiled runtime static library across test cases.
 /// Returns path to a cached `.a` compiled from `standalone.rs`.
@@ -106,7 +106,6 @@ use std::hash::{Hash, Hasher};
 pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     use std::hash::Hash;
     use std::io::Read;
-    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
 
@@ -274,7 +273,7 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
 }
 
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
-    let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
+    let tokens = lexer::Lexer::new(src).tokenize()?;
     let mut file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
@@ -289,7 +288,7 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
 /// or use callbacks, which are incompatible with fork isolation
 /// (child-process heap is not accessible from the parent).
 pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
-    let tokens = lexer::Lexer::new(src).tokenize().map_err(|e| e)?;
+    let tokens = lexer::Lexer::new(src).tokenize()?;
     let mut file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;

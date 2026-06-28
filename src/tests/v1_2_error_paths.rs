@@ -316,7 +316,7 @@ func main() -> i32 {
     assert!(file.items.len() == 1, "should still parse the function");
     if let crate::ast::Item::Func(f) = &file.items[0] {
         // The function body should contain at least the valid statement
-        assert!(f.body.len() >= 1, "should have at least one statement");
+        assert!(!f.body.is_empty(), "should have at least one statement");
     } else {
         panic!("expected a function item");
     }
@@ -339,7 +339,7 @@ func working() -> i32 {
     let (file, errors) = crate::parser::Parser::new(tokens).parse_file_with_recovery();
     assert!(!errors.is_empty(), "should have parse errors");
     assert!(
-        file.items.len() >= 1,
+        !file.items.is_empty(),
         "should still parse the working function"
     );
     assert!(file
