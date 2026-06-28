@@ -105,6 +105,7 @@ mod tests {
         ("read_lines_each", false, true, true),
         ("read_lines_json", true, true, true),
         ("exit", true, true, true),
+        ("exec_pipe", true, true, true),
         ("from_int", true, true, true),
         // lexer/parse are in is_builtin() but codegen returns a compile error
         ("lexer", true, true, true),

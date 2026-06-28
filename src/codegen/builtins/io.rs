@@ -1932,4 +1932,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         self.wrap_c_string(raw_ptr)
     }
+
+    pub(super) fn compile_exec_pipe(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount("exec_pipe expects 1 argument".to_string()));
+        }
+        let cmd_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let func = self.module.get_function("mimi_exec_pipe")
+            .ok_or_else(|| "mimi_exec_pipe not declared".to_string())?;
+        let raw_ptr = self.builder.build_call(
+            func,
+            &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
+            "exec_pipe_call",
+        ).map_err(|e| CompileError::LlvmError(format!("exec_pipe error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_exec_pipe returned void")?
+            .into_pointer_value();
+        self.wrap_c_string(raw_ptr)
+    }
 }

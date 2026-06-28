@@ -1040,6 +1040,12 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_exec_pipe(cmd: i8*) -> i8*
+    module.add_function(
+        "mimi_exec_pipe",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 
     // ========== Binary I/O & streaming line reading ==========
     // mimi_read_file_partial(path: i8*, max_bytes: i64) -> i8*
@@ -1113,6 +1119,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
         | "exec" | "file_stat" | "append_file" | "set_env"
+        | "exec_pipe"
         | "read_file_partial" | "read_file_bytes" | "write_file_bytes" | "read_lines_json"
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
@@ -1207,6 +1214,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "mkdir_p" => self.compile_mkdir_p(args),
             "remove_file" => self.compile_remove_file(args),
             "exec" => self.compile_exec(args),
+            "exec_pipe" => self.compile_exec_pipe(args),
             "file_stat" => self.compile_file_stat(args),
             "append_file" => self.compile_append_file(args),
             "set_env" => self.compile_set_env(args),

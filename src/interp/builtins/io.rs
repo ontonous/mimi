@@ -411,6 +411,28 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_exec_pipe(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("exec_pipe expects 1 argument (command)"));
+        }
+        match &args[0] {
+            Value::String(cmd) => {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output();
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        Ok(Value::String(stdout))
+                    }
+                    Err(e) => Err(InterpError::new(format!("exec_pipe error: {}", e))),
+                }
+            }
+            _ => Err(InterpError::new("exec_pipe expects a string command")),
+        }
+    }
+
     pub(crate) fn builtin_set_env(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new(

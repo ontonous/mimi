@@ -3641,6 +3641,31 @@ pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
     }
 }
 
+/// Executes a command and returns just stdout. Simpler than mimi_exec.
+/// Returns an allocated C string (caller must free with mimi_string_free).
+/// On error, returns an empty string.
+#[no_mangle]
+pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    if cmd.is_null() {
+        return alloc_c_string("");
+    }
+    let cmd_str = match unsafe { CStr::from_ptr(cmd) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return alloc_c_string(""),
+    };
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd_str)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            alloc_c_string(&stdout)
+        }
+        Err(_) => alloc_c_string(""),
+    }
+}
+
 /// Result of stat-ing a file.
 #[repr(C)]
 pub struct MimiStatResult {

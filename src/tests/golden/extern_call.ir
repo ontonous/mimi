@@ -225,6 +225,8 @@ declare i64 @mimi_append_file(ptr, ptr)
 
 declare i64 @mimi_set_env(ptr, ptr)
 
+declare ptr @mimi_exec_pipe(ptr)
+
 declare ptr @mimi_read_file_partial(ptr, i64)
 
 declare ptr @mimi_read_file_bytes(ptr)

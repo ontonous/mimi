@@ -386,7 +386,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unknown".into(), vec![]);
             }
-            "sort" | "sort_f64" | "sort_str" | "reverse" | "flatten" => {
+            "sort" | "reverse" | "flatten" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -396,6 +396,28 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[0], scopes);
                 }
                 return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+            }
+            "sort_f64" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "sort_f64 expects 1 argument",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("f64".into(), vec![])]);
+            }
+            "sort_str" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "sort_str expects 1 argument",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
             }
             "zip" => {
                 if args.len() != 2 {
@@ -688,6 +710,14 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[0], scopes);
                 }
                 return Type::Name("ExecResult".into(), vec![]);
+            }
+            "exec_pipe" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "exec_pipe expects 1 argument (command)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
             }
             "file_stat" => {
                 if args.len() != 1 {

@@ -3316,6 +3316,23 @@ fn dual_sort_str() {
     );
 }
 
+// === P2: exec_pipe test ===
+
+#[test]
+fn dual_exec_pipe() {
+    if !can_link() { return; }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let cmd = exec_pipe("echo hello world")
+            println(str_trim(cmd))
+            0
+        }
+        "#,
+        "hello world"
+    );
+}
+
 // ==================== FFI Struct-by-Value Dual Tests ====================
 // Requires: rustc compiler, cc linker, and standalone.rs compiled as .so
 
