@@ -20,32 +20,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut free_vars = BTreeMap::new();
         self.collect_free_vars(body, &param_names, vars, &mut free_vars);
 
-        let ret_type = match ret {
-            Some(ty) => types::mimi_type_to_llvm(self.context, ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
-            None => BasicTypeEnum::IntType(self.context.i64_type()),
-        };
-
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Function type: fn(env_ptr: i8*, params...) -> ret_type
-        let mut param_types_llvm = vec![BasicTypeEnum::PointerType(i8_ptr)];
-        for p in params {
-            let ty = types::mimi_type_to_llvm(self.context, &p.ty)
-                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-            param_types_llvm.push(ty);
-        }
-        let metadata_params: Vec<_> = param_types_llvm
-            .iter()
-            .map(|t| types::basic_to_metadata(self.context, *t))
-            .collect();
-        let fn_type = match ret_type {
-            BasicTypeEnum::IntType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::PointerType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::StructType(t) => t.fn_type(&metadata_params, false),
-            BasicTypeEnum::ArrayType(t) => t.fn_type(&metadata_params, false),
-            _ => self.context.i64_type().fn_type(&metadata_params, false),
-        };
+        let ret_type = lambda_ret_type(self.context, ret);
+        let param_types_llvm = lambda_param_types(self.context, params);
+        let fn_type = lambda_fn_type(self.context, ret_type, &param_types_llvm);
 
         let lambda_name = format!("__lambda_{}_{}", self.spawn_counter, body.len());
         self.spawn_counter += 1;
@@ -55,88 +32,97 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(entry);
 
         let mut lambda_vars = vars.clone();
-        // Bind env_ptr param (param 0)
         let env_ptr_param = lambda_fn
             .get_nth_param(0)
             .ok_or_else(|| "codegen: lambda env_ptr param index out of range".to_string())?
             .into_pointer_value();
 
-        // Load captured variables from env struct
-        if !free_vars.is_empty() {
-            let env_field_types: Vec<BasicTypeEnum<'ctx>> =
-                free_vars.values().map(|&(_, ty)| ty).collect();
-            let env_struct_type = self.context.struct_type(&env_field_types, false);
-            let env_struct_ptr = self
-                .builder
-                .build_pointer_cast(
-                    env_ptr_param,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "env_struct",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
-            for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {
-                let field_gep = self
-                    .gep()
-                    .build_struct_gep(
-                        env_struct_type,
-                        env_struct_ptr,
-                        i as u32,
-                        &format!("env_{}_gep", name),
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                let field_val = self
-                    .builder
-                    .build_load(ty, field_gep, &format!("cap_{}", name))
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let alloca = self
-                    .builder
-                    .build_alloca(ty, &format!("cap_{}_alloca", name))
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(alloca, field_val)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                lambda_vars.insert(name.clone(), (alloca, ty));
-            }
+        self.load_captured_vars(&free_vars, env_ptr_param, &mut lambda_vars)?;
+        self.bind_lambda_params(params, lambda_fn, &mut lambda_vars)?;
+        self.emit_lambda_body(body, ret_type, &mut lambda_vars)?;
+
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
         }
 
-        // Bind regular parameters (params start at index 1)
+        self.build_closure_struct(lambda_fn, &free_vars)
+    }
+
+    /// Load captured variables from the env struct into the lambda's local scope.
+    fn load_captured_vars(
+        &self,
+        free_vars: &BTreeMap<String, VarEntry<'ctx>>,
+        env_ptr_param: inkwell::values::PointerValue<'ctx>,
+        lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
+        if free_vars.is_empty() {
+            return Ok(());
+        }
+        let env_struct_type = env_struct_type_for(self.context, free_vars);
+        let env_struct_ptr = self.build_pointer_cast(
+            env_ptr_param,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "env_struct",
+        )?;
+        for (i, (name, &(_, ty))) in free_vars.iter().enumerate() {
+            let field_gep = self
+                .gep()
+                .build_struct_gep(
+                    env_struct_type,
+                    env_struct_ptr,
+                    i as u32,
+                    &format!("env_{}_gep", name),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let field_val = self.build_load(ty, field_gep, &format!("cap_{}", name))?;
+            let alloca = self.build_alloca(ty, &format!("cap_{}_alloca", name))?;
+            self.build_store(alloca, field_val)?;
+            lambda_vars.insert(name.clone(), (alloca, ty));
+        }
+        Ok(())
+    }
+
+    /// Store regular lambda parameters into stack allocas.
+    fn bind_lambda_params(
+        &self,
+        params: &[Param],
+        lambda_fn: inkwell::values::FunctionValue<'ctx>,
+        lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
         for (i, p) in params.iter().enumerate() {
             let param_idx = i as u32 + 1;
             let ty = types::mimi_type_to_llvm(self.context, &p.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-            let alloca = self
-                .builder
-                .build_alloca(ty, &p.name)
-                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-            self.builder
-                .build_store(
-                    alloca,
-                    lambda_fn
-                        .get_nth_param(param_idx)
-                        .ok_or_else(|| "codegen: lambda param index out of range".to_string())?,
-                )
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            let alloca = self.build_alloca(ty, &p.name)?;
+            let param_val = lambda_fn
+                .get_nth_param(param_idx)
+                .ok_or_else(|| "codegen: lambda param index out of range".to_string())?;
+            self.build_store(alloca, param_val)?;
             lambda_vars.insert(p.name.clone(), (alloca, ty));
         }
+        Ok(())
+    }
 
-        // Compile body
-        let mut last_val = self.context.i64_type().const_int(0, false).into();
+    /// Compile the lambda body and emit a final return if needed.
+    fn emit_lambda_body(
+        &mut self,
+        body: &Block,
+        ret_type: BasicTypeEnum<'ctx>,
+        lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
+        let mut last_val = default_ret_value(self.context, ret_type);
         for stmt in body {
             match stmt {
                 Stmt::Expr(e) => {
-                    last_val = self.compile_expr(e, &lambda_vars)?;
+                    last_val = self.compile_expr(e, lambda_vars)?;
                 }
                 Stmt::Return(Some(e)) => {
-                    let v = self.compile_expr(e, &lambda_vars)?;
-                    self.builder
-                        .build_return(Some(&v))
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+                    let v = self.compile_expr(e, lambda_vars)?;
+                    self.build_return(Some(&v))?;
                     break;
                 }
                 Stmt::Return(None) => {
-                    self.builder
-                        .build_return(None)
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+                    self.build_return(None)?;
                     break;
                 }
                 Stmt::Let {
@@ -144,8 +130,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     init: Some(init),
                     ..
                 } => {
-                    let val = self.compile_expr(init, &lambda_vars)?;
-                    self.compile_pattern_bind(pat, val, &mut lambda_vars)
+                    let val = self.compile_expr(init, lambda_vars)?;
+                    self.compile_pattern_bind(pat, val, lambda_vars)
                         .map_err(|e| {
                             CompileError::LlvmError(format!("pattern bind error: {}", e))
                         })?;
@@ -154,103 +140,90 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         if !self.block_has_terminator() {
-            self.builder
-                .build_return(Some(&last_val))
-                .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+            self.build_return(Some(&last_val))?;
         }
-        if let Some(bb) = saved_block {
-            self.builder.position_at_end(bb);
-        }
+        Ok(())
+    }
 
-        // Build closure struct: { fn_ptr: i8*, env_ptr: i8* } on stack
+    /// Build and return the closure struct { fn_ptr: i8*, env_ptr: i8* }.
+    fn build_closure_struct(
+        &mut self,
+        lambda_fn: inkwell::values::FunctionValue<'ctx>,
+        free_vars: &BTreeMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let closure_struct_type = types::closure_struct_type(self.context);
-        let closure_alloca = self
-            .builder
-            .build_alloca(BasicTypeEnum::StructType(closure_struct_type), "closure")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let closure_alloca =
+            self.build_alloca(BasicTypeEnum::StructType(closure_struct_type), "closure")?;
 
         let fn_ptr = lambda_fn.as_global_value().as_pointer_value();
         let fn_gep = self
             .gep()
             .build_struct_gep(closure_struct_type, closure_alloca, 0, "fn_gep")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(fn_gep, fn_ptr)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(fn_gep, fn_ptr)?;
 
-        if !free_vars.is_empty() {
-            let env_field_types: Vec<BasicTypeEnum<'ctx>> =
-                free_vars.values().map(|&(_, ty)| ty).collect();
-            let env_struct_type = self.context.struct_type(&env_field_types, false);
-            let env_byte_size = env_struct_type
-                .size_of()
-                .ok_or_else(|| "size_of error".to_string())?;
-            let malloc_fn = self
-                .module
-                .get_function("malloc")
-                .ok_or_else(|| "malloc not declared".to_string())?;
-            let env_heap_ptr = self
-                .builder
-                .build_call(
-                    malloc_fn,
-                    &[BasicMetadataValueEnum::IntValue(env_byte_size)],
-                    "env_heap",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                .try_as_basic_value_opt()
-                .ok_or("malloc returned void")?
-                .into_pointer_value();
-            // NOTE: not registered in heap_allocs — closure env must outlive
-            // the creating scope if the closure escapes (returned or stored
-            // to a shared variable), so we cannot auto-free it on scope exit.
-            for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
-                let val = self
-                    .builder
-                    .build_load(ty, var_alloca, &format!("cap_val_{}", name))
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let field_gep = self
-                    .gep()
-                    .build_struct_gep(
-                        env_struct_type,
-                        env_heap_ptr,
-                        i as u32,
-                        &format!("env_{}_gep", name),
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                self.builder
-                    .build_store(field_gep, val)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-            }
-            let env_gep = self
-                .gep()
-                .build_struct_gep(closure_struct_type, closure_alloca, 1, "env_gep")
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let env_ptr_i8 = self
-                .builder
-                .build_pointer_cast(env_heap_ptr, i8_ptr, "env_ptr_i8")
-                .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
-            self.builder
-                .build_store(env_gep, env_ptr_i8)
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let env_gep = self
+            .gep()
+            .build_struct_gep(closure_struct_type, closure_alloca, 1, "env_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        if free_vars.is_empty() {
+            self.build_store(env_gep, i8_ptr.const_null())?;
         } else {
-            let env_gep = self
-                .gep()
-                .build_struct_gep(closure_struct_type, closure_alloca, 1, "env_gep")
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            self.builder
-                .build_store(env_gep, i8_ptr.const_null())
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            let env_heap_ptr = self.allocate_closure_env(free_vars)?;
+            let env_ptr_i8 = self.build_pointer_cast(env_heap_ptr, i8_ptr, "env_ptr_i8")?;
+            self.build_store(env_gep, env_ptr_i8)?;
         }
 
-        let closure_val = self
-            .builder
-            .build_load(
-                BasicTypeEnum::StructType(closure_struct_type),
-                closure_alloca,
-                "closure_val",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        Ok(closure_val)
+        self.build_load(
+            BasicTypeEnum::StructType(closure_struct_type),
+            closure_alloca,
+            "closure_val",
+        )
+    }
+
+    /// Allocate and populate the closure environment struct on the heap.
+    fn allocate_closure_env(
+        &self,
+        free_vars: &BTreeMap<String, VarEntry<'ctx>>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let env_field_types: Vec<BasicTypeEnum<'ctx>> =
+            free_vars.values().map(|&(_, ty)| ty).collect();
+        let env_struct_type = self.context.struct_type(&env_field_types, false);
+        let env_byte_size = env_struct_type
+            .size_of()
+            .ok_or_else(|| "size_of error".to_string())?;
+        let malloc_fn = self
+            .module
+            .get_function("malloc")
+            .ok_or_else(|| "malloc not declared".to_string())?;
+        let env_heap_ptr = self
+            .build_call(
+                malloc_fn,
+                &[BasicMetadataValueEnum::IntValue(env_byte_size)],
+                "env_heap",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("malloc returned void")?
+            .into_pointer_value();
+
+        // NOTE: not registered in heap_allocs — closure env must outlive the
+        // creating scope if the closure escapes (returned or stored to a shared
+        // variable), so we cannot auto-free it on scope exit.
+        for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
+            let val = self.build_load(ty, var_alloca, &format!("cap_val_{}", name))?;
+            let field_gep = self
+                .gep()
+                .build_struct_gep(
+                    env_struct_type,
+                    env_heap_ptr,
+                    i as u32,
+                    &format!("env_{}_gep", name),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            self.build_store(field_gep, val)?;
+        }
+        Ok(env_heap_ptr)
     }
 
     /// Collect free variables used in a block that are defined in the enclosing scope
@@ -450,5 +423,70 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => {}
         }
+    }
+}
+
+fn lambda_ret_type<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    ret: &Option<Type>,
+) -> BasicTypeEnum<'ctx> {
+    match ret {
+        Some(ty) => types::mimi_type_to_llvm(context, ty)
+            .unwrap_or(BasicTypeEnum::IntType(context.i64_type())),
+        None => BasicTypeEnum::IntType(context.i64_type()),
+    }
+}
+
+fn lambda_param_types<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    params: &[Param],
+) -> Vec<BasicTypeEnum<'ctx>> {
+    let i8_ptr = context.ptr_type(inkwell::AddressSpace::default());
+    let mut result = vec![BasicTypeEnum::PointerType(i8_ptr)];
+    for p in params {
+        result.push(
+            types::mimi_type_to_llvm(context, &p.ty)
+                .unwrap_or(BasicTypeEnum::IntType(context.i64_type())),
+        );
+    }
+    result
+}
+
+fn lambda_fn_type<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    ret_type: BasicTypeEnum<'ctx>,
+    param_types_llvm: &[BasicTypeEnum<'ctx>],
+) -> inkwell::types::FunctionType<'ctx> {
+    let metadata_params: Vec<_> = param_types_llvm
+        .iter()
+        .map(|t| types::basic_to_metadata(context, *t))
+        .collect();
+    match ret_type {
+        BasicTypeEnum::IntType(t) => t.fn_type(&metadata_params, false),
+        BasicTypeEnum::FloatType(t) => t.fn_type(&metadata_params, false),
+        BasicTypeEnum::PointerType(t) => t.fn_type(&metadata_params, false),
+        BasicTypeEnum::StructType(t) => t.fn_type(&metadata_params, false),
+        BasicTypeEnum::ArrayType(t) => t.fn_type(&metadata_params, false),
+        _ => context.i64_type().fn_type(&metadata_params, false),
+    }
+}
+
+fn env_struct_type_for<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    free_vars: &BTreeMap<String, VarEntry<'ctx>>,
+) -> inkwell::types::StructType<'ctx> {
+    let env_field_types: Vec<BasicTypeEnum<'ctx>> =
+        free_vars.values().map(|&(_, ty)| ty).collect();
+    context.struct_type(&env_field_types, false)
+}
+
+fn default_ret_value<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    ret_type: BasicTypeEnum<'ctx>,
+) -> BasicValueEnum<'ctx> {
+    match ret_type {
+        BasicTypeEnum::IntType(_) => context.i64_type().const_int(0, false).into(),
+        BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),
+        _ => context.i64_type().const_int(0, false).into(),
     }
 }
