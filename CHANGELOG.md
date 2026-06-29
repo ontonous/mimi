@@ -6,6 +6,31 @@
 
 ### Changed
 
+- **Codegen 质量重构**: 提取 `CodeGenerator` LLVM 构建辅助方法族
+  (`build_alloca`, `build_store`, `build_load`, `build_call`, `build_br`,
+  `build_cond_br`, `build_return`, `get_runtime_fn`, `build_extract_value`,
+  `build_ptr_to_int`, `build_bit_cast`)，消除数百处重复的错误包装样板。
+- **拆分超长 codegen 函数**:
+  - `builtins/mod.rs::register_runtime` → 16 个按功能分组的注册 helper
+  - `func.rs::compile_func` → `bind_func_params` / `compile_func_body` /
+    `emit_implicit_return` 等 helper
+  - `expr/call/method.rs::compile_method_call` → 弱引用升级、共享解引用、
+    dyn trait、impl trait、集合方法等 helper
+  - `expr/call/constructor.rs::compile_variant_method` → is/unwrap/unwrap_or/
+    ok_or/map/and_then/map_err 等 helper
+  - `expr/match.rs` → arm dispatch/body/phi 与 list prefix 绑定 helper
+  - `registry/funcs.rs::generate_extern_fn` → 签名、参数/返回转换、合约检查、
+    no_panic、清理等 helper
+  - `block.rs` → `compile_if_stmt` / `compile_break_stmt` /
+    `compile_continue_stmt`
+  - `expr/operator.rs::compile_binop` → 算术/整数/浮点/字符串/相等/比较/
+    逻辑/范围/幂/按位 helper
+  - `func/body.rs` → 共享 `emit_loop_body_block` 与 for 循环 index/list helper
+  - `expr/call/helpers.rs::compile_builtin_intrinsic` → 按内建类别分组的 helper
+  - `actors.rs::compile_actor_method` → prologue/body/epilogue helper
+- 在 `scope.rs`、`actors.rs`、`expr/call/async.rs`、`expr.rs` 等文件中采用新的
+  LLVM 构建辅助方法，进一步减少样板代码。
+
 ### Fixed
 
 ## [v0.28.7] — 2026-06-29
