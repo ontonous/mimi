@@ -1,5 +1,6 @@
 //! FFI boundary layer shared by the interpreter and codegen backends.
 
+pub mod bindgen_tests;
 pub mod c_header;
 pub mod callback;
 pub mod contract;
