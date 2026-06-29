@@ -5,3 +5,4 @@ rust_main
 xcallbacks*.so
 mimi_ffi.h
 bindings/
+*.ll
