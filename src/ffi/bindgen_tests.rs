@@ -88,6 +88,32 @@ mod tests {
                 variadic: false,
                 no_panic: false,
             },
+            ExternFunc {
+                name: "apply_callback".to_string(),
+                params: vec![
+                    ExternParam {
+                        name: "f".to_string(),
+                        ty: Type::Func(
+                            vec![
+                                Type::Name("i32".to_string(), vec![]),
+                                Type::Name("i32".to_string(), vec![]),
+                            ],
+                            Box::new(Type::Name("i32".to_string(), vec![])),
+                        ),
+                        cap_mode: None,
+                    },
+                    ExternParam {
+                        name: "x".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                        cap_mode: None,
+                    },
+                ],
+                ret: Some(Type::Name("i32".to_string(), vec![])),
+                requires: None,
+                ensures: None,
+                variadic: false,
+                no_panic: false,
+            },
         ]
     }
 
@@ -113,6 +139,7 @@ mod tests {
         assert!(out.contains("pub fn add("));
         assert!(out.contains("pub fn greet("));
         assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_longlong"));
+        assert!(out.contains("pub fn apply_callback(f: unsafe extern \"C\" fn(c_longlong, c_longlong) -> c_longlong, x: c_longlong) -> c_longlong"));
         assert!(out.contains("extern \"C\""));
     }
 
@@ -125,6 +152,10 @@ mod tests {
         assert!(out.contains("func greet("));
         assert!(out.contains("type Point struct"));
         assert!(out.contains("func point_sum(p Point) int64"));
+        assert!(out.contains("type apply_callback_f_cb func(int64, int64) int64"));
+        assert!(out.contains("var apply_callback_f_cb_slot apply_callback_f_cb"));
+        assert!(out.contains("//export mimi_cb_apply_callback_f"));
+        assert!(out.contains("func apply_callback(f apply_callback_f_cb, x int64) int64"));
         // Regression: return type of mimi_string_free must be void, not void*.
         assert!(!out.contains("extern void* mimi_string_free"));
         assert!(out.contains("extern void mimi_string_free"));
@@ -156,6 +187,9 @@ mod tests {
         assert!(out.contains("inline MimiString greet("));
         assert!(out.contains("inline int64_t point_sum(const struct Point& p)"));
         assert!(out.contains("MimiString"));
+        assert!(out.contains("std::function<int64_t(int64_t, int64_t)> apply_callback_f_cb"));
+        assert!(out.contains("apply_callback_f_cb = f"));
+        assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
     }
 
     #[test]

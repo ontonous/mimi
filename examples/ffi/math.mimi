@@ -1,0 +1,17 @@
+type Point = #[repr(C)] record { x: i32, y: i32 }
+
+extern "C" func add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+extern "C" func greet(name: string) -> string {
+    "Hello, " + name
+}
+
+extern "C" func point_sum(p: Point) -> i32 {
+    p.x + p.y
+}
+
+extern "C" func apply_callback(f: func(i32, i32) -> i32, x: i32) -> i32 {
+    f(x, x + 1)
+}

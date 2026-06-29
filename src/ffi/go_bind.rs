@@ -56,6 +56,9 @@ impl GoBindGenerator {
         // Go struct types for #[repr(C)] records
         self.write_go_struct_defs(&mut out)?;
 
+        // Go callback types, slots, and C-exported trampolines
+        self.write_go_callback_support(&mut out, extern_funcs)?;
+
         for func in extern_funcs {
             let contract = self.build_contract(func);
             self.write_go_func(&mut out, func, &contract)?;
@@ -130,6 +133,178 @@ impl GoBindGenerator {
         Ok(())
     }
 
+    fn write_go_callback_support(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        // Generate type aliases and slots for callback parameters
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let go_type = self.callback_go_type(param_types, ret_type);
+                    let slot = self.callback_slot_name(&func.name, &p.name);
+                    writeln!(out, "type {} {}", self.callback_type_name(&func.name, &p.name), go_type)?;
+                    writeln!(out, "var {} {}", slot, self.callback_type_name(&func.name, &p.name))?;
+                }
+            }
+        }
+        writeln!(out)?;
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    self.write_go_callback_trampoline(out, &func.name, &p.name, param_types, ret_type)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_go_callback_trampoline(
+        &self,
+        out: &mut String,
+        func_name: &str,
+        param_name: &str,
+        param_types: &[Type],
+        ret_type: &Type,
+    ) -> Result<(), std::fmt::Error> {
+        let tramp = self.callback_trampoline_name(func_name, param_name);
+        writeln!(out, "//export {}", tramp)?;
+        let c_args: Vec<String> = param_types
+            .iter()
+            .enumerate()
+            .map(|(j, ty)| format!("arg{} {}", j, self.go_cgo_param_type(ty)))
+            .collect();
+        let c_ret = self.go_cgo_ret_type(ret_type);
+        let slot = self.callback_slot_name(func_name, param_name);
+        let go_args: Vec<String> = param_types
+            .iter()
+            .enumerate()
+            .map(|(j, ty)| format!("{}(arg{})", self.go_cast_from_c(ty), j))
+            .collect();
+        let call = format!("{}({})", slot, go_args.join(", "));
+        if c_ret.is_empty() {
+            writeln!(out, "func {}({}) {{", tramp, c_args.join(", "))?;
+            writeln!(out, "    if {} == nil {{ return }}", slot)?;
+            writeln!(out, "    {}", call)?;
+            writeln!(out, "}}")?;
+        } else {
+            writeln!(out, "func {}({}) {} {{", tramp, c_args.join(", "), c_ret)?;
+            writeln!(out, "    if {} == nil {{ return {} }}", slot, self.go_callback_default_ret(ret_type))?;
+            writeln!(out, "    return {}({})", self.go_cast_to_c(ret_type), call)?;
+            writeln!(out, "}}")?;
+        }
+        writeln!(out)?;
+        Ok(())
+    }
+
+    fn callback_type_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("{}_{}_cb", func_name, param_name)
+    }
+
+    fn callback_slot_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("{}_{}_cb_slot", func_name, param_name)
+    }
+
+    fn callback_trampoline_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}", func_name, param_name)
+    }
+
+    fn callback_go_type(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let args: Vec<String> = param_types
+            .iter()
+            .map(|ty| self.go_callback_arg_type(ty))
+            .collect();
+        let ret = self.go_callback_ret_type(ret_type);
+        if ret.is_empty() {
+            format!("func({})", args.join(", "))
+        } else {
+            format!("func({}) {}", args.join(", "), ret)
+        }
+    }
+
+    fn callback_c_type(&self, param_types: &[Type], ret_type: &Type) -> String {
+        self.callback_c_param_decl("callback", param_types, ret_type)
+    }
+
+    fn callback_c_param_decl(&self, name: &str, param_types: &[Type], ret_type: &Type) -> String {
+        let args: Vec<String> = param_types
+            .iter()
+            .map(|ty| self.c_callback_arg_type(ty))
+            .collect();
+        let ret = self.c_callback_ret_type(ret_type);
+        let args_str = if args.is_empty() { "void".to_string() } else { args.join(", ") };
+        format!("{} (*{})({})", ret, name, args_str)
+    }
+
+    fn c_callback_arg_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            _ => "long long".to_string(),
+        }
+    }
+
+    fn c_callback_ret_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "unit" => "void".to_string(),
+            _ => "long long".to_string(),
+        }
+    }
+
+    fn go_callback_arg_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            _ => "int64".to_string(),
+        }
+    }
+
+    fn go_callback_ret_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            Type::Name(name, _) if name == "unit" => "".to_string(),
+            _ => "int64".to_string(),
+        }
+    }
+
+    fn go_cgo_param_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            _ => "C.longlong".to_string(),
+        }
+    }
+
+    fn go_cgo_ret_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            Type::Name(name, _) if name == "unit" => "".to_string(),
+            _ => "C.longlong".to_string(),
+        }
+    }
+
+    fn go_cast_from_c(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            _ => "int64".to_string(),
+        }
+    }
+
+    fn go_cast_to_c(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            _ => "C.longlong".to_string(),
+        }
+    }
+
+    fn go_callback_default_ret(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "0.0".to_string(),
+            _ => "0".to_string(),
+        }
+    }
+
     fn write_c_decl(
         &self,
         out: &mut String,
@@ -140,7 +315,13 @@ impl GoBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, _p)| self.mimi_type_to_c(contract, i))
+            .map(|(i, p)| {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    self.callback_c_param_decl(&p.name, param_types, ret_type)
+                } else {
+                    format!("{} {}", self.mimi_type_to_c(contract, i), p.name)
+                }
+            })
             .collect();
         let ret = self.ret_type_to_c(contract);
         writeln!(out, "extern {} {}({});", ret, func.name, params.join(", "))
@@ -156,7 +337,14 @@ impl GoBindGenerator {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| format!("{} {}", p.name, self.mimi_type_to_go(contract, i)))
+            .map(|(i, p)| {
+                let ty = if let FfiArgContract::Callback { .. } = &contract.args[i] {
+                    self.callback_type_name(&func.name, &p.name)
+                } else {
+                    self.mimi_type_to_go(contract, i)
+                };
+                format!("{} {}", p.name, ty)
+            })
             .collect();
         let go_ret = self.ret_type_to_go(contract);
 
@@ -188,6 +376,13 @@ impl GoBindGenerator {
                 }
                 FfiArgContract::Float => {
                     c_args.push(format!("C.double({})", p.name));
+                }
+                FfiArgContract::Callback { .. } => {
+                    let slot = self.callback_slot_name(&func.name, &p.name);
+                    let tramp = self.callback_trampoline_name(&func.name, &p.name);
+                    let type_name = self.callback_type_name(&func.name, &p.name);
+                    writeln!(conversions, "\t{} = ({})({})", slot, type_name, p.name)?;
+                    c_args.push(format!("C.{}", tramp));
                 }
                 _ => {
                     c_args.push(p.name.clone());
@@ -228,7 +423,9 @@ impl GoBindGenerator {
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "long long".to_string(),
             FfiArgContract::Json => "char*".to_string(),
             FfiArgContract::StructByValue(name) => format!("struct {}", name),
-            FfiArgContract::Callback { .. } => "void*".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_c_type(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -259,7 +456,9 @@ impl GoBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64".to_string(),
             FfiArgContract::StructByValue(name) => name.clone(),
-            FfiArgContract::Callback { .. } => "unsafe.Pointer".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_go_type(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "unsafe.Pointer".to_string(),
         }
     }

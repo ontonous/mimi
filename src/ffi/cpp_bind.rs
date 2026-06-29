@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, TypeAttribute, TypeDef, TypeDefKind};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// C++ binding generator — produces a `.hpp` header with RAII wrappers.
@@ -72,6 +72,9 @@ impl CppBindGenerator {
         writeln!(out, "}};")?;
         writeln!(out)?;
 
+        // Callback support: thread-local std::function slots and C trampolines
+        self.write_callback_support(&mut out, extern_funcs)?;
+
         // C++ wrapper functions
         writeln!(out, "// C++ wrapper functions with RAII and type safety")?;
         for func in extern_funcs {
@@ -108,6 +111,37 @@ impl CppBindGenerator {
         )
     }
 
+    fn write_callback_support(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let slot = format!("{}_{}_cb", func.name, p.name);
+                    let tramp = format!("mimi_cb_{}_{}_trampoline", func.name, p.name);
+                    let cpp_sig = self.callback_cpp_type(param_types, ret_type);
+                    let c_sig = self.callback_c_signature(&tramp, param_types, ret_type);
+                    writeln!(out, "// Callback slot for {}::{}", func.name, p.name)?;
+                    writeln!(out, "thread_local static {} {};", cpp_sig, slot)?;
+                    writeln!(out, "{}", c_sig)?;
+                    writeln!(out, "    if (!{}) {{", slot)?;
+                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(out, "    }}")?;
+                    let c_args: Vec<String> = param_types.iter().enumerate()
+                        .map(|(j, _)| format!("arg{}", j))
+                        .collect();
+                    writeln!(out, "    return {}({});", slot, c_args.join(", "))?;
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn write_cpp_wrapper(
         &self,
         out: &mut String,
@@ -134,6 +168,12 @@ impl CppBindGenerator {
                 FfiArgContract::StringTransfer | FfiArgContract::Json => {
                     writeln!(conversions, "        auto {}_cstr = {}.c_str();", p.name, p.name)?;
                     c_args.push(format!("{}_cstr", p.name));
+                }
+                FfiArgContract::Callback { .. } => {
+                    let slot = format!("{}_{}_cb", func.name, p.name);
+                    let tramp = format!("{}_{}_trampoline", func.name, p.name);
+                    writeln!(conversions, "        {} = {};", slot, p.name)?;
+                    c_args.push(tramp);
                 }
                 _ => {
                     c_args.push(format!("static_cast<{}>({})", self.mimi_type_to_c(contract, i), p.name));
@@ -174,7 +214,9 @@ impl CppBindGenerator {
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
             FfiArgContract::Json => "const char*".to_string(),
             FfiArgContract::StructByValue(name) => format!("struct {}", name),
-            FfiArgContract::Callback { .. } => "void*".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_c_type(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -193,7 +235,9 @@ impl CppBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
             FfiArgContract::StructByValue(name) => format!("const struct {}&", name),
-            FfiArgContract::Callback { .. } => "void*".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_cpp_type(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -212,6 +256,60 @@ impl CppBindGenerator {
             crate::ffi::contract::FfiRetContract::Json => "std::string".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("struct {}", name),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "void*".to_string(),
+        }
+    }
+
+    fn callback_cpp_type(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let args: Vec<String> = param_types
+            .iter()
+            .map(|ty| self.mimi_type_to_c_type(ty))
+            .collect();
+        format!(
+            "std::function<{}({})>",
+            self.mimi_type_to_c_type(ret_type),
+            args.join(", ")
+        )
+    }
+
+    fn callback_c_type(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let args: Vec<String> = param_types
+            .iter()
+            .map(|ty| self.mimi_type_to_c_type(ty))
+            .collect();
+        format!(
+            "{} (*)({})",
+            self.mimi_type_to_c_type(ret_type),
+            args.join(", ")
+        )
+    }
+
+    fn callback_c_signature(&self, name: &str, param_types: &[Type], ret_type: &Type) -> String {
+        let ret = self.mimi_type_to_c_type(ret_type);
+        let args: Vec<String> = param_types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| format!("{} arg{}", self.mimi_type_to_c_type(ty), i))
+            .collect();
+        let args_str = if args.is_empty() { "void".to_string() } else { args.join(", ") };
+        format!("extern \"C\" {} {}({}) {{", ret, name, args_str)
+    }
+
+    fn callback_default_ret(&self, ret_type: &Type) -> String {
+        match ret_type {
+            Type::Name(name, _) if name == "f64" => "0.0".to_string(),
+            Type::Name(name, _) if name == "unit" => "".to_string(),
+            _ => "0".to_string(),
+        }
+    }
+
+    fn mimi_type_to_c_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" | "i64" | "bool" => "int64_t".to_string(),
+                "f64" => "double".to_string(),
+                _ => "int64_t".to_string(),
+            },
+            _ => "int64_t".to_string(),
         }
     }
 }

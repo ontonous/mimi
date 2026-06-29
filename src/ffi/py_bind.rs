@@ -485,9 +485,6 @@ impl PyBindGenerator {
             | FfiArgContract::Json => {
                 format!("{}.c_str()", name)
             }
-            FfiArgContract::Callback { .. } => {
-                format!("{}.cast<py::function>()", name)
-            }
             _ => name.clone(),
         }
     }

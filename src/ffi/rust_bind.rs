@@ -211,7 +211,9 @@ impl RustBindGenerator {
             | FfiArgContract::CBorrowMut(_) => "c_longlong".to_string(),
             FfiArgContract::Json => "*const c_char".to_string(),
             FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
-            FfiArgContract::Callback { .. } => "*const c_void".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_signature_to_rust(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
     }
@@ -233,9 +235,28 @@ impl RustBindGenerator {
             | FfiArgContract::CBorrowMut(_) => "i64".to_string(),
             FfiArgContract::Json => "&str".to_string(),
             FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
-            FfiArgContract::Callback { .. } => "*const c_void".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_signature_to_rust(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
+    }
+
+    /// Build a C function-pointer type string from Mimi callback parameter/return types.
+    fn callback_signature_to_rust(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let arg_types: Vec<String> = param_types
+            .iter()
+            .map(|ty| match ty {
+                Type::Name(name, _) if name == "f64" => "c_double".to_string(),
+                _ => "c_longlong".to_string(),
+            })
+            .collect();
+        let ret = match ret_type {
+            Type::Name(name, _) if name == "f64" => "c_double".to_string(),
+            Type::Name(name, _) if name == "unit" => "()".to_string(),
+            _ => "c_longlong".to_string(),
+        };
+        format!("unsafe extern \"C\" fn({}) -> {}", arg_types.join(", "), ret)
     }
 
     fn ret_type_to_rust(&self, contract: &FfiContract) -> String {
