@@ -1,0 +1,11 @@
+extern "C" func map_int(f: func(i32) -> i32, x: i32) -> i32 {
+    f(x)
+}
+
+extern "C" func reduce_int(f: func(i32, i32) -> i32, a: i32, b: i32) -> i32 {
+    f(a, b)
+}
+
+extern "C" func filter_int(f: func(i32) -> bool, x: i32) -> bool {
+    f(x)
+}

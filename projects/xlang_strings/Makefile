@@ -1,0 +1,49 @@
+MIMI = ../../target/debug/mimi
+CARGO = cargo
+CC = gcc
+CXX = g++
+PYTHON = python3
+EXT_SUFFIX := $(shell $(PYTHON) -c "import importlib.machinery; print(importlib.machinery.EXTENSION_SUFFIXES[0])")
+
+RUNTIME_SHIM_DIR = ../runtime_shim
+RUNTIME_SHIM_SO = $(RUNTIME_SHIM_DIR)/target/debug/libmimi_runtime_shim.so
+
+export LLVM_SYS_180_PREFIX = /tmp/llvm-wrapper
+
+.PHONY: all bindings clean test test-c test-rust test-python
+
+all: libxstrings.so bindings $(RUNTIME_SHIM_SO) c_main rust_main xstrings$(EXT_SUFFIX)
+
+libxstrings.so: xstrings.mimi
+	$(MIMI) build --shared $< -o $@
+
+bindings: xstrings.mimi
+	$(MIMI) bindgen $< -o bindings
+	ln -sf bindings/xstrings.h mimi_ffi.h
+
+$(RUNTIME_SHIM_SO): $(RUNTIME_SHIM_DIR)/Cargo.toml $(RUNTIME_SHIM_DIR)/src/lib.rs
+	$(CARGO) build --manifest-path $(RUNTIME_SHIM_DIR)/Cargo.toml
+
+c_main: c_main.c libxstrings.so bindings $(RUNTIME_SHIM_SO)
+	$(CC) -o $@ c_main.c -I. -L. -L$(RUNTIME_SHIM_DIR)/target/debug -lxstrings -lmimi_runtime_shim -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,'$$ORIGIN/$(RUNTIME_SHIM_DIR)/target/debug'
+
+rust_main: rust_main.rs libxstrings.so bindings $(RUNTIME_SHIM_SO)
+	rustc -L. -L$(RUNTIME_SHIM_DIR)/target/debug rust_main.rs -o $@ -lxstrings -lmimi_runtime_shim -C link-arg=-Wl,-rpath,'$$ORIGIN' -C link-arg=-Wl,-rpath,'$$ORIGIN/$(RUNTIME_SHIM_DIR)/target/debug'
+
+xstrings$(EXT_SUFFIX): bindings/xstrings_pybind.cpp libxstrings.so bindings $(RUNTIME_SHIM_SO)
+	$(CXX) -shared -fPIC -O2 -std=c++17 $$(python3 -m pybind11 --includes) $< -I. -L. -L$(RUNTIME_SHIM_DIR)/target/debug -lxstrings -lmimi_runtime_shim -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,'$$ORIGIN/$(RUNTIME_SHIM_DIR)/target/debug' -o $@
+
+test-c: c_main
+	./c_main
+
+test-rust: rust_main
+	./rust_main
+
+test-python: xstrings$(EXT_SUFFIX)
+	$(PYTHON) python_test.py
+
+test: test-c test-rust test-python
+
+clean:
+	rm -f libxstrings.so c_main rust_main xstrings*.so mimi_ffi.h
+	rm -rf bindings

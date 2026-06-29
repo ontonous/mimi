@@ -1,0 +1,11 @@
+extern "C" func greet(name: string) -> string {
+    "Hello, " + name
+}
+
+extern "C" func char_count(s: string) -> i32 {
+    len(s) as i32
+}
+
+extern "C" func join(a: string, b: string) -> string {
+    a + b
+}

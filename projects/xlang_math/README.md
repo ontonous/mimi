@@ -41,7 +41,7 @@ make test
 ### 3. 运行时库分发
 
 - 绑定代码链接 `-lmimi_runtime`，但 `mimi build --shared` 并不产出 `libmimi_runtime.so`。
-- 本项目用 `runtime_shim/` 小 crate 把 `mimi::runtime` 的 C ABI 符号重新导出为 `libmimi_runtime_shim.so`，客户端再链接它。
+- 本项目链接 `../runtime_shim/` 构建的 `libmimi_runtime_shim.so`，它把 `mimi::runtime` 的 C ABI 符号重新导出为共享库。
 - 长期应让工具链直接产出运行时共享库或把运行时静态链接进用户共享库。
 
 ## 文件说明
@@ -52,5 +52,5 @@ make test
 | `c_main.c` | C 调用示例 |
 | `rust_main.rs` | Rust 调用示例 |
 | `python_test.py` | Python 调用示例 |
-| `runtime_shim/` | 导出 Mimi runtime C ABI 的 cdylib |
+| `../runtime_shim/` | 共享的 Mimi runtime C ABI cdylib |
 | `bindings/` | `mimi bindgen` 生成的绑定文件 |
