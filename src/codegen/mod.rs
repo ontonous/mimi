@@ -429,6 +429,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("bitcast error ({}): {}", name, e)))
     }
 
+    /// Build a `pointercast` instruction.
+    pub(super) fn build_pointer_cast(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        ty: inkwell::types::PointerType<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        self.builder
+            .build_pointer_cast(ptr, ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("pointercast error ({}): {}", name, e)))
+    }
+
     /// Build an `inttoptr` instruction.
     pub(super) fn build_int_to_ptr(
         &self,
