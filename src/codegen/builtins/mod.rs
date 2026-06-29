@@ -19,6 +19,33 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     let i64 = ctx.i64_type();
     let void = ctx.void_type();
 
+    register_libc(module, ctx, i8_ptr, i32, i64, void);
+    register_map_record_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_string_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_regex_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_ffi_fns_defined_in_rust_ffi_rt_rs(module, ctx, i8_ptr, i32, i64, void);
+    register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c(module, ctx, i8_ptr, i32, i64, void);
+    register_time_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_environment_cli_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_json_fns_stubs_for_codegen(module, ctx, i8_ptr, i32, i64, void);
+    register_set_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_network_socket_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_mimifuture_mimiexecutor_poll_based_async_rt(module, ctx, i8_ptr, i32, i64, void);
+    register_directory_path_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_process_advanced_file_operations(module, ctx, i8_ptr, i32, i64, void);
+    register_binary_i_o_streaming_line_reading(module, ctx, i8_ptr, i32, i64, void);
+    register_crypto_fns(module, ctx, i8_ptr, i32, i64, void);
+}
+
+fn register_libc<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+
     module.add_function(
         "printf",
         i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], true),
@@ -142,6 +169,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
 
     // Future-based spawn/await (replaces old pthread_create/join)
 
+}
+
+fn register_map_record_fns<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // Map/Record runtime functions
     // MapHandle = i64 (pointer cast)
     module.add_function(
@@ -234,6 +271,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_string_fns<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // String runtime functions
     // MimiList* = i8* (opaque pointer to {i64, i8**} struct)
     // str_split(s, delim) → MimiList*
@@ -324,6 +371,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_regex_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // Regex functions
     // mimi_regex_match(text, pattern) -> int (0 or 1)
     module.add_function(
@@ -421,6 +478,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_ffi_fns_defined_in_rust_ffi_rt_rs<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    _i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // FFI runtime functions (defined in Rust ffi/runtime.rs)
     // mimi_shared_retain(handle) -> handle
     module.add_function(
@@ -434,6 +501,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
+}
+
+fn register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // G5: Refcounted heap allocation for shared values (defined in mimi_runtime.c)
     // mimi_rc_alloc(size: i64) -> i8*
     module.add_function(
@@ -552,6 +629,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_time_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    _i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // Time functions
     // mimi_now() -> i64 (unix timestamp in seconds)
     module.add_function(
@@ -572,6 +659,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_environment_cli_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // Environment/CLI functions
     // mimi_getenv(name: i8*) -> i8*
     module.add_function(
@@ -604,6 +701,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_json_fns_stubs_for_codegen<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // JSON functions (stubs for codegen)
     // mimi_is_valid_json(json_str: i8*) -> i32 (1 if valid, 0 if not)
     module.add_function(
@@ -679,6 +786,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_set_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Set runtime functions ==========
     // mimi_set_new() -> i64 (handle)
     module.add_function(
@@ -747,6 +864,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_network_socket_fns<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Network / Socket functions ==========
     // mimi_socket(domain: i64, type: i64, protocol: i64) -> i64
     module.add_function(
@@ -855,6 +982,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_mimifuture_mimiexecutor_poll_based_async_rt<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // ─── MimiFuture + MimiExecutor (poll-based async runtime) ───
     // mimi_future_alloc(result_size: i64) -> i8*
     module.add_function(
@@ -918,6 +1055,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_directory_path_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Directory & path runtime functions ==========
     // mimi_listdir(path: i8*) -> MimiList* (i8*)
     module.add_function(
@@ -986,6 +1133,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_process_advanced_file_operations<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Process & advanced file operations ==========
     // mimi_exec(cmd: i8*) -> i8* (MimiExecResult*)
     module.add_function(
@@ -1054,6 +1211,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_binary_i_o_streaming_line_reading<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Binary I/O & streaming line reading ==========
     // mimi_read_file_partial(path: i8*, max_bytes: i64) -> i8*
     module.add_function(
@@ -1092,6 +1259,16 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 
+}
+
+fn register_crypto_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    _i32: inkwell::types::IntType<'ctx>,
+    _i64: inkwell::types::IntType<'ctx>,
+    _void: inkwell::types::VoidType<'ctx>,
+) {
     // ========== Crypto runtime functions ==========
     // mimi_sha256(data: i8*) -> i8* (hex string)
     module.add_function(
@@ -1124,6 +1301,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
         Some(inkwell::module::Linkage::External),
     );
 }
+
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(

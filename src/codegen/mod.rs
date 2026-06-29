@@ -291,6 +291,110 @@ impl<'ctx> CodeGenerator<'ctx> {
         gep::CheckedGepBuilder::new(&self.builder)
     }
 
+    // -------------------------------------------------------------------------
+    // Low-level LLVM builder helpers
+    //
+    // These thin wrappers reduce the repetitive `map_err(|e|
+    // CompileError::LlvmError(format!(...)))` boilerplate that appears hundreds
+    // of times across the codegen module. They intentionally keep the same
+    // semantics as the underlying inkwell calls so that refactors are local and
+    // low-risk.
+    // -------------------------------------------------------------------------
+
+    /// Build an `alloca` instruction, returning a typed error on failure.
+    pub(super) fn build_alloca<T: inkwell::types::BasicType<'ctx>>(
+        &self,
+        ty: T,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        self.builder
+            .build_alloca(ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("alloca error ({}): {}", name, e)))
+    }
+
+    /// Build a `store` instruction.
+    pub(super) fn build_store(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        val: impl inkwell::values::BasicValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        self.builder
+            .build_store(ptr, val)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Build a typed `load` instruction.
+    pub(super) fn build_load<T: inkwell::types::BasicType<'ctx>>(
+        &self,
+        ty: T,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.builder
+            .build_load(ty, ptr, name)
+            .map_err(|e| CompileError::LlvmError(format!("load error ({}): {}", name, e)))
+    }
+
+    /// Build an unconditional branch.
+    #[allow(dead_code)] // Will be adopted by upcoming codegen refactors.
+    pub(super) fn build_br(
+        &self,
+        dest: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> Result<(), CompileError> {
+        self.builder
+            .build_unconditional_branch(dest)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Build a conditional branch.
+    pub(super) fn build_cond_br(
+        &self,
+        cond: inkwell::values::IntValue<'ctx>,
+        then_bb: inkwell::basic_block::BasicBlock<'ctx>,
+        else_bb: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> Result<(), CompileError> {
+        self.builder
+            .build_conditional_branch(cond, then_bb, else_bb)
+            .map_err(|e| CompileError::LlvmError(format!("conditional branch error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Look up a runtime/external function by name.
+    pub(super) fn get_runtime_fn(
+        &self,
+        name: &str,
+    ) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        self.module
+            .get_function(name)
+            .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", name)))
+    }
+
+    /// Build a call instruction and return the resulting `CallSiteValue`.
+    pub(super) fn build_call(
+        &self,
+        func: inkwell::values::FunctionValue<'ctx>,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<inkwell::values::CallSiteValue<'ctx>, CompileError> {
+        self.builder
+            .build_call(func, args, name)
+            .map_err(|e| CompileError::LlvmError(format!("call error ({}): {}", name, e)))
+    }
+
+    /// Build a `return` instruction with an optional value.
+    #[allow(dead_code)] // Will be adopted by upcoming codegen refactors.
+    pub(super) fn build_return(
+        &self,
+        val: Option<&dyn inkwell::values::BasicValue<'ctx>>,
+    ) -> Result<(), CompileError> {
+        self.builder
+            .build_return(val)
+            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        Ok(())
+    }
+
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
         self.builder.get_insert_block()?.get_parent()
     }
@@ -388,17 +492,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Shared variable: load the heap pointer, store new value at that location
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let heap_ptr = self
-                .builder
-                .build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))
-                .map_err(|e| CompileError::LlvmError(format!("shared heap ptr load error: {}", e)))?
+                .build_load(ptr_ty, alloca, &format!("{}_heap_ptr", name))?
                 .into_pointer_value();
-            self.builder.build_store(heap_ptr, val).map_err(|e| {
-                CompileError::LlvmError(format!("shared assign store error: {}", e))
-            })?;
+            self.build_store(heap_ptr, val)?;
         } else {
-            self.builder
-                .build_store(alloca, val)
-                .map_err(|e| CompileError::LlvmError(format!("assign store error: {}", e)))?;
+            self.build_store(alloca, val)?;
         }
         Ok(())
     }
@@ -619,13 +717,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })?;
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr_typed = self
-                        .builder
-                        .build_load(
-                            BasicTypeEnum::PointerType(ptr_ty),
-                            src_alloca,
-                            &format!("{}_weak_load", name),
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("weak load: {}", e)))?
+                        .build_load(BasicTypeEnum::PointerType(ptr_ty), src_alloca, &format!("{}_weak_load", name))?
                         .into_pointer_value();
 
                     // Increment the weak refcount on the heap allocation.
@@ -635,31 +727,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| {
                             CompileError::LlvmError(format!("pointer cast error: {}", e))
                         })?;
-                    let weak_retain_fn = self
-                        .module
-                        .get_function("mimi_rc_weak_retain")
-                        .ok_or_else(|| {
-                            CompileError::LlvmError("mimi_rc_weak_retain not declared".to_string())
-                        })?;
-                    self.builder
-                        .build_call(
-                            weak_retain_fn,
-                            &[inkwell::values::BasicMetadataValueEnum::PointerValue(
-                                heap_i8,
-                            )],
-                            &format!("{}_weak_retain", name),
-                        )
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("weak retain error: {}", e))
-                        })?;
+                    let weak_retain_fn = self.get_runtime_fn("mimi_rc_weak_retain")?;
+                    self.build_call(
+                        weak_retain_fn,
+                        &[inkwell::values::BasicMetadataValueEnum::PointerValue(heap_i8)],
+                        &format!("{}_weak_retain", name),
+                    )?;
 
-                    let new_alloca = self
-                        .builder
-                        .build_alloca(ptr_ty, name)
-                        .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
-                    self.builder
-                        .build_store(new_alloca, heap_ptr_typed)
-                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    let new_alloca = self.build_alloca(ptr_ty, name)?;
+                    self.build_store(new_alloca, heap_ptr_typed)?;
                     vars.insert(name.clone(), (new_alloca, val_ty));
                     self.shared_var_names.insert(name.clone());
                     // Register the weak pointer so it is released when the weak ref goes out of scope.
@@ -689,10 +765,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .and_then(|tn| self.type_llvm.get(tn))
                 .cloned()
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-            let loaded = self
-                .builder
-                .build_load(pointee_ty, pv, &format!("{}_val", name))
-                .map_err(|e| CompileError::LlvmError(format!("shared load init: {}", e)))?;
+            let loaded = self.build_load(pointee_ty, pv, &format!("{}_val", name))?;
             val = loaded;
             loaded.get_type()
         } else {
@@ -701,18 +774,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let ty_size_bytes = self.llvm_type_size_bytes(llvm_ty);
         let ty_size = self.context.i64_type().const_int(ty_size_bytes, false);
-        let alloc_fn = self
-            .module
-            .get_function("mimi_rc_alloc")
-            .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc not declared".to_string()))?;
+        let alloc_fn = self.get_runtime_fn("mimi_rc_alloc")?;
         let heap_raw = self
-            .builder
             .build_call(
                 alloc_fn,
                 &[inkwell::values::BasicMetadataValueEnum::IntValue(ty_size)],
                 &format!("{}_rc_alloc", name),
-            )
-            .map_err(|e| CompileError::LlvmError(format!("rc_alloc error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("mimi_rc_alloc returned void".to_string()))?;
 
@@ -729,9 +797,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_is_null(heap_raw_ptr, "heap_is_null")
             .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(is_null, alloc_fail_bb, alloc_ok_bb)
-            .map_err(|e| CompileError::LlvmError(format!("alloc check branch: {}", e)))?;
+        self.build_cond_br(is_null, alloc_fail_bb, alloc_ok_bb)?;
 
         // Fail path: call abort (allocation failure is unrecoverable)
         self.builder.position_at_end(alloc_fail_bb);
@@ -753,9 +819,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(&format!("shared let '{}': allocation failed", name), "alloc_fail_msg")
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-        self.builder
-            .build_call(abort_fn, &[BasicMetadataValueEnum::PointerValue(msg_ptr.as_pointer_value())], "alloc_abort")
-            .map_err(|e| CompileError::LlvmError(format!("abort call error: {}", e)))?;
+        self.build_call(abort_fn, &[BasicMetadataValueEnum::PointerValue(msg_ptr.as_pointer_value())], "alloc_abort")?;
         self.builder
             .build_unreachable()
             .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
@@ -772,20 +836,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("pointer cast error: {}", e)))?;
 
-        self.builder
-            .build_store(heap_ptr, val)
-            .map_err(|e| CompileError::LlvmError(format!("shared store error: {}", e)))?;
+        self.build_store(heap_ptr, val)?;
 
-        let alloca = self
-            .builder
-            .build_alloca(
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                name,
-            )
-            .map_err(|e| CompileError::LlvmError(format!("shared handle alloca error: {}", e)))?;
-        self.builder
-            .build_store(alloca, heap_ptr)
-            .map_err(|e| CompileError::LlvmError(format!("shared handle store error: {}", e)))?;
+        let alloca = self.build_alloca(self.context.ptr_type(inkwell::AddressSpace::default()), name)?;
+        self.build_store(alloca, heap_ptr)?;
 
         vars.insert(name.clone(), (alloca, llvm_ty));
         self.shared_var_names.insert(name.clone());
