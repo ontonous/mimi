@@ -139,4 +139,4 @@ public class Main {
 
 - 字符串返回值由 Mimi 运行时分配，调用方需使用 `mimi_string_free` 释放。
 - `#[repr(C)]` record 以值传递，绑定生成器会生成对应的语言结构体。
-- 当前 Rust / Go / C++ / Python 绑定生成器已支持 `func(...)` 回调参数；Node.js / Java 的回调包装仍在完善中。
+- 当前 Rust / Go / C++ / Python / Node.js 绑定生成器已支持 `func(...)` 回调参数；Java 的回调包装仍在完善中。

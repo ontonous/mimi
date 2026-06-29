@@ -171,11 +171,15 @@ mod tests {
         assert!(out.contains("typedef struct Point"));
         assert!(out.contains("struct Point p_struct"));
         assert!(out.contains("napi_get_named_property(env, args[0], \"x\""));
+        assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
+        assert!(out.contains("napi_create_reference(env, args[0], 1, &mimi_cb_apply_callback_f_slot.ref)"));
+        assert!(out.contains("mimi_cb_apply_callback_f_slot.env = env"));
         let dts = gen.generate_dts(&sample_extern_funcs()).unwrap();
         assert!(dts.contains("export interface Point"));
         assert!(dts.contains("export function add("));
         assert!(dts.contains("export function greet("));
         assert!(dts.contains("point_sum(p: Point): number"));
+        assert!(dts.contains("apply_callback(f: (arg0: number, arg1: number) => number, x: number): number"));
     }
 
     #[test]

@@ -67,7 +67,8 @@ mimi bindgen math.mimi -o bindings
 - ✅ C++：使用 `std::function` + thread-local slot + C trampoline。
 - ✅ Go：使用类型别名 + `//export` trampoline + package-level slot。
 - ✅ Python：使用 `std::function` + thread-local slot + C trampoline，`.pyi` 输出 `Callable`。
-- ⏳ Node.js / Java：生成类型签名，但 idiomatic 闭包包装仍在开发中。
+- ✅ Node.js：使用 N-API env/ref slot + thread-local 存储 + C trampoline，`.d.ts` 输出具体函数签名。
+- ⏳ Java：生成类型签名，但 idiomatic 闭包包装仍在开发中。
 
 ## 7. 错误处理
 

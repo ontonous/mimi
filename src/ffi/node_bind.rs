@@ -49,6 +49,9 @@ impl NodeBindGenerator {
         // C struct definitions for #[repr(C)] records
         self.write_c_struct_decls(&mut out)?;
 
+        // C callback trampolines for func(...) parameters
+        self.write_callback_support(&mut out, extern_funcs)?;
+
         for func in extern_funcs {
             let contract = self.build_contract(func);
             self.write_napi_function(&mut out, func, &contract)?;
@@ -152,6 +155,150 @@ impl NodeBindGenerator {
         Ok(())
     }
 
+    fn write_callback_support(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let slot = self.callback_slot_name(&func.name, &p.name);
+                    let tramp = self.callback_trampoline_name(&func.name, &p.name);
+                    writeln!(out, "typedef struct {{ napi_env env; napi_ref ref; }} {}_t;", slot)?;
+                    writeln!(out, "static __thread {}_t {} = {{NULL, NULL}};", slot, slot)?;
+                    let ret_c = self.callback_c_type(ret_type);
+                    let c_args: Vec<String> = param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(j, ty)| format!("{} arg{}", self.callback_c_type(ty), j))
+                        .collect();
+                    writeln!(
+                        out,
+                        "static {} {}({}) {{",
+                        ret_c,
+                        tramp,
+                        c_args.join(", ")
+                    )?;
+                    writeln!(out, "    if (!{}.env || !{}.ref) {{", slot, slot)?;
+                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(out, "    }}")?;
+                    writeln!(out, "    napi_value fn;")?;
+                    writeln!(out, "    napi_get_reference_value({}.env, {}.ref, &fn);", slot, slot)?;
+                    for j in 0..param_types.len() {
+                        writeln!(out, "    napi_value argv{};", j)?;
+                        writeln!(
+                            out,
+                            "    napi_create_int64({}.env, arg{}, &argv{});",
+                            slot, j, j
+                        )?;
+                    }
+                    let argv_list: Vec<String> = (0..param_types.len()).map(|j| format!("&argv{}", j)).collect();
+                    writeln!(out, "    napi_value result;")?;
+                    writeln!(
+                        out,
+                        "    if (napi_call_function({}.env, NULL, fn, {}, {}, &result) != napi_ok) {{",
+                        slot,
+                        param_types.len(),
+                        argv_list.join(", ")
+                    )?;
+                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(out, "    }}")?;
+                    if !matches!(ret_type.as_ref(), Type::Name(name, _) if name == "unit") {
+                        writeln!(
+                            out,
+                            "    {} ret;",
+                            ret_c
+                        )?;
+                        writeln!(
+                            out,
+                            "    napi_get_value_int64({}.env, result, &ret);",
+                            slot
+                        )?;
+                        writeln!(out, "    return ret;")?;
+                    }
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_callback_arg_extract(
+        &self,
+        out: &mut String,
+        func_name: &str,
+        param_name: &str,
+        arg_index: usize,
+    ) -> Result<(), std::fmt::Error> {
+        let slot = self.callback_slot_name(func_name, param_name);
+        writeln!(out, "    napi_valuetype {}_type;", param_name)?;
+        writeln!(
+            out,
+            "    napi_typeof(env, args[{}], &{}_type);",
+            arg_index, param_name
+        )?;
+        writeln!(
+            out,
+            "    if ({}_type == napi_function) {{",
+            param_name
+        )?;
+        writeln!(
+            out,
+            "        napi_create_reference(env, args[{}], 1, &{}.ref);",
+            arg_index, slot
+        )?;
+        writeln!(out, "        {}.env = env;", slot)?;
+        writeln!(out, "    }}")?;
+        Ok(())
+    }
+
+    fn callback_slot_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_slot", func_name, param_name)
+    }
+
+    fn callback_trampoline_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_trampoline", func_name, param_name)
+    }
+
+    fn callback_c_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "unit" => "void".to_string(),
+            _ => "int64_t".to_string(),
+        }
+    }
+
+    fn callback_default_ret(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "0.0".to_string(),
+            Type::Name(name, _) if name == "unit" => "".to_string(),
+            _ => "0".to_string(),
+        }
+    }
+
+    fn callback_ts_type(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let args: Vec<String> = param_types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                let ty_str = match ty {
+                    Type::Name(name, _) if name == "f64" => "number",
+                    _ => "number",
+                };
+                format!("arg{}: {}", i, ty_str)
+            })
+            .collect();
+        let ret = match ret_type {
+            Type::Name(name, _) if name == "f64" => "number",
+            Type::Name(name, _) if name == "unit" => "void",
+            _ => "number",
+        };
+        format!("({}) => {}", args.join(", "), ret)
+    }
+
     fn write_napi_function(
         &self,
         out: &mut String,
@@ -187,6 +334,9 @@ impl NodeBindGenerator {
                 FfiArgContract::StructByValue(name) => {
                     self.write_struct_arg_extract(out, &p.name, name, i)?;
                 }
+                FfiArgContract::Callback { .. } => {
+                    self.write_callback_arg_extract(out, &func.name, &p.name, i)?;
+                }
                 _ => {
                     writeln!(out, "    // Unsupported arg type for {}", p.name)?;
                 }
@@ -204,6 +354,7 @@ impl NodeBindGenerator {
                 FfiArgContract::Float => format!("{}_val", p.name),
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => format!("{}_buf", p.name),
                 FfiArgContract::StructByValue(_name) => format!("{}_struct", p.name),
+                FfiArgContract::Callback { .. } => self.callback_trampoline_name(&func.name, &p.name),
                 _ => format!("(intptr_t)NULL /* {} */", p.name),
             })
             .collect();
@@ -247,11 +398,15 @@ impl NodeBindGenerator {
             }
         }
 
-        // Free string arguments
+        // Free string arguments and release callback references
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
                     writeln!(out, "    free({}_buf);", p.name)?;
+                }
+                FfiArgContract::Callback { .. } => {
+                    let slot = self.callback_slot_name(&func.name, &p.name);
+                    writeln!(out, "    if ({}.ref) {{ napi_delete_reference(env, {}.ref); {}.ref = NULL; {}.env = NULL; }}", slot, slot, slot, slot)?;
                 }
                 _ => {}
             }
@@ -376,7 +531,9 @@ impl NodeBindGenerator {
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "number".to_string(),
             FfiArgContract::Json => "string".to_string(),
             FfiArgContract::StructByValue(name) => name.clone(),
-            FfiArgContract::Callback { .. } => "Function".to_string(),
+            FfiArgContract::Callback { param_types, ret_type } => {
+                self.callback_ts_type(param_types, ret_type)
+            }
             FfiArgContract::Unsupported(_) => "any".to_string(),
         }
     }
