@@ -429,6 +429,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("bitcast error ({}): {}", name, e)))
     }
 
+    /// Build an `inttoptr` instruction.
+    pub(super) fn build_int_to_ptr(
+        &self,
+        val: inkwell::values::IntValue<'ctx>,
+        ptr_ty: inkwell::types::PointerType<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        self.builder
+            .build_int_to_ptr(val, ptr_ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("inttoptr error ({}): {}", name, e)))
+    }
+
+    /// Build an `in_bounds_gep` instruction.
+    /// Delegates to `CheckedGepBuilder` so the underlying unsafe call is absorbed.
+    pub(super) fn build_in_bounds_gep<T: inkwell::types::BasicType<'ctx>>(
+        &self,
+        pointee_ty: T,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        indices: &[inkwell::values::IntValue<'ctx>],
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        self.gep()
+            .build_in_bounds_gep(pointee_ty.as_basic_type_enum(), ptr, indices, name)
+            .map_err(|e| CompileError::LlvmError(format!("gep error ({}): {}", name, e)))
+    }
+
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
         self.builder.get_insert_block()?.get_parent()
     }

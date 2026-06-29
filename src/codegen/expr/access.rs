@@ -15,32 +15,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         elem_int: inkwell::values::IntValue<'ctx>,
         base_var: Option<&str>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
-        if let Some(var_name) = base_var {
-            // Check if the list element type is a struct (stored as pointer to struct)
-            if let Some(&BasicTypeEnum::StructType(sty)) = self.list_elem_llvm_types.get(var_name) {
+        let Some(var_name) = base_var else {
+            return Ok(None);
+        };
+
+        // Check if the list element type is a struct (stored as pointer to struct)
+        if let Some(&BasicTypeEnum::StructType(sty)) = self.list_elem_llvm_types.get(var_name) {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+            let struct_val =
+                self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
+            return Ok(Some(struct_val));
+        }
+
+        // Check if the list element type is string (stored as raw i8* pointer)
+        if let Some(type_name) = self.var_type_names.get(var_name) {
+            if type_name == "List<string>" {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let elem_ptr = self
-                    .builder
-                    .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
-                let struct_val = self
-                    .builder
-                    .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
-                    .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
-                return Ok(Some(struct_val));
-            }
-            // Check if the list element type is string (stored as raw i8* pointer)
-            if let Some(type_name) = self.var_type_names.get(var_name) {
-                if type_name == "List<string>" {
-                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let elem_ptr = self
-                        .builder
-                        .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")
-                        .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
-                    return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
-                }
+                let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
+                return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
             }
         }
+
         Ok(None)
     }
 
@@ -58,58 +54,53 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(Type::Name(n, args)) = self.var_types.get(name) {
                 if n == "List" && args.len() == 1 {
                     let elem_ty = &args[0];
-                    let llvm_ty = types::mimi_type_to_llvm(self.context, elem_ty);
-                    if let Some(BasicTypeEnum::StructType(sty)) = llvm_ty {
+                    if let Some(BasicTypeEnum::StructType(sty)) =
+                        types::mimi_type_to_llvm(self.context, elem_ty)
+                    {
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let elem_ptr = self
-                            .builder
-                            .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
-                            .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
-                        let struct_val = self
-                            .builder
-                            .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
-                            .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
+                        let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                        let struct_val =
+                            self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
                         return Ok(Some(struct_val));
                     }
                 }
             }
         }
+
         // Fallback: string-based parsing (for complex expressions not in var_types)
         let obj_type = self.infer_object_type(obj_expr, vars);
         if obj_type.is_empty() {
             return Ok(None);
         }
+
         // Handle List<string> — elements are raw i8* pointers
         if obj_type == "List<string>" {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-            let elem_ptr = self
-                .builder
-                .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+            let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
             return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
         }
+
         if let Some(elem_ty) = crate::codegen::extract_list_elem_type(&obj_type) {
             let llvm_ty = if let Type::Name(name, _) = &elem_ty {
-                self.type_llvm.get(name).cloned()
+                self.type_llvm
+                    .get(name)
+                    .cloned()
                     .or_else(|| types::mimi_type_to_llvm(self.context, &elem_ty))
             } else {
                 types::mimi_type_to_llvm(self.context, &elem_ty)
             };
             if let Some(BasicTypeEnum::StructType(sty)) = llvm_ty {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let elem_ptr = self
-                    .builder
-                    .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
-                let struct_val = self
-                    .builder
-                    .build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")
-                    .map_err(|e| CompileError::LlvmError(format!("load struct elem: {}", e)))?;
+                let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                let struct_val =
+                    self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
                 return Ok(Some(struct_val));
             }
         }
+
         Ok(None)
     }
+
     pub(in crate::codegen) fn compile_field_expr(
         &mut self,
         obj: &Expr,
@@ -120,89 +111,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Expr::Ident(name) = obj {
             if self.shared_var_names.contains(name.as_str()) {
                 if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
-                    let obj_type = self.infer_object_type(obj, vars);
-                    if let Some(td) = self.type_defs.get(&obj_type) {
-                        if let TypeDefKind::Record(fields) = &td.kind {
-                            if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
-                                let ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let heap_ptr = self
-                                    .builder
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(ptr_ty),
-                                        alloca,
-                                        &format!("{}_heap_ptr", name),
-                                    )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!(
-                                            "shared heap ptr load: {}",
-                                            e
-                                        ))
-                                    })?
-                                    .into_pointer_value();
-                                let sty = self
-                                    .type_llvm
-                                    .get(&obj_type)
-                                    .and_then(|bt| match bt {
-                                        BasicTypeEnum::StructType(s) => Some(*s),
-                                        _ => None,
-                                    })
-                                    .ok_or_else(|| {
-                                        CompileError::Generic(format!(
-                                            "type '{}' is not a struct",
-                                            obj_type
-                                        ))
-                                    })?;
-                                let gep = self
-                                    .gep()
-                                    .build_struct_gep(sty, heap_ptr, idx as u32, field_name)
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("gep error: {}", e))
-                                    })?;
-                                let field_ty =
-                                    types::mimi_type_to_llvm(self.context, &fields[idx].ty)
-                                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                                return self.builder.build_load(field_ty, gep, field_name).map_err(
-                                    |e| CompileError::LlvmError(format!("load error: {}", e)),
-                                );
-                            }
-                        }
+                    if let Some(val) = self.compile_shared_field_load(obj, name, alloca, field_name, vars)? {
+                        return Ok(val);
                     }
                 }
             }
         }
+
         // Field access: obj.field
         let obj_val = self.compile_expr(obj, vars)?;
         let obj_type = self.infer_object_type(obj, vars);
-        let field_ptr = match obj_val {
-            BasicValueEnum::PointerValue(pv) => pv,
-            BasicValueEnum::StructValue(sv) => {
-                if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(&obj_type) {
-                    let alloca = self
-                        .builder
-                        .build_alloca(*sty, "tmp")
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                    self.builder
-                        .build_store(alloca, sv)
-                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    alloca
-                } else {
-                    return Err(
-                        format!("[E0707] cannot access field on type '{}'", obj_type).into(),
-                    );
-                }
-            }
-            _ => {
-                return Err(CompileError::Generic(format!(
-                    "field access requires a struct or actor type, got {}",
-                    obj_val.get_type()
-                )))
-            }
-        };
-        let sty = match self.type_llvm.get(&obj_type) {
-            Some(BasicTypeEnum::StructType(s)) => *s,
-            _ => return Err(format!("type '{}' is not a struct", obj_type).into()),
-        };
+        let field_ptr = self.materialize_field_base(obj_val, &obj_type)?;
+        let sty = self.expect_struct_type(&obj_type)?;
+
         if let Some(td) = self.type_defs.get(&obj_type) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
@@ -212,29 +133,103 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
                     let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
                         .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                    return self
-                        .builder
-                        .build_load(field_ty, gep, field_name)
-                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)));
+                    return self.build_load(field_ty, gep, field_name);
                 }
             }
         }
+
         // Fallback: numeric field index
         if let Ok(idx) = field_name.parse::<u32>() {
             let gep = self
                 .gep()
                 .build_struct_gep(sty, field_ptr, idx, field_name)
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            return self
-                .builder
-                .build_load(
-                    BasicTypeEnum::IntType(self.context.i64_type()),
-                    gep,
-                    field_name,
-                )
-                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)));
+            return self.build_load(
+                BasicTypeEnum::IntType(self.context.i64_type()),
+                gep,
+                field_name,
+            );
         }
+
         Err(format!("field '{}' not found on type '{}'", field_name, obj_type).into())
+    }
+
+    /// Shared variable field access fast path.
+    fn compile_shared_field_load(
+        &mut self,
+        obj: &Expr,
+        name: &str,
+        alloca: inkwell::values::PointerValue<'ctx>,
+        field_name: &str,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let obj_type = self.infer_object_type(obj, vars);
+        let td = match self.type_defs.get(&obj_type) {
+            Some(td) => td,
+            None => return Ok(None),
+        };
+        let fields = match &td.kind {
+            TypeDefKind::Record(fields) => fields,
+            _ => return Ok(None),
+        };
+        let idx = match fields.iter().position(|f| f.name == *field_name) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let heap_ptr = self
+            .build_load(BasicTypeEnum::PointerType(ptr_ty), alloca, &format!("{}_heap_ptr", name))?
+            .into_pointer_value();
+        let sty = self
+            .type_llvm
+            .get(&obj_type)
+            .and_then(|bt| match bt {
+                BasicTypeEnum::StructType(s) => Some(*s),
+                _ => None,
+            })
+            .ok_or_else(|| CompileError::Generic(format!("type '{}' is not a struct", obj_type)))?;
+        let gep = self
+            .gep()
+            .build_struct_gep(sty, heap_ptr, idx as u32, field_name)
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+        self.build_load(field_ty, gep, field_name).map(Some)
+    }
+
+    /// Ensure a struct value is addressable (spill to stack if it is a value).
+    fn materialize_field_base(
+        &self,
+        obj_val: BasicValueEnum<'ctx>,
+        obj_type: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        match obj_val {
+            BasicValueEnum::PointerValue(pv) => Ok(pv),
+            BasicValueEnum::StructValue(sv) => {
+                if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(obj_type) {
+                    let alloca = self.build_alloca(*sty, "tmp")?;
+                    self.build_store(alloca, sv)?;
+                    Ok(alloca)
+                } else {
+                    Err(format!("[E0707] cannot access field on type '{}'", obj_type).into())
+                }
+            }
+            _ => Err(CompileError::Generic(format!(
+                "field access requires a struct or actor type, got {}",
+                obj_val.get_type()
+            ))),
+        }
+    }
+
+    fn expect_struct_type(
+        &self,
+        obj_type: &str,
+    ) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
+        match self.type_llvm.get(obj_type) {
+            Some(BasicTypeEnum::StructType(s)) => Ok(*s),
+            _ => Err(format!("type '{}' is not a struct", obj_type).into()),
+        }
     }
 
     pub(in crate::codegen) fn compile_index_expr(
@@ -243,202 +238,139 @@ impl<'ctx> CodeGenerator<'ctx> {
         idx_expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // list[i] or arr[i] - load from array/list
         let obj_val = self.compile_expr(obj, vars)?;
         let idx_val = self.compile_expr(idx_expr, vars)?;
         match obj_val {
-            BasicValueEnum::PointerValue(pv) => {
-                let idx_iv = match idx_val {
-                    BasicValueEnum::IntValue(iv) => iv,
-                    _ => return Err("index must be i64".into()),
-                };
-                // Try list struct first: { i64 len, i8* data }
-                let list_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                        BasicTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                    ],
-                    false,
-                );
-                // Check if this looks like a list struct by trying to GEP field 0 (len)
-                if let Ok(_len_gep) = self
-                    .gep()
-                    .build_struct_gep(list_ty, pv, 0, "list.len_check")
-                {
-                    // Bounds check
-                    self.check_list_bounds(pv, idx_iv, "index read")?;
-                    // It's a list struct - load data pointer and index into it
-                    let data_gep = self
-                        .gep()
-                        .build_struct_gep(list_ty, pv, 1, "list.data")
-                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                    let data_ptr = self
-                        .builder
-                        .build_load(
-                            BasicTypeEnum::PointerType(
-                                self.context.ptr_type(inkwell::AddressSpace::default()),
-                            ),
-                            data_gep,
-                            "data",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-                        .into_pointer_value();
-                    let data_ptr_i64 = self
-                        .builder
-                        .build_bit_cast(
-                            data_ptr,
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                            "data_i64",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                        .into_pointer_value();
-                    let elem_ptr = {
-                        self.gep().build_in_bounds_gep(
-                            self.context.i64_type(),
-                            data_ptr_i64,
-                            &[idx_iv],
-                            "elem",
-                        )
-                    }
-                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                    let elem_int = self
-                        .builder
-                        .build_load(
-                            BasicTypeEnum::IntType(self.context.i64_type()),
-                            elem_ptr,
-                            "elem_val",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-                        .into_int_value();
-                    // Convert i64→struct when the list element type is a compound type.
-                    // Only use variable-name lookup for direct Ident expressions
-                    // (avoids wrong type inference for nested lists).
-                    if let Expr::Ident(var_name) = obj {
-                        if let Some(converted) =
-                            self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
-                        {
-                            return Ok(converted);
-                        }
-                    }
-                    if let Some(converted) = self.convert_list_elem_by_type(elem_int, obj, vars)? {
-                        return Ok(converted);
-                    }
-                    return Ok(elem_int.into());
-                }
-                // Fallback: treat as raw pointer to i64 array
-                let elem_ptr = {
-                    self.gep()
-                        .build_in_bounds_gep(self.context.i64_type(), pv, &[idx_iv], "elem")
-                }
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                self.builder
-                    .build_load(
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                        elem_ptr,
-                        "elem_val",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))
-            }
+            BasicValueEnum::PointerValue(pv) => self.compile_index_on_pointer(pv, obj, idx_val, vars),
             BasicValueEnum::StructValue(sv) => {
-                let sv_ty = sv.get_type();
-                let list_alloca = self
-                    .builder
-                    .build_alloca(sv_ty, "list_tmp")
-                    .map_err(|e| CompileError::LlvmError(format!("list alloca: {}", e)))?;
-                self.builder
-                    .build_store(list_alloca, sv)
-                    .map_err(|e| CompileError::LlvmError(format!("store list: {}", e)))?;
-                let idx_iv = match idx_val {
-                    BasicValueEnum::IntValue(iv) => iv,
-                    _ => return Err("index must be i64".into()),
-                };
-                let list_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                        BasicTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                    ],
-                    false,
-                );
-                self.check_list_bounds(list_alloca, idx_iv, "index read")?;
-                let data_gep = self
-                    .gep()
-                    .build_struct_gep(list_ty, list_alloca, 1, "list.data")
-                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                let data_ptr = self
-                    .builder
-                    .build_load(
-                        BasicTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                        data_gep,
-                        "data",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-                    .into_pointer_value();
-                let data_ptr_i64 = self
-                    .builder
-                    .build_bit_cast(
-                        data_ptr,
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
-                        "data_i64",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                    .into_pointer_value();
-                let elem_ptr = {
-                    self.gep().build_in_bounds_gep(
-                        self.context.i64_type(),
-                        data_ptr_i64,
-                        &[idx_iv],
-                        "elem",
-                    )
-                }
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                let elem_int = self
-                    .builder
-                    .build_load(
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                        elem_ptr,
-                        "elem_val",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-                    .into_int_value();
-                // For struct-valued lists (from chained indexing), use type
-                // inference to determine if elements are structs or scalars.
-                if let Expr::Ident(var_name) = obj {
-                    if let Some(converted) =
-                        self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
-                    {
-                        return Ok(converted);
-                    }
-                }
-                if let Some(converted) = self.convert_list_elem_by_type(elem_int, obj, vars)? {
-                    return Ok(converted);
-                }
-                Ok(elem_int.into())
+                self.compile_index_on_struct(sv, obj, idx_val, vars)
             }
-            BasicValueEnum::ArrayValue(_av) => {
-                // Direct LLVM array value: extract element by index
-                let idx = match idx_val {
-                    BasicValueEnum::IntValue(iv) => {
-                        // Convert runtime i64 index to constant u32 for extractvalue
-                        iv.get_zero_extended_constant().ok_or_else(|| {
-                            "array index must be a compile-time constant".to_string()
-                        })? as u32
-                    }
-                    _ => return Err("index must be i64".into()),
-                };
-                let elem = self
-                    .builder
-                    .build_extract_value(obj_val.into_array_value(), idx, "arr_elem")
-                    .map_err(|e| CompileError::LlvmError(format!("extractvalue error: {}", e)))?;
-                Ok(elem)
-            }
+            BasicValueEnum::ArrayValue(_) => self.compile_index_on_array(obj_val, idx_val),
             _ => Err("index requires a list/array pointer".into()),
         }
+    }
+
+    fn compile_index_on_pointer(
+        &mut self,
+        pv: inkwell::values::PointerValue<'ctx>,
+        obj: &Expr,
+        idx_val: BasicValueEnum<'ctx>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let idx_iv = require_int_index(idx_val)?;
+        let list_ty = self.standard_list_type();
+
+        // Check if this looks like a list struct by trying to GEP field 0 (len)
+        if self
+            .gep()
+            .build_struct_gep(list_ty, pv, 0, "list.len_check")
+            .is_ok()
+        {
+            self.check_list_bounds(pv, idx_iv, "index read")?;
+            let elem_int = self.load_list_element_i64(pv, idx_iv)?;
+            if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
+                return Ok(converted);
+            }
+            return Ok(elem_int.into());
+        }
+
+        // Fallback: treat as raw pointer to i64 array
+        let elem_ptr = self.build_in_bounds_gep(self.context.i64_type(), pv, &[idx_iv], "elem")?;
+        self.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
+    }
+
+    fn compile_index_on_struct(
+        &mut self,
+        sv: inkwell::values::StructValue<'ctx>,
+        obj: &Expr,
+        idx_val: BasicValueEnum<'ctx>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let sv_ty = sv.get_type();
+        let list_alloca = self.build_alloca(sv_ty, "list_tmp")?;
+        self.build_store(list_alloca, sv)?;
+        let idx_iv = require_int_index(idx_val)?;
+        self.check_list_bounds(list_alloca, idx_iv, "index read")?;
+        let elem_int = self.load_list_element_i64(list_alloca, idx_iv)?;
+        if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
+            return Ok(converted);
+        }
+        Ok(elem_int.into())
+    }
+
+    fn compile_index_on_array(
+        &self,
+        obj_val: BasicValueEnum<'ctx>,
+        idx_val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let idx = match idx_val {
+            BasicValueEnum::IntValue(iv) => iv.get_zero_extended_constant().ok_or_else(|| {
+                "array index must be a compile-time constant".to_string()
+            })? as u32,
+            _ => return Err("index must be i64".into()),
+        };
+        self.build_extract_value(obj_val.into_array_value().into(), idx, "arr_elem")
+    }
+
+    fn standard_list_type(&self) -> inkwell::types::StructType<'ctx> {
+        self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(self.context.i64_type()),
+                BasicTypeEnum::PointerType(
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                ),
+            ],
+            false,
+        )
+    }
+
+    /// Load a list element as i64 from `{ len, data }`.
+    fn load_list_element_i64(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+        idx: inkwell::values::IntValue<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let list_ty = self.standard_list_type();
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, list_ptr, 1, "list.data")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let data_ptr = self
+            .build_load(
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                data_gep,
+                "data",
+            )?
+            .into_pointer_value();
+        let data_ptr_i64 = self
+            .build_bit_cast(
+                data_ptr.into(),
+                self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+                "data_i64",
+            )?
+            .into_pointer_value();
+        let elem_ptr =
+            self.build_in_bounds_gep(self.context.i64_type(), data_ptr_i64, &[idx], "elem")?;
+        Ok(self.build_load(
+            BasicTypeEnum::IntType(self.context.i64_type()),
+            elem_ptr,
+            "elem_val",
+        )?.into_int_value())
+    }
+
+    /// Try to convert a loaded i64 list element into its real struct/string form.
+    fn try_convert_list_element(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        obj: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        if let Expr::Ident(var_name) = obj {
+            if let Some(converted) = self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))? {
+                return Ok(Some(converted));
+            }
+        }
+        self.convert_list_elem_by_type(elem_int, obj, vars)
     }
 
     pub(in crate::codegen) fn compile_tuple_index_expr(
@@ -450,7 +382,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         // D4: newtype .0 — newtypes are transparent in codegen, .0 is identity
         if index == 0 {
             if let Expr::Ident(name) = tuple_expr {
-                // Check if the variable's type name is a registered newtype
                 if let Some(type_name) = self.var_type_names.get(name) {
                     if let Some(td) = self.type_defs.get(type_name) {
                         if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
@@ -460,8 +391,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+
         let tuple_val = self.compile_expr(tuple_expr, vars)?;
-        match tuple_val {
+        Ok(match tuple_val {
             BasicValueEnum::PointerValue(pv) => {
                 let struct_ty = self
                     .tuple_type_stack
@@ -480,21 +412,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let field_ty = field_types
                     .get(index)
                     .ok_or_else(|| format!("tuple field {} out of bounds", index))?;
-                let field_ty = *field_ty;
-                self.builder
-                    .build_load(field_ty, field_gep, &format!("tuple_{}", index))
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))
+                self.build_load(*field_ty, field_gep, &format!("tuple_{}", index))?
             }
             BasicValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(sv, index as u32, &format!("tuple_{}", index))
-                .map_err(|e| {
-                    CompileError::LlvmError(format!("extract tuple field {} error: {}", index, e))
-                }),
-            _ => Err(CompileError::Generic(format!(
+                .build_extract_value(sv.into(), index as u32, &format!("tuple_{}", index))?,
+            _ => return Err(CompileError::Generic(format!(
                 "tuple index requires a tuple value, got {:?}",
                 tuple_val
             ))),
-        }
+        })
+    }
+}
+
+fn require_int_index<'ctx>(
+    idx_val: BasicValueEnum<'ctx>,
+) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+    match idx_val {
+        BasicValueEnum::IntValue(iv) => Ok(iv),
+        _ => Err("index must be i64".into()),
     }
 }
