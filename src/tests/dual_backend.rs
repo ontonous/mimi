@@ -4843,6 +4843,42 @@ fn dual_format_mixed() {
 }
 
 #[test]
+fn dual_lexer_builtin_codegen() {
+    if !can_link() { return; }
+    let src = r#"
+        func main() -> i32 {
+            let tokens = lexer("func add(a: i32, b: i32) -> i32 { a + b }")
+            println(tokens)
+            0
+        }
+    "#;
+    let _ = run_source(src);
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(
+        out.trim(),
+        r#"[{"kind":"KEYWORD","value":"func","line":1,"col":1},{"kind":"IDENT","value":"add","line":1,"col":6},{"kind":"PUNCT","value":"(","line":1,"col":9},{"kind":"IDENT","value":"a","line":1,"col":10},{"kind":"PUNCT","value":":","line":1,"col":11},{"kind":"KEYWORD","value":"i32","line":1,"col":13},{"kind":"PUNCT","value":",","line":1,"col":16},{"kind":"IDENT","value":"b","line":1,"col":18},{"kind":"PUNCT","value":":","line":1,"col":19},{"kind":"KEYWORD","value":"i32","line":1,"col":21},{"kind":"PUNCT","value":")","line":1,"col":24},{"kind":"OP","value":"->","line":1,"col":26},{"kind":"KEYWORD","value":"i32","line":1,"col":29},{"kind":"PUNCT","value":"{","line":1,"col":33},{"kind":"IDENT","value":"a","line":1,"col":35},{"kind":"OP","value":"+","line":1,"col":37},{"kind":"IDENT","value":"b","line":1,"col":39},{"kind":"PUNCT","value":"}","line":1,"col":41}]"#
+    );
+}
+
+#[test]
+fn dual_parse_builtin_codegen() {
+    if !can_link() { return; }
+    let src = r#"
+        func main() -> i32 {
+            let ast = parse("func add(a: i32, b: i32) -> i32 { a + b }")
+            println(ast)
+            0
+        }
+    "#;
+    let _ = run_source(src);
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(
+        out.trim(),
+        r#"{"functions":[{"name":"add","line":1,"col":1,"is_pub":false,"is_comptime":false,"is_async":false,"params":[{"name":"a","type":"i32","mut":false,"line":1,"col":10},{"name":"b","type":"i32","mut":false,"line":1,"col":18}],"return_type":"i32","has_body":true,"body_end_line":1,"stmts":[]}],"types":[],"imports":[],"has_main":false}"#
+    );
+}
+
+#[test]
 fn dual_record_list_field() {
     if !can_link() { return; }
     dual_assert!(
