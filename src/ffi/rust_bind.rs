@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, TypeDef};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// Rust binding generator — produces a `.rs` file with extern "C" declarations.
@@ -38,21 +38,8 @@ impl RustBindGenerator {
         writeln!(out, "use std::ptr;")?;
         writeln!(out)?;
 
-        // Generate opaque handle types for records
-        let record_names: Vec<&String> = self
-            .type_defs
-            .iter()
-            .filter(|(_, td)| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
-            .map(|(name, _)| name)
-            .collect();
-        if !record_names.is_empty() {
-            writeln!(out, "// Opaque handle types for Mimi records")?;
-            for name in &record_names {
-                writeln!(out, "#[repr(C)]")?;
-                writeln!(out, "pub struct Mimi{}(c_void);", name)?;
-            }
-            writeln!(out)?;
-        }
+        // Generate type definitions
+        self.write_type_definitions(&mut out)?;
 
         writeln!(out, "extern \"C\" {{")?;
 
@@ -84,13 +71,13 @@ impl RustBindGenerator {
         let record_type_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+            .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
             .map(|(name, _)| name.clone())
             .collect();
         let repr_c_record_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| td.attributes.contains(&crate::ast::TypeAttribute::ReprC))
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
             .map(|(name, _)| name.clone())
             .collect();
         FfiContract::from_extern_with_caps_repr(
@@ -99,6 +86,55 @@ impl RustBindGenerator {
             &record_type_names,
             &repr_c_record_names,
         )
+    }
+
+    /// Generate Rust type definitions for #[repr(C)] records (as real structs)
+    /// and non-repr(C) records (as opaque handles).
+    fn write_type_definitions(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+
+        if !repr_c.is_empty() {
+            writeln!(out, "// #[repr(C)] structs (layout-compatible with C)")?;
+            for (name, td) in repr_c {
+                if let TypeDefKind::Record(fields) = &td.kind {
+                    writeln!(out, "#[repr(C)]")?;
+                    writeln!(out, "#[derive(Debug, Clone, Copy)]")?;
+                    writeln!(out, "pub struct Mimi{} {{", name)?;
+                    for field in fields {
+                        let rust_ty = self.mimi_type_to_rust_field(&field.ty);
+                        writeln!(out, "    pub {}: {},", field.name, rust_ty)?;
+                    }
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                }
+            }
+        }
+
+        // Opaque handles for non-#[repr(C)] records
+        let opaque: Vec<&String> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| {
+                matches!(td.kind, TypeDefKind::Record(_))
+                    && !td.attributes.contains(&TypeAttribute::ReprC)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        if !opaque.is_empty() {
+            writeln!(out, "// Opaque handle types for non-#[repr(C)] Mimi records")?;
+            for name in opaque {
+                writeln!(out, "#[repr(C)]")?;
+                writeln!(out, "pub struct Mimi{}(c_void);", name)?;
+            }
+            writeln!(out)?;
+        }
+
+        Ok(())
     }
 
     fn write_function(
@@ -152,7 +188,7 @@ impl RustBindGenerator {
 
         writeln!(out, "    pub fn {}({}) -> {} {{", func.name, params.join(", "), ret)?;
         write!(out, "{}", conversions)?;
-        writeln!(out, "        unsafe {{ crate::{}({}) }}", func.name, call_args.join(", "))?;
+        writeln!(out, "        unsafe {{ super::{}({}) }}", func.name, call_args.join(", "))?;
         writeln!(out, "    }}")?;
         writeln!(out)
     }
@@ -164,14 +200,17 @@ impl RustBindGenerator {
         match &contract.args[index] {
             FfiArgContract::Int => "c_longlong".to_string(),
             FfiArgContract::Float => "c_double".to_string(),
-            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "*const c_char".to_string(),
+            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
+                "*const c_char".to_string()
+            }
             FfiArgContract::Cap(_) => "c_longlong".to_string(),
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "*mut c_void".to_string(),
+            FfiArgContract::RawPtr(inner) => format!("*const {}", self.mimi_type_to_rust_field(inner)),
+            FfiArgContract::RawPtrMut(inner) => format!("*mut {}", self.mimi_type_to_rust_field(inner)),
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "c_longlong".to_string(),
             FfiArgContract::Json => "*const c_char".to_string(),
-            FfiArgContract::StructByValue(name) => format!("*mut Mimi{}", name),
+            FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
             FfiArgContract::Callback { .. } => "*const c_void".to_string(),
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
@@ -187,12 +226,13 @@ impl RustBindGenerator {
             FfiArgContract::StringBorrow => "&str".to_string(),
             FfiArgContract::StringTransfer => "String".to_string(),
             FfiArgContract::Cap(_) => "i64".to_string(),
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "*mut c_void".to_string(),
+            FfiArgContract::RawPtr(inner) => format!("*const {}", self.mimi_type_to_rust_field(inner)),
+            FfiArgContract::RawPtrMut(inner) => format!("*mut {}", self.mimi_type_to_rust_field(inner)),
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "i64".to_string(),
             FfiArgContract::Json => "&str".to_string(),
-            FfiArgContract::StructByValue(name) => format!("*mut Mimi{}", name),
+            FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
             FfiArgContract::Callback { .. } => "*const c_void".to_string(),
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
@@ -205,13 +245,17 @@ impl RustBindGenerator {
             crate::ffi::contract::FfiRetContract::Float => "c_double".to_string(),
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => "*mut c_char".to_string(),
-            crate::ffi::contract::FfiRetContract::RawPtr(_)
-            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "*mut c_void".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(inner) => {
+                format!("*const {}", self.mimi_type_to_rust_field(inner))
+            }
+            crate::ffi::contract::FfiRetContract::RawPtrMut(inner) => {
+                format!("*mut {}", self.mimi_type_to_rust_field(inner))
+            }
             crate::ffi::contract::FfiRetContract::CShared(_)
             | crate::ffi::contract::FfiRetContract::CBorrow(_)
             | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "c_longlong".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "*mut c_char".to_string(),
-            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("*mut Mimi{}", name),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("Mimi{}", name),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "*const c_void".to_string(),
         }
     }
@@ -223,14 +267,48 @@ impl RustBindGenerator {
             crate::ffi::contract::FfiRetContract::Float => "f64".to_string(),
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),
-            crate::ffi::contract::FfiRetContract::RawPtr(_)
-            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "*mut c_void".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(inner) => {
+                format!("*const {}", self.mimi_type_to_rust_field(inner))
+            }
+            crate::ffi::contract::FfiRetContract::RawPtrMut(inner) => {
+                format!("*mut {}", self.mimi_type_to_rust_field(inner))
+            }
             crate::ffi::contract::FfiRetContract::CShared(_)
             | crate::ffi::contract::FfiRetContract::CBorrow(_)
             | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "i64".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "String".to_string(),
-            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("*mut Mimi{}", name),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("Mimi{}", name),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "*const c_void".to_string(),
         }
+    }
+
+    /// Map a Mimi type used inside a #[repr(C)] record field to a Rust type.
+    fn mimi_type_to_rust_field(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "i32".to_string(),
+                "i64" => "i64".to_string(),
+                "f64" => "f64".to_string(),
+                "bool" => "bool".to_string(),
+                other => {
+                    if self.is_repr_c_record(other) {
+                        format!("Mimi{}", other)
+                    } else {
+                        "c_void".to_string()
+                    }
+                }
+            },
+            _ => "c_void".to_string(),
+        }
+    }
+
+    fn is_repr_c_record(&self, name: &str) -> bool {
+        self.type_defs
+            .get(name)
+            .map(|td| {
+                matches!(td.kind, TypeDefKind::Record(_))
+                    && td.attributes.contains(&TypeAttribute::ReprC)
+            })
+            .unwrap_or(false)
     }
 }

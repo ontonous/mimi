@@ -8,10 +8,37 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::ast::{ExternFunc, ExternParam, Type};
+    use crate::ast::{
+        ExternFunc, ExternParam, Field, Type, TypeAttribute, TypeDef, TypeDefKind,
+    };
     use crate::ffi::{
         c_header, cpp_bind, go_bind, jni_bind, node_bind, py_bind, rust_bind,
     };
+
+    fn sample_type_defs() -> HashMap<String, TypeDef> {
+        let mut map = HashMap::new();
+        map.insert(
+            "Point".to_string(),
+            TypeDef {
+                name: "Point".to_string(),
+                pub_: true,
+                kind: TypeDefKind::Record(vec![
+                    Field {
+                        name: "x".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "y".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![TypeAttribute::ReprC],
+            },
+        );
+        map
+    }
 
     fn sample_extern_funcs() -> Vec<ExternFunc> {
         vec![
@@ -48,36 +75,56 @@ mod tests {
                 variadic: false,
                 no_panic: false,
             },
+            ExternFunc {
+                name: "point_sum".to_string(),
+                params: vec![ExternParam {
+                    name: "p".to_string(),
+                    ty: Type::Name("Point".to_string(), vec![]),
+                    cap_mode: None,
+                }],
+                ret: Some(Type::Name("i32".to_string(), vec![])),
+                requires: None,
+                ensures: None,
+                variadic: false,
+                no_panic: false,
+            },
         ]
     }
 
     #[test]
     fn c_header_includes_all_runtime_declarations() {
-        let header = c_header::generate_c_header(&sample_extern_funcs(), HashMap::new()).unwrap();
+        let header = c_header::generate_c_header(&sample_extern_funcs(), sample_type_defs()).unwrap();
         assert!(header.contains("mimi_string_free("));
         assert!(header.contains("mimi_cap_register("));
         assert!(header.contains("mimi_runtime_set_error_handler("));
         assert!(header.contains("mimi_callback_deregister("));
         assert!(header.contains("MimiErrorHandler"));
         assert!(header.contains("int64_t add(int64_t a, int64_t b)"));
+        assert!(header.contains("typedef struct Point"));
+        assert!(header.contains("int64_t point_sum(struct Point p)"));
     }
 
     #[test]
     fn rust_binding_smoke() {
-        let gen = rust_bind::RustBindGenerator::new(HashMap::new(), "math");
+        let gen = rust_bind::RustBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
+        assert!(out.contains("pub struct MimiPoint"));
+        assert!(out.contains("pub x: i32"));
         assert!(out.contains("pub fn add("));
         assert!(out.contains("pub fn greet("));
+        assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_longlong"));
         assert!(out.contains("extern \"C\""));
     }
 
     #[test]
     fn go_binding_smoke() {
-        let gen = go_bind::GoBindGenerator::new(HashMap::new(), "math");
+        let gen = go_bind::GoBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         assert!(out.contains("package math"));
         assert!(out.contains("func add("));
         assert!(out.contains("func greet("));
+        assert!(out.contains("type Point struct"));
+        assert!(out.contains("func point_sum(p Point) int64"));
         // Regression: return type of mimi_string_free must be void, not void*.
         assert!(!out.contains("extern void* mimi_string_free"));
         assert!(out.contains("extern void mimi_string_free"));
@@ -85,10 +132,11 @@ mod tests {
 
     #[test]
     fn node_binding_smoke() {
-        let gen = node_bind::NodeBindGenerator::new(HashMap::new(), "math");
+        let gen = node_bind::NodeBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         assert!(out.contains("napi_add"));
         assert!(out.contains("napi_greet"));
+        assert!(out.contains("napi_point_sum"));
         let dts = gen.generate_dts(&sample_extern_funcs()).unwrap();
         assert!(dts.contains("export function add("));
         assert!(dts.contains("export function greet("));
@@ -96,16 +144,18 @@ mod tests {
 
     #[test]
     fn cpp_binding_smoke() {
-        let gen = cpp_bind::CppBindGenerator::new(HashMap::new(), "math");
+        let gen = cpp_bind::CppBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
+        assert!(out.contains("#include \"mimi_ffi.h\""));
         assert!(out.contains("inline int64_t add("));
         assert!(out.contains("inline MimiString greet("));
+        assert!(out.contains("inline int64_t point_sum(const struct Point& p)"));
         assert!(out.contains("MimiString"));
     }
 
     #[test]
     fn java_binding_smoke() {
-        let gen = jni_bind::JniBindGenerator::new(HashMap::new(), "math");
+        let gen = jni_bind::JniBindGenerator::new(sample_type_defs(), "math");
         let c = gen.generate_c(&sample_extern_funcs()).unwrap();
         let java = gen.generate_java(&sample_extern_funcs()).unwrap();
         assert!(c.contains("JNIEXPORT jlong JNICALL Java_Math_add"));
@@ -119,7 +169,7 @@ mod tests {
 
     #[test]
     fn python_binding_smoke() {
-        let gen = py_bind::PyBindGenerator::new(HashMap::new(), "math");
+        let gen = py_bind::PyBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         let pyi = gen.generate_pyi(&sample_extern_funcs()).unwrap();
         assert!(out.contains("PYBIND11_MODULE(math"));

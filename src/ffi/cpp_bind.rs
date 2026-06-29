@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, TypeDef};
+use crate::ast::{ExternFunc, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// C++ binding generator — produces a `.hpp` header with RAII wrappers.
@@ -43,11 +43,7 @@ impl CppBindGenerator {
         writeln!(out, "#include <string>")?;
         writeln!(out, "#include <stdexcept>")?;
         writeln!(out, "#include <functional>")?;
-        writeln!(out)?;
-        writeln!(out, "// Mimi runtime C declarations")?;
-        writeln!(out, "extern \"C\" {{")?;
-        writeln!(out, "    void mimi_string_free(char* s);")?;
-        writeln!(out, "}}")?;
+        writeln!(out, "#include \"mimi_ffi.h\"")?;
         writeln!(out)?;
 
         // Namespace
@@ -76,15 +72,6 @@ impl CppBindGenerator {
         writeln!(out, "}};")?;
         writeln!(out)?;
 
-        // Extern C declarations
-        writeln!(out, "extern \"C\" {{")?;
-        for func in extern_funcs {
-            let contract = self.build_contract(func);
-            self.write_c_decl(&mut out, func, &contract)?;
-        }
-        writeln!(out, "}} // extern \"C\"")?;
-        writeln!(out)?;
-
         // C++ wrapper functions
         writeln!(out, "// C++ wrapper functions with RAII and type safety")?;
         for func in extern_funcs {
@@ -104,13 +91,13 @@ impl CppBindGenerator {
         let record_type_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+            .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
             .map(|(name, _)| name.clone())
             .collect();
         let repr_c_record_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| td.attributes.contains(&crate::ast::TypeAttribute::ReprC))
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
             .map(|(name, _)| name.clone())
             .collect();
         FfiContract::from_extern_with_caps_repr(
@@ -119,22 +106,6 @@ impl CppBindGenerator {
             &record_type_names,
             &repr_c_record_names,
         )
-    }
-
-    fn write_c_decl(
-        &self,
-        out: &mut String,
-        func: &ExternFunc,
-        contract: &FfiContract,
-    ) -> Result<(), std::fmt::Error> {
-        let params: Vec<String> = func
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| format!("{} {}", self.mimi_type_to_c(contract, i), p.name))
-            .collect();
-        let ret = self.ret_type_to_c(contract);
-        writeln!(out, "    {} {}({});", ret, func.name, params.join(", "))
     }
 
     fn write_cpp_wrapper(
@@ -191,8 +162,10 @@ impl CppBindGenerator {
     }
 
     fn mimi_type_to_c(&self, contract: &FfiContract, index: usize) -> String {
-        if index >= contract.args.len() { return "void*".to_string(); }
-        match contract.args[index] {
+        if index >= contract.args.len() {
+            return "void*".to_string();
+        }
+        match &contract.args[index] {
             FfiArgContract::Int => "int64_t".to_string(),
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "const char*".to_string(),
@@ -200,25 +173,18 @@ impl CppBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
             FfiArgContract::Json => "const char*".to_string(),
-            FfiArgContract::StructByValue(_) => "void*".to_string(),
+            FfiArgContract::StructByValue(name) => format!("struct {}", name),
             FfiArgContract::Callback { .. } => "void*".to_string(),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
 
-    fn ret_type_to_c(&self, contract: &FfiContract) -> String {
-        match &contract.ret {
-            crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "int64_t".to_string(),
-            crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "char*".to_string(),
-            _ => "int64_t".to_string(),
-        }
-    }
 
     fn mimi_type_to_cpp(&self, contract: &FfiContract, index: usize) -> String {
-        if index >= contract.args.len() { return "void*".to_string(); }
-        match contract.args[index] {
+        if index >= contract.args.len() {
+            return "void*".to_string();
+        }
+        match &contract.args[index] {
             FfiArgContract::Int => "int64_t".to_string(),
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow => "const std::string&".to_string(),
@@ -226,7 +192,7 @@ impl CppBindGenerator {
             FfiArgContract::Cap(_) => "int64_t".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
-            FfiArgContract::StructByValue(_) => "void*".to_string(),
+            FfiArgContract::StructByValue(name) => format!("const struct {}&", name),
             FfiArgContract::Callback { .. } => "void*".to_string(),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
@@ -238,7 +204,14 @@ impl CppBindGenerator {
             crate::ffi::contract::FfiRetContract::Int => "int64_t".to_string(),
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
             crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "MimiString".to_string(),
-            _ => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::Json => "std::string".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("struct {}", name),
+            crate::ffi::contract::FfiRetContract::Unsupported(_) => "void*".to_string(),
         }
     }
 }

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, TypeDef};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// Go binding generator — produces a CGO-compatible `.go` file.
@@ -39,6 +39,11 @@ impl GoBindGenerator {
         writeln!(out, "#cgo LDFLAGS: -lmimi_runtime -lpthread -ldl -lm")?;
         writeln!(out, "#include <stdlib.h>")?;
         writeln!(out, "extern void mimi_string_free(char* s);")?;
+
+        // C struct definitions for #[repr(C)] records
+        self.write_c_struct_decls(&mut out)?;
+
+        // Extern function declarations
         for func in extern_funcs {
             let contract = self.build_contract(func);
             self.write_c_decl(&mut out, func, &contract)?;
@@ -47,6 +52,9 @@ impl GoBindGenerator {
         writeln!(out, "import \"C\"")?;
         writeln!(out, "import \"unsafe\"")?;
         writeln!(out)?;
+
+        // Go struct types for #[repr(C)] records
+        self.write_go_struct_defs(&mut out)?;
 
         for func in extern_funcs {
             let contract = self.build_contract(func);
@@ -60,13 +68,13 @@ impl GoBindGenerator {
         let record_type_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+            .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
             .map(|(name, _)| name.clone())
             .collect();
         let repr_c_record_names: std::collections::HashSet<String> = self
             .type_defs
             .iter()
-            .filter(|(_, td)| td.attributes.contains(&crate::ast::TypeAttribute::ReprC))
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
             .map(|(name, _)| name.clone())
             .collect();
         FfiContract::from_extern_with_caps_repr(
@@ -75,6 +83,51 @@ impl GoBindGenerator {
             &record_type_names,
             &repr_c_record_names,
         )
+    }
+
+    fn write_c_struct_decls(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        for (name, td) in repr_c {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                writeln!(out, "typedef struct {0} {{", name)?;
+                for field in fields {
+                    let c_type = self.mimi_type_to_c_field(&field.ty);
+                    writeln!(out, "    {} {};", c_type, field.name)?;
+                }
+                writeln!(out, "}} {};", name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_go_struct_defs(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        if !repr_c.is_empty() {
+            writeln!(out, "// Go structs matching #[repr(C)] Mimi records")?;
+            for (name, td) in repr_c {
+                if let TypeDefKind::Record(fields) = &td.kind {
+                    writeln!(out, "type {} struct {{", name)?;
+                    for field in fields {
+                        let go_type = self.mimi_type_to_go_field(&field.ty);
+                        let go_name = capitalize(&field.name);
+                        writeln!(out, "    {} {}", go_name, go_type)?;
+                    }
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn write_c_decl(
@@ -115,6 +168,18 @@ impl GoBindGenerator {
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
                     writeln!(conversions, "\t{}_c := C.CString({})", p.name, p.name)?;
                     writeln!(conversions, "\tdefer C.free(unsafe.Pointer({}_c))", p.name)?;
+                    c_args.push(format!("{}_c", p.name));
+                }
+                FfiArgContract::StructByValue(name) => {
+                    writeln!(conversions, "\t{}_c := C.{}{{}}", p.name, name)?;
+                    if let Some(td) = self.type_defs.get(name) {
+                        if let TypeDefKind::Record(fields) = &td.kind {
+                            for field in fields {
+                                let go_field = capitalize(&field.name);
+                                writeln!(conversions, "\t{}_c.{} = C.{}({}_{})", p.name, field.name, self.mimi_type_to_c_field(&field.ty), p.name, go_field)?;
+                            }
+                        }
+                    }
                     c_args.push(format!("{}_c", p.name));
                 }
                 FfiArgContract::Int | FfiArgContract::Cap(_) | FfiArgContract::CShared(_)
@@ -162,7 +227,7 @@ impl GoBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "long long".to_string(),
             FfiArgContract::Json => "char*".to_string(),
-            FfiArgContract::StructByValue(_) => "void*".to_string(),
+            FfiArgContract::StructByValue(name) => format!("struct {}", name),
             FfiArgContract::Callback { .. } => "void*".to_string(),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
@@ -177,7 +242,7 @@ impl GoBindGenerator {
             crate::ffi::contract::FfiRetContract::RawPtr(_) | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
             crate::ffi::contract::FfiRetContract::CShared(_) | crate::ffi::contract::FfiRetContract::CBorrow(_) | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "long long".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "char*".to_string(),
-            crate::ffi::contract::FfiRetContract::StructByValue(_) => "void*".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("struct {}", name),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -193,7 +258,7 @@ impl GoBindGenerator {
             FfiArgContract::Cap(_) => "int64".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64".to_string(),
-            FfiArgContract::StructByValue(_) => "unsafe.Pointer".to_string(),
+            FfiArgContract::StructByValue(name) => name.clone(),
             FfiArgContract::Callback { .. } => "unsafe.Pointer".to_string(),
             FfiArgContract::Unsupported(_) => "unsafe.Pointer".to_string(),
         }
@@ -208,9 +273,57 @@ impl GoBindGenerator {
             crate::ffi::contract::FfiRetContract::RawPtr(_) | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
             crate::ffi::contract::FfiRetContract::CShared(_) | crate::ffi::contract::FfiRetContract::CBorrow(_) | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int64".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "string".to_string(),
-            crate::ffi::contract::FfiRetContract::StructByValue(_) => "unsafe.Pointer".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "unsafe.Pointer".to_string(),
         }
+    }
+
+    fn mimi_type_to_c_field(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "int".to_string(),
+                "i64" => "long long".to_string(),
+                "f64" => "double".to_string(),
+                "bool" => "int".to_string(),
+                other => {
+                    if self.is_repr_c_record(other) {
+                        format!("struct {}", other)
+                    } else {
+                        "void*".to_string()
+                    }
+                }
+            },
+            _ => "void*".to_string(),
+        }
+    }
+
+    fn mimi_type_to_go_field(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "int32".to_string(),
+                "i64" => "int64".to_string(),
+                "f64" => "float64".to_string(),
+                "bool" => "bool".to_string(),
+                other => {
+                    if self.is_repr_c_record(other) {
+                        other.to_string()
+                    } else {
+                        "unsafe.Pointer".to_string()
+                    }
+                }
+            },
+            _ => "unsafe.Pointer".to_string(),
+        }
+    }
+
+    fn is_repr_c_record(&self, name: &str) -> bool {
+        self.type_defs
+            .get(name)
+            .map(|td| {
+                matches!(td.kind, TypeDefKind::Record(_))
+                    && td.attributes.contains(&TypeAttribute::ReprC)
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -223,4 +336,12 @@ fn sanitize_go_package(name: &str) -> String {
         s = format!("_{}", s);
     }
     s.to_lowercase()
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }

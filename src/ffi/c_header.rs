@@ -261,10 +261,17 @@ impl CHeaderGenerator {
             .filter(|(_, td)| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
             .map(|(name, _)| name.clone())
             .collect();
-        let contract = FfiContract::from_extern_with_caps(
+        let repr_c_record_names: std::collections::HashSet<String> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&crate::ast::TypeAttribute::ReprC))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let contract = FfiContract::from_extern_with_caps_repr(
             func,
             &std::collections::HashSet::new(),
             &record_type_names,
+            &repr_c_record_names,
         );
 
         // Return type
