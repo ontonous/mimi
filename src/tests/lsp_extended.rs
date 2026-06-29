@@ -1046,10 +1046,9 @@ fn lsp_code_lens_verify_status_with_contracts() {
         titles
     );
     assert!(
-        titles.iter().any(|t| t.contains("verify")
-            || t.contains("✓")
-            || t.contains("✗")
-            || t.contains("?")),
+        titles
+            .iter()
+            .any(|t| t.contains("verify") || t.contains("✓") || t.contains("✗") || t.contains("?")),
         "should have verify lens: {:?}",
         titles
     );
@@ -1222,10 +1221,15 @@ fn lsp_code_actions_insert_at_diagnostic_line() {
     let actions = server.compute_code_actions("file:///test.mimi", &context);
     assert!(!actions.is_empty(), "should produce code action");
     let changes = &actions[0]["edit"]["changes"];
-    let uri_changes = changes["file:///test.mimi"].as_array().expect("should have uri key");
+    let uri_changes = changes["file:///test.mimi"]
+        .as_array()
+        .expect("should have uri key");
     // newText should be inserted at line 5 (the diagnostic line), not hardcoded line 0
     let insert_line = uri_changes[0]["range"]["start"]["line"].as_u64().unwrap();
-    assert_eq!(insert_line, 5, "insert should be at diagnostic line (5), not hardcoded line 0");
+    assert_eq!(
+        insert_line, 5,
+        "insert should be at diagnostic line (5), not hardcoded line 0"
+    );
 }
 
 // --- P1: prepareRename correct range ---
@@ -1238,13 +1242,22 @@ fn lsp_prepare_rename_full_word() {
     assert_eq!(word, "foo", "get_word_at should find 'foo' at position 6");
     // Test at start of 'foo' (position 5)
     let word_start = server.get_word_at(text, 0, 5);
-    assert_eq!(word_start, "foo", "get_word_at should find 'foo' at position 5");
+    assert_eq!(
+        word_start, "foo",
+        "get_word_at should find 'foo' at position 5"
+    );
     // Test at position after "foo" in the parens (position 8)
     let word_after = server.get_word_at(text, 0, 8);
-    assert_eq!(word_after, "foo", "get_word_at should find 'foo' at position 8");
+    assert_eq!(
+        word_after, "foo",
+        "get_word_at should find 'foo' at position 8"
+    );
     // Test at position 9 (after the word)
     let word_end = server.get_word_at(text, 0, 9);
-    assert_eq!(word_end, "", "get_word_at should return empty at position 9 (after word)");
+    assert_eq!(
+        word_end, "",
+        "get_word_at should return empty at position 9 (after word)"
+    );
 }
 
 // --- P1: compute_go_to_implementation cross_file ---
@@ -1254,15 +1267,24 @@ fn lsp_prepare_rename_full_word() {
 fn lsp_goto_implementation_cross_document_search() {
     let mut server = LspServer::new();
     // Open two documents in the server's document cache
-    server.cache_put("file:///a.mimi".to_string(), "func test() { 1 }".to_string());
-    server.cache_put("file:///b.mimi".to_string(), "func other() { 2 }".to_string());
+    server.cache_put(
+        "file:///a.mimi".to_string(),
+        "func test() { 1 }".to_string(),
+    );
+    server.cache_put(
+        "file:///b.mimi".to_string(),
+        "func other() { 2 }".to_string(),
+    );
 
     // The documents should be accessible
     assert!(server.documents.contains_key("file:///a.mimi"));
     assert!(server.documents.contains_key("file:///b.mimi"));
     // compute_workspace_symbols searches all documents
     let symbols = server.compute_workspace_symbols("");
-    let uris: Vec<_> = symbols.iter().filter_map(|s| s["location"]["uri"].as_str()).collect();
+    let uris: Vec<_> = symbols
+        .iter()
+        .filter_map(|s| s["location"]["uri"].as_str())
+        .collect();
     assert!(uris.contains(&"file:///a.mimi") || uris.contains(&"file:///b.mimi"));
 }
 
@@ -1271,17 +1293,20 @@ fn lsp_goto_implementation_cross_document_search() {
 fn lsp_symbol_impl_kind_is_namespace() {
     let mut server = LspServer::new();
     // Need to cache the document so compute_workspace_symbols can find it
-    server.cache_put("file:///test.mimi".to_string(), "impl Foo for Bar { }".to_string());
+    server.cache_put(
+        "file:///test.mimi".to_string(),
+        "impl Foo for Bar { }".to_string(),
+    );
     let symbols = server.compute_workspace_symbols("");
     eprintln!("DEBUG all symbols: {:?}", symbols);
-    let impl_symbols: Vec<_> = symbols
-        .iter()
-        .filter(|s| s["name"] == "Bar")
-        .collect();
+    let impl_symbols: Vec<_> = symbols.iter().filter(|s| s["name"] == "Bar").collect();
     eprintln!("DEBUG impl symbols for Bar: {:?}", impl_symbols);
     assert!(!impl_symbols.is_empty(), "should find impl symbol");
     let kind = impl_symbols[0]["kind"].as_u64().unwrap();
-    assert_eq!(kind, 26, "impl kind should be 26 (Namespace), not 25 (Object)");
+    assert_eq!(
+        kind, 26,
+        "impl kind should be 26 (Namespace), not 25 (Object)"
+    );
 }
 
 // --- P2: parse_error_to_lsp end_col ---
@@ -1326,7 +1351,10 @@ fn lsp_word_end_offset_at_line_end() {
     assert_eq!(offset, 0, "word_end_offset at line end should be 0");
     // Position in middle of word
     let offset2 = server.word_end_offset("func foo()", 0, 6);
-    assert!(offset2 > 0, "word_end_offset in middle of word should be positive");
+    assert!(
+        offset2 > 0,
+        "word_end_offset in middle of word should be positive"
+    );
 }
 
 // --- P2: didSave includeText ---
@@ -1356,7 +1384,10 @@ fn lsp_did_save_uses_provided_text() {
         }
     });
     let response = server.handle_message(&save_msg);
-    assert!(response.is_some(), "didSave should produce diagnostics response");
+    assert!(
+        response.is_some(),
+        "didSave should produce diagnostics response"
+    );
 }
 
 // --- P2: workspace/symbol isIncomplete ---
@@ -1403,7 +1434,10 @@ fn lsp_signature_help_no_debug_format() {
 #[test]
 fn lsp_percent_decode_unicode() {
     let decoded = crate::lsp::util::percent_decode("%u0041"); // 'A'
-    assert_eq!(decoded, "A", "percent_decode should handle %uXXXX Unicode escapes");
+    assert_eq!(
+        decoded, "A",
+        "percent_decode should handle %uXXXX Unicode escapes"
+    );
     let decoded2 = crate::lsp::util::percent_decode("%u00E9"); // 'é'
     assert_eq!(decoded2, "é", "percent_decode should handle accented chars");
     // Standard %XX should still work

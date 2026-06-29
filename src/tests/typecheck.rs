@@ -1002,7 +1002,10 @@ func main() -> i32 { check([1, 2]) }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "List<i32> pattern with string element should fail");
+    assert!(
+        result.is_err(),
+        "List<i32> pattern with string element should fail"
+    );
 }
 
 #[test]
@@ -1031,7 +1034,10 @@ func main() -> i32 { 1 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "Constructor shadowing function should produce error");
+    assert!(
+        result.is_err(),
+        "Constructor shadowing function should produce error"
+    );
 }
 
 #[test]
@@ -1267,7 +1273,11 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype should transparently unify with inner type: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype should transparently unify with inner type: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1280,7 +1290,11 @@ func main() -> i32 { 0 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit wrap on return: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit wrap on return: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1294,7 +1308,11 @@ func main() -> i32 { 0 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit unwrap on return: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit unwrap on return: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1307,7 +1325,11 @@ func main() -> i32 { apply(42) }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit wrap on fn arg: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit wrap on fn arg: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1321,7 +1343,11 @@ func main() -> i32 { apply(make()) }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit unwrap on fn arg: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit unwrap on fn arg: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1337,7 +1363,11 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit wrap on assign: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit wrap on assign: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1354,7 +1384,11 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit unwrap on assign: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit unwrap on assign: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1369,7 +1403,11 @@ func main() -> i32 { 0 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "newtype implicit wrap in if/else: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "newtype implicit wrap in if/else: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1383,7 +1421,11 @@ func main() -> i32 { apply(OrderId(1)) }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "cross-newtype should be rejected: {:?}", result);
+    assert!(
+        result.is_err(),
+        "cross-newtype should be rejected: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -1400,7 +1442,11 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "cross-newtype assignment should be rejected: {:?}", result);
+    assert!(
+        result.is_err(),
+        "cross-newtype assignment should be rejected: {:?}",
+        result
+    );
 }
 
 // ─── v0.25.5: Bug 6 + Bug 7 tests ──────────────────────────────────

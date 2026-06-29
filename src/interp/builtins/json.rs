@@ -109,8 +109,9 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(json) => {
-                let jv: serde_json::Value = serde_json::from_str(json)
-                    .map_err(|e| InterpError::new(format!("json_array_length parse error: {}", e)))?;
+                let jv: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+                    InterpError::new(format!("json_array_length parse error: {}", e))
+                })?;
                 match jv {
                     serde_json::Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
                     _ => Err(InterpError::new("json_array_length: value is not an array")),

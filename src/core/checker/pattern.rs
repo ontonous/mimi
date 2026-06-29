@@ -263,41 +263,39 @@ impl<'a> Checker<'a> {
                     );
                 }
             },
-            Pattern::Array(pats) => {
-                match subject {
-                    Type::Array(inner, size) => {
-                        if pats.len() != *size {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0251,
-                                format!(
-                                    "array pattern expects {} elements, found {}",
-                                    size,
-                                    pats.len()
-                                ),
-                            );
-                        } else {
-                            for p in pats {
-                                self.check_pattern(p, inner, scopes);
-                            }
-                        }
-                    }
-                    Type::Name(n, args) if n == "List" && args.len() == 1 => {
-                        let elem_ty = &args[0];
-                        for p in pats {
-                            self.check_pattern(p, elem_ty, scopes);
-                        }
-                    }
-                    _ => {
+            Pattern::Array(pats) => match subject {
+                Type::Array(inner, size) => {
+                    if pats.len() != *size {
                         self.emit_code(
                             crate::diagnostic::codes::E0251,
                             format!(
-                                "cannot match array pattern against non-array type {}",
-                                fmt_type(subject)
+                                "array pattern expects {} elements, found {}",
+                                size,
+                                pats.len()
                             ),
                         );
+                    } else {
+                        for p in pats {
+                            self.check_pattern(p, inner, scopes);
+                        }
                     }
                 }
-            }
+                Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                    let elem_ty = &args[0];
+                    for p in pats {
+                        self.check_pattern(p, elem_ty, scopes);
+                    }
+                }
+                _ => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0251,
+                        format!(
+                            "cannot match array pattern against non-array type {}",
+                            fmt_type(subject)
+                        ),
+                    );
+                }
+            },
             Pattern::Slice(pats, rest) => {
                 match subject {
                     Type::Array(inner, _) | Type::Slice(inner) => {

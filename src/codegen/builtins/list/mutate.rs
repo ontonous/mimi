@@ -117,9 +117,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::StructValue(sv) => {
                 // StructValue: allocate on heap, store struct, return pointer
                 let sty = sv.get_type();
-                let alloca = self.builder.build_alloca(sty, "push_struct_tmp")
+                let alloca = self
+                    .builder
+                    .build_alloca(sty, "push_struct_tmp")
                     .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder.build_store(alloca, sv)
+                self.builder
+                    .build_store(alloca, sv)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                 BasicValueEnum::PointerValue(alloca)
             }
@@ -632,16 +635,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
         // Call mimi_sort_f64_inplace(data, count)
-        let func = self.module.get_function("mimi_sort_f64_inplace")
+        let func = self
+            .module
+            .get_function("mimi_sort_f64_inplace")
             .ok_or_else(|| "mimi_sort_f64_inplace not declared".to_string())?;
-        self.builder.build_call(
-            func,
-            &[
-                BasicMetadataValueEnum::PointerValue(data_ptr),
-                BasicMetadataValueEnum::IntValue(list_len),
-            ],
-            "sort_f64_call",
-        ).map_err(|e| CompileError::LlvmError(format!("sort_f64 call error: {}", e)))?;
+        self.builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(list_len),
+                ],
+                "sort_f64_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("sort_f64 call error: {}", e)))?;
         // Return the same list (sorted in place)
         Ok(list_ptr.into())
     }

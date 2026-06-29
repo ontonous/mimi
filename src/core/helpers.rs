@@ -216,7 +216,7 @@ pub fn subst_type_params(
         Type::Slice(inner) => Type::Slice(Box::new(subst_type_params(inner, generics, type_map))),
         Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
         Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
-        Type::TypeVar(_) => ty.clone(),  // Bug-3 clarification: TypeVar represents inference variables (u32 IDs)
+        Type::TypeVar(_) => ty.clone(), // Bug-3 clarification: TypeVar represents inference variables (u32 IDs)
         // NOT user-defined type parameters. User params like `T` in `type Foo[T] = T`
         // are stored as Type::Name("T", vec![]), which IS replaced by subst_type_params.
         // TypeVar is created by the inference engine and should be resolved by unify, not
@@ -288,7 +288,11 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner≃n
         (Type::Newtype(n, inner), Type::Name(n2, _))
         | (Type::Name(n2, _), Type::Newtype(n, inner)) => {
-            if n == n2 { true } else { same_type(inner, &Type::Name(n2.clone(), vec![])) }
+            if n == n2 {
+                true
+            } else {
+                same_type(inner, &Type::Name(n2.clone(), vec![]))
+            }
         }
         // Newtype is transparent — same_type with non-Name, non-Newtype types
         (Type::Newtype(_, inner), other) if !matches!(other, Type::Newtype(..)) => {
@@ -322,9 +326,7 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::CBorrow(a), Type::CBorrow(b)) => same_type(a, b),
         (Type::CBorrowMut(a), Type::CBorrowMut(b)) => same_type(a, b),
         (Type::TypeVar(a), Type::TypeVar(b)) => a == b,
-        (Type::ForAll(p1, b1), Type::ForAll(p2, b2)) => {
-            p1 == p2 && same_type(b1, b2)
-        }
+        (Type::ForAll(p1, b1), Type::ForAll(p2, b2)) => p1 == p2 && same_type(b1, b2),
         _ => false,
     }
 }

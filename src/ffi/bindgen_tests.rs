@@ -8,12 +8,8 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::ast::{
-        ExternFunc, ExternParam, Field, Type, TypeAttribute, TypeDef, TypeDefKind,
-    };
-    use crate::ffi::{
-        c_header, cpp_bind, go_bind, jni_bind, node_bind, py_bind, rust_bind,
-    };
+    use crate::ast::{ExternFunc, ExternParam, Field, Type, TypeAttribute, TypeDef, TypeDefKind};
+    use crate::ffi::{c_header, cpp_bind, go_bind, jni_bind, node_bind, py_bind, rust_bind};
 
     fn sample_type_defs() -> HashMap<String, TypeDef> {
         let mut map = HashMap::new();
@@ -119,15 +115,16 @@ mod tests {
 
     #[test]
     fn c_header_includes_all_runtime_declarations() {
-        let header = c_header::generate_c_header(&sample_extern_funcs(), sample_type_defs()).unwrap();
+        let header =
+            c_header::generate_c_header(&sample_extern_funcs(), sample_type_defs()).unwrap();
         assert!(header.contains("mimi_string_free("));
         assert!(header.contains("mimi_cap_register("));
         assert!(header.contains("mimi_runtime_set_error_handler("));
         assert!(header.contains("mimi_callback_deregister("));
         assert!(header.contains("MimiErrorHandler"));
-        assert!(header.contains("int64_t add(int64_t a, int64_t b)"));
+        assert!(header.contains("int32_t add(int32_t a, int32_t b)"));
         assert!(header.contains("typedef struct Point"));
-        assert!(header.contains("int64_t point_sum(struct Point p)"));
+        assert!(header.contains("int32_t point_sum(struct Point p)"));
     }
 
     #[test]
@@ -138,8 +135,10 @@ mod tests {
         assert!(out.contains("pub x: i32"));
         assert!(out.contains("pub fn add("));
         assert!(out.contains("pub fn greet("));
-        assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_longlong"));
-        assert!(out.contains("pub fn apply_callback(f: unsafe extern \"C\" fn(i32, i32) -> i32, x: c_longlong) -> c_longlong"));
+        assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_int"));
+        assert!(out.contains(
+            "pub fn apply_callback(f: unsafe extern \"C\" fn(i32, i32) -> i32, x: c_int) -> c_int"
+        ));
         assert!(out.contains("extern \"C\""));
         // Regression: raw extern symbols must be in a submodule so wrappers can reuse function names.
         assert!(out.contains("mod ffi_raw"));
@@ -157,11 +156,11 @@ mod tests {
         assert!(out.contains("func Add("));
         assert!(out.contains("func Greet("));
         assert!(out.contains("type Point struct"));
-        assert!(out.contains("func Point_sum(p Point) int64"));
-        assert!(out.contains("type Apply_callback_f_cb func(int64, int64) int64"));
+        assert!(out.contains("func Point_sum(p Point) int32"));
+        assert!(out.contains("type Apply_callback_f_cb func(int32, int32) int32"));
         assert!(out.contains("var apply_callback_f_cb_slot Apply_callback_f_cb"));
         assert!(out.contains("//export mimi_cb_apply_callback_f"));
-        assert!(out.contains("func Apply_callback(f Apply_callback_f_cb, x int64) int64"));
+        assert!(out.contains("func Apply_callback(f Apply_callback_f_cb, x int32) int32"));
         // Regression: struct field access must use Go field selector (p.X), not p_X.
         assert!(out.contains("p_c.x = C.int(p.X)"));
         // Regression: callback slot must be cleared after the call to avoid leaking the closure.
@@ -182,14 +181,18 @@ mod tests {
         assert!(out.contains("struct Point p_struct"));
         assert!(out.contains("napi_get_named_property(env, args[0], \"x\""));
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
-        assert!(out.contains("napi_create_reference(env, args[0], 1, &mimi_cb_apply_callback_f_slot.ref)"));
+        assert!(out.contains(
+            "napi_create_reference(env, args[0], 1, &mimi_cb_apply_callback_f_slot.ref)"
+        ));
         assert!(out.contains("mimi_cb_apply_callback_f_slot.env = env"));
         let dts = gen.generate_dts(&sample_extern_funcs()).unwrap();
         assert!(dts.contains("export interface Point"));
         assert!(dts.contains("export function add("));
         assert!(dts.contains("export function greet("));
         assert!(dts.contains("point_sum(p: Point): number"));
-        assert!(dts.contains("apply_callback(f: (arg0: number, arg1: number) => number, x: number): number"));
+        assert!(dts.contains(
+            "apply_callback(f: (arg0: number, arg1: number) => number, x: number): number"
+        ));
     }
 
     #[test]
@@ -197,13 +200,15 @@ mod tests {
         let gen = cpp_bind::CppBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         assert!(out.contains("#include \"mimi_ffi.h\""));
-        assert!(out.contains("inline int64_t add("));
+        assert!(out.contains("inline int32_t add("));
         assert!(out.contains("inline MimiString greet("));
-        assert!(out.contains("inline int64_t point_sum(const struct Point& p)"));
+        assert!(out.contains("inline int32_t point_sum(const struct Point& p)"));
         assert!(out.contains("MimiString"));
         assert!(out.contains("std::function<int32_t(int32_t, int32_t)> apply_callback_f_cb"));
         assert!(out.contains("apply_callback_f_cb = f"));
-        assert!(out.contains("extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"));
+        assert!(out.contains(
+            "extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"
+        ));
         // Regression: callback slot must be cleared after the call to release the closure.
         assert!(out.contains("apply_callback_f_cb = {}"));
     }
@@ -214,7 +219,7 @@ mod tests {
         let c = gen.generate_c(&sample_extern_funcs()).unwrap();
         eprintln!("JAVA C:\n{}", c);
         let java = gen.generate_java(&sample_extern_funcs()).unwrap();
-        assert!(c.contains("JNIEXPORT jlong JNICALL Java_Math_add"));
+        assert!(c.contains("JNIEXPORT jint JNICALL Java_Math_add"));
         assert!(c.contains("JNIEXPORT jstring JNICALL Java_Math_greet"));
         // Regression: string args must be converted and released with the same variable name.
         assert!(c.contains("const char* name_str ="));
@@ -225,13 +230,14 @@ mod tests {
         assert!(c.contains("mimi_cb_apply_callback_f_trampoline"));
         assert!(c.contains("mimi_cb_apply_callback_f_setup(env, f)"));
         assert!(c.contains("mimi_cb_apply_callback_f_teardown(env)"));
-        assert!(java.contains("public static native long add("));
+        assert!(java.contains("public static native int add("));
         assert!(java.contains("public static native String greet("));
         assert!(java.contains("public static class Point"));
-        assert!(java.contains("public static native long point_sum(Point p)"));
+        assert!(java.contains("public static native int point_sum(Point p)"));
         assert!(java.contains("public interface ApplyCallbackFCallback"));
         assert!(java.contains("int apply(int arg0, int arg1)"));
-        assert!(java.contains("public static native long apply_callback(ApplyCallbackFCallback f, long x)"));
+        assert!(java
+            .contains("public static native int apply_callback(ApplyCallbackFCallback f, int x)"));
     }
 
     #[test]
@@ -243,9 +249,13 @@ mod tests {
         assert!(out.contains("#include <pybind11/functional.h>"));
         assert!(out.contains("m.def(\"add\""));
         assert!(out.contains("py::class_<Point>(m, \"Point\")"));
-        assert!(out.contains("m.def(\"point_sum\", [](Point p) -> int64_t"));
-        assert!(out.contains("thread_local static std::function<int32_t(int32_t, int32_t)> g_apply_callback_f_cb"));
-        assert!(out.contains("extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"));
+        assert!(out.contains("m.def(\"point_sum\", [](Point p) -> int32_t"));
+        assert!(out.contains(
+            "thread_local static std::function<int32_t(int32_t, int32_t)> g_apply_callback_f_cb"
+        ));
+        assert!(out.contains(
+            "extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"
+        ));
         assert!(out.contains("g_apply_callback_f_cb = f"));
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
         // Regression: callback slot must be cleared after the call to release the Python callable.

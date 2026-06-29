@@ -31,7 +31,8 @@ impl<'a> Checker<'a> {
                 return self.unification.resolve(ret);
             } else {
                 // Function reference: return func(T) -> U type
-                let resolved_params: Vec<Type> = params.iter().map(|p| self.unification.resolve(p)).collect();
+                let resolved_params: Vec<Type> =
+                    params.iter().map(|p| self.unification.resolve(p)).collect();
                 let resolved_ret = self.unification.resolve(ret);
                 return Type::Func(resolved_params, Box::new(resolved_ret));
             }

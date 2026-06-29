@@ -10,8 +10,8 @@ pub mod go_bind;
 pub mod jni_bind;
 pub mod node_bind;
 pub mod py_bind;
-pub mod rust_bind;
 pub mod runtime;
+pub mod rust_bind;
 
 pub use callback::{callback_table_register, callback_table_remove};
 pub use contract::{FfiArgContract, FfiContract, FfiRetContract};

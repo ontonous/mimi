@@ -2,18 +2,38 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexerError {
-    TabsNotAllowed { line: usize, col: usize },
-    IndentNotMultipleOfFour { line: usize, col: usize },
-    DedentMismatch { line: usize, col: usize },
-    UnexpectedDollar { line: usize, col: usize },
-    UnexpectedCharacter { c: char, line: usize, col: usize },
+    TabsNotAllowed {
+        line: usize,
+        col: usize,
+    },
+    IndentNotMultipleOfFour {
+        line: usize,
+        col: usize,
+    },
+    DedentMismatch {
+        line: usize,
+        col: usize,
+    },
+    UnexpectedDollar {
+        line: usize,
+        col: usize,
+    },
+    UnexpectedCharacter {
+        c: char,
+        line: usize,
+        col: usize,
+    },
     UnterminatedString,
     UnterminatedEscape,
     UnterminatedFString,
     UnterminatedFStringEscape,
     UnterminatedInterpolation,
     UnterminatedBlockComment,
-    InvalidEscape { escape: String, line: usize, col: usize },
+    InvalidEscape {
+        escape: String,
+        line: usize,
+        col: usize,
+    },
 }
 
 impl fmt::Display for LexerError {

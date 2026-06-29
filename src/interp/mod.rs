@@ -663,7 +663,11 @@ impl<'a> Interpreter<'a> {
             Type::CBuffer(inner) => format!("CBuffer<{}>", self.resolve_type_name(inner)),
             Type::TypeVar(id) => format!("?T{}", id),
             Type::ForAll(params, body) => {
-                format!("forall {}. {}", params.join(", "), self.resolve_type_name(body))
+                format!(
+                    "forall {}. {}",
+                    params.join(", "),
+                    self.resolve_type_name(body)
+                )
             }
         }
     }

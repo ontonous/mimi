@@ -1135,10 +1135,7 @@ mod tests {
         let c_str = unsafe { mimi_string_as_c_str(raw) };
         assert!(!c_str.is_null());
         unsafe {
-            assert_eq!(
-                std::ffi::CStr::from_ptr(c_str).to_str().unwrap(),
-                "hello"
-            );
+            assert_eq!(std::ffi::CStr::from_ptr(c_str).to_str().unwrap(), "hello");
         }
 
         mimi_string_as_c_str_free(c_str);

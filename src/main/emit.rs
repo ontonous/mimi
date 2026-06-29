@@ -121,10 +121,7 @@ pub(crate) fn emit_py_bindings(
     Ok(())
 }
 
-pub(crate) fn emit_rust_bindings(
-    path: Option<&Path>,
-    output: Option<&Path>,
-) -> Result<(), String> {
+pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -137,9 +134,14 @@ pub(crate) fn emit_rust_bindings(
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
     collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
     let gen = ffi::rust_bind::RustBindGenerator::new(type_defs, &pkg_name);
-    let bindings = gen.generate(&extern_funcs)
+    let bindings = gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("failed to generate Rust bindings: {}", e))?;
 
     match output {
@@ -153,10 +155,7 @@ pub(crate) fn emit_rust_bindings(
     Ok(())
 }
 
-pub(crate) fn emit_go_bindings(
-    path: Option<&Path>,
-    output: Option<&Path>,
-) -> Result<(), String> {
+pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -167,9 +166,14 @@ pub(crate) fn emit_go_bindings(
     let mut type_defs = HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
     let gen = ffi::go_bind::GoBindGenerator::new(type_defs, &pkg_name);
-    let bindings = gen.generate(&extern_funcs)
+    let bindings = gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("failed to generate Go bindings: {}", e))?;
 
     match output {
@@ -198,9 +202,14 @@ pub(crate) fn emit_node_bindings(
     let mut type_defs = HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
     let gen = ffi::node_bind::NodeBindGenerator::new(type_defs, &pkg_name);
-    let bindings = gen.generate(&extern_funcs)
+    let bindings = gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("failed to generate Node.js bindings: {}", e))?;
 
     match output {
@@ -214,7 +223,8 @@ pub(crate) fn emit_node_bindings(
 
     // Generate TypeScript declarations
     if let Some(ts_path) = ts_output {
-        let dts = gen.generate_dts(&extern_funcs)
+        let dts = gen
+            .generate_dts(&extern_funcs)
             .map_err(|e| format!("failed to generate TypeScript declarations: {}", e))?;
         fs::write(ts_path, &dts)
             .map_err(|e| format!("failed to write {}: {}", ts_path.display(), e))?;
@@ -238,9 +248,14 @@ pub(crate) fn emit_java_bindings(
     let mut type_defs = HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
     let gen = ffi::jni_bind::JniBindGenerator::new(type_defs, &pkg_name);
-    let c_bridge = gen.generate_c(&extern_funcs)
+    let c_bridge = gen
+        .generate_c(&extern_funcs)
         .map_err(|e| format!("failed to generate JNI C bridge: {}", e))?;
 
     match output {
@@ -254,7 +269,8 @@ pub(crate) fn emit_java_bindings(
 
     // Generate Java interface class
     if let Some(java_path) = java_output {
-        let java_class = gen.generate_java(&extern_funcs)
+        let java_class = gen
+            .generate_java(&extern_funcs)
             .map_err(|e| format!("failed to generate Java class: {}", e))?;
         fs::write(java_path, &java_class)
             .map_err(|e| format!("failed to write {}: {}", java_path.display(), e))?;
@@ -322,10 +338,7 @@ fn collect_exported_and_types(
     }
 }
 
-pub(crate) fn emit_cpp_bindings(
-    path: Option<&Path>,
-    output: Option<&Path>,
-) -> Result<(), String> {
+pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -336,9 +349,14 @@ pub(crate) fn emit_cpp_bindings(
     let mut type_defs = HashMap::new();
     collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
     let gen = ffi::cpp_bind::CppBindGenerator::new(type_defs, &pkg_name);
-    let bindings = gen.generate(&extern_funcs)
+    let bindings = gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("failed to generate C++ bindings: {}", e))?;
 
     match output {

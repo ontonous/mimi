@@ -69,84 +69,109 @@ fn path_dirname_of_dot() {
 fn sha256_test_vector_1() {
     // NIST test vector: SHA-256("abc")
     let v = run_source("func main() -> string { sha256(\"abc\") }");
-    assert_eq!(v, interp::Value::String("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
+        )
+    );
 }
 
 #[test]
 fn sha256_test_vector_2() {
     // SHA-256 of empty string
     let v = run_source("func main() -> string { sha256(\"\") }");
-    assert_eq!(v, interp::Value::String("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+        )
+    );
 }
 
 #[test]
 fn sha256_test_vector_3() {
     // SHA-256("hello") — well-known vector
     let v = run_source("func main() -> string { sha256(\"hello\") }");
-    assert_eq!(v, interp::Value::String("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()
+        )
+    );
 }
 
 #[test]
 fn sha256_deterministic() {
     // Same input should always produce same output
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let h1 = sha256("test")
     let h2 = sha256("test")
     if h1 == h2 { 1 } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn sha256_different_inputs_different() {
     // Different inputs should produce different hashes
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let h1 = sha256("hello")
     let h2 = sha256("world")
     if h1 == h2 { 0 } else { 1 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn base64_roundtrip_empty() {
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let e = base64_encode("")
     let d = base64_decode(e)
     match d { Ok(s) => if s == "" { 1 } else { 0 }, Err(_) => 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn base64_roundtrip_binary_like() {
     // Base64 of a string with special characters
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let original = "Hello, World! 123"
     let e = base64_encode(original)
     let d = base64_decode(e)
     match d { Ok(s) => if s == original { 1 } else { 0 }, Err(_) => 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn base64_decode_invalid_returns_err() {
     // Invalid base64 should return Err, not crash
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let d = base64_decode("not!valid!base64!!!")
     match d { Ok(_) => 0, Err(_) => 1 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
@@ -184,7 +209,9 @@ fn str_contains_empty_pattern() {
 #[test]
 fn str_starts_with_longer_prefix() {
     // starts_with where prefix is longer than string
-    let v = run_source("func main() -> i32 { if str_starts_with(\"hi\", \"hello world\") { 1 } else { 0 } }");
+    let v = run_source(
+        "func main() -> i32 { if str_starts_with(\"hi\", \"hello world\") { 1 } else { 0 } }",
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -198,7 +225,9 @@ fn str_trim_only_whitespace() {
 #[test]
 fn str_join_empty_list() {
     // Join an empty list — tests empty collection handling
-    let v = run_source("func main() -> i32 { let empty = str_split(\"\", \"|\"); len(str_join(empty, \",\")) }");
+    let v = run_source(
+        "func main() -> i32 { let empty = str_split(\"\", \"|\"); len(str_join(empty, \",\")) }",
+    );
     // str_split("", "|") returns [""], so join returns ""
     assert_eq!(v, interp::Value::Int(0));
 }
@@ -218,7 +247,9 @@ fn regex_match_empty_pattern() {
 #[test]
 fn regex_match_no_match() {
     // Regex that doesn't match
-    let v = run_source("func main() -> i32 { if regex_match(\"hello\", \"^[0-9]+$\") { 1 } else { 0 } }");
+    let v = run_source(
+        "func main() -> i32 { if regex_match(\"hello\", \"^[0-9]+$\") { 1 } else { 0 } }",
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -261,18 +292,21 @@ fn integer_min_operations() {
 
 #[test]
 fn json_roundtrip_string() {
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let s = to_json("hello")
     if s == "\"hello\"" { 1 } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn json_valid_object() {
-    let v = run_source("func main() -> i32 { if json_is_valid(\"{\\\"a\\\":1}\") { 1 } else { 0 } }");
+    let v =
+        run_source("func main() -> i32 { if json_is_valid(\"{\\\"a\\\":1}\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(1));
 }
 
@@ -301,7 +335,8 @@ fn while_false_immediately() {
 #[test]
 fn for_empty_range() {
     // For loop over empty range
-    let v = run_source("func main() -> i32 { let mut x = 0; for i in range(5, 5) { x = x + 1; } x }");
+    let v =
+        run_source("func main() -> i32 { let mut x = 0; for i in range(5, 5) { x = x + 1; } x }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -317,14 +352,16 @@ fn match_all_wildcard() {
 #[test]
 fn record_field_shadowing() {
     // Record field name shadowing a variable
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Item { name: string }
 func main() -> string {
     let name = "outer"
     let item = Item { name: "inner" }
     item.name
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("inner".to_string()));
 }
 
@@ -332,6 +369,7 @@ func main() -> string {
 fn tuple_nested_access() {
     // Accessing nested tuple elements — parser doesn't support t.1.1
     // Use destructuring instead
-    let v = run_source("func main() -> i32 { let t = (1, (2, 3)); let (a, b) = t; let (c, d) = b; d }");
+    let v =
+        run_source("func main() -> i32 { let t = (1, (2, 3)); let (a, b) = t; let (c, d) = b; d }");
     assert_eq!(v, interp::Value::Int(3));
 }

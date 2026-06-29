@@ -77,10 +77,15 @@ pub fn profiler_is_enabled() -> bool {
 
 /// Record a function call with its duration.
 pub fn profiler_record(name: &str, duration_ns: u64) {
-    let Ok(mut guard) = PROFILER.lock() else { return };
+    let Ok(mut guard) = PROFILER.lock() else {
+        return;
+    };
     if let Some(profiler) = guard.as_mut() {
         if profiler.enabled {
-            let entry = profiler.entries.entry(name.to_string()).or_insert_with(ProfileEntry::new);
+            let entry = profiler
+                .entries
+                .entry(name.to_string())
+                .or_insert_with(ProfileEntry::new);
             entry.record(duration_ns);
         }
     }
@@ -126,8 +131,10 @@ pub fn profiler_report() {
     entries.sort_by_key(|b| std::cmp::Reverse(b.1.total_ns));
 
     eprintln!("\n=== Mimi Profile Report ===");
-    eprintln!("{:<40} {:>10} {:>14} {:>14} {:>14}",
-        "Function", "Calls", "Total (ms)", "Avg (ms)", "Max (ms)");
+    eprintln!(
+        "{:<40} {:>10} {:>14} {:>14} {:>14}",
+        "Function", "Calls", "Total (ms)", "Avg (ms)", "Max (ms)"
+    );
     eprintln!("{}", "-".repeat(96));
 
     let mut total_calls = 0u64;
@@ -136,7 +143,8 @@ pub fn profiler_report() {
     for (name, entry) in entries.iter().take(50) {
         total_calls += entry.call_count;
         total_time += entry.total_ns;
-        eprintln!("{:<40} {:>10} {:>14.3} {:>14.3} {:>14.3}",
+        eprintln!(
+            "{:<40} {:>10} {:>14.3} {:>14.3} {:>14.3}",
             name,
             entry.call_count,
             entry.total_ns as f64 / 1_000_000.0,
@@ -146,7 +154,8 @@ pub fn profiler_report() {
     }
 
     eprintln!("{}", "-".repeat(96));
-    eprintln!("{:<40} {:>10} {:>14.3}",
+    eprintln!(
+        "{:<40} {:>10} {:>14.3}",
         "TOTAL",
         total_calls,
         total_time as f64 / 1_000_000.0,

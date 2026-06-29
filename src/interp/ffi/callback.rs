@@ -47,9 +47,8 @@ static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[allow(clippy::type_complexity)]
-fn global_callback_store()
-    -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>>
-{
+fn global_callback_store(
+) -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>> {
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -152,39 +151,33 @@ unsafe fn callback_trampoline_inner(
 
     // Look up closure + active guard (bound for RAII Drop semantics)
     #[allow(unused_variables)]
-    let (closure, ret_is_float, arg_free_mask, active_guard) =
-        match entry {
-            Some((closure, ret_is_float, arg_free_mask)) => {
-                // TLS entry — use no-op active guard (global store count not affected)
-                (
-                    closure,
-                    ret_is_float,
-                    arg_free_mask,
-                    ActiveCountGuard(None),
-                )
-            }
-            None => {
-                // Global store entry — increment and track the count
-                let (closure, ret_is_float, arg_free_mask, cnt) = {
-                    let store = global_callback_store()
-                        .lock()
-                        .expect("CALLBACK_GLOBAL_STORE lock poisoned");
-                    match store.get(&callback_id).cloned() {
-                        Some((c, r, a, cnt)) => (c, r, a, cnt),
-                        None => {
-                            *result = 0;
-                            return;
-                        }
+    let (closure, ret_is_float, arg_free_mask, active_guard) = match entry {
+        Some((closure, ret_is_float, arg_free_mask)) => {
+            // TLS entry — use no-op active guard (global store count not affected)
+            (closure, ret_is_float, arg_free_mask, ActiveCountGuard(None))
+        }
+        None => {
+            // Global store entry — increment and track the count
+            let (closure, ret_is_float, arg_free_mask, cnt) = {
+                let store = global_callback_store()
+                    .lock()
+                    .expect("CALLBACK_GLOBAL_STORE lock poisoned");
+                match store.get(&callback_id).cloned() {
+                    Some((c, r, a, cnt)) => (c, r, a, cnt),
+                    None => {
+                        *result = 0;
+                        return;
                     }
-                };
-                (
-                    closure,
-                    ret_is_float,
-                    arg_free_mask,
-                    ActiveCountGuard::new(&cnt),
-                )
-            }
-        };
+                }
+            };
+            (
+                closure,
+                ret_is_float,
+                arg_free_mask,
+                ActiveCountGuard::new(&cnt),
+            )
+        }
+    };
 
     // active_guard is live here — if we return early it will be dropped (decremented).
     // Extract C arguments from raw void pointers.

@@ -174,7 +174,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 attributes: vec![],
             };
             let llvm_ty = BasicTypeEnum::StructType(
-                self.context.struct_type(&[i32_ty, string_ty, string_ty], false),
+                self.context
+                    .struct_type(&[i32_ty, string_ty, string_ty], false),
             );
             self.type_llvm.insert("ExecResult".to_string(), llvm_ty);
             self.type_defs.insert("ExecResult".to_string(), exec_ty);
@@ -207,7 +208,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 attributes: vec![],
             };
             let llvm_ty = BasicTypeEnum::StructType(
-                self.context.struct_type(&[i64_ty, i64_ty, bool_ty, bool_ty], false),
+                self.context
+                    .struct_type(&[i64_ty, i64_ty, bool_ty, bool_ty], false),
             );
             self.type_llvm.insert("StatResult".to_string(), llvm_ty);
             self.type_defs.insert("StatResult".to_string(), stat_ty);

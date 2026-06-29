@@ -90,8 +90,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "env_ptr_typed",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-            let env_ptr_val = self
-                .build_load(BasicTypeEnum::PointerType(i8_ptr), env_ptr_typed, "env_ptr_val")?;
+            let env_ptr_val = self.build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                env_ptr_typed,
+                "env_ptr_val",
+            )?;
             let env_ptr = if let BasicValueEnum::PointerValue(pv) = env_ptr_val {
                 pv
             } else {
@@ -261,7 +264,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "null_env_typed",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-            self.build_store(env_ptr_typed, BasicValueEnum::PointerValue(i8_ptr.const_null()))?;
+            self.build_store(
+                env_ptr_typed,
+                BasicValueEnum::PointerValue(i8_ptr.const_null()),
+            )?;
         }
 
         // Call mimi_spawn_future(future, poll_fn)

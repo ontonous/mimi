@@ -63,7 +63,11 @@ impl JniBindGenerator {
         writeln!(out, "public class {} {{", java_class)?;
         writeln!(out)?;
         writeln!(out, "    static {{")?;
-        writeln!(out, "        System.loadLibrary(\"mimi_{}\");", self.module_name)?;
+        writeln!(
+            out,
+            "        System.loadLibrary(\"mimi_{}\");",
+            self.module_name
+        )?;
         writeln!(out, "    }}")?;
         writeln!(out)?;
 
@@ -79,7 +83,11 @@ impl JniBindGenerator {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    let ty = if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let ty = if let FfiArgContract::Callback {
+                        param_types,
+                        ret_type,
+                    } = &contract.args[i]
+                    {
                         self.callback_interface_name(&func.name, &p.name, param_types, ret_type)
                     } else {
                         self.mimi_type_to_java(&contract, i)
@@ -88,7 +96,13 @@ impl JniBindGenerator {
                 })
                 .collect();
             let ret = self.ret_type_to_java(&contract);
-            writeln!(out, "    public static native {} {}({});", ret, func.name, params.join(", "))?;
+            writeln!(
+                out,
+                "    public static native {} {}({});",
+                ret,
+                func.name,
+                params.join(", ")
+            )?;
         }
 
         writeln!(out, "}}")?;
@@ -132,7 +146,12 @@ impl JniBindGenerator {
             func.name
         )?;
         for (i, p) in func.params.iter().enumerate() {
-            write!(out, ", {} {}", self.mimi_type_to_jni(contract, i), sanitize_java_name(&p.name))?;
+            write!(
+                out,
+                ", {} {}",
+                self.mimi_type_to_jni(contract, i),
+                sanitize_java_name(&p.name)
+            )?;
         }
         writeln!(out, ") {{")?;
 
@@ -147,9 +166,15 @@ impl JniBindGenerator {
         // Convert Java string arguments to C strings before the call.
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                FfiArgContract::StringBorrow
+                | FfiArgContract::StringTransfer
+                | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
-                    writeln!(out, "    const char* {}_str = (*env)->GetStringUTFChars(env, {}, NULL);", jname, jname)?;
+                    writeln!(
+                        out,
+                        "    const char* {}_str = (*env)->GetStringUTFChars(env, {}, NULL);",
+                        jname, jname
+                    )?;
                 }
                 _ => {}
             }
@@ -173,14 +198,21 @@ impl JniBindGenerator {
             .map(|(i, p)| {
                 let jname = sanitize_java_name(&p.name);
                 match &contract.args[i] {
-                    FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                    FfiArgContract::StringBorrow
+                    | FfiArgContract::StringTransfer
+                    | FfiArgContract::Json => {
                         format!("(char*){}_str", jname)
                     }
-                    FfiArgContract::Int | FfiArgContract::Cap(_) | FfiArgContract::CShared(_)
-                    | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => jname,
+                    FfiArgContract::Int(_)
+                    | FfiArgContract::Cap(_)
+                    | FfiArgContract::CShared(_)
+                    | FfiArgContract::CBorrow(_)
+                    | FfiArgContract::CBorrowMut(_) => jname,
                     FfiArgContract::Float => jname,
                     FfiArgContract::StructByValue(_) => format!("{}_struct", jname),
-                    FfiArgContract::Callback { .. } => self.callback_trampoline_name(&func.name, &p.name),
+                    FfiArgContract::Callback { .. } => {
+                        self.callback_trampoline_name(&func.name, &p.name)
+                    }
                     _ => format!("(intptr_t)NULL /* {} */", jname),
                 }
             })
@@ -190,22 +222,54 @@ impl JniBindGenerator {
             crate::ffi::contract::FfiRetContract::Unit => {
                 writeln!(out, "    {}({});", func.name, c_args.join(", "))?;
             }
-            crate::ffi::contract::FfiRetContract::Int => {
-                writeln!(out, "    jlong mimi_ret = (jlong)({}({}));", func.name, c_args.join(", "))?;
+            crate::ffi::contract::FfiRetContract::Int(scalar) => {
+                let (jni_ty, cast) = match scalar {
+                    crate::ffi::contract::FfiScalarType::I32 => ("jint", "(jint)"),
+                    crate::ffi::contract::FfiScalarType::I64 => ("jlong", "(jlong)"),
+                    crate::ffi::contract::FfiScalarType::Bool => ("jboolean", "(jboolean)"),
+                };
+                writeln!(
+                    out,
+                    "    {} mimi_ret = {}{}({});",
+                    jni_ty,
+                    cast,
+                    func.name,
+                    c_args.join(", ")
+                )?;
             }
             crate::ffi::contract::FfiRetContract::Float => {
-                writeln!(out, "    jdouble mimi_ret = (jdouble)({}({}));", func.name, c_args.join(", "))?;
+                writeln!(
+                    out,
+                    "    jdouble mimi_ret = (jdouble)({}({}));",
+                    func.name,
+                    c_args.join(", ")
+                )?;
             }
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => {
-                writeln!(out, "    char* raw_ret = {}({});", func.name, c_args.join(", "))?;
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => {
+                writeln!(
+                    out,
+                    "    char* raw_ret = {}({});",
+                    func.name,
+                    c_args.join(", ")
+                )?;
                 writeln!(out, "    jstring mimi_ret = NULL;")?;
                 writeln!(out, "    if (raw_ret) {{")?;
-                writeln!(out, "        mimi_ret = (*env)->NewStringUTF(env, raw_ret);")?;
+                writeln!(
+                    out,
+                    "        mimi_ret = (*env)->NewStringUTF(env, raw_ret);"
+                )?;
                 writeln!(out, "        mimi_string_free(raw_ret);")?;
                 writeln!(out, "    }}")?;
             }
             crate::ffi::contract::FfiRetContract::StructByValue(name) => {
-                writeln!(out, "    struct {} mimi_struct_ret = {}({});", name, func.name, c_args.join(", "))?;
+                writeln!(
+                    out,
+                    "    struct {} mimi_struct_ret = {}({});",
+                    name,
+                    func.name,
+                    c_args.join(", ")
+                )?;
                 writeln!(out, "    jobject mimi_ret = NULL;")?;
                 self.write_struct_return_build(out, java_class, name, "mimi_ret")?;
             }
@@ -218,9 +282,15 @@ impl JniBindGenerator {
         // Release string arguments and tear down callback slots
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                FfiArgContract::StringBorrow
+                | FfiArgContract::StringTransfer
+                | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
-                    writeln!(out, "    if ({}_str) (*env)->ReleaseStringUTFChars(env, {}, {}_str);", jname, jname, jname)?;
+                    writeln!(
+                        out,
+                        "    if ({}_str) (*env)->ReleaseStringUTFChars(env, {}, {}_str);",
+                        jname, jname, jname
+                    )?;
                 }
                 FfiArgContract::Callback { .. } => {
                     let teardown = self.callback_teardown_name(&func.name, &p.name);
@@ -271,32 +341,47 @@ impl JniBindGenerator {
         for func in extern_funcs {
             let contract = self.build_contract(func);
             for (i, p) in func.params.iter().enumerate() {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
                     let slot = self.callback_slot_name(&func.name, &p.name);
                     let tramp = self.callback_trampoline_name(&func.name, &p.name);
-                    let iface = self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
+                    let iface =
+                        self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
                     let sig = self.callback_jni_signature(param_types, ret_type);
                     writeln!(out, "typedef struct {{")?;
                     writeln!(out, "    JNIEnv* env;")?;
                     writeln!(out, "    jobject global_ref;")?;
                     writeln!(out, "    jmethodID method;")?;
                     writeln!(out, "}} {0}_t;", slot)?;
-                    writeln!(out, "static __thread {0}_t {0} = {{NULL, NULL, NULL}};", slot)?;
+                    writeln!(
+                        out,
+                        "static __thread {0}_t {0} = {{NULL, NULL, NULL}};",
+                        slot
+                    )?;
                     let ret_c = self.callback_c_type(ret_type);
                     let c_args: Vec<String> = param_types
                         .iter()
                         .enumerate()
                         .map(|(j, ty)| format!("{} arg{}", self.callback_c_type(ty), j))
                         .collect();
+                    writeln!(out, "static {} {}({}) {{", ret_c, tramp, c_args.join(", "))?;
                     writeln!(
                         out,
-                        "static {} {}({}) {{",
-                        ret_c, tramp, c_args.join(", ")
+                        "    if (!{}.env || !{}.global_ref || !{}.method) {{",
+                        slot, slot, slot
                     )?;
-                    writeln!(out, "    if (!{}.env || !{}.global_ref || !{}.method) {{", slot, slot, slot)?;
-                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(
+                        out,
+                        "        return {};",
+                        self.callback_default_ret(ret_type)
+                    )?;
                     writeln!(out, "    }}")?;
-                    let jargs: Vec<String> = (0..param_types.len()).map(|j| format!("jarg{}", j)).collect();
+                    let jargs: Vec<String> = (0..param_types.len())
+                        .map(|j| format!("jarg{}", j))
+                        .collect();
                     for (j, ty) in param_types.iter().enumerate() {
                         let local_ty = self.callback_jni_arg_type(ty);
                         writeln!(out, "    {} jarg{} = ({})arg{};", local_ty, j, local_ty, j)?;
@@ -306,7 +391,11 @@ impl JniBindGenerator {
                         writeln!(
                             out,
                             "    (*{}.env)->CallVoidMethod({}.env, {}.global_ref, {}.method, {});",
-                            slot, slot, slot, slot, jargs.join(", ")
+                            slot,
+                            slot,
+                            slot,
+                            slot,
+                            jargs.join(", ")
                         )?;
                     } else {
                         let ret_local = self.callback_jni_ret_type(ret_type);
@@ -320,23 +409,27 @@ impl JniBindGenerator {
                     writeln!(out, "}}")?;
                     writeln!(out)?;
                     let cb_setup = self.callback_setup_name(&func.name, &p.name);
+                    writeln!(out, "static void {}(JNIEnv* env, jobject cb) {{", cb_setup)?;
                     writeln!(
                         out,
-                        "static void {}(JNIEnv* env, jobject cb) {{",
-                        cb_setup
+                        "    jclass cb_cls = (*env)->FindClass(env, \"{}${}\");",
+                        java_class, iface
                     )?;
-                    writeln!(out, "    jclass cb_cls = (*env)->FindClass(env, \"{}${}\");", java_class, iface)?;
-                    writeln!(out, "    {0}.method = (*env)->GetMethodID(env, cb_cls, \"apply\", \"{1}\");", slot, sig)?;
-                    writeln!(out, "    {0}.global_ref = (*env)->NewGlobalRef(env, cb);", slot)?;
+                    writeln!(
+                        out,
+                        "    {0}.method = (*env)->GetMethodID(env, cb_cls, \"apply\", \"{1}\");",
+                        slot, sig
+                    )?;
+                    writeln!(
+                        out,
+                        "    {0}.global_ref = (*env)->NewGlobalRef(env, cb);",
+                        slot
+                    )?;
                     writeln!(out, "    {0}.env = env;", slot)?;
                     writeln!(out, "}}")?;
                     writeln!(out)?;
                     let cb_teardown = self.callback_teardown_name(&func.name, &p.name);
-                    writeln!(
-                        out,
-                        "static void {}(JNIEnv* env) {{",
-                        cb_teardown
-                    )?;
+                    writeln!(out, "static void {}(JNIEnv* env) {{", cb_teardown)?;
                     writeln!(out, "    if ({0}.global_ref) {{ (*env)->DeleteGlobalRef(env, {0}.global_ref); {0}.global_ref = NULL; {0}.env = NULL; {0}.method = NULL; }}", slot)?;
                     writeln!(out, "}}")?;
                     writeln!(out)?;
@@ -379,8 +472,13 @@ impl JniBindGenerator {
         for func in extern_funcs {
             let contract = self.build_contract(func);
             for (i, p) in func.params.iter().enumerate() {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
-                    let iface = self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
+                    let iface =
+                        self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
                     let ret_java = self.callback_java_ret_type(ret_type);
                     let params: Vec<String> = param_types
                         .iter()
@@ -406,7 +504,11 @@ impl JniBindGenerator {
         param_name: &str,
     ) -> Result<(), std::fmt::Error> {
         writeln!(out, "    struct {} {}_struct;", type_name, param_name)?;
-        writeln!(out, "    jclass {0}_cls = (*env)->FindClass(env, \"{1}${0}\");", type_name, java_class)?;
+        writeln!(
+            out,
+            "    jclass {0}_cls = (*env)->FindClass(env, \"{1}${0}\");",
+            type_name, java_class
+        )?;
         if let Some(td) = self.type_defs.get(type_name) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 for field in fields {
@@ -435,9 +537,19 @@ impl JniBindGenerator {
         type_name: &str,
         result_var: &str,
     ) -> Result<(), std::fmt::Error> {
-        writeln!(out, "    jclass ret_cls = (*env)->FindClass(env, \"{}${}\");", java_class, type_name)?;
-        writeln!(out, "    jmethodID ret_init = (*env)->GetMethodID(env, ret_cls, \"<init>\", \"()V\");")?;
-        writeln!(out, "    jobject ret_obj = (*env)->NewObject(env, ret_cls, ret_init);")?;
+        writeln!(
+            out,
+            "    jclass ret_cls = (*env)->FindClass(env, \"{}${}\");",
+            java_class, type_name
+        )?;
+        writeln!(
+            out,
+            "    jmethodID ret_init = (*env)->GetMethodID(env, ret_cls, \"<init>\", \"()V\");"
+        )?;
+        writeln!(
+            out,
+            "    jobject ret_obj = (*env)->NewObject(env, ret_cls, ret_init);"
+        )?;
         if let Some(td) = self.type_defs.get(type_name) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 for field in fields {
@@ -528,8 +640,18 @@ impl JniBindGenerator {
             .unwrap_or(false)
     }
 
-    fn callback_interface_name(&self, func_name: &str, param_name: &str, _param_types: &[Type], _ret_type: &Type) -> String {
-        format!("{}{}Callback", sanitize_java_class(func_name), sanitize_java_class(param_name))
+    fn callback_interface_name(
+        &self,
+        func_name: &str,
+        param_name: &str,
+        _param_types: &[Type],
+        _ret_type: &Type,
+    ) -> String {
+        format!(
+            "{}{}Callback",
+            sanitize_java_class(func_name),
+            sanitize_java_class(param_name)
+        )
     }
 
     fn callback_jni_signature(&self, param_types: &[Type], ret_type: &Type) -> String {
@@ -646,12 +768,18 @@ impl JniBindGenerator {
             return "jlong".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "jlong".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "jint".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "jlong".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "jboolean".to_string(),
+            },
             FfiArgContract::Float => "jdouble".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "jstring".to_string(),
             FfiArgContract::Cap(_) => "jlong".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "jlong".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "jlong".to_string(),
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "jlong".to_string(),
             FfiArgContract::Json => "jstring".to_string(),
             FfiArgContract::StructByValue(_) => "jobject".to_string(),
             FfiArgContract::Callback { .. } => "jobject".to_string(),
@@ -662,9 +790,14 @@ impl JniBindGenerator {
     fn ret_type_to_jni(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "jlong".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "jint".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "jlong".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "jboolean".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "jdouble".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "jstring".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => "jstring".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(_) => "jobject".to_string(),
             _ => "jlong".to_string(),
         }
@@ -675,12 +808,18 @@ impl JniBindGenerator {
             return "long".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "long".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "long".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "boolean".to_string(),
+            },
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "String".to_string(),
             FfiArgContract::Cap(_) => "long".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "long".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "long".to_string(),
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "long".to_string(),
             FfiArgContract::Json => "String".to_string(),
             FfiArgContract::StructByValue(name) => name.clone(),
             FfiArgContract::Callback { .. } => "long".to_string(),
@@ -691,9 +830,14 @@ impl JniBindGenerator {
     fn ret_type_to_java(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "long".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "long".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "boolean".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             _ => "long".to_string(),
         }
@@ -703,7 +847,13 @@ impl JniBindGenerator {
 fn sanitize_java_class(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.starts_with(|c: char| c.is_numeric()) {
         s = format!("_{}", s);
@@ -726,10 +876,10 @@ fn sanitize_java_name(name: &str) -> String {
         "abstract" | "assert" | "boolean" | "break" | "byte" | "case" | "catch" | "char"
         | "class" | "const" | "continue" | "default" | "do" | "double" | "else" | "enum"
         | "extends" | "final" | "finally" | "float" | "for" | "goto" | "if" | "implements"
-        | "import" | "instanceof" | "int" | "interface" | "long" | "native" | "new"
-        | "package" | "private" | "protected" | "public" | "return" | "short" | "static"
-        | "strictfp" | "super" | "switch" | "synchronized" | "this" | "throw" | "throws"
-        | "transient" | "try" | "void" | "volatile" | "while" => format!("{}_", name),
+        | "import" | "instanceof" | "int" | "interface" | "long" | "native" | "new" | "package"
+        | "private" | "protected" | "public" | "return" | "short" | "static" | "strictfp"
+        | "super" | "switch" | "synchronized" | "this" | "throw" | "throws" | "transient"
+        | "try" | "void" | "volatile" | "while" => format!("{}_", name),
         _ => name.to_string(),
     }
 }

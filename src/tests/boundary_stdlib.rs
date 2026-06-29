@@ -7,25 +7,31 @@ use super::*;
 
 #[test]
 fn boundary_listdir_nonexistent() {
-    let v = run_source("func main() -> i32 { let e = listdir(\"/nonexistent_path_xyz\"); println(len(e)); 0 }");
+    let v = run_source(
+        "func main() -> i32 { let e = listdir(\"/nonexistent_path_xyz\"); println(len(e)); 0 }",
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_walk_dir_nonexistent() {
-    let v = run_source("func main() -> i32 { let e = walk_dir(\"/nonexistent_path_xyz\"); println(len(e)); 0 }");
+    let v = run_source(
+        "func main() -> i32 { let e = walk_dir(\"/nonexistent_path_xyz\"); println(len(e)); 0 }",
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_is_dir_nonexistent() {
-    let v = run_source("func main() -> i32 { if is_dir(\"/nonexistent_path_xyz\") { 1 } else { 0 } }");
+    let v =
+        run_source("func main() -> i32 { if is_dir(\"/nonexistent_path_xyz\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_is_file_nonexistent() {
-    let v = run_source("func main() -> i32 { if is_file(\"/nonexistent_path_xyz\") { 1 } else { 0 } }");
+    let v =
+        run_source("func main() -> i32 { if is_file(\"/nonexistent_path_xyz\") { 1 } else { 0 } }");
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -37,7 +43,9 @@ fn boundary_mkdir_p_existing() {
 
 #[test]
 fn boundary_remove_file_nonexistent() {
-    let v = run_source("func main() -> i32 { if remove_file(\"/nonexistent_file_xyz\") { 1 } else { 0 } }");
+    let v = run_source(
+        "func main() -> i32 { if remove_file(\"/nonexistent_file_xyz\") { 1 } else { 0 } }",
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -64,13 +72,23 @@ fn boundary_walk_dir_recursive() {
 #[test]
 fn boundary_sha256_empty() {
     let v = run_source("func main() -> string { sha256(\"\") }");
-    assert_eq!(v, interp::Value::String("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+        )
+    );
 }
 
 #[test]
 fn boundary_sha256_known_vector() {
     let v = run_source("func main() -> string { sha256(\"abc\") }");
-    assert_eq!(v, interp::Value::String("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()));
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
+        )
+    );
 }
 
 #[test]
@@ -93,7 +111,8 @@ fn boundary_base64_encode_known() {
 
 #[test]
 fn boundary_base64_roundtrip() {
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> string {
     let original = "Hello, Mimi!"
     let encoded = base64_encode(original)
@@ -103,13 +122,15 @@ func main() -> string {
         Err(e) => "error"
     }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("Hello, Mimi!".to_string()));
 }
 
 #[test]
 fn boundary_base64_decode_invalid() {
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> string {
     let decoded = base64_decode("not!valid!!!")
     match decoded {
@@ -117,7 +138,8 @@ func main() -> string {
         Err(e) => "err"
     }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("err".to_string()));
 }
 
@@ -177,81 +199,114 @@ fn boundary_path_dirname_simple() {
 
 #[test]
 fn codegen_boundary_is_dir() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             if is_dir(".") { println("dir") } else { println("not") }
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "dir");
 }
 
 #[test]
 fn codegen_boundary_is_file() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             if is_file("examples/hello.mimi") { println("file") } else { println("not") }
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "file");
 }
 
 #[test]
 fn codegen_boundary_path_ext() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(path_ext("test.mimi"))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "mimi");
 }
 
 #[test]
 fn codegen_boundary_path_basename() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(path_basename("/a/b/c.txt"))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "c.txt");
 }
 
 #[test]
 fn codegen_boundary_path_dirname() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(path_dirname("/a/b/c.txt"))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "/a/b");
 }
 
 #[test]
 fn codegen_boundary_mkdir_p() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             if mkdir_p("/tmp/mimi_cg_test") { println("ok") } else { println("fail") }
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "ok");
     std::fs::remove_dir("/tmp/mimi_cg_test").ok();
 }
 
 #[test]
 fn codegen_boundary_for_loop_listdir() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             let entries = listdir("examples")
             let mut count = 0
@@ -261,73 +316,109 @@ fn codegen_boundary_for_loop_listdir() {
             println(count)
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     let n: i32 = out.trim().parse().unwrap_or(0);
     assert!(n > 10, "expected many entries, got {}", n);
 }
 
 #[test]
 fn codegen_boundary_sha256_empty() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(sha256(""))
             0
         }
-    "#).expect("codegen failed");
-    assert_eq!(out.trim(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    "#,
+    )
+    .expect("codegen failed");
+    assert_eq!(
+        out.trim(),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
 }
 
 fn can_codegen() -> bool {
-    std::process::Command::new("cc").arg("--version").output().is_ok()
+    std::process::Command::new("cc")
+        .arg("--version")
+        .output()
+        .is_ok()
 }
 
 #[test]
 fn codegen_boundary_sha256() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(sha256("abc"))
             0
         }
-    "#).expect("codegen failed");
-    assert_eq!(out.trim(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    "#,
+    )
+    .expect("codegen failed");
+    assert_eq!(
+        out.trim(),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
 }
 
 #[test]
 fn codegen_boundary_base64() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(base64_encode("Hello"))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "SGVsbG8=");
 }
 
 #[test]
 fn codegen_boundary_path_join() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             println(path_join(path_join("a", "b"), "c"))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     assert_eq!(out.trim(), "a/b/c");
 }
 
 #[test]
 fn codegen_boundary_listdir() {
-    if !can_codegen() { return; }
-    let out = compile_and_run(r#"
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"
         func main() -> i32 {
             let e = listdir("examples")
             println(len(e))
             0
         }
-    "#).expect("codegen failed");
+    "#,
+    )
+    .expect("codegen failed");
     let n: i32 = out.trim().parse().unwrap_or(0);
     assert!(n > 0, "expected entries in examples/, got {}", n);
 }

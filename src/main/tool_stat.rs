@@ -12,14 +12,29 @@ pub(crate) fn run(dir: &Path, depth: u32, show_hash: bool) -> Result<(), String>
 
     println!("=== mimi stat ===");
     println!("Target: {}", dir.display());
-    println!("Depth:  {}", if depth == 0 { "unlimited".to_string() } else { depth.to_string() });
+    println!(
+        "Depth:  {}",
+        if depth == 0 {
+            "unlimited".to_string()
+        } else {
+            depth.to_string()
+        }
+    );
     println!();
 
     let mut total_files = 0u64;
     let mut total_dirs = 0u64;
     let mut ext_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-    scan_dir(dir, 0, depth, show_hash, &mut total_files, &mut total_dirs, &mut ext_counts);
+    scan_dir(
+        dir,
+        0,
+        depth,
+        show_hash,
+        &mut total_files,
+        &mut total_dirs,
+        &mut ext_counts,
+    );
 
     println!();
     println!("=== Summary ===");
@@ -67,10 +82,22 @@ fn scan_dir(
         if path.is_dir() {
             *total_dirs += 1;
             println!("{}[D] {}/", indent, name);
-            scan_dir(&path, current_depth + 1, max_depth, show_hash, total_files, total_dirs, ext_counts);
+            scan_dir(
+                &path,
+                current_depth + 1,
+                max_depth,
+                show_hash,
+                total_files,
+                total_dirs,
+                ext_counts,
+            );
         } else {
             *total_files += 1;
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
             *ext_counts.entry(ext.clone()).or_insert(0) += 1;
 
             let mut line = format!("{}[F] {}", indent, name);

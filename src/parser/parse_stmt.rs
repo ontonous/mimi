@@ -390,7 +390,9 @@ impl Parser {
             false
         } else {
             let m = self.at(&TokenKind::Mut);
-            if m { self.advance(); }
+            if m {
+                self.advance();
+            }
             m
         };
         let ref_ = self.at(&TokenKind::Ref);

@@ -39,9 +39,15 @@ impl<'a> Interpreter<'a> {
                     // No runtime conversion needed — type checked at compile time.
                     Ok(val)
                 }
-                _ => Err(InterpError::new(format!("unsupported cast target type: {}", name))),
+                _ => Err(InterpError::new(format!(
+                    "unsupported cast target type: {}",
+                    name
+                ))),
             },
-            _ => Err(InterpError::new(format!("unsupported cast target type: {:?}", target_type))),
+            _ => Err(InterpError::new(format!(
+                "unsupported cast target type: {:?}",
+                target_type
+            ))),
         }
     }
 

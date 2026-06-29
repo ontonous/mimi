@@ -115,7 +115,12 @@ impl Parser {
                 self.expect(TokenKind::Eq, "`=` after const name")?;
                 let value = self.parse_expr(0)?;
                 self.match_semi();
-                Ok(Item::Const { name, ty, value, pub_ })
+                Ok(Item::Const {
+                    name,
+                    ty,
+                    value,
+                    pub_,
+                })
             }
             TokenKind::Cap => Ok(Item::Cap(self.parse_cap_def()?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_def()?)),

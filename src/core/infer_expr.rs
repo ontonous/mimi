@@ -14,9 +14,7 @@ impl<'a> Checker<'a> {
     ) -> Type {
         match expr {
             // C3: None in context of Option<T> → infer Option<T>
-            Expr::Literal(Lit::Unit) if matches!(expected, Type::Option(_)) => {
-                expected.clone()
-            }
+            Expr::Literal(Lit::Unit) if matches!(expected, Type::Option(_)) => expected.clone(),
             // C3: bare None (parsed as Ident "None") in Option context
             Expr::Ident(name) if name == "None" => {
                 if let Type::Option(_) = expected {

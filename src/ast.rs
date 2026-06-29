@@ -22,7 +22,12 @@ pub enum Item {
     Trait(TraitDef),
     Impl(ImplDef),
     ExternBlock(ExternBlock),
-    Const { name: String, ty: Option<Type>, value: Expr, pub_: bool },
+    Const {
+        name: String,
+        ty: Option<Type>,
+        value: Expr,
+        pub_: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

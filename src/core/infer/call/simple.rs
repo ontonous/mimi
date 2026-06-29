@@ -657,7 +657,10 @@ impl<'a> Checker<'a> {
             }
             "listdir" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "listdir expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "listdir expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -665,7 +668,10 @@ impl<'a> Checker<'a> {
             }
             "is_dir" | "is_file" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "is_dir/is_file expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "is_dir/is_file expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -673,7 +679,10 @@ impl<'a> Checker<'a> {
             }
             "path_join" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "path_join expects 2 arguments");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "path_join expects 2 arguments",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -682,7 +691,10 @@ impl<'a> Checker<'a> {
             }
             "path_ext" | "path_basename" | "path_dirname" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "path_ext/basename/dirname expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "path_ext/basename/dirname expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -690,7 +702,10 @@ impl<'a> Checker<'a> {
             }
             "walk_dir" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "walk_dir expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "walk_dir expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -698,7 +713,10 @@ impl<'a> Checker<'a> {
             }
             "mkdir_p" | "remove_file" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "mkdir_p/remove_file expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "mkdir_p/remove_file expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -706,7 +724,10 @@ impl<'a> Checker<'a> {
             }
             "exec" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "exec expects 1 argument (command)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "exec expects 1 argument (command)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -714,7 +735,10 @@ impl<'a> Checker<'a> {
             }
             "exec_pipe" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "exec_pipe expects 1 argument (command)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "exec_pipe expects 1 argument (command)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -722,7 +746,10 @@ impl<'a> Checker<'a> {
             }
             "file_stat" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "file_stat expects 1 argument (path)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "file_stat expects 1 argument (path)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -730,7 +757,10 @@ impl<'a> Checker<'a> {
             }
             "append_file" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "append_file expects 2 arguments (path, content)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "append_file expects 2 arguments (path, content)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -739,7 +769,10 @@ impl<'a> Checker<'a> {
             }
             "set_env" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "set_env expects 2 arguments (key, value)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "set_env expects 2 arguments (key, value)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -748,7 +781,10 @@ impl<'a> Checker<'a> {
             }
             "read_file_partial" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "read_file_partial expects 2 arguments (path, max_bytes)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "read_file_partial expects 2 arguments (path, max_bytes)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -757,7 +793,10 @@ impl<'a> Checker<'a> {
             }
             "read_file_bytes" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "read_file_bytes expects 1 argument (path)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "read_file_bytes expects 1 argument (path)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -765,7 +804,10 @@ impl<'a> Checker<'a> {
             }
             "write_file_bytes" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "write_file_bytes expects 2 arguments (path, data)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "write_file_bytes expects 2 arguments (path, data)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -774,7 +816,10 @@ impl<'a> Checker<'a> {
             }
             "read_lines_each" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "read_lines_each expects 2 arguments (path, callback)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "read_lines_each expects 2 arguments (path, callback)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -783,7 +828,10 @@ impl<'a> Checker<'a> {
             }
             "read_lines_json" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "read_lines_json expects 1 argument (path)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "read_lines_json expects 1 argument (path)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -791,7 +839,10 @@ impl<'a> Checker<'a> {
             }
             "sha256" | "base64_encode" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "sha256/base64_encode expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "sha256/base64_encode expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -799,7 +850,10 @@ impl<'a> Checker<'a> {
             }
             "base64_decode" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "base64_decode expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "base64_decode expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
@@ -1658,5 +1712,3 @@ impl<'a> Checker<'a> {
         ret
     }
 }
-
-

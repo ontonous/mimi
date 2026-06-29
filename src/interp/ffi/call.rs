@@ -37,7 +37,6 @@ fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
 
 use std::collections::HashMap;
 
-
 /// Wrapper for *mut SigJmpBuf that implements Send + Sync.
 /// Raw pointers are !Send/!Sync by default, but jump buffers are
 /// safely shareable across threads when used with siglongjmp.
@@ -56,9 +55,8 @@ unsafe impl Sync for JmpBufPtr {}
 ///
 /// set_jump_buf writes to BOTH maps (main thread), get_jump_buf reads only the thread-local.
 /// This ensures the signal handler path uses only async-signal-safe operations.
-static FFI_CRASH_JUMP_BUFFERS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<u64, JmpBufPtr>>,
-> = std::sync::OnceLock::new();
+static FFI_CRASH_JUMP_BUFFERS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, JmpBufPtr>>> =
+    std::sync::OnceLock::new();
 
 // Thread-local jump buffer for signal handler access (async-signal-safe).
 thread_local! {
@@ -66,8 +64,7 @@ thread_local! {
 }
 
 fn with_jump_buffers<R, F: FnOnce(&mut HashMap<u64, JmpBufPtr>) -> R>(f: F) -> R {
-    let map = FFI_CRASH_JUMP_BUFFERS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let map = FFI_CRASH_JUMP_BUFFERS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut guard = map.lock().expect("FFI_CRASH_JUMP_BUFFERS lock poisoned");
     f(&mut guard)
 }

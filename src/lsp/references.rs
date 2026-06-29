@@ -93,7 +93,9 @@ impl LspServer {
 
         // Check if word is a trait name in the current file
         let is_trait = if let Some(file) = self.parse_with_recovery(text) {
-            file.items.iter().any(|item| matches!(item, Item::Trait(t) if t.name == word))
+            file.items
+                .iter()
+                .any(|item| matches!(item, Item::Trait(t) if t.name == word))
         } else {
             false
         };
@@ -388,7 +390,9 @@ impl LspServer {
                                 let params: Vec<String> = m
                                     .params
                                     .iter()
-                                    .map(|p| format!("{}: {}", p.name, crate::core::fmt_type(&p.ty)))
+                                    .map(|p| {
+                                        format!("{}: {}", p.name, crate::core::fmt_type(&p.ty))
+                                    })
                                     .collect();
                                 let ret = m
                                     .ret
@@ -414,7 +418,9 @@ impl LspServer {
                                 let params: Vec<String> = m
                                     .params
                                     .iter()
-                                    .map(|p| format!("{}: {}", p.name, crate::core::fmt_type(&p.ty)))
+                                    .map(|p| {
+                                        format!("{}: {}", p.name, crate::core::fmt_type(&p.ty))
+                                    })
                                     .collect();
                                 let ret = m
                                     .ret

@@ -46,7 +46,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i = self.build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")?;
         let cmp = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, i.into_int_value(), n, "repeat_cmp")
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                i.into_int_value(),
+                n,
+                "repeat_cmp",
+            )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         self.build_cond_br(cmp, body_bb, done_bb)?;
 
@@ -284,7 +289,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i = self.build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")?;
         let cmp = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, i.into_int_value(), s_len, "case_cmp")
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                i.into_int_value(),
+                s_len,
+                "case_cmp",
+            )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         self.build_cond_br(cmp, body_bb, done_bb)?;
 
@@ -494,7 +504,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Call strlen on a raw string pointer.
     fn string_len(&self, ptr: PointerValue<'ctx>) -> MimiResult<IntValue<'ctx>> {
         let strlen_fn = self.get_runtime_fn("strlen")?;
-        Ok(self.build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(ptr)], "s_len")?
+        Ok(self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                "s_len",
+            )?
             .try_as_basic_value_opt()
             .ok_or("strlen returned void")?
             .into_int_value())
@@ -536,11 +551,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Write a null byte at `buf[offset]`.
-    fn null_terminate(
-        &self,
-        buf: PointerValue<'ctx>,
-        offset: IntValue<'ctx>,
-    ) -> MimiResult<()> {
+    fn null_terminate(&self, buf: PointerValue<'ctx>, offset: IntValue<'ctx>) -> MimiResult<()> {
         let i8_ty = self.context.i8_type();
         let null_pos = self.build_in_bounds_gep(i8_ty, buf, &[offset], "null_pos")?;
         self.build_store(null_pos, i8_ty.const_int(0, false))

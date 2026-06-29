@@ -475,8 +475,7 @@ fn env_struct_type_for<'ctx>(
     context: &'ctx inkwell::context::Context,
     free_vars: &BTreeMap<String, VarEntry<'ctx>>,
 ) -> inkwell::types::StructType<'ctx> {
-    let env_field_types: Vec<BasicTypeEnum<'ctx>> =
-        free_vars.values().map(|&(_, ty)| ty).collect();
+    let env_field_types: Vec<BasicTypeEnum<'ctx>> = free_vars.values().map(|&(_, ty)| ty).collect();
     context.struct_type(&env_field_types, false)
 }
 

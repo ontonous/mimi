@@ -91,7 +91,9 @@ impl<'a> Interpreter<'a> {
                         InterpError::lock_error(format!("shared read lock failed: {}", e))
                     })?
                     .clone()),
-                Value::LocalShared(rc) => Ok(rc.lock().expect("local_shared lock not poisoned").clone()),
+                Value::LocalShared(rc) => {
+                    Ok(rc.lock().expect("local_shared lock not poisoned").clone())
+                }
                 _ => Err(InterpError::new(format!(
                     "cannot dereference {}",
                     type_name(&v)

@@ -131,25 +131,37 @@ pub(crate) fn find_enclosing_func_in_items<'a>(
 impl LspServer {
     /// Get the column of the word start at the given position
     pub fn word_start_col(&self, text: &str, line: usize, character: usize) -> usize {
-        word_range_at(text, line, character).map(|(s, _)| s).unwrap_or(character)
+        word_range_at(text, line, character)
+            .map(|(s, _)| s)
+            .unwrap_or(character)
     }
 
     /// Get the number of characters from the cursor to the end of the word
     pub fn word_end_offset(&self, text: &str, line: usize, character: usize) -> usize {
-        word_range_at(text, line, character).map(|(_, e)| e.saturating_sub(character)).unwrap_or(0)
+        word_range_at(text, line, character)
+            .map(|(_, e)| e.saturating_sub(character))
+            .unwrap_or(0)
     }
 
     /// Helper: get the word at a given position
     pub fn get_word_at(&self, text: &str, line: usize, character: usize) -> String {
         word_range_at(text, line, character)
             .map(|(start, end)| {
-                text.lines().nth(line).map(|l| l[start..end].to_string()).unwrap_or_default()
+                text.lines()
+                    .nth(line)
+                    .map(|l| l[start..end].to_string())
+                    .unwrap_or_default()
             })
             .unwrap_or_default()
     }
 
     /// Helper: get the (start, end) byte indices of the word at a given position
-    pub fn get_word_range(&self, text: &str, line: usize, character: usize) -> Option<(usize, usize)> {
+    pub fn get_word_range(
+        &self,
+        text: &str,
+        line: usize,
+        character: usize,
+    ) -> Option<(usize, usize)> {
         word_range_at(text, line, character)
     }
 }

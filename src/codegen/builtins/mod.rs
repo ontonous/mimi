@@ -24,7 +24,9 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_string_fns(module, ctx, i8_ptr, i32, i64, void);
     register_regex_fns(module, ctx, i8_ptr, i32, i64, void);
     register_ffi_fns_defined_in_rust_ffi_rt_rs(module, ctx, i8_ptr, i32, i64, void);
-    register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c(module, ctx, i8_ptr, i32, i64, void);
+    register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c(
+        module, ctx, i8_ptr, i32, i64, void,
+    );
     register_time_fns(module, ctx, i8_ptr, i32, i64, void);
     register_environment_cli_fns(module, ctx, i8_ptr, i32, i64, void);
     register_json_fns_stubs_for_codegen(module, ctx, i8_ptr, i32, i64, void);
@@ -45,7 +47,6 @@ fn register_libc<'ctx>(
     i64: inkwell::types::IntType<'ctx>,
     void: inkwell::types::VoidType<'ctx>,
 ) {
-
     module.add_function(
         "printf",
         i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], true),
@@ -168,7 +169,6 @@ fn register_libc<'ctx>(
     );
 
     // Future-based spawn/await (replaces old pthread_create/join)
-
 }
 
 fn register_map_record_fns<'ctx>(
@@ -270,7 +270,6 @@ fn register_map_record_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_string_fns<'ctx>(
@@ -355,22 +354,15 @@ fn register_string_fns<'ctx>(
     // mimi_to_string_i64(i64) → i8* (heap-allocated string, Rust Display)
     module.add_function(
         "mimi_to_string_i64",
-        i8_ptr.fn_type(
-            &[BasicMetadataTypeEnum::IntType(i64)],
-            false,
-        ),
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
     // mimi_to_string_f64(f64) → i8* (heap-allocated string, Rust Display)
     module.add_function(
         "mimi_to_string_f64",
-        i8_ptr.fn_type(
-            &[BasicMetadataTypeEnum::FloatType(ctx.f64_type())],
-            false,
-        ),
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::FloatType(ctx.f64_type())], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_regex_fns<'ctx>(
@@ -477,7 +469,6 @@ fn register_regex_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_ffi_fns_defined_in_rust_ffi_rt_rs<'ctx>(
@@ -628,7 +619,6 @@ fn register_g5_refcounted_heap_allocation_for_shared_values_defined_in_mimi_rt_c
         void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_time_fns<'ctx>(
@@ -658,7 +648,6 @@ fn register_time_fns<'ctx>(
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_environment_cli_fns<'ctx>(
@@ -700,7 +689,6 @@ fn register_environment_cli_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_json_fns_stubs_for_codegen<'ctx>(
@@ -785,7 +773,6 @@ fn register_json_fns_stubs_for_codegen<'ctx>(
         i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_set_fns<'ctx>(
@@ -863,7 +850,6 @@ fn register_set_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_network_socket_fns<'ctx>(
@@ -981,7 +967,6 @@ fn register_network_socket_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_mimifuture_mimiexecutor_poll_based_async_rt<'ctx>(
@@ -1054,7 +1039,6 @@ fn register_mimifuture_mimiexecutor_poll_based_async_rt<'ctx>(
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_directory_path_fns<'ctx>(
@@ -1132,7 +1116,6 @@ fn register_directory_path_fns<'ctx>(
         i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_process_advanced_file_operations<'ctx>(
@@ -1210,7 +1193,6 @@ fn register_process_advanced_file_operations<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_binary_i_o_streaming_line_reading<'ctx>(
@@ -1258,7 +1240,6 @@ fn register_binary_i_o_streaming_line_reading<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
-
 }
 
 fn register_crypto_fns<'ctx>(
@@ -1301,7 +1282,6 @@ fn register_crypto_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
 }
-
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(
@@ -1538,41 +1518,69 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn compile_lexer(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    fn compile_lexer(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("lexer expects 1 argument (source string)".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "lexer expects 1 argument (source string)".to_string(),
+            ));
         }
         let source_ptr = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            _ => return Err(CompileError::TypeMismatch("lexer: first arg must be a string".to_string())),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "lexer: first arg must be a string".to_string(),
+                ))
+            }
         };
-        let func = self.module.get_function("mimi_lexer_tokenize")
+        let func = self
+            .module
+            .get_function("mimi_lexer_tokenize")
             .ok_or_else(|| "mimi_lexer_tokenize not declared".to_string())?;
-        let result = self.builder.build_call(
-            func,
-            &[BasicMetadataValueEnum::PointerValue(source_ptr)],
-            "lexer_call",
-        ).map_err(|e| CompileError::LlvmError(format!("lexer error: {}", e)))?
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(source_ptr)],
+                "lexer_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("lexer error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_lexer_tokenize returned void")?;
         self.wrap_c_string(result.into_pointer_value())
     }
 
-    fn compile_parse(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    fn compile_parse(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("parse expects 1 argument (source string)".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "parse expects 1 argument (source string)".to_string(),
+            ));
         }
         let source_ptr = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            _ => return Err(CompileError::TypeMismatch("parse: first arg must be a string".to_string())),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "parse: first arg must be a string".to_string(),
+                ))
+            }
         };
-        let func = self.module.get_function("mimi_parse_source")
+        let func = self
+            .module
+            .get_function("mimi_parse_source")
             .ok_or_else(|| "mimi_parse_source not declared".to_string())?;
-        let result = self.builder.build_call(
-            func,
-            &[BasicMetadataValueEnum::PointerValue(source_ptr)],
-            "parse_call",
-        ).map_err(|e| CompileError::LlvmError(format!("parse error: {}", e)))?
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(source_ptr)],
+                "parse_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("parse error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_parse_source returned void")?;
         self.wrap_c_string(result.into_pointer_value())

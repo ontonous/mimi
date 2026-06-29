@@ -108,17 +108,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if iv.get_type() == i32_ty {
                         Ok(val)
                     } else if iv.get_type().get_bit_width() > 32 {
-                        Ok(self.builder.build_int_truncate(iv, i32_ty, "cast_i32")
-                            .map_err(|e| CompileError::LlvmError(format!("truncate error: {}", e)))?.into())
+                        Ok(self
+                            .builder
+                            .build_int_truncate(iv, i32_ty, "cast_i32")
+                            .map_err(|e| CompileError::LlvmError(format!("truncate error: {}", e)))?
+                            .into())
                     } else {
-                        Ok(self.builder.build_int_z_extend(iv, i32_ty, "cast_i32")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?.into())
+                        Ok(self
+                            .builder
+                            .build_int_z_extend(iv, i32_ty, "cast_i32")
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            .into())
                     }
                 }
-                BasicValueEnum::FloatValue(fv) => {
-                    Ok(self.builder.build_float_to_signed_int(fv, self.context.i32_type(), "fptosi")
-                        .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?.into())
-                }
+                BasicValueEnum::FloatValue(fv) => Ok(self
+                    .builder
+                    .build_float_to_signed_int(fv, self.context.i32_type(), "fptosi")
+                    .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?
+                    .into()),
                 _ => Err("unsupported cast to i32".into()),
             },
             "i64" => match val {
@@ -127,28 +134,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if iv.get_type() == i64_ty {
                         Ok(val)
                     } else {
-                        Ok(self.builder.build_int_z_extend(iv, i64_ty, "cast_i64")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?.into())
+                        Ok(self
+                            .builder
+                            .build_int_z_extend(iv, i64_ty, "cast_i64")
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            .into())
                     }
                 }
-                BasicValueEnum::FloatValue(fv) => {
-                    Ok(self.builder.build_float_to_signed_int(fv, self.context.i64_type(), "fptosi")
-                        .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?.into())
-                }
+                BasicValueEnum::FloatValue(fv) => Ok(self
+                    .builder
+                    .build_float_to_signed_int(fv, self.context.i64_type(), "fptosi")
+                    .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?
+                    .into()),
                 _ => Err("unsupported cast to i64".into()),
             },
             "f64" => match val {
-                BasicValueEnum::IntValue(iv) => {
-                    Ok(self.builder.build_signed_int_to_float(iv, self.context.f64_type(), "sitofp")
-                        .map_err(|e| CompileError::LlvmError(format!("sitofp error: {}", e)))?.into())
-                }
+                BasicValueEnum::IntValue(iv) => Ok(self
+                    .builder
+                    .build_signed_int_to_float(iv, self.context.f64_type(), "sitofp")
+                    .map_err(|e| CompileError::LlvmError(format!("sitofp error: {}", e)))?
+                    .into()),
                 BasicValueEnum::FloatValue(fv) => {
                     let f64_ty = self.context.f64_type();
                     if fv.get_type() == f64_ty {
                         Ok(val)
                     } else {
-                        Ok(self.builder.build_float_ext(fv, f64_ty, "fpext")
-                            .map_err(|e| CompileError::LlvmError(format!("fpext error: {}", e)))?.into())
+                        Ok(self
+                            .builder
+                            .build_float_ext(fv, f64_ty, "fpext")
+                            .map_err(|e| CompileError::LlvmError(format!("fpext error: {}", e)))?
+                            .into())
                     }
                 }
                 _ => Err("unsupported cast to f64".into()),

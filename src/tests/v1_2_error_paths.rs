@@ -29,7 +29,10 @@ fn error_path_unit_token_source_text_matches_display() {
 fn error_path_fstring_incomplete_hex_escape() {
     let src = r#"func main() -> i32 { let s = f"val \xA end"; 0 }"#;
     let result = crate::lexer::Lexer::new(src).tokenize();
-    assert!(result.is_err(), "incomplete \\x escape should be a lexer error");
+    assert!(
+        result.is_err(),
+        "incomplete \\x escape should be a lexer error"
+    );
 }
 
 // ─── BUG-2: scan_fstring \u{...} missing closing brace ─────────────────────
@@ -39,14 +42,20 @@ fn error_path_fstring_incomplete_hex_escape() {
 fn error_path_fstring_unterminated_unicode_brace() {
     let src = r#"func main() -> i32 { let s = f"val \u{1F end"; 0 }"#;
     let result = crate::lexer::Lexer::new(src).tokenize();
-    assert!(result.is_err(), "unterminated unicode brace escape should be a lexer error");
+    assert!(
+        result.is_err(),
+        "unterminated unicode brace escape should be a lexer error"
+    );
 }
 
 #[test]
 fn error_path_fstring_empty_unicode_brace() {
     let src = r#"func main() -> i32 { let s = f"val \u{} end"; 0 }"#;
     let result = crate::lexer::Lexer::new(src).tokenize();
-    assert!(result.is_err(), "empty unicode brace escape should be a lexer error");
+    assert!(
+        result.is_err(),
+        "empty unicode brace escape should be a lexer error"
+    );
 }
 
 // ─── BUG-5: parse_fstring_parts 错误位置报告 (0,0) ─────────────────────────
@@ -64,13 +73,18 @@ fn error_path_fstring_parse_inner_error_reports_position() {
     // The FString token holds raw text including \xA, and parse_fstring_parts re-lexes it.
     // The inner lex error is reported as (0,0) due to the bug.
     let parse_result = crate::parser::Parser::new(tokens.unwrap()).parse_file();
-    assert!(parse_result.is_err(), "invalid inner escape should parse error");
+    assert!(
+        parse_result.is_err(),
+        "invalid inner escape should parse error"
+    );
     let parse_err = parse_result.unwrap_err();
     // BUG-5: This assertion fails because the lexer error in the f-string reports (0,0)
     assert!(
         parse_err.line > 0 || parse_err.col > 0,
         "f-string inner lexer error should not be at 0,0 but was line={}, col={}, msg={}",
-        parse_err.line, parse_err.col, parse_err.message
+        parse_err.line,
+        parse_err.col,
+        parse_err.message
     );
 }
 
@@ -89,7 +103,8 @@ func f() -> i32 {
 "#;
     // 使用 recovery 模式解析，语法错误会被捕获并继续
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let (file, _errors) = crate::parser::Parser::new_with_recovery(tokens).parse_file_with_recovery();
+    let (file, _errors) =
+        crate::parser::Parser::new_with_recovery(tokens).parse_file_with_recovery();
     let body = match &file.items[0] {
         crate::ast::Item::Func(f) => &f.body,
         _ => panic!("expected func"),

@@ -25,7 +25,7 @@ impl<'a> Interpreter<'a> {
         callback_ids: &mut Vec<i64>,
     ) -> Result<i64, Errno> {
         match contract {
-            FfiArgContract::Int => match arg {
+            FfiArgContract::Int(_) => match arg {
                 Value::Int(n) => Ok(*n),
                 Value::Bool(b) => Ok(*b as i64),
                 other => Err(Errno::Generic(format!(
@@ -346,7 +346,13 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Errno> {
         match contract {
             FfiRetContract::Unit => Ok(Value::Unit),
-            FfiRetContract::Int => Ok(Value::Int(result)),
+            FfiRetContract::Int(crate::ffi::contract::FfiScalarType::Bool) => {
+                Ok(Value::Bool(result != 0))
+            }
+            FfiRetContract::Int(crate::ffi::contract::FfiScalarType::I32) => {
+                Ok(Value::Int(result as i32 as i64))
+            }
+            FfiRetContract::Int(_) => Ok(Value::Int(result)),
             FfiRetContract::Float => Ok(Value::Float(f64::from_bits(result as u64))),
             FfiRetContract::String => {
                 if result == 0 {

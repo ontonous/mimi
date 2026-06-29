@@ -18,7 +18,9 @@ impl LspServer {
             };
             let range = diag.get("range").cloned().unwrap_or_default();
             // Use the error location to insert new code after the relevant line
-            let insert_line = range.get("start").and_then(|s| s.get("line"))
+            let insert_line = range
+                .get("start")
+                .and_then(|s| s.get("line"))
                 .and_then(|l| l.as_u64())
                 .map(|l| l as usize)
                 .unwrap_or(0);

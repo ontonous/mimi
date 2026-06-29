@@ -86,7 +86,8 @@ impl<'a> Checker<'a> {
         }
         // check_block_with_implicit_return returns the type of the last expression
         // to avoid redundant re-checking (refactoring: eliminate double traversal)
-        let implicit_return_ty = self.check_block_with_implicit_return(&func.body, &ret, &mut scopes);
+        let implicit_return_ty =
+            self.check_block_with_implicit_return(&func.body, &ret, &mut scopes);
         // Implicit return type check: last expression must match declared return type
         if let Some(last_ty) = implicit_return_ty {
             // Resolve through unification table before further comparison

@@ -1,8 +1,20 @@
 # Changelog
 
-## [Unreleased] — 0.28.9-dev
+## [v0.28.9] - 2026-06-30
 
 ### Added
+
+- **`extern "C" func` 导出函数 C ABI wrapper 集成**:
+  - `src/codegen/func/export.rs`：为导出函数生成内部 ABI body (`foo__mimi_export_body`)
+    与 C ABI wrapper (`foo`)，完成 `i32`/`bool` 宽度、`string` ↔ `char*`、
+    `#[repr(C)]` record ↔ C layout、`func` 闭包 ↔ C 函数指针 trampoline 的转换。
+  - `src/codegen/func.rs`：在 `compile_func` 中接入 wrapper 生成路径，真实跨语言项目
+    (`xlang_math` / `xlang_strings` / `xlang_callback`) C/Rust/Python 端测试全部通过。
+- **绑定生成器标量宽度精确化**:
+  - `FfiArgContract::Int` / `FfiRetContract::Int` 现在携带 `FfiScalarType(I32/I64/Bool)`。
+  - C/C++/Rust/Python/Go/Node.js/Java 绑定生成器按原始类型输出 `int32_t`/`int64_t`/`bool`
+    （或对应语言的 `i32`/`i64`/`bool`、`jint`/`jlong`/`jboolean` 等），修正此前一律输出
+    `int64_t` 导致的 ABI 声明不匹配。
 
 - **`#[repr(C)]` struct-by-value 跨语言绑定生成**:
   - Rust (`rust_bind.rs`)：生成 `#[repr(C)] #[derive(Debug, Clone, Copy)] pub struct MimiX`，

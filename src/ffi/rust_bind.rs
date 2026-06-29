@@ -34,7 +34,10 @@ impl RustBindGenerator {
         writeln!(out, "// Module: {}", self.module_name)?;
         writeln!(out, "// Do not edit manually.")?;
         writeln!(out)?;
-        writeln!(out, "use std::ffi::{{c_char, c_double, c_int, c_longlong, c_void}};")?;
+        writeln!(
+            out,
+            "use std::ffi::{{c_char, c_double, c_int, c_longlong, c_void}};"
+        )?;
         writeln!(out, "use std::ptr;")?;
         writeln!(out)?;
 
@@ -134,7 +137,10 @@ impl RustBindGenerator {
             .map(|(name, _)| name)
             .collect();
         if !opaque.is_empty() {
-            writeln!(out, "// Opaque handle types for non-#[repr(C)] Mimi records")?;
+            writeln!(
+                out,
+                "// Opaque handle types for non-#[repr(C)] Mimi records"
+            )?;
             for name in opaque {
                 writeln!(out, "#[repr(C)]")?;
                 writeln!(out, "pub struct Mimi{}(c_void);", name)?;
@@ -158,7 +164,13 @@ impl RustBindGenerator {
             .map(|(i, p)| format!("{}: {}", p.name, self.mimi_type_to_rust(contract, i)))
             .collect();
         let ret = self.ret_type_to_rust(contract);
-        writeln!(out, "    pub fn {}({}) -> {};", func.name, params.join(", "), ret)
+        writeln!(
+            out,
+            "    pub fn {}({}) -> {};",
+            func.name,
+            params.join(", "),
+            ret
+        )
     }
 
     fn write_safe_wrapper(
@@ -184,8 +196,16 @@ impl RustBindGenerator {
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
-                    writeln!(conversions, "        let {}_cstr = std::ffi::CString::new({}).unwrap();", p.name, p.name)?;
-                    writeln!(conversions, "        let {}_ptr = {}_cstr.as_ptr();", p.name, p.name)?;
+                    writeln!(
+                        conversions,
+                        "        let {}_cstr = std::ffi::CString::new({}).unwrap();",
+                        p.name, p.name
+                    )?;
+                    writeln!(
+                        conversions,
+                        "        let {}_ptr = {}_cstr.as_ptr();",
+                        p.name, p.name
+                    )?;
                     call_args.push(format!("{}_ptr", p.name));
                 }
                 _ => {
@@ -194,20 +214,39 @@ impl RustBindGenerator {
             }
         }
 
-        writeln!(out, "    pub fn {}({}) -> {} {{", func.name, params.join(", "), ret)?;
+        writeln!(
+            out,
+            "    pub fn {}({}) -> {} {{",
+            func.name,
+            params.join(", "),
+            ret
+        )?;
         write!(out, "{}", conversions)?;
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned
             | crate::ffi::contract::FfiRetContract::Json => {
-                writeln!(out, "        let raw = unsafe {{ super::ffi_raw::{}({}) }};", func.name, call_args.join(", "))?;
+                writeln!(
+                    out,
+                    "        let raw = unsafe {{ super::ffi_raw::{}({}) }};",
+                    func.name,
+                    call_args.join(", ")
+                )?;
                 writeln!(out, "        if raw.is_null() {{ return String::new(); }}")?;
                 writeln!(out, "        let s = unsafe {{ std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned() }};")?;
-                writeln!(out, "        unsafe {{ super::ffi_raw::mimi_string_free(raw) }};")?;
+                writeln!(
+                    out,
+                    "        unsafe {{ super::ffi_raw::mimi_string_free(raw) }};"
+                )?;
                 writeln!(out, "        s")?;
             }
             _ => {
-                writeln!(out, "        unsafe {{ super::ffi_raw::{}({}) }}", func.name, call_args.join(", "))?;
+                writeln!(
+                    out,
+                    "        unsafe {{ super::ffi_raw::{}({}) }}",
+                    func.name,
+                    call_args.join(", ")
+                )?;
             }
         }
         writeln!(out, "    }}")?;
@@ -219,22 +258,31 @@ impl RustBindGenerator {
             return "*const c_void".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "c_longlong".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "c_int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "c_longlong".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             FfiArgContract::Float => "c_double".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
                 "*const c_char".to_string()
             }
             FfiArgContract::Cap(_) => "c_longlong".to_string(),
-            FfiArgContract::RawPtr(inner) => format!("*const {}", self.mimi_type_to_rust_field(inner)),
-            FfiArgContract::RawPtrMut(inner) => format!("*mut {}", self.mimi_type_to_rust_field(inner)),
+            FfiArgContract::RawPtr(inner) => {
+                format!("*const {}", self.mimi_type_to_rust_field(inner))
+            }
+            FfiArgContract::RawPtrMut(inner) => {
+                format!("*mut {}", self.mimi_type_to_rust_field(inner))
+            }
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "c_longlong".to_string(),
             FfiArgContract::Json => "*const c_char".to_string(),
             FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_signature_to_rust(param_types, ret_type)
-            }
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_signature_to_rust(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
     }
@@ -244,21 +292,30 @@ impl RustBindGenerator {
             return "*const c_void".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "i64".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "i32".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "i64".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             FfiArgContract::Float => "f64".to_string(),
             FfiArgContract::StringBorrow => "&str".to_string(),
             FfiArgContract::StringTransfer => "String".to_string(),
             FfiArgContract::Cap(_) => "i64".to_string(),
-            FfiArgContract::RawPtr(inner) => format!("*const {}", self.mimi_type_to_rust_field(inner)),
-            FfiArgContract::RawPtrMut(inner) => format!("*mut {}", self.mimi_type_to_rust_field(inner)),
+            FfiArgContract::RawPtr(inner) => {
+                format!("*const {}", self.mimi_type_to_rust_field(inner))
+            }
+            FfiArgContract::RawPtrMut(inner) => {
+                format!("*mut {}", self.mimi_type_to_rust_field(inner))
+            }
             FfiArgContract::CShared(_)
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "i64".to_string(),
             FfiArgContract::Json => "&str".to_string(),
             FfiArgContract::StructByValue(name) => format!("Mimi{}", name),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_signature_to_rust(param_types, ret_type)
-            }
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_signature_to_rust(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "*const c_void".to_string(),
         }
     }
@@ -284,13 +341,21 @@ impl RustBindGenerator {
             Type::Name(name, _) if name == "unit" => "()".to_string(),
             _ => "c_longlong".to_string(),
         };
-        format!("unsafe extern \"C\" fn({}) -> {}", arg_types.join(", "), ret)
+        format!(
+            "unsafe extern \"C\" fn({}) -> {}",
+            arg_types.join(", "),
+            ret
+        )
     }
 
     fn ret_type_to_rust(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "()".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "c_longlong".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "c_int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "c_longlong".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "c_double".to_string(),
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => "*mut c_char".to_string(),
@@ -312,7 +377,11 @@ impl RustBindGenerator {
     fn ret_type_to_rust_safe(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "()".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "i64".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "i32".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "i64".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "f64".to_string(),
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),

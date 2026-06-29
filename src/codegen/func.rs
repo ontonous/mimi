@@ -51,6 +51,7 @@ use super::VarEntry;
 // - `func/body.rs`: statement-level body helpers (loops and assignment forms).
 // - `func/pattern.rs`: recursive `compile_pattern_bind`.
 mod body;
+mod export;
 mod pattern;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -1175,6 +1176,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Delegate async funcs to compile_async_func
         if func.is_async {
             return self.compile_async_func(func);
+        }
+
+        // Exported extern functions get a C ABI wrapper around an internal body.
+        if func.extern_abi.is_some() && func.generics.is_empty() {
+            let body_name = format!("{}__mimi_export_body", func.name);
+            if self.module.get_function(&body_name).is_none() {
+                let mut body_func = func.clone();
+                body_func.name = body_name.clone();
+                body_func.extern_abi = None;
+                self.compile_func(&body_func)?;
+            }
+            return self.compile_export_wrapper(func, &body_name);
         }
 
         // For impl Trait return types, determine the concrete type from the body

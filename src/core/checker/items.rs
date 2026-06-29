@@ -35,9 +35,18 @@ impl<'a> Checker<'a> {
                 name: "ExecResult".to_string(),
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
-                    Field { name: "exit_code".to_string(), ty: Type::Name("i32".to_string(), vec![]) },
-                    Field { name: "stdout".to_string(), ty: Type::Name("string".to_string(), vec![]) },
-                    Field { name: "stderr".to_string(), ty: Type::Name("string".to_string(), vec![]) },
+                    Field {
+                        name: "exit_code".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "stdout".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "stderr".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
                 ]),
                 generics: vec![],
                 derives: vec![],
@@ -51,10 +60,22 @@ impl<'a> Checker<'a> {
                 name: "StatResult".to_string(),
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
-                    Field { name: "size".to_string(), ty: Type::Name("i64".to_string(), vec![]) },
-                    Field { name: "modified".to_string(), ty: Type::Name("i64".to_string(), vec![]) },
-                    Field { name: "is_file".to_string(), ty: Type::Name("bool".to_string(), vec![]) },
-                    Field { name: "is_dir".to_string(), ty: Type::Name("bool".to_string(), vec![]) },
+                    Field {
+                        name: "size".to_string(),
+                        ty: Type::Name("i64".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "modified".to_string(),
+                        ty: Type::Name("i64".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "is_file".to_string(),
+                        ty: Type::Name("bool".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "is_dir".to_string(),
+                        ty: Type::Name("bool".to_string(), vec![]),
+                    },
                 ]),
                 generics: vec![],
                 derives: vec![],
@@ -113,13 +134,21 @@ impl<'a> Checker<'a> {
                 }
                 names
             }
-            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Option(inner)
-            | Type::Shared(inner) | Type::LocalShared(inner) | Type::Weak(inner)
-            | Type::WeakLocal(inner) | Type::Array(inner, _) | Type::Slice(inner)
-            | Type::RawPtr(inner) | Type::RawPtrMut(inner) | Type::CShared(inner)
-            | Type::CBorrow(inner) | Type::CBorrowMut(inner) | Type::CBuffer(inner) => {
-                Self::extract_type_names(inner)
-            }
+            Type::Ref(_, inner)
+            | Type::RefMut(_, inner)
+            | Type::Option(inner)
+            | Type::Shared(inner)
+            | Type::LocalShared(inner)
+            | Type::Weak(inner)
+            | Type::WeakLocal(inner)
+            | Type::Array(inner, _)
+            | Type::Slice(inner)
+            | Type::RawPtr(inner)
+            | Type::RawPtrMut(inner)
+            | Type::CShared(inner)
+            | Type::CBorrow(inner)
+            | Type::CBorrowMut(inner)
+            | Type::CBuffer(inner) => Self::extract_type_names(inner),
             Type::Result(ok, err) => {
                 let mut names = Self::extract_type_names(ok);
                 names.extend(Self::extract_type_names(err));
@@ -287,7 +316,9 @@ impl<'a> Checker<'a> {
                     }
                     TypeDefKind::Enum(variants) => {
                         // CK2: Build self_ty with generic args for proper substitution
-                        let generic_args: Vec<Type> = t.generics.iter()
+                        let generic_args: Vec<Type> = t
+                            .generics
+                            .iter()
                             .map(|g| Type::Name(g.name.clone(), vec![]))
                             .collect();
                         let self_ty = Type::Name(t.name.clone(), generic_args);
@@ -296,7 +327,10 @@ impl<'a> Checker<'a> {
                             if self.funcs.contains_key(&v.name) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0402,
-                                    format!("variant constructor '{}' shadows existing function '{}'", v.name, v.name),
+                                    format!(
+                                        "variant constructor '{}' shadows existing function '{}'",
+                                        v.name, v.name
+                                    ),
                                 );
                             }
                             let ret = self_ty.clone();
@@ -382,7 +416,10 @@ impl<'a> Checker<'a> {
                     if self.funcs.contains_key(&qualified) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
-                            format!("duplicate function definition '{}' in actor '{}'", method.name, actor.name),
+                            format!(
+                                "duplicate function definition '{}' in actor '{}'",
+                                method.name, actor.name
+                            ),
                         );
                         return;
                     }
@@ -410,7 +447,8 @@ impl<'a> Checker<'a> {
                     );
                     self.generic_scope
                         .truncate(self.generic_scope.len() - generic_names.len());
-                    self.funcs.insert(format!("{}::{}", actor.name, method.name), (params, ret));
+                    self.funcs
+                        .insert(format!("{}::{}", actor.name, method.name), (params, ret));
                 }
             }
             Item::Cap(c) => {
@@ -542,7 +580,9 @@ impl<'a> Checker<'a> {
                     self.funcs.insert(func.name.clone(), (params, ret));
                 }
             }
-            Item::Const { name, ty, value, .. } => {
+            Item::Const {
+                name, ty, value, ..
+            } => {
                 // Infer the type of the constant value
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
@@ -725,7 +765,9 @@ impl<'a> Checker<'a> {
             Item::ExternBlock(_) => {
                 // Extern blocks are collected but not type-checked in v1.1
             }
-            Item::Const { name, ty, value, .. } => {
+            Item::Const {
+                name, ty, value, ..
+            } => {
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
                 if let Some(declared_ty) = ty {

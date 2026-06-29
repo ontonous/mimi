@@ -111,20 +111,14 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
                 .get("textDocument")?
                 .get("uri")?
                 .as_str()?;
-            let changes = msg
-                .get("params")?
-                .get("contentChanges")?
-                .as_array()?;
+            let changes = msg.get("params")?.get("contentChanges")?.as_array()?;
 
             // Empty contentChanges is legal in LSP incremental sync — skip silently.
             if changes.is_empty() {
                 return None;
             }
 
-            let text = changes
-                .first()?
-                .get("text")?
-                .as_str()?;
+            let text = changes.first()?.get("text")?.as_str()?;
             server.cache_put(uri.to_string(), text.to_string());
             let mut diagnostics = server.compute_diagnostics(text);
             let verif_diags =

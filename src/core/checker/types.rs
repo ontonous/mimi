@@ -77,10 +77,9 @@ impl<'a> Checker<'a> {
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
             Type::TypeVar(_) => ty.clone(),
-            Type::ForAll(params, body) => Type::ForAll(
-                params.clone(),
-                Box::new(self.resolve_type(body)),
-            ),
+            Type::ForAll(params, body) => {
+                Type::ForAll(params.clone(), Box::new(self.resolve_type(body)))
+            }
         }
     }
 

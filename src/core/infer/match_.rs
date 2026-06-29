@@ -187,4 +187,3 @@ impl<'a> Checker<'a> {
         }
     }
 }
-

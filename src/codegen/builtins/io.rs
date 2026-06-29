@@ -188,34 +188,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             };
             self.build_call(
-                    printf,
-                    &[BasicMetadataValueEnum::PointerValue(msg_ptr)],
-                    "assert_printf",
-                )?;
+                printf,
+                &[BasicMetadataValueEnum::PointerValue(msg_ptr)],
+                "assert_printf",
+            )?;
         } else {
             let fmt_global = self
                 .builder
                 .build_global_string_ptr("assertion failed\n", "assert_msg")
                 .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
             self.build_call(
-                    printf,
-                    &[BasicMetadataValueEnum::PointerValue(
-                        fmt_global.as_pointer_value(),
-                    )],
-                    "assert_printf",
-                )?;
+                printf,
+                &[BasicMetadataValueEnum::PointerValue(
+                    fmt_global.as_pointer_value(),
+                )],
+                "assert_printf",
+            )?;
         }
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
         self.build_call(
-                exit_fn,
-                &[BasicMetadataValueEnum::IntValue(
-                    self.context.i32_type().const_int(1, false),
-                )],
-                "assert_exit",
-            )?;
+            exit_fn,
+            &[BasicMetadataValueEnum::IntValue(
+                self.context.i32_type().const_int(1, false),
+            )],
+            "assert_exit",
+        )?;
         self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
@@ -326,12 +326,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("assertion failed: ", "aeq_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(
-                    prefix.as_pointer_value(),
-                )],
-                "aeq_prefix_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(
+                prefix.as_pointer_value(),
+            )],
+            "aeq_prefix_call",
+        )?;
 
         // Print left value
         self.build_print_value(printf, &a)?;
@@ -341,10 +341,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr(" != ", "aeq_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
-                "aeq_sep_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
+            "aeq_sep_call",
+        )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -353,22 +353,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("\n", "aeq_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
-                "aeq_nl_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
+            "aeq_nl_call",
+        )?;
 
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
         self.build_call(
-                exit_fn,
-                &[BasicMetadataValueEnum::IntValue(
-                    self.context.i32_type().const_int(1, false),
-                )],
-                "aeq_exit",
-            )?;
+            exit_fn,
+            &[BasicMetadataValueEnum::IntValue(
+                self.context.i32_type().const_int(1, false),
+            )],
+            "aeq_exit",
+        )?;
         self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
@@ -478,12 +478,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("assertion failed: ", "ane_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(
-                    prefix.as_pointer_value(),
-                )],
-                "ane_prefix_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(
+                prefix.as_pointer_value(),
+            )],
+            "ane_prefix_call",
+        )?;
         // Print left value
         self.build_print_value(printf, &a)?;
         // Print " == "
@@ -492,10 +492,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr(" == ", "ane_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
-                "ane_sep_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
+            "ane_sep_call",
+        )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -504,21 +504,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("\n", "ane_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
-                "ane_nl_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
+            "ane_nl_call",
+        )?;
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
         self.build_call(
-                exit_fn,
-                &[BasicMetadataValueEnum::IntValue(
-                    self.context.i32_type().const_int(1, false),
-                )],
-                "ane_exit",
-            )?;
+            exit_fn,
+            &[BasicMetadataValueEnum::IntValue(
+                self.context.i32_type().const_int(1, false),
+            )],
+            "ane_exit",
+        )?;
         self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
@@ -594,12 +594,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("assertion failed: ", "aaeq_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(
-                    prefix.as_pointer_value(),
-                )],
-                "aaeq_prefix_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(
+                prefix.as_pointer_value(),
+            )],
+            "aaeq_prefix_call",
+        )?;
         // Print left value
         self.build_print_value(printf, &a)?;
         // Print " !≈ "
@@ -608,10 +608,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr(" !≈ ", "aaeq_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
-                "aaeq_sep_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
+            "aaeq_sep_call",
+        )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -620,21 +620,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_global_string_ptr("\n", "aaeq_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
         self.build_call(
-                printf,
-                &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
-                "aaeq_nl_call",
-            )?;
+            printf,
+            &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
+            "aaeq_nl_call",
+        )?;
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
         self.build_call(
-                exit_fn,
-                &[BasicMetadataValueEnum::IntValue(
-                    self.context.i32_type().const_int(1, false),
-                )],
-                "aaeq_exit",
-            )?;
+            exit_fn,
+            &[BasicMetadataValueEnum::IntValue(
+                self.context.i32_type().const_int(1, false),
+            )],
+            "aaeq_exit",
+        )?;
         self.build_br(ok_bb)?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
@@ -694,14 +694,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("fgets", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                fgets_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::IntValue(buf_size),
-                    BasicMetadataValueEnum::PointerValue(stdin_val),
-                ],
-                "fgets_call",
-            )?;
+            fgets_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::IntValue(buf_size),
+                BasicMetadataValueEnum::PointerValue(stdin_val),
+            ],
+            "fgets_call",
+        )?;
         // strlen(buf) for string struct length
         let strlen_fn = self
             .module
@@ -935,10 +935,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("rewind", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                rewind_fn,
-                &[BasicMetadataValueEnum::PointerValue(file)],
-                "rewind_call",
-            )?;
+            rewind_fn,
+            &[BasicMetadataValueEnum::PointerValue(file)],
+            "rewind_call",
+        )?;
         // malloc(file_size + 1)
         let one = self.context.i64_type().const_int(1, false);
         let alloc_size = self
@@ -977,15 +977,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("fread", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                fread_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
-                    BasicMetadataValueEnum::IntValue(file_size),
-                    BasicMetadataValueEnum::PointerValue(file),
-                ],
-                "fread_call",
-            )?;
+            fread_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
+                BasicMetadataValueEnum::IntValue(file_size),
+                BasicMetadataValueEnum::PointerValue(file),
+            ],
+            "fread_call",
+        )?;
         // Null-terminate
         let null_gep = {
             self.build_in_bounds_gep(
@@ -1005,10 +1005,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                fclose_fn,
-                &[BasicMetadataValueEnum::PointerValue(file)],
-                "fclose_call",
-            )?;
+            fclose_fn,
+            &[BasicMetadataValueEnum::PointerValue(file)],
+            "fclose_call",
+        )?;
         // Build string struct { i8*, i64 }
         let string_ty = self.context.struct_type(
             &[
@@ -1107,15 +1107,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("fwrite", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                fwrite_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(content_ptr),
-                    BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
-                    BasicMetadataValueEnum::IntValue(content_len.into_int_value()),
-                    BasicMetadataValueEnum::PointerValue(file),
-                ],
-                "fwrite_call",
-            )?;
+            fwrite_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(content_ptr),
+                BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
+                BasicMetadataValueEnum::IntValue(content_len.into_int_value()),
+                BasicMetadataValueEnum::PointerValue(file),
+            ],
+            "fwrite_call",
+        )?;
         // fclose(file)
         let i32_ty = self.context.i32_type();
         let fclose_fn = self.module.get_function("fclose").unwrap_or_else(|| {
@@ -1125,10 +1125,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(
-                fclose_fn,
-                &[BasicMetadataValueEnum::PointerValue(file)],
-                "fclose_call",
-            )?;
+            fclose_fn,
+            &[BasicMetadataValueEnum::PointerValue(file)],
+            "fclose_call",
+        )?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
@@ -1145,14 +1145,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_global_string_ptr("%lld", "int_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
                 self.build_call(
-                        printf,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::IntValue(*iv),
-                        ],
-                        "print_int",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
+                    printf,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(*iv),
+                    ],
+                    "print_int",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 let fmt = self
@@ -1160,14 +1160,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_global_string_ptr("%f", "float_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
                 self.build_call(
-                        printf,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::FloatValue(*fv),
-                        ],
-                        "print_float",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
+                    printf,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::FloatValue(*fv),
+                    ],
+                    "print_float",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
             }
             BasicMetadataValueEnum::PointerValue(pv) => {
                 let fmt = self
@@ -1175,14 +1175,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_global_string_ptr("%s", "str_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
                 self.build_call(
-                        printf,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::PointerValue(*pv),
-                        ],
-                        "print_str",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
+                    printf,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(*pv),
+                    ],
+                    "print_str",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
             }
             BasicMetadataValueEnum::StructValue(sv) => {
                 if let Ok(BasicValueEnum::PointerValue(pv)) =
@@ -1193,14 +1193,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_global_string_ptr("%s", "struct_str_fmt")
                         .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
                     self.build_call(
-                            printf,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(pv),
-                            ],
-                            "print_struct_str",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
+                        printf,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(pv),
+                        ],
+                        "print_struct_str",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("printf: {}", e)))?;
                 }
             }
             _ => {}
@@ -1216,17 +1216,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount(format!("{} expects 1 argument", runtime_fn_name)));
+            return Err(CompileError::WrongArgCount(format!(
+                "{} expects 1 argument",
+                runtime_fn_name
+            )));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let fn_val = self.module.get_function(runtime_fn_name)
+        let fn_val = self
+            .module
+            .get_function(runtime_fn_name)
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
-        let result = self.build_call(
-            fn_val,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            &format!("{}_call", runtime_fn_name),
-        ).map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
-        let ret = result.try_as_basic_value_opt()
+        let result = self
+            .build_call(
+                fn_val,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                &format!("{}_call", runtime_fn_name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
+        let ret = result
+            .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", runtime_fn_name)))?;
         Ok(ret)
     }
@@ -1237,17 +1245,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount(format!("{} expects 1 argument", runtime_fn_name)));
+            return Err(CompileError::WrongArgCount(format!(
+                "{} expects 1 argument",
+                runtime_fn_name
+            )));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let fn_val = self.module.get_function(runtime_fn_name)
+        let fn_val = self
+            .module
+            .get_function(runtime_fn_name)
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
-        let result = self.build_call(
-            fn_val,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            &format!("{}_call", runtime_fn_name),
-        ).map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
-        let raw_ptr = result.try_as_basic_value_opt()
+        let result = self
+            .build_call(
+                fn_val,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                &format!("{}_call", runtime_fn_name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{}: {}", runtime_fn_name, e)))?;
+        let raw_ptr = result
+            .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", runtime_fn_name)))?;
         // Wrap raw C string into Mimi string struct {ptr, len}
         self.wrap_c_string(raw_ptr.into_pointer_value())
@@ -1258,27 +1274,40 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("listdir expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "listdir expects 1 argument".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let fn_val = self.module.get_function("mimi_listdir")
+        let fn_val = self
+            .module
+            .get_function("mimi_listdir")
             .ok_or("mimi_listdir not declared")?;
-        let result = self.build_call(
-            fn_val,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            "listdir_call",
-        ).map_err(|e| CompileError::LlvmError(format!("listdir: {}", e)))?;
-        let list_ptr = result.try_as_basic_value_opt()
+        let result = self
+            .build_call(
+                fn_val,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                "listdir_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("listdir: {}", e)))?;
+        let list_ptr = result
+            .try_as_basic_value_opt()
             .ok_or("listdir returned void")?;
         // Return as opaque pointer (MimiList*)
         Ok(list_ptr)
     }
 
-    pub(super) fn compile_is_dir(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_is_dir(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_bool("mimi_is_dir", args)
     }
 
-    pub(super) fn compile_is_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_is_file(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_bool("mimi_is_file", args)
     }
 
@@ -1287,34 +1316,50 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err(CompileError::WrongArgCount("path_join expects 2 arguments".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "path_join expects 2 arguments".to_string(),
+            ));
         }
         let a_ptr = self.extract_raw_str_ptr(&args[0])?;
         let b_ptr = self.extract_raw_str_ptr(&args[1])?;
-        let fn_val = self.module.get_function("mimi_path_join")
+        let fn_val = self
+            .module
+            .get_function("mimi_path_join")
             .ok_or("mimi_path_join not declared")?;
-        let result = self.build_call(
-            fn_val,
-            &[
-                BasicMetadataValueEnum::PointerValue(a_ptr),
-                BasicMetadataValueEnum::PointerValue(b_ptr),
-            ],
-            "path_join_call",
-        ).map_err(|e| CompileError::LlvmError(format!("path_join: {}", e)))?;
-        let raw_ptr = result.try_as_basic_value_opt()
+        let result = self
+            .build_call(
+                fn_val,
+                &[
+                    BasicMetadataValueEnum::PointerValue(a_ptr),
+                    BasicMetadataValueEnum::PointerValue(b_ptr),
+                ],
+                "path_join_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("path_join: {}", e)))?;
+        let raw_ptr = result
+            .try_as_basic_value_opt()
             .ok_or("path_join returned void")?;
         self.wrap_c_string(raw_ptr.into_pointer_value())
     }
 
-    pub(super) fn compile_path_ext(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_path_ext(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_path_ext", args)
     }
 
-    pub(super) fn compile_path_basename(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_path_basename(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_path_basename", args)
     }
 
-    pub(super) fn compile_path_dirname(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_path_dirname(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_path_dirname", args)
     }
 
@@ -1323,45 +1368,65 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("walk_dir expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "walk_dir expects 1 argument".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let fn_val = self.module.get_function("mimi_walk_dir")
+        let fn_val = self
+            .module
+            .get_function("mimi_walk_dir")
             .ok_or("mimi_walk_dir not declared")?;
-        let result = self.build_call(
-            fn_val,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            "walk_dir_call",
-        ).map_err(|e| CompileError::LlvmError(format!("walk_dir: {}", e)))?;
-        let list_ptr = result.try_as_basic_value_opt()
+        let result = self
+            .build_call(
+                fn_val,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                "walk_dir_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("walk_dir: {}", e)))?;
+        let list_ptr = result
+            .try_as_basic_value_opt()
             .ok_or("walk_dir returned void")?;
         Ok(list_ptr)
     }
 
-    pub(super) fn compile_mkdir_p(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_mkdir_p(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_bool("mimi_mkdir_p", args)
     }
 
-    pub(super) fn compile_remove_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_remove_file(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_bool("mimi_remove_file", args)
     }
 
     // === Process & advanced file operations (codegen) ===
 
-    pub(super) fn compile_exec(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_exec(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("exec expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "exec expects 1 argument".to_string(),
+            ));
         }
         let cmd_ptr = self.extract_raw_str_ptr(&args[0])?;
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Call mimi_exec(cmd) -> MimiExecResult*
         let exec_fn = self.get_runtime_fn("mimi_exec")?;
-        let res_ptr = self.build_call(
-            exec_fn,
-            &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
-            "exec_call",
-        ).map_err(|e| CompileError::LlvmError(format!("exec error: {}", e)))?
+        let res_ptr = self
+            .build_call(
+                exec_fn,
+                &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
+                "exec_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("exec error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_exec returned void")?
             .into_pointer_value();
@@ -1381,11 +1446,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(res_ty, res_ptr, 0, "exit_code_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let exit_code_raw = self.build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
+        let exit_code_raw = self
+            .build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         // Truncate to i32 for ExecResult.exit_code field
-        let exit_code = self.builder.build_int_truncate(exit_code_raw, self.context.i32_type(), "exit_code_i32")
+        let exit_code = self
+            .builder
+            .build_int_truncate(exit_code_raw, self.context.i32_type(), "exit_code_i32")
             .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
 
         // Extract stdout
@@ -1393,7 +1461,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(res_ty, res_ptr, 1, "stdout_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let stdout_raw = self.build_load(i8_ptr, stdout_gep, "stdout_raw")
+        let stdout_raw = self
+            .build_load(i8_ptr, stdout_gep, "stdout_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         let stdout_str = self.wrap_c_string(stdout_raw)?;
@@ -1403,7 +1472,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(res_ty, res_ptr, 2, "stderr_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let stderr_raw = self.build_load(i8_ptr, stderr_gep, "stderr_raw")
+        let stderr_raw = self
+            .build_load(i8_ptr, stderr_gep, "stderr_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         let stderr_str = self.wrap_c_string(stderr_raw)?;
@@ -1458,9 +1528,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(alloca.into())
     }
 
-    pub(super) fn compile_file_stat(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_file_stat(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("file_stat expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "file_stat expects 1 argument".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1472,14 +1547,16 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Call mimi_file_stat(path, &err_out)
         let stat_fn = self.get_runtime_fn("mimi_file_stat")?;
-        let stat_ptr = self.build_call(
-            stat_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(path_ptr),
-                BasicMetadataValueEnum::PointerValue(err_alloca),
-            ],
-            "stat_call",
-        ).map_err(|e| CompileError::LlvmError(format!("file_stat error: {}", e)))?
+        let stat_ptr = self
+            .build_call(
+                stat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::PointerValue(err_alloca),
+                ],
+                "stat_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("file_stat error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_file_stat returned void")?
             .into_pointer_value();
@@ -1496,12 +1573,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
 
         // Check if stat_ptr is null (error case)
-        let is_null = self.builder.build_int_compare(
-            inkwell::IntPredicate::EQ,
-            stat_ptr,
-            i8_ptr.const_null(),
-            "stat_null",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                stat_ptr,
+                i8_ptr.const_null(),
+                "stat_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
 
         // Build StatResult LLVM struct { i64, i64, i1, i1 }
         let bool_ty = self.context.bool_type();
@@ -1526,10 +1606,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 0, "size_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let size_loaded = self.build_load(i64_ty, size_gep, "size_loaded")
+        let size_loaded = self
+            .build_load(i64_ty, size_gep, "size_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let size_val = self.builder.build_select(is_null, neg_one_i64, size_loaded, "size_sel")
+        let size_val = self
+            .builder
+            .build_select(is_null, neg_one_i64, size_loaded, "size_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // modified
@@ -1537,10 +1620,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 1, "mod_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let mod_loaded = self.build_load(i64_ty, mod_gep, "mod_loaded")
+        let mod_loaded = self
+            .build_load(i64_ty, mod_gep, "mod_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let mod_val = self.builder.build_select(is_null, zero_i64, mod_loaded, "mod_sel")
+        let mod_val = self
+            .builder
+            .build_select(is_null, zero_i64, mod_loaded, "mod_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // is_file
@@ -1548,13 +1634,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 2, "isf_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let isf_raw = self.build_load(i64_ty, isf_gep, "isf_loaded")
+        let isf_raw = self
+            .build_load(i64_ty, isf_gep, "isf_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let isf_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE, isf_raw, zero_i64, "isf_cmp",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let isf_val = self.builder.build_select(is_null, false_val, isf_bool, "isf_sel")
+        let isf_bool = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, isf_raw, zero_i64, "isf_cmp")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let isf_val = self
+            .builder
+            .build_select(is_null, false_val, isf_bool, "isf_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // is_dir
@@ -1562,13 +1652,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 3, "isd_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let isd_raw = self.build_load(i64_ty, isd_gep, "isd_loaded")
+        let isd_raw = self
+            .build_load(i64_ty, isd_gep, "isd_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let isd_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE, isd_raw, zero_i64, "isd_cmp",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let isd_val = self.builder.build_select(is_null, false_val, isd_bool, "isd_sel")
+        let isd_bool = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, isd_raw, zero_i64, "isd_cmp")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let isd_val = self
+            .builder
+            .build_select(is_null, false_val, isd_bool, "isd_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
 
@@ -1605,81 +1699,113 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(alloca.into())
     }
 
-    pub(super) fn compile_append_file(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_append_file(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err(CompileError::WrongArgCount("append_file expects 2 arguments".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "append_file expects 2 arguments".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let content_ptr = self.extract_raw_str_ptr(&args[1])?;
 
         let append_fn = self.get_runtime_fn("mimi_append_file")?;
-        let ret = self.build_call(
-            append_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(path_ptr),
-                BasicMetadataValueEnum::PointerValue(content_ptr),
-            ],
-            "append_call",
-        ).map_err(|e| CompileError::LlvmError(format!("append_file error: {}", e)))?
+        let ret = self
+            .build_call(
+                append_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::PointerValue(content_ptr),
+                ],
+                "append_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("append_file error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_append_file returned void")?
             .into_int_value();
 
         // Convert i64 to bool (i64): ret != 0
         let zero = self.context.i64_type().const_int(0, false);
-        let cmp = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE, ret, zero, "append_ok",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let result = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "append_result")
+        let cmp = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, ret, zero, "append_ok")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let result = self
+            .builder
+            .build_int_z_extend(cmp, self.context.i64_type(), "append_result")
             .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
         Ok(result.into())
     }
 
-    pub(super) fn compile_set_env(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_set_env(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err(CompileError::WrongArgCount("set_env expects 2 arguments".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "set_env expects 2 arguments".to_string(),
+            ));
         }
         let key_ptr = self.extract_raw_str_ptr(&args[0])?;
         let val_ptr = self.extract_raw_str_ptr(&args[1])?;
 
         let set_fn = self.get_runtime_fn("mimi_set_env")?;
-        let ret = self.build_call(
-            set_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(key_ptr),
-                BasicMetadataValueEnum::PointerValue(val_ptr),
-            ],
-            "set_env_call",
-        ).map_err(|e| CompileError::LlvmError(format!("set_env error: {}", e)))?
+        let ret = self
+            .build_call(
+                set_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                    BasicMetadataValueEnum::PointerValue(val_ptr),
+                ],
+                "set_env_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("set_env error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_set_env returned void")?
             .into_int_value();
 
         // Convert i64 to bool (i64): ret != 0
         let zero = self.context.i64_type().const_int(0, false);
-        let cmp = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE, ret, zero, "set_env_ok",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let result = self.builder.build_int_z_extend(cmp, self.context.i64_type(), "set_env_result")
+        let cmp = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, ret, zero, "set_env_ok")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let result = self
+            .builder
+            .build_int_z_extend(cmp, self.context.i64_type(), "set_env_result")
             .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?;
         Ok(result.into())
     }
 
     // === Crypto operations (codegen) ===
 
-    pub(super) fn compile_sha256(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_sha256(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_sha256", args)
     }
 
-    pub(super) fn compile_base64_encode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_base64_encode(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_base64_encode", args)
     }
 
-    pub(super) fn compile_base64_decode(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_base64_decode(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.call_runtime_str_to_str("mimi_base64_decode", args)
     }
 
-    pub(super) fn compile_format(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_format(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.is_empty() {
             return Err(CompileError::WrongArgCount(
                 "format expects at least 1 argument (template string)".to_string(),
@@ -1698,9 +1824,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(pv) => {
                 call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
             }
-            _ => return Err(CompileError::TypeMismatch(
-                "format: first arg must be a string template".to_string(),
-            )),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "format: first arg must be a string template".to_string(),
+                ))
+            }
         }
         // Remaining args: convert to string pointers (up to 8)
         for i in 1..args.len().min(9) {
@@ -1710,11 +1838,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 BasicMetadataValueEnum::IntValue(iv) => {
                     let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
-                    let str_result = self.build_call(
-                        to_i64_fn,
-                        &[BasicMetadataValueEnum::IntValue(*iv)],
-                        "to_str_i64",
-                    ).map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
+                    let str_result = self
+                        .build_call(
+                            to_i64_fn,
+                            &[BasicMetadataValueEnum::IntValue(*iv)],
+                            "to_str_i64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
                         .try_as_basic_value_opt()
                         .ok_or("mimi_to_string_i64 returned void")?
                         .into_pointer_value();
@@ -1722,11 +1852,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 BasicMetadataValueEnum::FloatValue(fv) => {
                     let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
-                    let str_result = self.build_call(
-                        to_f64_fn,
-                        &[BasicMetadataValueEnum::FloatValue(*fv)],
-                        "to_str_f64",
-                    ).map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
+                    let str_result = self
+                        .build_call(
+                            to_f64_fn,
+                            &[BasicMetadataValueEnum::FloatValue(*fv)],
+                            "to_str_f64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("to_string error: {}", e)))?
                         .try_as_basic_value_opt()
                         .ok_or("mimi_to_string_f64 returned void")?
                         .into_pointer_value();
@@ -1739,16 +1871,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Pad with null pointers if less than 8 args
         while call_args.len() < 10 {
-            call_args.push(BasicMetadataValueEnum::PointerValue(
-                i8_ptr.const_null(),
-            ));
+            call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
         }
         let format_fn = self.get_runtime_fn("mimi_str_format")?;
-        let result = self.build_call(
-            format_fn,
-            &call_args,
-            "format_call",
-        ).map_err(|e| CompileError::LlvmError(format!("format error: {}", e)))?
+        let result = self
+            .build_call(format_fn, &call_args, "format_call")
+            .map_err(|e| CompileError::LlvmError(format!("format error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_str_format returned void")?;
         Ok(result)
@@ -1756,103 +1884,145 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     // === Binary I/O & streaming line reading (codegen) ===
 
-    pub(super) fn compile_read_file_partial(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_read_file_partial(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err(CompileError::WrongArgCount("read_file_partial expects 2 arguments".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "read_file_partial expects 2 arguments".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let max_bytes = match args[1] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => return Err(CompileError::TypeMismatch("read_file_partial: max_bytes must be i64".into())),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "read_file_partial: max_bytes must be i64".into(),
+                ))
+            }
         };
         let func = self.get_runtime_fn("mimi_read_file_partial")?;
-        let raw_ptr = self.build_call(
-            func,
-            &[
-                BasicMetadataValueEnum::PointerValue(path_ptr),
-                BasicMetadataValueEnum::IntValue(max_bytes),
-            ],
-            "read_file_partial_call",
-        ).map_err(|e| CompileError::LlvmError(format!("read_file_partial error: {}", e)))?
+        let raw_ptr = self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::IntValue(max_bytes),
+                ],
+                "read_file_partial_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("read_file_partial error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_read_file_partial returned void")?
             .into_pointer_value();
         self.wrap_c_string(raw_ptr)
     }
 
-    pub(super) fn compile_read_file_bytes(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_read_file_bytes(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("read_file_bytes expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "read_file_bytes expects 1 argument".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let func = self.get_runtime_fn("mimi_read_file_bytes")?;
-        let raw_ptr = self.build_call(
-            func,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            "read_file_bytes_call",
-        ).map_err(|e| CompileError::LlvmError(format!("read_file_bytes error: {}", e)))?
+        let raw_ptr = self
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                "read_file_bytes_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("read_file_bytes error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_read_file_bytes returned void")?
             .into_pointer_value();
         self.wrap_c_string(raw_ptr)
     }
 
-    pub(super) fn compile_write_file_bytes(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_write_file_bytes(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err(CompileError::WrongArgCount("write_file_bytes expects 2 arguments".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "write_file_bytes expects 2 arguments".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let data_ptr = self.extract_raw_str_ptr(&args[1])?;
         let func = self.get_runtime_fn("mimi_write_file_bytes")?;
-        let result = self.build_call(
-            func,
-            &[
-                BasicMetadataValueEnum::PointerValue(path_ptr),
-                BasicMetadataValueEnum::PointerValue(data_ptr),
-            ],
-            "write_file_bytes_call",
-        ).map_err(|e| CompileError::LlvmError(format!("write_file_bytes error: {}", e)))?
+        let result = self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                ],
+                "write_file_bytes_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("write_file_bytes error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_write_file_bytes returned void")?
             .into_int_value();
         let zero = self.context.i64_type().const_int(0, false);
-        let cmp = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE,
-            result,
-            zero,
-            "write_file_bytes_ok",
-        ).map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let cmp = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                result,
+                zero,
+                "write_file_bytes_ok",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         Ok(cmp.into())
     }
 
-    pub(super) fn compile_read_lines_json(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_read_lines_json(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("read_lines_json expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "read_lines_json expects 1 argument".to_string(),
+            ));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let func = self.get_runtime_fn("mimi_read_lines_json")?;
-        let raw_ptr = self.build_call(
-            func,
-            &[BasicMetadataValueEnum::PointerValue(path_ptr)],
-            "read_lines_json_call",
-        ).map_err(|e| CompileError::LlvmError(format!("read_lines_json error: {}", e)))?
+        let raw_ptr = self
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(path_ptr)],
+                "read_lines_json_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("read_lines_json error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_read_lines_json returned void")?
             .into_pointer_value();
         self.wrap_c_string(raw_ptr)
     }
 
-    pub(super) fn compile_exec_pipe(&self, args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_exec_pipe(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount("exec_pipe expects 1 argument".to_string()));
+            return Err(CompileError::WrongArgCount(
+                "exec_pipe expects 1 argument".to_string(),
+            ));
         }
         let cmd_ptr = self.extract_raw_str_ptr(&args[0])?;
         let func = self.get_runtime_fn("mimi_exec_pipe")?;
-        let raw_ptr = self.build_call(
-            func,
-            &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
-            "exec_pipe_call",
-        ).map_err(|e| CompileError::LlvmError(format!("exec_pipe error: {}", e)))?
+        let raw_ptr = self
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
+                "exec_pipe_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("exec_pipe error: {}", e)))?
             .try_as_basic_value_opt()
             .ok_or("mimi_exec_pipe returned void")?
             .into_pointer_value();

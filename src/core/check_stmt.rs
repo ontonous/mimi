@@ -638,7 +638,11 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(None) => {
                 // C2: use unification for unit return check
-                if self.unification.unify(ret, &Type::Name("unit".into(), vec![])).is_err() {
+                if self
+                    .unification
+                    .unify(ret, &Type::Name("unit".into(), vec![]))
+                    .is_err()
+                {
                     self.emit_code(
                         crate::diagnostic::codes::E0207,
                         format!(
@@ -993,15 +997,24 @@ impl<'a> Checker<'a> {
                             if let Some(type_def) = self.types.get(name) {
                                 match &type_def.kind {
                                     TypeDefKind::Record(fields) => {
-                                        if let Some(field_def) = fields.iter().find(|f| f.name == *field) {
+                                        if let Some(field_def) =
+                                            fields.iter().find(|f| f.name == *field)
+                                        {
                                             // Bug 8 fix: unify value type with field's declared type
-                                            if self.unification.unify(&field_def.ty, &value_ty).is_err() {
-                                                self.emit_code(crate::diagnostic::codes::E0209, format!(
-                                                    "cannot assign {} to field '{}' of type {}",
-                                                    fmt_type(&value_ty),
-                                                    field,
-                                                    fmt_type(&field_def.ty)
-                                                ));
+                                            if self
+                                                .unification
+                                                .unify(&field_def.ty, &value_ty)
+                                                .is_err()
+                                            {
+                                                self.emit_code(
+                                                    crate::diagnostic::codes::E0209,
+                                                    format!(
+                                                        "cannot assign {} to field '{}' of type {}",
+                                                        fmt_type(&value_ty),
+                                                        field,
+                                                        fmt_type(&field_def.ty)
+                                                    ),
+                                                );
                                             }
                                         } else {
                                             let available: Vec<&str> =

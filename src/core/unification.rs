@@ -91,18 +91,32 @@ impl UnificationTable {
             Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
                 args.iter().any(|a| Self::occurs_in(var, a)) || Self::occurs_in(var, ret)
             }
-            Type::Ref(_, inner) | Type::RefMut(_, inner) | Type::Shared(inner)
-            | Type::LocalShared(inner) | Type::Weak(inner) | Type::WeakLocal(inner)
-            | Type::RawPtr(inner) | Type::RawPtrMut(inner) | Type::CShared(inner)
-            | Type::CBorrow(inner) | Type::CBorrowMut(inner) | Type::CBuffer(inner)
-            | Type::Array(inner, _) | Type::Slice(inner) => Self::occurs_in(var, inner),
+            Type::Ref(_, inner)
+            | Type::RefMut(_, inner)
+            | Type::Shared(inner)
+            | Type::LocalShared(inner)
+            | Type::Weak(inner)
+            | Type::WeakLocal(inner)
+            | Type::RawPtr(inner)
+            | Type::RawPtrMut(inner)
+            | Type::CShared(inner)
+            | Type::CBorrow(inner)
+            | Type::CBorrowMut(inner)
+            | Type::CBuffer(inner)
+            | Type::Array(inner, _)
+            | Type::Slice(inner) => Self::occurs_in(var, inner),
             Type::Newtype(_, inner) => Self::occurs_in(var, inner),
             // Type::Name is string-based; TypeVar is integer-based — no cross-check needed.
             // ForAll params are stored as strings in ForAll but referenced as TypeVar(i)
             // in the body after remap. instantiate() handles TypeVar substitution correctly.
             Type::Name(_, args) => args.iter().any(|a| Self::occurs_in(var, a)),
-            Type::Infer | Type::Nothing | Type::Allocator | Type::RawString
-            | Type::Cap(_) | Type::ImplTrait(_) | Type::DynTrait(_) => false,
+            Type::Infer
+            | Type::Nothing
+            | Type::Allocator
+            | Type::RawString
+            | Type::Cap(_)
+            | Type::ImplTrait(_)
+            | Type::DynTrait(_) => false,
         }
     }
 
@@ -150,14 +164,23 @@ impl UnificationTable {
             Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve(inner))),
             Type::Array(inner, n) => Type::Array(Box::new(self.resolve(inner)), *n),
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve(inner))),
-            Type::Newtype(name, inner) => Type::Newtype(name.clone(), Box::new(self.resolve(inner))),
+            Type::Newtype(name, inner) => {
+                Type::Newtype(name.clone(), Box::new(self.resolve(inner)))
+            }
             Type::Name(name, args) => {
                 Type::Name(name.clone(), args.iter().map(|a| self.resolve(a)).collect())
             }
-            Type::ForAll(params, body) => Type::ForAll(params.clone(), Box::new(self.resolve(body))),
+            Type::ForAll(params, body) => {
+                Type::ForAll(params.clone(), Box::new(self.resolve(body)))
+            }
             // Leaf types — no TypeVars inside
-            Type::Infer | Type::Nothing | Type::Allocator | Type::RawString
-            | Type::Cap(_) | Type::ImplTrait(_) | Type::DynTrait(_) => ty.clone(),
+            Type::Infer
+            | Type::Nothing
+            | Type::Allocator
+            | Type::RawString
+            | Type::Cap(_)
+            | Type::ImplTrait(_)
+            | Type::DynTrait(_) => ty.clone(),
         }
     }
 
@@ -206,15 +229,11 @@ impl UnificationTable {
             (Type::Option(inner), Type::Name(n, args)) if n == "Option" && args.len() == 1 => {
                 self.unify(inner, &args[0])
             }
-            (Type::Name(n, args), Type::Result(ok, err))
-                if n == "Result" && args.len() == 2 =>
-            {
+            (Type::Name(n, args), Type::Result(ok, err)) if n == "Result" && args.len() == 2 => {
                 self.unify(&args[0], ok)?;
                 self.unify(&args[1], err)
             }
-            (Type::Result(ok, err), Type::Name(n, args))
-                if n == "Result" && args.len() == 2 =>
-            {
+            (Type::Result(ok, err), Type::Name(n, args)) if n == "Result" && args.len() == 2 => {
                 self.unify(ok, &args[0])?;
                 self.unify(err, &args[1])
             }
@@ -307,7 +326,7 @@ impl UnificationTable {
                 "cannot unify {} with {}",
                 crate::core::helpers::fmt_type(&a_resolved),
                 crate::core::helpers::fmt_type(&b_resolved),
-            )))
+            ))),
         }
     }
 }

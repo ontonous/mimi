@@ -44,10 +44,10 @@ mod run;
 mod search;
 #[path = "main/stats.rs"]
 mod stats;
-#[path = "main/tool_stat.rs"]
-mod tool_stat;
 #[path = "main/test.rs"]
 mod test;
+#[path = "main/tool_stat.rs"]
+mod tool_stat;
 #[path = "main/tree.rs"]
 mod tree;
 #[path = "main/update.rs"]
@@ -470,12 +470,13 @@ fn main() {
         } => mms::mms(&files, ast, json, render, latex),
         Command::Stats { path } => stats::stats(path.as_deref()),
         Command::Stat { path, depth, hash } => {
-            let dir = path.as_deref().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+            let dir = path
+                .as_deref()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
             tool_stat::run(&dir, depth, hash)
         }
-        Command::Bindgen { path, output } => {
-            bindgen::run(&path, &output)
-        }
+        Command::Bindgen { path, output } => bindgen::run(&path, &output),
         Command::Install { all } => install::install(all),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),

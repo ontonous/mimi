@@ -12,6 +12,17 @@ use std::collections::HashSet;
 
 use crate::ast::{CapMode, Expr, ExternFunc, Type};
 
+/// Width/signedness of a scalar integer crossing the FFI boundary.
+#[derive(Debug, Clone, Copy)]
+pub enum FfiScalarType {
+    /// 32-bit signed integer (`i32`).
+    I32,
+    /// 64-bit signed integer (`i64`).
+    I64,
+    /// Boolean (`bool`).
+    Bool,
+}
+
 /// Contract for one extern function.
 #[derive(Debug, Clone)]
 pub struct FfiContract {
@@ -31,7 +42,7 @@ pub struct FfiContract {
 #[derive(Debug, Clone)]
 pub enum FfiArgContract {
     /// Scalar integer or boolean passed by value.
-    Int,
+    Int(FfiScalarType),
     /// 64-bit floating point passed by value.
     Float,
     /// A Mimi `string` passed as a temporary borrowed `char*`.
@@ -79,7 +90,7 @@ pub enum FfiRetContract {
     /// No return value (`unit`).
     Unit,
     /// Scalar integer or boolean.
-    Int,
+    Int(FfiScalarType),
     /// 64-bit floating point.
     Float,
     /// A null-terminated C string borrowed from C (Mimi does NOT free).
@@ -352,10 +363,12 @@ impl FfiArgContract {
                     return FfiArgContract::Cap(CapMode::Borrow);
                 }
                 match name.as_str() {
-                    "i32" | "i64" | "bool" => FfiArgContract::Int,
+                    "i32" => FfiArgContract::Int(FfiScalarType::I32),
+                    "i64" => FfiArgContract::Int(FfiScalarType::I64),
+                    "bool" => FfiArgContract::Int(FfiScalarType::Bool),
                     "f64" => FfiArgContract::Float,
                     "string" => FfiArgContract::StringBorrow,
-                    "unit" => FfiArgContract::Int,
+                    "unit" => FfiArgContract::Int(FfiScalarType::I64),
                     "List" => FfiArgContract::Json,
                     other => {
                         if record_type_names.contains(other) {
@@ -400,7 +413,9 @@ impl FfiRetContract {
     ) -> Self {
         match ty {
             Type::Name(name, _) => match name.as_str() {
-                "i32" | "i64" | "bool" => FfiRetContract::Int,
+                "i32" => FfiRetContract::Int(FfiScalarType::I32),
+                "i64" => FfiRetContract::Int(FfiScalarType::I64),
+                "bool" => FfiRetContract::Int(FfiScalarType::Bool),
                 "f64" => FfiRetContract::Float,
                 "string" => FfiRetContract::String,
                 "unit" => FfiRetContract::Unit,

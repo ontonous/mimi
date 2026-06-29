@@ -28,11 +28,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicValueEnum::PointerValue(pv) => {
                 let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let closure_struct_ty =
-                    self.context
-                        .struct_type(&[BasicTypeEnum::PointerType(i8_ptr); 2], false);
+                let closure_struct_ty = self
+                    .context
+                    .struct_type(&[BasicTypeEnum::PointerType(i8_ptr); 2], false);
                 let loaded = self
-                    .build_load(BasicTypeEnum::StructType(closure_struct_ty), pv, "closure_loaded")?
+                    .build_load(
+                        BasicTypeEnum::StructType(closure_struct_ty),
+                        pv,
+                        "closure_loaded",
+                    )?
                     .into_struct_value();
                 let agg = AggregateValueEnum::StructValue(loaded);
                 let fn_ptr = self
@@ -96,7 +100,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let call = self
             .builder
-            .build_indirect_call(indirect_fn_type, fn_ptr_typed.into_pointer_value(), &call_args, "closure_call")
+            .build_indirect_call(
+                indirect_fn_type,
+                fn_ptr_typed.into_pointer_value(),
+                &call_args,
+                "closure_call",
+            )
             .map_err(|e| CompileError::LlvmError(format!("indirect call: {}", e)))?;
         Ok(call_try_basic_value(&call)
             .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false))))

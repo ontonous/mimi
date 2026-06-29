@@ -22,9 +22,23 @@ pub(crate) fn run(
         mimi::runtime::profiler::profiler_init();
     }
     let result = if watch {
-        run_watch(&path, verify_contracts, verify_ffi, allocator, strict, extra_args)
+        run_watch(
+            &path,
+            verify_contracts,
+            verify_ffi,
+            allocator,
+            strict,
+            extra_args,
+        )
     } else {
-        run_once(&path, verify_contracts, verify_ffi, allocator, strict, extra_args)
+        run_once(
+            &path,
+            verify_contracts,
+            verify_ffi,
+            allocator,
+            strict,
+            extra_args,
+        )
     };
     if profile {
         mimi::runtime::profiler::profiler_report();
@@ -135,7 +149,14 @@ fn run_watch(
     println!("Watching {} for changes...", path.display());
     let mut last_modified = get_mtime(path)?;
     // Run once first
-    let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict, extra_args);
+    let _ = run_once(
+        path,
+        verify_contracts,
+        verify_ffi,
+        allocator,
+        strict,
+        extra_args,
+    );
     loop {
         std::thread::sleep(Duration::from_millis(500));
         match get_mtime(path) {
@@ -143,7 +164,14 @@ fn run_watch(
                 last_modified = mtime;
                 println!("\n--- file changed, re-running ---");
                 print!("\x1B[2J\x1B[H");
-                let _ = run_once(path, verify_contracts, verify_ffi, allocator, strict, extra_args);
+                let _ = run_once(
+                    path,
+                    verify_contracts,
+                    verify_ffi,
+                    allocator,
+                    strict,
+                    extra_args,
+                );
             }
             Err(e) => {
                 eprintln!("watch error: {}", e);

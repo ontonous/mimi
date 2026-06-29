@@ -239,10 +239,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     enum_ty
                 }
             }
-            crate::ast::TypeDefKind::Alias(ty) => {
-                types::mimi_type_to_llvm(self.context, ty)
-                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
-            }
+            crate::ast::TypeDefKind::Alias(ty) => types::mimi_type_to_llvm(self.context, ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
             crate::ast::TypeDefKind::Newtype(inner_ty) => {
                 let llvm_ty = types::mimi_type_to_llvm(self.context, inner_ty)
                     .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));

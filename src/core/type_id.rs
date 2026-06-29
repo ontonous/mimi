@@ -215,8 +215,14 @@ mod tests {
         let mut arena = TypeArena::new();
         let body = arena.intern(Type::Name("i32".into(), vec![]));
         // ForAll stores the body Type directly (not TypeId in Phase 1)
-        let f1 = arena.intern(Type::ForAll(vec!["T".into()], Box::new(Type::Name("i32".into(), vec![]))));
-        let f2 = arena.intern(Type::ForAll(vec!["T".into()], Box::new(Type::Name("i32".into(), vec![]))));
+        let f1 = arena.intern(Type::ForAll(
+            vec!["T".into()],
+            Box::new(Type::Name("i32".into(), vec![])),
+        ));
+        let f2 = arena.intern(Type::ForAll(
+            vec!["T".into()],
+            Box::new(Type::Name("i32".into(), vec![])),
+        ));
         assert_eq!(f1, f2);
         assert_eq!(arena.len(), 2); // i32 + ForAll
         let _ = body;

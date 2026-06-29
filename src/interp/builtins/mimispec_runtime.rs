@@ -10,9 +10,8 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(source) => {
-                let c_source = CString::new(source.as_str()).map_err(|_| {
-                    InterpError::new("lexer: source contains null bytes")
-                })?;
+                let c_source = CString::new(source.as_str())
+                    .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
                 let result_ptr = mimi_lexer_tokenize(c_source.as_ptr());
                 if result_ptr.is_null() {
                     return Ok(Value::String("[]".to_string()));
@@ -34,12 +33,13 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(source) => {
-                let c_source = CString::new(source.as_str()).map_err(|_| {
-                    InterpError::new("parse: source contains null bytes")
-                })?;
+                let c_source = CString::new(source.as_str())
+                    .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
                 let result_ptr = mimi_parse_source(c_source.as_ptr());
                 if result_ptr.is_null() {
-                    return Ok(Value::String(r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string()));
+                    return Ok(Value::String(
+                        r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),
+                    ));
                 }
                 // SAFETY: result_ptr was just allocated by mimi_parse_source via alloc_c_string/malloc
                 let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }

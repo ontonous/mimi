@@ -220,7 +220,13 @@ impl crate::verifier::Verifier {
     pub(crate) fn expr_to_z3_bool(&mut self, expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool> {
         match expr {
             Expr::Literal(Lit::Bool(b)) => Some(Z3Bool::from_bool(*b)),
-            Expr::Ident(name) => vars.get_int(name).map(|v| v.ne(Z3Int::from_i64(0))).or_else(|| vars.get_real(name).map(|v| v.ne(Z3Real::from_int(&Z3Int::from_i64(0))))),
+            Expr::Ident(name) => vars
+                .get_int(name)
+                .map(|v| v.ne(Z3Int::from_i64(0)))
+                .or_else(|| {
+                    vars.get_real(name)
+                        .map(|v| v.ne(Z3Real::from_int(&Z3Int::from_i64(0))))
+                }),
             Expr::Old(inner) => {
                 if let Expr::Ident(name) = inner.as_ref() {
                     let old_name = format!("old_{}", name);

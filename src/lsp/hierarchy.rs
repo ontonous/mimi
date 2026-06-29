@@ -249,7 +249,12 @@ fn collect_calls_from_expr(
 
 /// Collect all line numbers where `func_name` is called within the given statements.
 /// Uses AST-based traversal instead of string matching to avoid false positives.
-fn collect_call_sites(stmts: &[Stmt], func_name: &str, lines: &[&str], call_lines: &mut Vec<usize>) {
+fn collect_call_sites(
+    stmts: &[Stmt],
+    func_name: &str,
+    lines: &[&str],
+    call_lines: &mut Vec<usize>,
+) {
     for stmt in stmts {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
@@ -258,7 +263,11 @@ fn collect_call_sites(stmts: &[Stmt], func_name: &str, lines: &[&str], call_line
             Stmt::Let { init: Some(e), .. } => {
                 collect_call_sites_from_expr(e, func_name, lines, call_lines);
             }
-            Stmt::If { cond: _, then_, else_ } => {
+            Stmt::If {
+                cond: _,
+                then_,
+                else_,
+            } => {
                 collect_call_sites(then_, func_name, lines, call_lines);
                 if let Some(els) = else_ {
                     collect_call_sites(els, func_name, lines, call_lines);
@@ -267,7 +276,11 @@ fn collect_call_sites(stmts: &[Stmt], func_name: &str, lines: &[&str], call_line
             Stmt::While { cond: _, body } => {
                 collect_call_sites(body, func_name, lines, call_lines);
             }
-            Stmt::For { var: _, iterable: _, body } => {
+            Stmt::For {
+                var: _,
+                iterable: _,
+                body,
+            } => {
                 collect_call_sites(body, func_name, lines, call_lines);
             }
             _ => {}
@@ -276,7 +289,12 @@ fn collect_call_sites(stmts: &[Stmt], func_name: &str, lines: &[&str], call_line
 }
 
 /// Recursively collect call sites from an expression
-fn collect_call_sites_from_expr(expr: &Expr, func_name: &str, lines: &[&str], call_lines: &mut Vec<usize>) {
+fn collect_call_sites_from_expr(
+    expr: &Expr,
+    func_name: &str,
+    lines: &[&str],
+    call_lines: &mut Vec<usize>,
+) {
     match expr {
         Expr::Call(callee, args) => {
             if let Expr::Ident(name) = callee.as_ref() {
@@ -347,7 +365,9 @@ fn collect_call_sites_from_expr(expr: &Expr, func_name: &str, lines: &[&str], ca
                 collect_call_sites_from_expr(&f.value, func_name, lines, call_lines);
             }
         }
-        Expr::Comprehension { expr, iter, guard, .. } => {
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
             collect_call_sites_from_expr(expr, func_name, lines, call_lines);
             collect_call_sites_from_expr(iter, func_name, lines, call_lines);
             if let Some(g) = guard {

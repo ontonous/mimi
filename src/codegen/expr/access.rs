@@ -59,8 +59,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     {
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
-                        let struct_val =
-                            self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
+                        let struct_val = self.build_load(
+                            BasicTypeEnum::StructType(sty),
+                            elem_ptr,
+                            "elem_struct",
+                        )?;
                         return Ok(Some(struct_val));
                     }
                 }
@@ -111,7 +114,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Expr::Ident(name) = obj {
             if self.shared_var_names.contains(name.as_str()) {
                 if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
-                    if let Some(val) = self.compile_shared_field_load(obj, name, alloca, field_name, vars)? {
+                    if let Some(val) =
+                        self.compile_shared_field_load(obj, name, alloca, field_name, vars)?
+                    {
                         return Ok(val);
                     }
                 }
@@ -179,7 +184,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let heap_ptr = self
-            .build_load(BasicTypeEnum::PointerType(ptr_ty), alloca, &format!("{}_heap_ptr", name))?
+            .build_load(
+                BasicTypeEnum::PointerType(ptr_ty),
+                alloca,
+                &format!("{}_heap_ptr", name),
+            )?
             .into_pointer_value();
         let sty = self
             .type_llvm
@@ -241,10 +250,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let obj_val = self.compile_expr(obj, vars)?;
         let idx_val = self.compile_expr(idx_expr, vars)?;
         match obj_val {
-            BasicValueEnum::PointerValue(pv) => self.compile_index_on_pointer(pv, obj, idx_val, vars),
-            BasicValueEnum::StructValue(sv) => {
-                self.compile_index_on_struct(sv, obj, idx_val, vars)
+            BasicValueEnum::PointerValue(pv) => {
+                self.compile_index_on_pointer(pv, obj, idx_val, vars)
             }
+            BasicValueEnum::StructValue(sv) => self.compile_index_on_struct(sv, obj, idx_val, vars),
             BasicValueEnum::ArrayValue(_) => self.compile_index_on_array(obj_val, idx_val),
             _ => Err("index requires a list/array pointer".into()),
         }
@@ -276,7 +285,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Fallback: treat as raw pointer to i64 array
         let elem_ptr = self.build_in_bounds_gep(self.context.i64_type(), pv, &[idx_iv], "elem")?;
-        self.build_load(BasicTypeEnum::IntType(self.context.i64_type()), elem_ptr, "elem_val")
+        self.build_load(
+            BasicTypeEnum::IntType(self.context.i64_type()),
+            elem_ptr,
+            "elem_val",
+        )
     }
 
     fn compile_index_on_struct(
@@ -304,9 +317,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         idx_val: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let idx = match idx_val {
-            BasicValueEnum::IntValue(iv) => iv.get_zero_extended_constant().ok_or_else(|| {
-                "array index must be a compile-time constant".to_string()
-            })? as u32,
+            BasicValueEnum::IntValue(iv) => iv
+                .get_zero_extended_constant()
+                .ok_or_else(|| "array index must be a compile-time constant".to_string())?
+                as u32,
             _ => return Err("index must be i64".into()),
         };
         self.build_extract_value(obj_val.into_array_value().into(), idx, "arr_elem")
@@ -316,9 +330,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(self.context.i64_type()),
-                BasicTypeEnum::PointerType(
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                ),
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
             ],
             false,
         )
@@ -345,17 +357,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_ptr_i64 = self
             .build_bit_cast(
                 data_ptr.into(),
-                self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
                 "data_i64",
             )?
             .into_pointer_value();
         let elem_ptr =
             self.build_in_bounds_gep(self.context.i64_type(), data_ptr_i64, &[idx], "elem")?;
-        Ok(self.build_load(
-            BasicTypeEnum::IntType(self.context.i64_type()),
-            elem_ptr,
-            "elem_val",
-        )?.into_int_value())
+        Ok(self
+            .build_load(
+                BasicTypeEnum::IntType(self.context.i64_type()),
+                elem_ptr,
+                "elem_val",
+            )?
+            .into_int_value())
     }
 
     /// Try to convert a loaded i64 list element into its real struct/string form.
@@ -366,7 +382,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         if let Expr::Ident(var_name) = obj {
-            if let Some(converted) = self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))? {
+            if let Some(converted) =
+                self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
+            {
                 return Ok(Some(converted));
             }
         }
@@ -414,12 +432,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| format!("tuple field {} out of bounds", index))?;
                 self.build_load(*field_ty, field_gep, &format!("tuple_{}", index))?
             }
-            BasicValueEnum::StructValue(sv) => self
-                .build_extract_value(sv.into(), index as u32, &format!("tuple_{}", index))?,
-            _ => return Err(CompileError::Generic(format!(
-                "tuple index requires a tuple value, got {:?}",
-                tuple_val
-            ))),
+            BasicValueEnum::StructValue(sv) => {
+                self.build_extract_value(sv.into(), index as u32, &format!("tuple_{}", index))?
+            }
+            _ => {
+                return Err(CompileError::Generic(format!(
+                    "tuple index requires a tuple value, got {:?}",
+                    tuple_val
+                )))
+            }
         })
     }
 }

@@ -128,10 +128,12 @@ fn json_get_string_exists() {
 
 #[test]
 fn json_get_string_missing_key() {
-    let v = run_source(
-        r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#,
+    let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
+    assert_eq!(
+        v,
+        interp::Value::String("".into()),
+        "json_get_string with missing key returns empty string"
     );
-    assert_eq!(v, interp::Value::String("".into()), "json_get_string with missing key returns empty string");
 }
 
 #[test]
@@ -174,7 +176,11 @@ fn json_get_element_middle() {
 #[test]
 fn json_get_element_out_of_bounds() {
     let v = run_source(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
-    assert_eq!(v, interp::Value::String("".into()), "json_get_element out of bounds returns empty string");
+    assert_eq!(
+        v,
+        interp::Value::String("".into()),
+        "json_get_element out of bounds returns empty string"
+    );
 }
 
 // json_get_element: nested objects in arrays
@@ -235,10 +241,12 @@ func main() -> str {
 
 #[test]
 fn json_get_bool_missing_key() {
-    let v = run_source(
-        r#"func main() -> string { json_get_string("{\"a\": true}", "missing") }"#,
+    let v = run_source(r#"func main() -> string { json_get_string("{\"a\": true}", "missing") }"#);
+    assert_eq!(
+        v,
+        interp::Value::String("".into()),
+        "json_get_string with missing key returns empty string"
     );
-    assert_eq!(v, interp::Value::String("".into()), "json_get_string with missing key returns empty string");
 }
 
 #[test]
@@ -250,7 +258,11 @@ fn json_has_key_present() {
 #[test]
 fn json_has_key_missing() {
     let v = run_source(r#"func main() -> bool { json_get_string("{\"x\":\"y\"}", "z") != "" }"#);
-    assert_eq!(v, interp::Value::Bool(false), "json_get_string of missing key returns empty string, not equal to \"\"");
+    assert_eq!(
+        v,
+        interp::Value::Bool(false),
+        "json_get_string of missing key returns empty string, not equal to \"\""
+    );
 }
 
 // ===== is_valid_json =====
@@ -555,12 +567,16 @@ fn json_array_length_nested() {
 
 #[test]
 fn json_array_length_objects() {
-    let v = run_source("func main() -> i32 { json_array_length(\"[{\\\"a\\\": 1}, {\\\"b\\\": 2}]\") }");
+    let v = run_source(
+        "func main() -> i32 { json_array_length(\"[{\\\"a\\\": 1}, {\\\"b\\\": 2}]\") }",
+    );
     assert_eq!(v, interp::Value::Int(2));
 }
 
 #[test]
 fn json_array_length_mixed() {
-    let v = run_source("func main() -> i32 { json_array_length(\"[1, \\\"hello\\\", true, null, []]\") }");
+    let v = run_source(
+        "func main() -> i32 { json_array_length(\"[1, \\\"hello\\\", true, null, []]\") }",
+    );
     assert_eq!(v, interp::Value::Int(5));
 }

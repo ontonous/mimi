@@ -168,18 +168,18 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("listdir expects 1 argument (path)"));
         }
         match &args[0] {
-            Value::String(path) => {
-                match std::fs::read_dir(path) {
-                    Ok(rd) => {
-                        let entries: Vec<Value> = rd
-                            .filter_map(|e| e.ok())
-                            .filter_map(|e| e.file_name().to_str().map(|s| Value::String(s.to_string())))
-                            .collect();
-                        Ok(Value::List(entries))
-                    }
-                    Err(_) => Ok(Value::List(vec![])),
+            Value::String(path) => match std::fs::read_dir(path) {
+                Ok(rd) => {
+                    let entries: Vec<Value> = rd
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            e.file_name().to_str().map(|s| Value::String(s.to_string()))
+                        })
+                        .collect();
+                    Ok(Value::List(entries))
                 }
-            }
+                Err(_) => Ok(Value::List(vec![])),
+            },
             _ => Err(InterpError::new("listdir expects a string path")),
         }
     }
@@ -210,7 +210,10 @@ impl<'a> Interpreter<'a> {
         }
         match (&args[0], &args[1]) {
             (Value::String(a), Value::String(b)) => {
-                let joined = std::path::Path::new(a).join(b).to_string_lossy().into_owned();
+                let joined = std::path::Path::new(a)
+                    .join(b)
+                    .to_string_lossy()
+                    .into_owned();
                 Ok(Value::String(joined))
             }
             _ => Err(InterpError::new("path_join expects (string, string)")),
@@ -276,7 +279,9 @@ impl<'a> Interpreter<'a> {
             Value::String(path) => {
                 let mut results = Vec::new();
                 Self::walk_dir_recursive_impl(path, &mut results);
-                Ok(Value::List(results.into_iter().map(Value::String).collect()))
+                Ok(Value::List(
+                    results.into_iter().map(Value::String).collect(),
+                ))
             }
             _ => Err(InterpError::new("walk_dir expects a string path")),
         }
@@ -326,10 +331,7 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(cmd) => {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output();
+                let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -417,10 +419,7 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(cmd) => {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output();
+                let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -435,9 +434,7 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_set_env(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new(
-                "set_env expects 2 arguments (key, value)",
-            ));
+            return Err(InterpError::new("set_env expects 2 arguments (key, value)"));
         }
         match (&args[0], &args[1]) {
             (Value::String(key), Value::String(value)) => {
@@ -453,49 +450,51 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_read_file_partial(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("read_file_partial expects 2 arguments (path, max_bytes)"));
+            return Err(InterpError::new(
+                "read_file_partial expects 2 arguments (path, max_bytes)",
+            ));
         }
         match (&args[0], &args[1]) {
-            (Value::String(path), Value::Int(max)) => {
-                match std::fs::read(path) {
-                    Ok(bytes) => {
-                        let limit = (*max).max(0) as usize;
-                        let slice = if limit > 0 && bytes.len() > limit {
-                            &bytes[..limit]
-                        } else {
-                            &bytes
-                        };
-                        let s = String::from_utf8_lossy(slice).to_string();
-                        Ok(Value::String(s))
-                    }
-                    Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
+            (Value::String(path), Value::Int(max)) => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let limit = (*max).max(0) as usize;
+                    let slice = if limit > 0 && bytes.len() > limit {
+                        &bytes[..limit]
+                    } else {
+                        &bytes
+                    };
+                    let s = String::from_utf8_lossy(slice).to_string();
+                    Ok(Value::String(s))
                 }
-            }
+                Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
+            },
             _ => Err(InterpError::new("read_file_partial expects (string, int)")),
         }
     }
 
     pub(crate) fn builtin_read_file_bytes(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
-            return Err(InterpError::new("read_file_bytes expects 1 argument (path)"));
+            return Err(InterpError::new(
+                "read_file_bytes expects 1 argument (path)",
+            ));
         }
         match &args[0] {
-            Value::String(path) => {
-                match std::fs::read(path) {
-                    Ok(bytes) => {
-                        let s = String::from_utf8_lossy(&bytes).to_string();
-                        Ok(Value::String(s))
-                    }
-                    Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
+            Value::String(path) => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let s = String::from_utf8_lossy(&bytes).to_string();
+                    Ok(Value::String(s))
                 }
-            }
+                Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
+            },
             _ => Err(InterpError::new("read_file_bytes expects a string path")),
         }
     }
 
     pub(crate) fn builtin_write_file_bytes(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("write_file_bytes expects 2 arguments (path, data)"));
+            return Err(InterpError::new(
+                "write_file_bytes expects 2 arguments (path, data)",
+            ));
         }
         match (&args[0], &args[1]) {
             (Value::String(path), Value::String(data)) => {
@@ -504,13 +503,20 @@ impl<'a> Interpreter<'a> {
                     Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
                 }
             }
-            _ => Err(InterpError::new("write_file_bytes expects (string, string)")),
+            _ => Err(InterpError::new(
+                "write_file_bytes expects (string, string)",
+            )),
         }
     }
 
-    pub(crate) fn builtin_read_lines_each(&mut self, args: Vec<Value>) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_read_lines_each(
+        &mut self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("read_lines_each expects 2 arguments (path, callback)"));
+            return Err(InterpError::new(
+                "read_lines_each expects 2 arguments (path, callback)",
+            ));
         }
         match (&args[0], &args[1]) {
             (Value::String(path), callback) => {
@@ -526,7 +532,12 @@ impl<'a> Interpreter<'a> {
                                 break;
                             }
                             match callback {
-                                Value::Closure { params, body, captured, .. } => {
+                                Value::Closure {
+                                    params,
+                                    body,
+                                    captured,
+                                    ..
+                                } => {
                                     if !params.is_empty() {
                                         self.push_scope();
                                         for (n, v) in captured {
@@ -539,7 +550,7 @@ impl<'a> Interpreter<'a> {
                                 }
                                 _ => {
                                     return Err(InterpError::new(
-                                        "read_lines_each expects a closure as second argument"
+                                        "read_lines_each expects a closure as second argument",
                                     ));
                                 }
                             }
@@ -553,13 +564,17 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Int(count))
             }
-            _ => Err(InterpError::new("read_lines_each expects (string, closure)")),
+            _ => Err(InterpError::new(
+                "read_lines_each expects (string, closure)",
+            )),
         }
     }
 
     pub(crate) fn builtin_read_lines_json(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
-            return Err(InterpError::new("read_lines_json expects 1 argument (path)"));
+            return Err(InterpError::new(
+                "read_lines_json expects 1 argument (path)",
+            ));
         }
         match &args[0] {
             Value::String(path) => {
@@ -570,7 +585,9 @@ impl<'a> Interpreter<'a> {
                 let mut result = String::from("[");
                 let mut first = true;
                 for line in reader.lines().map_while(Result::ok) {
-                    if !first { result.push(','); }
+                    if !first {
+                        result.push(',');
+                    }
                     first = false;
                     result.push('"');
                     for ch in line.chars() {
@@ -629,12 +646,13 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("base64_decode expects 1 argument"));
         }
         match &args[0] {
-            Value::String(data) => {
-                match crate::runtime::base64_decode_str(data) {
-                    Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
-                    Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String("invalid base64".to_string())])),
-                }
-            }
+            Value::String(data) => match crate::runtime::base64_decode_str(data) {
+                Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
+                Err(_) => Ok(Value::Variant(
+                    "Err".into(),
+                    vec![Value::String("invalid base64".to_string())],
+                )),
+            },
             _ => Err(InterpError::new("base64_decode expects a string")),
         }
     }

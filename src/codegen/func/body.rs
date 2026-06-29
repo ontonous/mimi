@@ -40,14 +40,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_cond_br(cond_bool, body_bb, merge_bb)?;
 
         self.builder.position_at_end(body_bb);
-        self.emit_loop_body_block(
-            body,
-            vars,
-            loop_bb,
-            merge_bb,
-            |_, _| Ok(()),
-            |_, _| Ok(()),
-        )?;
+        self.emit_loop_body_block(body, vars, loop_bb, merge_bb, |_, _| Ok(()), |_, _| Ok(()))?;
 
         self.builder.position_at_end(merge_bb);
         Ok(())
@@ -114,14 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_cond_br(true_val, body_bb, merge_bb)?;
 
         self.builder.position_at_end(body_bb);
-        self.emit_loop_body_block(
-            body,
-            vars,
-            loop_bb,
-            merge_bb,
-            |_, _| Ok(()),
-            |_, _| Ok(()),
-        )?;
+        self.emit_loop_body_block(body, vars, loop_bb, merge_bb, |_, _| Ok(()), |_, _| Ok(()))?;
 
         self.builder.position_at_end(merge_bb);
         Ok(())
@@ -143,8 +129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let start_iv = Self::expect_int_value(start_val, "range start must be i64")?;
             let end_iv = Self::expect_int_value(end_val, "range end must be i64")?;
 
-            let (idx_alloca, loop_bb, body_bb, merge_bb) =
-                self.build_for_index_header(start_iv)?;
+            let (idx_alloca, loop_bb, body_bb, merge_bb) = self.build_for_index_header(start_iv)?;
 
             self.builder.position_at_end(loop_bb);
             self.build_for_index_condition(idx_alloca, end_iv, body_bb, merge_bb)?;
@@ -550,7 +535,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn build_for_index_header(
         &self,
         start_iv: IntValue<'ctx>,
-    ) -> MimiResult<(PointerValue<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>)> {
+    ) -> MimiResult<(
+        PointerValue<'ctx>,
+        BasicBlock<'ctx>,
+        BasicBlock<'ctx>,
+        BasicBlock<'ctx>,
+    )> {
         let function = self.current_function().ok_or_else(|| {
             CompileError::LlvmError("codegen: no current function for for".to_string())
         })?;
@@ -587,8 +577,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn build_for_list_header(
         &self,
         list_ptr: PointerValue<'ctx>,
-    ) -> MimiResult<(PointerValue<'ctx>, IntValue<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>)>
-    {
+    ) -> MimiResult<(
+        PointerValue<'ctx>,
+        IntValue<'ctx>,
+        BasicBlock<'ctx>,
+        BasicBlock<'ctx>,
+        BasicBlock<'ctx>,
+    )> {
         let function = self.current_function().ok_or_else(|| {
             CompileError::LlvmError("codegen: no current function for for".to_string())
         })?;
@@ -659,11 +654,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(list_struct_ty, list_ptr, 1, "list.data")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let data_ptr = self.build_load(
-            BasicTypeEnum::PointerType(i8_ptr_ty),
-            data_gep,
-            "data",
-        )?;
+        let data_ptr = self.build_load(BasicTypeEnum::PointerType(i8_ptr_ty), data_gep, "data")?;
         let data_pv = match data_ptr {
             BasicValueEnum::PointerValue(pv) => pv,
             _ => return Err(CompileError::LlvmError("data must be pointer".to_string())),
@@ -681,9 +672,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "elem",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            let raw_str_ptr = match self.build_load(BasicTypeEnum::PointerType(i8_ptr_ty), elem_ptr, "raw_str_ptr")? {
+            let raw_str_ptr = match self.build_load(
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                elem_ptr,
+                "raw_str_ptr",
+            )? {
                 BasicValueEnum::PointerValue(pv) => pv,
-                _ => return Err(CompileError::LlvmError("raw_str_ptr must be pointer".to_string())),
+                _ => {
+                    return Err(CompileError::LlvmError(
+                        "raw_str_ptr must be pointer".to_string(),
+                    ))
+                }
             };
             // Wrap C string into Mimi string struct {ptr, len}
             let mimi_str = self.wrap_c_string(raw_str_ptr)?;

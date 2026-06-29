@@ -30,11 +30,15 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     for ef in &exported_funcs {
         let extern_func = ast::ExternFunc {
             name: ef.name.clone(),
-            params: ef.params.iter().map(|p| ast::ExternParam {
-                name: p.name.clone(),
-                ty: p.ty.clone(),
-                cap_mode: None,
-            }).collect(),
+            params: ef
+                .params
+                .iter()
+                .map(|p| ast::ExternParam {
+                    name: p.name.clone(),
+                    ty: p.ty.clone(),
+                    cap_mode: None,
+                })
+                .collect(),
             ret: ef.ret.clone(),
             requires: None,
             ensures: None,
@@ -44,7 +48,11 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
         extern_funcs.push(extern_func);
     }
 
-    let pkg_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mimi_module").to_string();
+    let pkg_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mimi_module")
+        .to_string();
 
     // Create output directory
     fs::create_dir_all(output_dir)
@@ -66,7 +74,8 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate C++ bindings
     let cpp_gen = ffi::cpp_bind::CppBindGenerator::new(type_defs.clone(), &pkg_name);
-    let cpp_header = cpp_gen.generate(&extern_funcs)
+    let cpp_header = cpp_gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("C++ generation failed: {}", e))?;
     let cpp_path = output_dir.join(format!("{}.hpp", pkg_name));
     fs::write(&cpp_path, &cpp_header)
@@ -75,7 +84,8 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate Rust bindings
     let rust_gen = ffi::rust_bind::RustBindGenerator::new(type_defs.clone(), &pkg_name);
-    let rust_code = rust_gen.generate(&extern_funcs)
+    let rust_code = rust_gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("Rust generation failed: {}", e))?;
     let rust_path = output_dir.join(format!("{}.rs", pkg_name));
     fs::write(&rust_path, &rust_code)
@@ -84,7 +94,8 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate Go bindings
     let go_gen = ffi::go_bind::GoBindGenerator::new(type_defs.clone(), &pkg_name);
-    let go_code = go_gen.generate(&extern_funcs)
+    let go_code = go_gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("Go generation failed: {}", e))?;
     let go_path = output_dir.join(format!("{}.go", pkg_name));
     fs::write(&go_path, &go_code)
@@ -93,7 +104,8 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate Node.js bindings
     let node_gen = ffi::node_bind::NodeBindGenerator::new(type_defs.clone(), &pkg_name);
-    let node_code = node_gen.generate(&extern_funcs)
+    let node_code = node_gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("Node.js generation failed: {}", e))?;
     let node_path = output_dir.join(format!("{}_napi.c", pkg_name));
     fs::write(&node_path, &node_code)
@@ -101,7 +113,8 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     println!("  [Node.js]  {}", node_path.display());
 
     // Generate TypeScript declarations
-    let ts_code = node_gen.generate_dts(&extern_funcs)
+    let ts_code = node_gen
+        .generate_dts(&extern_funcs)
         .map_err(|e| format!("TypeScript generation failed: {}", e))?;
     let ts_path = output_dir.join(format!("{}.d.ts", pkg_name));
     fs::write(&ts_path, &ts_code)
@@ -110,14 +123,16 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate Python bindings
     let py_gen = ffi::py_bind::PyBindGenerator::new(type_defs.clone(), &pkg_name);
-    let py_cpp = py_gen.generate(&extern_funcs)
+    let py_cpp = py_gen
+        .generate(&extern_funcs)
         .map_err(|e| format!("Python binding generation failed: {}", e))?;
     let py_path = output_dir.join(format!("{}_pybind.cpp", pkg_name));
     fs::write(&py_path, &py_cpp)
         .map_err(|e| format!("failed to write {}: {}", py_path.display(), e))?;
     println!("  [Python]   {}", py_path.display());
 
-    let pyi = py_gen.generate_pyi(&extern_funcs)
+    let pyi = py_gen
+        .generate_pyi(&extern_funcs)
         .map_err(|e| format!("Python stub generation failed: {}", e))?;
     let pyi_path = output_dir.join(format!("{}.pyi", pkg_name));
     fs::write(&pyi_path, &pyi)
@@ -126,14 +141,16 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Generate Java bindings
     let java_gen = ffi::jni_bind::JniBindGenerator::new(type_defs.clone(), &pkg_name);
-    let java_c = java_gen.generate_c(&extern_funcs)
+    let java_c = java_gen
+        .generate_c(&extern_funcs)
         .map_err(|e| format!("Java JNI generation failed: {}", e))?;
     let java_c_path = output_dir.join(format!("{}_jni.c", pkg_name));
     fs::write(&java_c_path, &java_c)
         .map_err(|e| format!("failed to write {}: {}", java_c_path.display(), e))?;
     println!("  [Java/JNI] {}", java_c_path.display());
 
-    let java_class = java_gen.generate_java(&extern_funcs)
+    let java_class = java_gen
+        .generate_java(&extern_funcs)
         .map_err(|e| format!("Java class generation failed: {}", e))?;
     let java_path = output_dir.join(format!("{}.java", capitalize(&pkg_name)));
     fs::write(&java_path, &java_class)
@@ -141,7 +158,10 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     println!("  [Java]     {}", java_path.display());
 
     println!();
-    println!("Generated 9 binding files for {} functions.", extern_funcs.len());
+    println!(
+        "Generated 9 binding files for {} functions.",
+        extern_funcs.len()
+    );
 
     Ok(())
 }
@@ -161,7 +181,10 @@ fn collect_extern_and_types(
             }
             ast::Item::Module(m) => {
                 collect_extern_and_types(
-                    &ast::File { imports: Vec::new(), items: m.items.clone() },
+                    &ast::File {
+                        imports: Vec::new(),
+                        items: m.items.clone(),
+                    },
                     extern_funcs,
                     type_defs,
                 );
@@ -188,7 +211,10 @@ fn collect_exported_and_types(
             }
             ast::Item::Module(m) => {
                 collect_exported_and_types(
-                    &ast::File { imports: Vec::new(), items: m.items.clone() },
+                    &ast::File {
+                        imports: Vec::new(),
+                        items: m.items.clone(),
+                    },
                     exported_funcs,
                     type_defs,
                 );

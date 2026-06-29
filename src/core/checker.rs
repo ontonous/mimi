@@ -215,7 +215,8 @@ impl<'a> Checker<'a> {
                 remap.insert(*old_id, i as u32);
             }
             let remapped_body = self.remap_type_vars(&resolved, &remap);
-            let param_names: Vec<String> = (0..generalized.len()).map(|i| format!("T{}", i)).collect();
+            let param_names: Vec<String> =
+                (0..generalized.len()).map(|i| format!("T{}", i)).collect();
             Type::ForAll(param_names, Box::new(remapped_body))
         }
     }
@@ -236,34 +237,31 @@ impl<'a> Checker<'a> {
                 Box::new(self.remap_type_vars(err, remap)),
             ),
             Type::Tuple(elems) => Type::Tuple(
-                elems.iter().map(|e| self.remap_type_vars(e, remap)).collect(),
+                elems
+                    .iter()
+                    .map(|e| self.remap_type_vars(e, remap))
+                    .collect(),
             ),
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-                Type::Func(
-                    args.iter().map(|a| self.remap_type_vars(a, remap)).collect(),
-                    Box::new(self.remap_type_vars(ret, remap)),
-                )
+            Type::Func(args, ret) | Type::ExternFunc(args, ret) => Type::Func(
+                args.iter()
+                    .map(|a| self.remap_type_vars(a, remap))
+                    .collect(),
+                Box::new(self.remap_type_vars(ret, remap)),
+            ),
+            Type::Ref(lt, inner) => {
+                Type::Ref(lt.clone(), Box::new(self.remap_type_vars(inner, remap)))
             }
-            Type::Ref(lt, inner) => Type::Ref(
-                lt.clone(),
-                Box::new(self.remap_type_vars(inner, remap)),
-            ),
-            Type::RefMut(lt, inner) => Type::RefMut(
-                lt.clone(),
-                Box::new(self.remap_type_vars(inner, remap)),
-            ),
+            Type::RefMut(lt, inner) => {
+                Type::RefMut(lt.clone(), Box::new(self.remap_type_vars(inner, remap)))
+            }
             Type::Shared(inner) => Type::Shared(Box::new(self.remap_type_vars(inner, remap))),
             Type::LocalShared(inner) => {
                 Type::LocalShared(Box::new(self.remap_type_vars(inner, remap)))
             }
             Type::Weak(inner) => Type::Weak(Box::new(self.remap_type_vars(inner, remap))),
-            Type::WeakLocal(inner) => {
-                Type::WeakLocal(Box::new(self.remap_type_vars(inner, remap)))
-            }
+            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.remap_type_vars(inner, remap))),
             Type::RawPtr(inner) => Type::RawPtr(Box::new(self.remap_type_vars(inner, remap))),
-            Type::RawPtrMut(inner) => {
-                Type::RawPtrMut(Box::new(self.remap_type_vars(inner, remap)))
-            }
+            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(self.remap_type_vars(inner, remap))),
             Type::CShared(inner) => Type::CShared(Box::new(self.remap_type_vars(inner, remap))),
             Type::CBorrow(inner) => Type::CBorrow(Box::new(self.remap_type_vars(inner, remap))),
             Type::CBorrowMut(inner) => {
@@ -279,12 +277,13 @@ impl<'a> Checker<'a> {
             }
             Type::Name(name, args) => Type::Name(
                 name.clone(),
-                args.iter().map(|a| self.remap_type_vars(a, remap)).collect(),
+                args.iter()
+                    .map(|a| self.remap_type_vars(a, remap))
+                    .collect(),
             ),
-            Type::ForAll(params, body) => Type::ForAll(
-                params.clone(),
-                Box::new(self.remap_type_vars(body, remap)),
-            ),
+            Type::ForAll(params, body) => {
+                Type::ForAll(params.clone(), Box::new(self.remap_type_vars(body, remap)))
+            }
             _ => ty.clone(),
         }
     }
@@ -320,14 +319,20 @@ impl<'a> Checker<'a> {
                 Box::new(self.resolve_and_collect_inner(err, free_vars)),
             ),
             Type::Tuple(elems) => Type::Tuple(
-                elems.iter().map(|e| self.resolve_and_collect_inner(e, free_vars)).collect(),
+                elems
+                    .iter()
+                    .map(|e| self.resolve_and_collect_inner(e, free_vars))
+                    .collect(),
             ),
             Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
                 let resolved_args = args
                     .iter()
                     .map(|a| self.resolve_and_collect_inner(a, free_vars))
                     .collect();
-                Type::Func(resolved_args, Box::new(self.resolve_and_collect_inner(ret, free_vars)))
+                Type::Func(
+                    resolved_args,
+                    Box::new(self.resolve_and_collect_inner(ret, free_vars)),
+                )
             }
             Type::Ref(lt, inner) => Type::Ref(
                 lt.clone(),
@@ -488,11 +493,16 @@ impl<'a> Checker<'a> {
                 Box::new(self.substitute_type_vars(ok, subs)),
                 Box::new(self.substitute_type_vars(err, subs)),
             ),
-            Type::Tuple(elems) => {
-                Type::Tuple(elems.iter().map(|e| self.substitute_type_vars(e, subs)).collect())
-            }
+            Type::Tuple(elems) => Type::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.substitute_type_vars(e, subs))
+                    .collect(),
+            ),
             Type::Func(args, ret) => Type::Func(
-                args.iter().map(|a| self.substitute_type_vars(a, subs)).collect(),
+                args.iter()
+                    .map(|a| self.substitute_type_vars(a, subs))
+                    .collect(),
                 Box::new(self.substitute_type_vars(ret, subs)),
             ),
             Type::Ref(lt, inner) => {
@@ -503,7 +513,9 @@ impl<'a> Checker<'a> {
             }
             Type::Name(name, args) => Type::Name(
                 name.clone(),
-                args.iter().map(|a| self.substitute_type_vars(a, subs)).collect(),
+                args.iter()
+                    .map(|a| self.substitute_type_vars(a, subs))
+                    .collect(),
             ),
             // Bug 7 fix: added missing container variants
             Type::Array(inner, size) => {
@@ -528,16 +540,20 @@ impl<'a> Checker<'a> {
                 Type::CBorrowMut(Box::new(self.substitute_type_vars(inner, subs)))
             }
             Type::CBuffer(inner) => Type::CBuffer(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::Newtype(name, inner) => {
-                Type::Newtype(name.clone(), Box::new(self.substitute_type_vars(inner, subs)))
-            }
+            Type::Newtype(name, inner) => Type::Newtype(
+                name.clone(),
+                Box::new(self.substitute_type_vars(inner, subs)),
+            ),
             Type::ExternFunc(args, ret) => Type::ExternFunc(
-                args.iter().map(|a| self.substitute_type_vars(a, subs)).collect(),
+                args.iter()
+                    .map(|a| self.substitute_type_vars(a, subs))
+                    .collect(),
                 Box::new(self.substitute_type_vars(ret, subs)),
             ),
-            Type::ForAll(params, body) => {
-                Type::ForAll(params.clone(), Box::new(self.substitute_type_vars(body, subs)))
-            }
+            Type::ForAll(params, body) => Type::ForAll(
+                params.clone(),
+                Box::new(self.substitute_type_vars(body, subs)),
+            ),
             _ => ty.clone(),
         }
     }

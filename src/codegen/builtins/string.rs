@@ -322,12 +322,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let s_ptr = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 0, "str_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                .into_pointer_value(),
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_parse_int: first arg must be string, int, or float".to_string(),
@@ -400,12 +399,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let s_ptr = match &args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 0, "str_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
+                .into_pointer_value(),
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "str_parse_float: first arg must be string, int, or float".to_string(),

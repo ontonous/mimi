@@ -322,12 +322,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .type_defs
             .get(&type_name_str)
             .map(|td| match &td.kind {
-                TypeDefKind::Record(fields) => {
-                    fields.iter().map(|f| f.name.clone()).collect()
-                }
-                TypeDefKind::Enum(variants) => {
-                    variants.iter().map(|v| v.name.clone()).collect()
-                }
+                TypeDefKind::Record(fields) => fields.iter().map(|f| f.name.clone()).collect(),
+                TypeDefKind::Enum(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 _ => vec![],
             })
             .unwrap_or_default();
@@ -353,9 +349,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .type_defs
             .get(&type_name_str)
             .map(|td| match &td.kind {
-                TypeDefKind::Enum(variants) => {
-                    variants.iter().map(|v| v.name.clone()).collect()
-                }
+                TypeDefKind::Enum(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 _ => vec![],
             })
             .unwrap_or_default();
@@ -389,9 +383,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .type_defs
                 .get(&type_name)
                 .map(|td| match &td.kind {
-                    TypeDefKind::Record(fields) => {
-                        fields.iter().map(|f| f.name.clone()).collect()
-                    }
+                    TypeDefKind::Record(fields) => fields.iter().map(|f| f.name.clone()).collect(),
                     _ => vec![],
                 })
                 .unwrap_or_default();
@@ -491,9 +483,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::FloatValue(fv) => self
                         .builder
                         .build_float_to_unsigned_int(fv, i64_ty, "float_to_i64")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("fptosi error: {}", e))
-                        })?,
+                        .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?,
                     BasicValueEnum::PointerValue(pv) => {
                         self.build_ptr_to_int(pv, i64_ty, "ptr_to_i64")?
                     }
@@ -521,22 +511,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             let result_alloca = self.build_alloca(result_list_ty, "values_result")?;
             let result_len_gep = self
                 .gep()
-                .build_struct_gep(
-                    result_list_ty,
-                    result_alloca,
-                    0,
-                    "values_result_len",
-                )
+                .build_struct_gep(result_list_ty, result_alloca, 0, "values_result_len")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.build_store(result_len_gep, i64_ty.const_int(field_count as u64, false))?;
             let result_data_gep = self
                 .gep()
-                .build_struct_gep(
-                    result_list_ty,
-                    result_alloca,
-                    1,
-                    "values_result_data",
-                )
+                .build_struct_gep(result_list_ty, result_alloca, 1, "values_result_data")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let values_data_void = self.build_bit_cast(
                 BasicValueEnum::PointerValue(values_data),
@@ -736,12 +716,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ];
                 let fn_call = self
                     .builder
-                    .build_indirect_call(
-                        indirect_fn_type,
-                        fn_ptr_typed,
-                        &call_args,
-                        "fn_call",
-                    )
+                    .build_indirect_call(indirect_fn_type, fn_ptr_typed, &call_args, "fn_call")
                     .map_err(|e| CompileError::LlvmError(format!("indirect call: {}", e)))?;
                 call_try_basic_value(&fn_call).ok_or("function returned void")?
             }

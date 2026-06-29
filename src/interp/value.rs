@@ -192,7 +192,7 @@ pub enum Value {
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
     Error(String),
-    ArenaRef(usize, usize, u64),  // (arena_id, slot_idx, generation)
+    ArenaRef(usize, usize, u64), // (arena_id, slot_idx, generation)
     ArenaBlock(usize),
     QuoteAst(Box<QuotedAst>),
     Newtype(Box<Value>),
@@ -710,10 +710,16 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
             }
             false
         }
-        Value::LocalShared(inner) => contains_arena_ref(&inner.0.lock().expect("local_shared lock not poisoned"), arena_id),
+        Value::LocalShared(inner) => contains_arena_ref(
+            &inner.0.lock().expect("local_shared lock not poisoned"),
+            arena_id,
+        ),
         Value::WeakLocal(inner) => {
             if let Some(rc) = inner.0.upgrade() {
-                contains_arena_ref(&rc.lock().expect("local_shared lock not poisoned"), arena_id)
+                contains_arena_ref(
+                    &rc.lock().expect("local_shared lock not poisoned"),
+                    arena_id,
+                )
             } else {
                 false
             }
@@ -846,12 +852,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                 false
             }
         }
-        (Value::LocalShared(a), Value::LocalShared(b)) => {
-            values_equal(
-                &a.0.lock().expect("local_shared lock not poisoned"),
-                &b.0.lock().expect("local_shared lock not poisoned"),
-            )
-        }
+        (Value::LocalShared(a), Value::LocalShared(b)) => values_equal(
+            &a.0.lock().expect("local_shared lock not poisoned"),
+            &b.0.lock().expect("local_shared lock not poisoned"),
+        ),
         (Value::Cap(a), Value::Cap(b)) => a == b,
         (
             Value::Range {

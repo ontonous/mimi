@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, ExternParam, FuncDef, Type, TypeAttribute, TypeDef, TypeDefKind, VariantPayload};
+use crate::ast::{
+    ExternFunc, ExternParam, FuncDef, Type, TypeAttribute, TypeDef, TypeDefKind, VariantPayload,
+};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// C header generator
@@ -44,25 +46,49 @@ impl CHeaderGenerator {
         writeln!(header, "void mimi_shared_release(MimiHandle handle);")?;
         writeln!(header, "/** Get a raw pointer to the inner value. Pointer valid only while handle alive. Returns NULL if invalid. */")?;
         writeln!(header, "void* mimi_shared_get_ptr(MimiHandle handle);")?;
-        writeln!(header, "/** Create a shared handle from a heap-allocated Value (transfers ownership). */")?;
+        writeln!(
+            header,
+            "/** Create a shared handle from a heap-allocated Value (transfers ownership). */"
+        )?;
         writeln!(header, "MimiHandle mimi_shared_create(void* value);")?;
         writeln!(header)?;
 
         // Value API
         writeln!(header, "// Value constructors / accessors")?;
-        writeln!(header, "/** Free a Value obtained via mimi_shared_get_ptr or mimi_value_new_*. */")?;
+        writeln!(
+            header,
+            "/** Free a Value obtained via mimi_shared_get_ptr or mimi_value_new_*. */"
+        )?;
         writeln!(header, "void mimi_value_free(void* value);")?;
-        writeln!(header, "/** Create a new integer Value (caller frees with mimi_value_free). */")?;
+        writeln!(
+            header,
+            "/** Create a new integer Value (caller frees with mimi_value_free). */"
+        )?;
         writeln!(header, "void* mimi_value_new_int(int64_t n);")?;
-        writeln!(header, "/** Create a new boolean Value (caller frees with mimi_value_free). */")?;
+        writeln!(
+            header,
+            "/** Create a new boolean Value (caller frees with mimi_value_free). */"
+        )?;
         writeln!(header, "void* mimi_value_new_bool(bool b);")?;
-        writeln!(header, "/** Create a new floating-point Value (caller frees with mimi_value_free). */")?;
+        writeln!(
+            header,
+            "/** Create a new floating-point Value (caller frees with mimi_value_free). */"
+        )?;
         writeln!(header, "void* mimi_value_new_float(double f);")?;
-        writeln!(header, "/** Read an integer from a Value, or 0 if not an integer. */")?;
+        writeln!(
+            header,
+            "/** Read an integer from a Value, or 0 if not an integer. */"
+        )?;
         writeln!(header, "int64_t mimi_value_as_int(void* value);")?;
-        writeln!(header, "/** Read a boolean from a Value, or false if not a boolean. */")?;
+        writeln!(
+            header,
+            "/** Read a boolean from a Value, or false if not a boolean. */"
+        )?;
         writeln!(header, "bool mimi_value_as_bool(void* value);")?;
-        writeln!(header, "/** Read a float from a Value, or 0.0 if not a float. */")?;
+        writeln!(
+            header,
+            "/** Read a float from a Value, or 0.0 if not a float. */"
+        )?;
         writeln!(header, "double mimi_value_as_float(void* value);")?;
         writeln!(header)?;
 
@@ -88,7 +114,10 @@ impl CHeaderGenerator {
             header,
             "bool mimi_cap_consume(MimiCap cap, const char* name);"
         )?;
-        writeln!(header, "/** Register a new capability and return its opaque handle. */")?;
+        writeln!(
+            header,
+            "/** Register a new capability and return its opaque handle. */"
+        )?;
         writeln!(header, "MimiCap mimi_cap_register(const char* name);")?;
         writeln!(header)?;
 
@@ -109,9 +138,15 @@ impl CHeaderGenerator {
         writeln!(header, "void mimi_string_free_raw(char* c_str);")?;
         writeln!(header, "/** Free a C string pointer obtained from mimi_string_as_c_str() when no longer needed. */")?;
         writeln!(header, "void mimi_string_as_c_str_free(const char* c_str);")?;
-        writeln!(header, "/** Free all pending C strings allocated by mimi_string_as_c_str() on this thread. */")?;
+        writeln!(
+            header,
+            "/** Free all pending C strings allocated by mimi_string_as_c_str() on this thread. */"
+        )?;
         writeln!(header, "void mimi_string_as_c_str_free_all(void);")?;
-        writeln!(header, "/** Return the byte length of a Mimi string value, or -1 on error. */")?;
+        writeln!(
+            header,
+            "/** Return the byte length of a Mimi string value, or -1 on error. */"
+        )?;
         writeln!(header, "int64_t mimi_string_len(void* mimi_string);")?;
         writeln!(header, "/** Free a C string allocated by the Mimi runtime (e.g. returned by extern functions). */")?;
         writeln!(header, "void mimi_string_free(char* c_str);")?;
@@ -119,15 +154,39 @@ impl CHeaderGenerator {
 
         // Callback / runtime misc API
         writeln!(header, "// Runtime misc API")?;
-        writeln!(header, "/** Callback signature for the runtime error handler. */")?;
-        writeln!(header, "typedef void (*MimiErrorHandler)(const char* message);")?;
+        writeln!(
+            header,
+            "/** Callback signature for the runtime error handler. */"
+        )?;
+        writeln!(
+            header,
+            "typedef void (*MimiErrorHandler)(const char* message);"
+        )?;
         writeln!(header, "/** Set a global error handler invoked on FFI contract violations. Pass NULL to reset. */")?;
-        writeln!(header, "void mimi_runtime_set_error_handler(MimiErrorHandler handler);")?;
-        writeln!(header, "/** Deregister a callback previously passed to C. Safe to call from any thread. */")?;
-        writeln!(header, "void mimi_callback_deregister(int64_t callback_id);")?;
-        writeln!(header, "/** Submit a raw task to the global Mimi thread pool. */")?;
-        writeln!(header, "void mimi_pool_submit(void* (*fn_ptr)(void*), void* arg);")?;
-        writeln!(header, "/** Block until all submitted pool tasks complete. */")?;
+        writeln!(
+            header,
+            "void mimi_runtime_set_error_handler(MimiErrorHandler handler);"
+        )?;
+        writeln!(
+            header,
+            "/** Deregister a callback previously passed to C. Safe to call from any thread. */"
+        )?;
+        writeln!(
+            header,
+            "void mimi_callback_deregister(int64_t callback_id);"
+        )?;
+        writeln!(
+            header,
+            "/** Submit a raw task to the global Mimi thread pool. */"
+        )?;
+        writeln!(
+            header,
+            "void mimi_pool_submit(void* (*fn_ptr)(void*), void* arg);"
+        )?;
+        writeln!(
+            header,
+            "/** Block until all submitted pool tasks complete. */"
+        )?;
         writeln!(header, "void mimi_pool_join_all(void);")?;
         writeln!(header)?;
 
@@ -351,7 +410,11 @@ impl CHeaderGenerator {
         }
 
         match &contract.args[index] {
-            FfiArgContract::Int => format!("int64_t {}", name),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => format!("int32_t {}", name),
+                crate::ffi::contract::FfiScalarType::I64 => format!("int64_t {}", name),
+                crate::ffi::contract::FfiScalarType::Bool => format!("bool {}", name),
+            },
             FfiArgContract::Float => format!("double {}", name),
             FfiArgContract::StringBorrow => format!("const char* {}", name),
             FfiArgContract::StringTransfer => format!("char* {}", name),
@@ -362,7 +425,11 @@ impl CHeaderGenerator {
             FfiArgContract::CShared(inner)
             | FfiArgContract::CBorrow(inner)
             | FfiArgContract::CBorrowMut(inner) => {
-                format!("MimiHandle /* {} */ {}", self.mimi_type_to_c_type(inner), name)
+                format!(
+                    "MimiHandle /* {} */ {}",
+                    self.mimi_type_to_c_type(inner),
+                    name
+                )
             }
             FfiArgContract::Json => format!("const char* {}", name),
             FfiArgContract::StructByValue(type_name) => format!("struct {} {}", type_name, name),
@@ -390,7 +457,11 @@ impl CHeaderGenerator {
     fn contract_ret_to_c_type(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
             crate::ffi::contract::FfiRetContract::String => "/*borrowed*/ char*".to_string(),
             crate::ffi::contract::FfiRetContract::StringOwned => "/*owned*/ char*".to_string(),
@@ -535,7 +606,7 @@ mod tests {
 
         let header = generate_c_header(&extern_funcs, HashMap::new())
             .expect("src/ffi/c_header.rs:396 unwrap failed");
-        assert!(header.contains("int64_t add(int64_t a, int64_t b);"));
+        assert!(header.contains("int32_t add(int32_t a, int32_t b);"));
     }
 
     #[test]

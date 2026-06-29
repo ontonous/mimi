@@ -213,9 +213,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(self.context.i64_type()),
-                BasicTypeEnum::PointerType(
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                ),
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
             ],
             false,
         );
@@ -225,9 +223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let data_i8 = self
             .build_load(
-                BasicTypeEnum::PointerType(
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                ),
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
                 data_gep,
                 "data",
             )?
@@ -264,12 +260,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     elem_ptr,
                     &format!("arrv_{}", j),
                 )?;
-                self.bind_pattern_var(
-                    local_vars,
-                    name,
-                    val,
-                    BasicTypeEnum::IntType(i64_ty),
-                )?;
+                self.bind_pattern_var(local_vars, name, val, BasicTypeEnum::IntType(i64_ty))?;
             }
         }
         Ok(())
@@ -605,8 +596,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 merge_bb,
                 else_bb,
             };
-            let (arm_val, body_bb) =
-                self.compile_match_arm_body(i, arm, arm_bb, vars, &env)?;
+            let (arm_val, body_bb) = self.compile_match_arm_body(i, arm, arm_bb, vars, &env)?;
             incoming_vals.push(arm_val);
             incoming_bbs.push(body_bb);
         }
@@ -667,12 +657,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let tag_val = self.context.i64_type().const_int(ordinal, false);
                     let cmp = self
                         .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::EQ,
-                            scrutinee_iv,
-                            tag_val,
-                            "cmp",
-                        )
+                        .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, tag_val, "cmp")
                         .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
                     let next_bb = self
                         .context
@@ -808,10 +793,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     BasicValueEnum::PointerValue(pv) => {
                         // Not-null means truthy (non-null pointers are valid values)
-                        let is_null =
-                            self.builder.build_is_null(pv, "guard_null").map_err(|e| {
-                                CompileError::LlvmError(format!("guard null: {}", e))
-                            })?;
+                        let is_null = self
+                            .builder
+                            .build_is_null(pv, "guard_null")
+                            .map_err(|e| CompileError::LlvmError(format!("guard null: {}", e)))?;
                         let zero = self.context.bool_type().const_int(0, false);
                         self.builder
                             .build_int_compare(
@@ -820,9 +805,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 zero,
                                 "guard_notnull",
                             )
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("guard notnull: {}", e))
-                            })?
+                            .map_err(|e| CompileError::LlvmError(format!("guard notnull: {}", e)))?
                     }
                     _ => return Err("match guard must be boolean or pointer".into()),
                 };

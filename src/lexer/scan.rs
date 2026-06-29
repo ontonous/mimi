@@ -1,8 +1,8 @@
 use crate::lexer::errors::{
-    dedent_mismatch, indent_not_multiple_of_four, tabs_not_allowed, unexpected_character,
-    unexpected_dollar, unterminated_block_comment, unterminated_escape, unterminated_fstring,
-    unterminated_fstring_escape, unterminated_interpolation, unterminated_string, invalid_escape,
-    LexerError,
+    dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
+    unexpected_character, unexpected_dollar, unterminated_block_comment, unterminated_escape,
+    unterminated_fstring, unterminated_fstring_escape, unterminated_interpolation,
+    unterminated_string, LexerError,
 };
 use crate::lexer::keywords::keyword_or_ident;
 use crate::lexer::token::{LexerMode, Token, TokenKind};

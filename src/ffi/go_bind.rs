@@ -143,11 +143,25 @@ impl GoBindGenerator {
         for func in extern_funcs {
             let contract = self.build_contract(func);
             for (i, p) in func.params.iter().enumerate() {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
                     let go_type = self.callback_go_type(param_types, ret_type);
                     let slot = self.callback_slot_name(&func.name, &p.name);
-                    writeln!(out, "type {} {}", self.callback_type_name(&func.name, &p.name), go_type)?;
-                    writeln!(out, "var {} {}", slot, self.callback_type_name(&func.name, &p.name))?;
+                    writeln!(
+                        out,
+                        "type {} {}",
+                        self.callback_type_name(&func.name, &p.name),
+                        go_type
+                    )?;
+                    writeln!(
+                        out,
+                        "var {} {}",
+                        slot,
+                        self.callback_type_name(&func.name, &p.name)
+                    )?;
                 }
             }
         }
@@ -155,8 +169,18 @@ impl GoBindGenerator {
         for func in extern_funcs {
             let contract = self.build_contract(func);
             for (i, p) in func.params.iter().enumerate() {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
-                    self.write_go_callback_trampoline(out, &func.name, &p.name, param_types, ret_type)?;
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
+                    self.write_go_callback_trampoline(
+                        out,
+                        &func.name,
+                        &p.name,
+                        param_types,
+                        ret_type,
+                    )?;
                 }
             }
         }
@@ -193,7 +217,12 @@ impl GoBindGenerator {
             writeln!(out, "}}")?;
         } else {
             writeln!(out, "func {}({}) {} {{", tramp, c_args.join(", "), c_ret)?;
-            writeln!(out, "    if {} == nil {{ return {} }}", slot, self.go_callback_default_ret(ret_type))?;
+            writeln!(
+                out,
+                "    if {} == nil {{ return {} }}",
+                slot,
+                self.go_callback_default_ret(ret_type)
+            )?;
             writeln!(out, "    return {}({})", self.go_cast_to_c(ret_type), call)?;
             writeln!(out, "}}")?;
         }
@@ -236,7 +265,11 @@ impl GoBindGenerator {
             .map(|ty| self.c_callback_arg_type(ty))
             .collect();
         let ret = self.c_callback_ret_type(ret_type);
-        let args_str = if args.is_empty() { "void".to_string() } else { args.join(", ") };
+        let args_str = if args.is_empty() {
+            "void".to_string()
+        } else {
+            args.join(", ")
+        };
         format!("{} (*{})({})", ret, name, args_str)
     }
 
@@ -264,6 +297,8 @@ impl GoBindGenerator {
 
     fn go_callback_arg_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "int32".to_string(),
+            Type::Name(name, _) if name == "i64" => "int64".to_string(),
             Type::Name(name, _) if name == "f64" => "float64".to_string(),
             Type::Name(name, _) if name == "bool" => "bool".to_string(),
             _ => "int64".to_string(),
@@ -272,6 +307,8 @@ impl GoBindGenerator {
 
     fn go_callback_ret_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "int32".to_string(),
+            Type::Name(name, _) if name == "i64" => "int64".to_string(),
             Type::Name(name, _) if name == "f64" => "float64".to_string(),
             Type::Name(name, _) if name == "bool" => "bool".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
@@ -334,7 +371,11 @@ impl GoBindGenerator {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
                     self.callback_c_param_decl(&p.name, param_types, ret_type)
                 } else {
                     format!("{} {}", self.mimi_type_to_c(contract, i), p.name)
@@ -371,7 +412,9 @@ impl GoBindGenerator {
         let mut c_args = Vec::new();
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
-                FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                FfiArgContract::StringBorrow
+                | FfiArgContract::StringTransfer
+                | FfiArgContract::Json => {
                     writeln!(conversions, "\t{}_c := C.CString({})", p.name, p.name)?;
                     writeln!(conversions, "\tdefer C.free(unsafe.Pointer({}_c))", p.name)?;
                     c_args.push(format!("{}_c", p.name));
@@ -382,14 +425,32 @@ impl GoBindGenerator {
                         if let TypeDefKind::Record(fields) = &td.kind {
                             for field in fields {
                                 let go_field = capitalize(&field.name);
-                                writeln!(conversions, "\t{}_c.{} = C.{}({}.{})", p.name, field.name, self.mimi_type_to_c_field(&field.ty), p.name, go_field)?;
+                                writeln!(
+                                    conversions,
+                                    "\t{}_c.{} = C.{}({}.{})",
+                                    p.name,
+                                    field.name,
+                                    self.mimi_type_to_c_field(&field.ty),
+                                    p.name,
+                                    go_field
+                                )?;
                             }
                         }
                     }
                     c_args.push(format!("{}_c", p.name));
                 }
-                FfiArgContract::Int | FfiArgContract::Cap(_) | FfiArgContract::CShared(_)
-                | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => {
+                FfiArgContract::Int(scalar) => {
+                    let cast = match scalar {
+                        crate::ffi::contract::FfiScalarType::I32 => "C.int",
+                        crate::ffi::contract::FfiScalarType::I64 => "C.longlong",
+                        crate::ffi::contract::FfiScalarType::Bool => "C._Bool",
+                    };
+                    c_args.push(format!("{}({})", cast, p.name));
+                }
+                FfiArgContract::Cap(_)
+                | FfiArgContract::CShared(_)
+                | FfiArgContract::CBorrow(_)
+                | FfiArgContract::CBorrowMut(_) => {
                     c_args.push(format!("C.longlong({})", p.name));
                 }
                 FfiArgContract::Float => {
@@ -410,7 +471,13 @@ impl GoBindGenerator {
         }
 
         let go_func_name = go_export_name(&func.name);
-        writeln!(out, "func {}({}) {} {{", go_func_name, go_params.join(", "), go_ret)?;
+        writeln!(
+            out,
+            "func {}({}) {} {{",
+            go_func_name,
+            go_params.join(", "),
+            go_ret
+        )?;
         write!(out, "{}", conversions)?;
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::String
@@ -435,17 +502,24 @@ impl GoBindGenerator {
             return "void*".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "long long".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "long long".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "_Bool".to_string(),
+            },
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "char*".to_string(),
             FfiArgContract::Cap(_) => "long long".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "long long".to_string(),
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "long long".to_string(),
             FfiArgContract::Json => "char*".to_string(),
             FfiArgContract::StructByValue(name) => format!("struct {}", name),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_c_type(param_types, ret_type)
-            }
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_c_type(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -453,11 +527,19 @@ impl GoBindGenerator {
     fn ret_type_to_c(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "long long".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "long long".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "_Bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "char*".to_string(),
-            crate::ffi::contract::FfiRetContract::RawPtr(_) | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
-            crate::ffi::contract::FfiRetContract::CShared(_) | crate::ffi::contract::FfiRetContract::CBorrow(_) | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "long long".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => "char*".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "long long".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "char*".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => format!("struct {}", name),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "void*".to_string(),
@@ -469,16 +551,27 @@ impl GoBindGenerator {
             return "unsafe.Pointer".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "int64".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             FfiArgContract::Float => "float64".to_string(),
-            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => "string".to_string(),
+            FfiArgContract::StringBorrow
+            | FfiArgContract::StringTransfer
+            | FfiArgContract::Json => "string".to_string(),
             FfiArgContract::Cap(_) => "int64".to_string(),
-            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64".to_string(),
-            FfiArgContract::StructByValue(name) => name.clone(),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_go_type(param_types, ret_type)
+            FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => {
+                "unsafe.Pointer".to_string()
             }
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "int64".to_string(),
+            FfiArgContract::StructByValue(name) => name.clone(),
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_go_type(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "unsafe.Pointer".to_string(),
         }
     }
@@ -486,11 +579,19 @@ impl GoBindGenerator {
     fn ret_type_to_go(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "int64".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "float64".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "string".to_string(),
-            crate::ffi::contract::FfiRetContract::RawPtr(_) | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
-            crate::ffi::contract::FfiRetContract::CShared(_) | crate::ffi::contract::FfiRetContract::CBorrow(_) | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int64".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => "string".to_string(),
+            crate::ffi::contract::FfiRetContract::RawPtr(_)
+            | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "unsafe.Pointer".to_string(),
+            crate::ffi::contract::FfiRetContract::CShared(_)
+            | crate::ffi::contract::FfiRetContract::CBorrow(_)
+            | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int64".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "string".to_string(),
             crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "unsafe.Pointer".to_string(),
@@ -549,7 +650,13 @@ impl GoBindGenerator {
 fn sanitize_go_package(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.starts_with(|c: char| c.is_numeric()) {
         s = format!("_{}", s);

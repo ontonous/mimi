@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod ffi_verification_tests {
     use crate::ast::{ExternFunc, ExternParam, Type};
-    use crate::ffi::contract::{FfiArgContract, FfiContract};
+    use crate::ffi::contract::{FfiArgContract, FfiContract, FfiScalarType};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -142,7 +142,10 @@ mod ffi_verification_tests {
 
         let contract = FfiContract::from_extern(&func);
         assert_eq!(contract.args.len(), 1);
-        assert!(matches!(contract.args[0], FfiArgContract::Int));
+        assert!(matches!(
+            contract.args[0],
+            FfiArgContract::Int(FfiScalarType::I32)
+        ));
     }
 
     #[test]

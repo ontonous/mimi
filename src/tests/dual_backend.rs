@@ -50,7 +50,9 @@ macro_rules! dual_assert_interp_only {
 
 #[test]
 fn dual_map_new_size() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -66,7 +68,9 @@ fn dual_map_new_size() {
 
 #[test]
 fn dual_map_set_size() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -84,7 +88,9 @@ fn dual_map_set_size() {
 
 #[test]
 fn dual_map_has_key() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -101,7 +107,9 @@ fn dual_map_has_key() {
 
 #[test]
 fn dual_map_get() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -118,7 +126,9 @@ fn dual_map_get() {
 
 #[test]
 fn dual_map_remove_size() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -3218,7 +3228,9 @@ fn dual_regex_replace_no_match() {
 
 #[test]
 fn dual_regex_find_all() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -3233,7 +3245,9 @@ fn dual_regex_find_all() {
 
 #[test]
 fn dual_regex_find_all_no_match() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -3248,7 +3262,9 @@ fn dual_regex_find_all_no_match() {
 
 #[test]
 fn dual_regex_capture_groups() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     // codegen runtime uses custom RegexEngine without capture group support
     dual_assert_interp_only!(
         r#"
@@ -3264,7 +3280,9 @@ fn dual_regex_capture_groups() {
 
 #[test]
 fn dual_regex_capture_groups_no_match() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -3279,7 +3297,9 @@ fn dual_regex_capture_groups_no_match() {
 
 #[test]
 fn dual_sort_f64() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     // sort_f64 works in both backends, but codegen println on floats prints bit patterns
     // (pre-existing limitation). Test interp-only to verify sort correctness.
     dual_assert_interp_only!(
@@ -3299,7 +3319,9 @@ fn dual_sort_f64() {
 
 #[test]
 fn dual_sort_str() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     // sort_str codegen is a no-op (string sorting requires runtime struct swap)
     dual_assert_interp_only!(
         r#"
@@ -3320,7 +3342,9 @@ fn dual_sort_str() {
 
 #[test]
 fn dual_exec_pipe() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4322,7 +4346,11 @@ fn dual_mimi_opt_cache_varied() {
     "#,
     )
     .expect("second compile failed");
-    assert_eq!(r2.trim(), "9", "second compile output mismatch (stale cache?)");
+    assert_eq!(
+        r2.trim(),
+        "9",
+        "second compile output mismatch (stale cache?)"
+    );
 }
 
 // P2-11: eval_quoted_ast Interpolate must not double-clone Box<Value>.
@@ -4346,7 +4374,11 @@ fn dual_quote_interpolate_snapshot() {
     let v1 = run_source(src);
     let v2 = run_source(src);
     assert_eq!(v1, interp::Value::Int(0), "first eval must succeed");
-    assert_eq!(v2, interp::Value::Int(0), "second eval must succeed (no double-free)");
+    assert_eq!(
+        v2,
+        interp::Value::Int(0),
+        "second eval must succeed (no double-free)"
+    );
 }
 
 // P0-2: parasteps with spawn in nested scope (inner block).
@@ -4406,7 +4438,9 @@ fn dual_arena_let_shadowing() {
 
 #[test]
 fn dual_path_join() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4422,7 +4456,9 @@ fn dual_path_join() {
 
 #[test]
 fn dual_path_ext() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4437,7 +4473,9 @@ fn dual_path_ext() {
 
 #[test]
 fn dual_path_basename() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4452,7 +4490,9 @@ fn dual_path_basename() {
 
 #[test]
 fn dual_path_dirname() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4467,7 +4507,9 @@ fn dual_path_dirname() {
 
 #[test]
 fn dual_is_dir() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4482,7 +4524,9 @@ fn dual_is_dir() {
 
 #[test]
 fn dual_is_file() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4497,7 +4541,9 @@ fn dual_is_file() {
 
 #[test]
 fn dual_listdir() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4513,7 +4559,9 @@ fn dual_listdir() {
 
 #[test]
 fn dual_mkdir_p_and_remove() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4528,7 +4576,9 @@ fn dual_mkdir_p_and_remove() {
 
 #[test]
 fn dual_walk_dir() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4544,7 +4594,9 @@ fn dual_walk_dir() {
 
 #[test]
 fn dual_path_join_chain() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4561,7 +4613,9 @@ fn dual_path_join_chain() {
 
 #[test]
 fn dual_sha256_hello() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4575,7 +4629,9 @@ fn dual_sha256_hello() {
 
 #[test]
 fn dual_sha256_empty() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4589,7 +4645,9 @@ fn dual_sha256_empty() {
 
 #[test]
 fn dual_base64_roundtrip() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4606,7 +4664,9 @@ fn dual_base64_roundtrip() {
 
 #[test]
 fn dual_string_comparison() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4624,7 +4684,9 @@ fn dual_string_comparison() {
 
 #[test]
 fn dual_const_declaration() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         const MAX: i32 = 100
@@ -4639,7 +4701,9 @@ fn dual_const_declaration() {
 
 #[test]
 fn dual_tuple_destructure_from_func() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func pair() -> (string, i32) {
@@ -4658,7 +4722,9 @@ fn dual_tuple_destructure_from_func() {
 
 #[test]
 fn dual_tuple_with_string_fields() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4674,7 +4740,9 @@ fn dual_tuple_with_string_fields() {
 
 #[test]
 fn dual_empty_typed_list() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4690,7 +4758,9 @@ fn dual_empty_typed_list() {
 
 #[test]
 fn dual_if_else_same_var() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4711,7 +4781,9 @@ fn dual_if_else_same_var() {
 
 #[test]
 fn dual_record_constructor_empty_list() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         type Config { name: string, tags: List<string> }
@@ -4727,7 +4799,9 @@ fn dual_record_constructor_empty_list() {
 
 #[test]
 fn dual_map_named_function() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func double(x: i32) -> i32 { x * 2 }
@@ -4746,7 +4820,9 @@ fn dual_map_named_function() {
 
 #[test]
 fn dual_higher_order_filter() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func is_even(x: i32) -> bool { x % 2 == 0 }
@@ -4763,7 +4839,9 @@ fn dual_higher_order_filter() {
 
 #[test]
 fn dual_format_string() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4778,7 +4856,9 @@ fn dual_format_string() {
 
 #[test]
 fn dual_string_list_index() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4795,7 +4875,9 @@ fn dual_string_list_index() {
 
 #[test]
 fn dual_format_int() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4811,7 +4893,9 @@ fn dual_format_int() {
 
 #[test]
 fn dual_format_float() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4827,7 +4911,9 @@ fn dual_format_float() {
 
 #[test]
 fn dual_format_mixed() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4844,7 +4930,9 @@ fn dual_format_mixed() {
 
 #[test]
 fn dual_lexer_builtin_codegen() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
         func main() -> i32 {
             let tokens = lexer("func add(a: i32, b: i32) -> i32 { a + b }")
@@ -4862,7 +4950,9 @@ fn dual_lexer_builtin_codegen() {
 
 #[test]
 fn dual_parse_builtin_codegen() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
         func main() -> i32 {
             let ast = parse("func add(a: i32, b: i32) -> i32 { a + b }")
@@ -4880,7 +4970,9 @@ fn dual_parse_builtin_codegen() {
 
 #[test]
 fn dual_record_list_field() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         type Config {
@@ -4902,7 +4994,9 @@ fn dual_record_list_field() {
 
 #[test]
 fn dual_record_empty_list_field() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         type Config {
@@ -4922,7 +5016,9 @@ fn dual_record_empty_list_field() {
 
 #[test]
 fn dual_record_list_i32_field() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         type Data {
@@ -4942,7 +5038,9 @@ fn dual_record_list_i32_field() {
 
 #[test]
 fn dual_from_json_record() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         type Person {
@@ -4963,7 +5061,9 @@ fn dual_from_json_record() {
 
 #[test]
 fn dual_set_contains() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4979,7 +5079,9 @@ fn dual_set_contains() {
 
 #[test]
 fn dual_map_inline_closure() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -4997,7 +5099,9 @@ fn dual_map_inline_closure() {
 
 #[test]
 fn dual_filter_inline_closure() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5016,7 +5120,9 @@ fn dual_filter_inline_closure() {
 #[test]
 #[ignore = "CI: codegen exits with raw pointer instead of exit_code field value (struct layout mismatch)"]
 fn dual_exec_basic() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5031,7 +5137,9 @@ fn dual_exec_basic() {
 
 #[test]
 fn dual_exec_stdout() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5047,7 +5155,9 @@ fn dual_exec_stdout() {
 #[test]
 #[ignore = "CI: codegen exits with raw pointer instead of exit_code field value (struct layout mismatch)"]
 fn dual_exec_exit_code() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5062,7 +5172,9 @@ fn dual_exec_exit_code() {
 
 #[test]
 fn dual_file_stat_file() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5080,7 +5192,9 @@ fn dual_file_stat_file() {
 
 #[test]
 fn dual_file_stat_dir() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5097,7 +5211,9 @@ fn dual_file_stat_dir() {
 
 #[test]
 fn dual_append_file() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5113,7 +5229,9 @@ fn dual_append_file() {
 
 #[test]
 fn dual_set_env() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5130,7 +5248,9 @@ fn dual_set_env() {
 
 #[test]
 fn dual_read_file_bytes() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5146,7 +5266,9 @@ fn dual_read_file_bytes() {
 
 #[test]
 fn dual_read_file_partial() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5162,7 +5284,9 @@ fn dual_read_file_partial() {
 
 #[test]
 fn dual_write_file_bytes() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5177,7 +5301,9 @@ fn dual_write_file_bytes() {
 
 #[test]
 fn dual_read_lines_json() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5193,7 +5319,9 @@ fn dual_read_lines_json() {
 
 #[test]
 fn dual_read_lines_each() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     // read_lines_each is interp-only (closure callback not supported in codegen builtin path)
     dual_assert_interp_only!(
         r#"
@@ -5213,7 +5341,9 @@ fn dual_read_lines_each() {
 
 #[test]
 fn dual_multiline_or_operator_after_newline() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5231,7 +5361,9 @@ fn dual_multiline_or_operator_after_newline() {
 
 #[test]
 fn dual_multiline_or_rhs_after_newline() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5249,7 +5381,9 @@ fn dual_multiline_or_rhs_after_newline() {
 
 #[test]
 fn dual_multiline_and_chain() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5266,7 +5400,9 @@ fn dual_multiline_and_chain() {
 
 #[test]
 fn dual_multiline_func_call() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func add(a: i32, b: i32) -> i32 { a + b }
@@ -5284,7 +5420,9 @@ fn dual_multiline_func_call() {
 
 #[test]
 fn dual_multiline_slice() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5302,7 +5440,9 @@ fn dual_multiline_slice() {
 
 #[test]
 fn dual_multiline_index() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5319,7 +5459,9 @@ fn dual_multiline_index() {
 
 #[test]
 fn dual_push_as_statement() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {
@@ -5335,7 +5477,9 @@ fn dual_push_as_statement() {
 
 #[test]
 fn dual_push_in_block_no_leak() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     dual_assert!(
         r#"
         func main() -> i32 {

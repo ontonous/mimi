@@ -390,7 +390,10 @@ impl<'a> Interpreter<'a> {
         // If the result is a direct ArenaRef into the same arena, extract the value
         if let Ok(Some(Value::ArenaRef(id, slot, gen))) = &result {
             if *id == arena_id {
-                if let Some(Arena { slots, generation, .. }) = self.arenas.get(*id) {
+                if let Some(Arena {
+                    slots, generation, ..
+                }) = self.arenas.get(*id)
+                {
                     if *gen != *generation {
                         // Stale ArenaRef from before a reset — treat as invalid
                         self.arena_depth -= 1;

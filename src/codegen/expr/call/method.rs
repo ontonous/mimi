@@ -181,9 +181,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "weak_upgrade",
             )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| {
-                CompileError::LlvmError("mimi_rc_upgrade returned void".to_string())
-            })?
+            .ok_or_else(|| CompileError::LlvmError("mimi_rc_upgrade returned void".to_string()))?
             .into_pointer_value();
         self.build_option_i64(upgraded, "upgrade_opt")
     }
@@ -262,8 +260,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
 
             if let BasicTypeEnum::StructType(_st) = ty {
-                let option_val =
-                    self.build_load(ty, alloca, &format!("{}_opt", name))?;
+                let option_val = self.build_load(ty, alloca, &format!("{}_opt", name))?;
                 let payload_int = self
                     .builder
                     .build_extract_value(option_val.into_struct_value(), 1, "payload_int")
@@ -351,9 +348,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
                 BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
                 BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
-                BasicValueEnum::ScalableVectorValue(_) => BasicMetadataValueEnum::IntValue(
-                    self.context.i64_type().const_int(0, false),
-                ),
+                BasicValueEnum::ScalableVectorValue(_) => {
+                    BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false))
+                }
             })
             .collect()
     }
@@ -413,7 +410,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(BasicTypeEnum::StructType(fat_ty), fat_ptr, 1, "vtable_gep")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let vtable_ptr = self
-            .build_load(BasicTypeEnum::PointerType(i8_ptr_ty), vtable_gep, "vtable_ptr")?
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                vtable_gep,
+                "vtable_ptr",
+            )?
             .into_pointer_value();
 
         let method_gep = self
@@ -433,8 +434,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(BasicTypeEnum::StructType(fat_ty), fat_ptr, 0, "data_gep")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let data_ptr = self
-            .build_load(BasicTypeEnum::PointerType(i8_ptr_ty), data_gep, "data_ptr")?;
+        let data_ptr =
+            self.build_load(BasicTypeEnum::PointerType(i8_ptr_ty), data_gep, "data_ptr")?;
 
         let fn_sig = self.find_trait_method_signature(trait_name, method_name);
         if let Some((fn_val, _)) = fn_sig {
@@ -458,9 +459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let call = self
                 .builder
                 .build_indirect_call(fn_type, fn_ptr_cast, &metadata_args, "dyn_call")
-                .map_err(|e| {
-                    CompileError::LlvmError(format!("dyn indirect call error: {}", e))
-                })?;
+                .map_err(|e| CompileError::LlvmError(format!("dyn indirect call error: {}", e)))?;
             return Ok(call_try_basic_value(&call)
                 .unwrap_or(self.context.i64_type().const_int(0, false).into()));
         }
@@ -483,10 +482,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if methods.iter().any(|m| m.name == *method_name) {
                     let mangled = format!("{}__{}__{}", tn, trait_name, method_name);
                     if let Some(f) = self.module.get_function(&mangled) {
-                        return Some((
-                            inkwell::values::AnyValueEnum::FunctionValue(f),
-                            mangled,
-                        ));
+                        return Some((inkwell::values::AnyValueEnum::FunctionValue(f), mangled));
                     }
                 }
             }
@@ -508,8 +504,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if methods.iter().any(|m| m.name == *method_name) {
                     let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
                     if let Some(function) = self.module.get_function(&mangled) {
-                        return self
-                            .compile_self_method_call(obj, args, vars, function, "impl_trait_call");
+                        return self.compile_self_method_call(
+                            obj,
+                            args,
+                            vars,
+                            function,
+                            "impl_trait_call",
+                        );
                     }
                 }
             }
@@ -692,7 +693,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(data_gep, data_i64)?;
                 self.build_load(list_ty, alloca, "list_ret_val")
             }
-            _ => Err(CompileError::Generic(format!("Set has no method '{}'", method_name))),
+            _ => Err(CompileError::Generic(format!(
+                "Set has no method '{}'",
+                method_name
+            ))),
         }
     }
 
@@ -954,8 +958,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "as_i64",
                 )?;
                 Ok(BasicValueEnum::IntValue(
-                    self.expect_basic_value(&r, "json_as_i64")?
-                        .into_int_value(),
+                    self.expect_basic_value(&r, "json_as_i64")?.into_int_value(),
                 ))
             }
             crate::ast::Type::Name(n, _) if n == "f64" || n == "f32" => {

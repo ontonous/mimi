@@ -1494,7 +1494,10 @@ func main() -> i32 { 0 }
     // With _match_fallback (unconstrained), ensures result >= 0
     // cannot be statically verified — should be Failed or Unknown.
     assert!(
-        matches!(f.unwrap().status, VerifStatus::Failed | VerifStatus::Unknown),
+        matches!(
+            f.unwrap().status,
+            VerifStatus::Failed | VerifStatus::Unknown
+        ),
         "non-exhaustive match should not silently pass ensures: {:?}",
         f.unwrap().status,
     );
@@ -1599,7 +1602,10 @@ func main() -> i32 { 0 }
     assert!(f.is_some(), "cross_block should be present");
     // The key assertion: borrow of x doesn't prevent verification
     assert!(
-        matches!(f.unwrap().status, VerifStatus::Verified | VerifStatus::Unknown),
+        matches!(
+            f.unwrap().status,
+            VerifStatus::Verified | VerifStatus::Unknown
+        ),
         "NLL cross-block should not cause false failure: {:?}",
         f.unwrap().status,
     );
@@ -1630,10 +1636,7 @@ func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("P1.2: let_subst propagation");
     let caller = results.iter().find(|r| r.func_name == "caller");
-    assert!(
-        caller.is_some(),
-        "caller function should be verified"
-    );
+    assert!(caller.is_some(), "caller function should be verified");
     assert_eq!(
         caller.unwrap().status,
         VerifStatus::Verified,
@@ -1664,10 +1667,7 @@ func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("P1.2: let_subst violation detection");
     let caller = results.iter().find(|r| r.func_name == "caller");
-    assert!(
-        caller.is_some(),
-        "caller function should be present"
-    );
+    assert!(caller.is_some(), "caller function should be present");
     // With P1.2 fix: half's ensures (d >= 0) is propagated, so verifier knows
     // d >= 0 but requires d >= 10 → violation detected → Failed
     // Without fix: half's ensures not propagated → no constraint on d → potentially Verified

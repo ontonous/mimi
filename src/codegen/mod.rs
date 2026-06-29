@@ -176,6 +176,10 @@ pub struct CodeGenerator<'ctx> {
     callback_thunk_counter: u64,
     /// G1b: Cache of generated callback thunks, keyed by signature fingerprint.
     callback_thunks: HashMap<String, CallbackThunkEntry<'ctx>>,
+    /// Counter for naming unique export callback trampolines.
+    export_callback_thunk_counter: u64,
+    /// Cache of export callback trampolines, keyed by signature fingerprint.
+    export_callback_trampolines: HashMap<String, inkwell::values::PointerValue<'ctx>>,
     pending_spawn_type: Option<BasicTypeEnum<'ctx>>,
     /// Maps variable names to the inner result type of Future<T> for async fn calls.
     /// Set when compiling `let f = async_fn()` and used when compiling `await f`.
@@ -270,6 +274,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             extern_param_types: HashMap::new(),
             callback_thunk_counter: 0,
             callback_thunks: HashMap::new(),
+            export_callback_thunk_counter: 0,
+            export_callback_trampolines: HashMap::new(),
             pending_spawn_type: None,
             async_var_inner_types: HashMap::new(),
             record_type_names: std::collections::HashSet::new(),
@@ -482,9 +488,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         ty: BasicTypeEnum<'ctx>,
         name: &str,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
-        let function = self.current_function()
+        let function = self
+            .current_function()
             .ok_or_else(|| "entry_alloca: no current function".to_string())?;
-        let entry = function.get_first_basic_block()
+        let entry = function
+            .get_first_basic_block()
             .ok_or_else(|| "entry_alloca: no entry block".to_string())?;
         let saved = self.builder.get_insert_block();
         // Position at the start of the entry block
@@ -493,7 +501,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             self.builder.position_at_end(entry);
         }
-        let alloca = self.builder.build_alloca(ty, name)
+        let alloca = self
+            .builder
+            .build_alloca(ty, name)
             .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
         // Restore original position
         if let Some(bb) = saved {
@@ -665,7 +675,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             if args.is_empty() {
                 Some(tn.clone())
             } else {
-                let inner: Vec<String> = args.iter().filter_map(|a| self.get_full_type_name(a)).collect();
+                let inner: Vec<String> = args
+                    .iter()
+                    .filter_map(|a| self.get_full_type_name(a))
+                    .collect();
                 if inner.len() == args.len() {
                     Some(format!("{}<{}>", tn, inner.join(", ")))
                 } else {
@@ -771,12 +784,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // G-41: Track return types for builtins that return List<string>
                 match fname.as_str() {
                     "listdir" | "walk_dir" => {
-                        self.var_type_names.insert(name.clone(), "List<string>".to_string());
-                        self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                        self.var_type_names
+                            .insert(name.clone(), "List<string>".to_string());
+                        self.var_types.insert(
+                            name.clone(),
+                            Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]),
+                        );
                     }
                     "str_split" => {
-                        self.var_type_names.insert(name.clone(), "List<string>".to_string());
-                        self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                        self.var_type_names
+                            .insert(name.clone(), "List<string>".to_string());
+                        self.var_types.insert(
+                            name.clone(),
+                            Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]),
+                        );
                     }
                     _ => {}
                 }
@@ -792,7 +813,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })?;
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let heap_ptr_typed = self
-                        .build_load(BasicTypeEnum::PointerType(ptr_ty), src_alloca, &format!("{}_weak_load", name))?
+                        .build_load(
+                            BasicTypeEnum::PointerType(ptr_ty),
+                            src_alloca,
+                            &format!("{}_weak_load", name),
+                        )?
                         .into_pointer_value();
 
                     // Increment the weak refcount on the heap allocation.
@@ -805,7 +830,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let weak_retain_fn = self.get_runtime_fn("mimi_rc_weak_retain")?;
                     self.build_call(
                         weak_retain_fn,
-                        &[inkwell::values::BasicMetadataValueEnum::PointerValue(heap_i8)],
+                        &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                            heap_i8,
+                        )],
                         &format!("{}_weak_retain", name),
                     )?;
 
@@ -892,9 +919,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let msg_ptr = self
             .builder
-            .build_global_string_ptr(&format!("shared let '{}': allocation failed", name), "alloc_fail_msg")
+            .build_global_string_ptr(
+                &format!("shared let '{}': allocation failed", name),
+                "alloc_fail_msg",
+            )
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-        self.build_call(abort_fn, &[BasicMetadataValueEnum::PointerValue(msg_ptr.as_pointer_value())], "alloc_abort")?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                msg_ptr.as_pointer_value(),
+            )],
+            "alloc_abort",
+        )?;
         self.builder
             .build_unreachable()
             .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
@@ -913,7 +949,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.build_store(heap_ptr, val)?;
 
-        let alloca = self.build_alloca(self.context.ptr_type(inkwell::AddressSpace::default()), name)?;
+        let alloca = self.build_alloca(
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            name,
+        )?;
         self.build_store(alloca, heap_ptr)?;
 
         vars.insert(name.clone(), (alloca, llvm_ty));
@@ -1109,8 +1148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
 
         // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var)
-        if self.optimize
-        {
+        if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module
                 .run_passes("default<O2>", &tm, options)

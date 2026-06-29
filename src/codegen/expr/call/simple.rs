@@ -30,7 +30,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 if let Some(&(alloca, BasicTypeEnum::StructType(st))) = vars.get(name.as_str()) {
                     if st.get_field_types().len() == 2 {
-                        let closure_val = self.build_load(BasicTypeEnum::StructType(st), alloca, &format!("{}_closure", name))?;
+                        let closure_val = self.build_load(
+                            BasicTypeEnum::StructType(st),
+                            alloca,
+                            &format!("{}_closure", name),
+                        )?;
                         let compiled_args = self.compile_arg_values(args, vars)?;
                         return self.compile_closure_call(closure_val, &compiled_args);
                     }
@@ -50,7 +54,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return self.compile_call(method_name, args, vars);
                     }
                     if is_custom_enum {
-                        return self.compile_custom_enum_constructor_call(type_name, method_name, args, vars);
+                        return self.compile_custom_enum_constructor_call(
+                            type_name,
+                            method_name,
+                            args,
+                            vars,
+                        );
                     }
                 }
                 self.compile_method_call(obj, method_name, args, vars)
@@ -175,9 +184,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         match name {
-            "Ok" | "Some" | "Err" | "None" => {
-                return self.compile_constructor(name, compiled_args)
-            }
+            "Ok" | "Some" | "Err" | "None" => return self.compile_constructor(name, compiled_args),
             _ => {}
         }
 
@@ -225,14 +232,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let thunk_entry = self
                         .get_or_create_callback_thunk(cb_params, cb_ret)
                         .map_err(|e| CompileError::LlvmError(format!("callback thunk: {}", e)))?;
-                    self.build_store(
-                        thunk_entry.fn_ptr_global.as_pointer_value(),
-                        fn_ptr,
-                    )?;
-                    self.build_store(
-                        thunk_entry.env_ptr_global.as_pointer_value(),
-                        env_ptr,
-                    )?;
+                    self.build_store(thunk_entry.fn_ptr_global.as_pointer_value(), fn_ptr)?;
+                    self.build_store(thunk_entry.env_ptr_global.as_pointer_value(), env_ptr)?;
                     self.pending_callback_tls
                         .push(thunk_entry.fn_ptr_global.as_pointer_value());
                     self.pending_callback_tls
@@ -263,7 +264,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let crate::ast::Type::Name(n, _) = &ef.params[i].ty {
                 if self.repr_c_record_names.contains(n.as_str()) {
                     if let BasicValueEnum::PointerValue(pv) = arg {
-                        if let Some(&BasicTypeEnum::StructType(sty)) = self.type_llvm.get(n.as_str()) {
+                        if let Some(&BasicTypeEnum::StructType(sty)) =
+                            self.type_llvm.get(n.as_str())
+                        {
                             let loaded = self.build_load(
                                 BasicTypeEnum::StructType(sty),
                                 *pv,
@@ -337,7 +340,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let BasicValueEnum::PointerValue(_pv) = compiled_args[i] {
                     let wrapper = self.get_or_create_closure_wrapper(&fn_name)?;
                     let closure_ty = crate::codegen::types::closure_struct_type(self.context);
-                    let closure_alloca = self.build_alloca(BasicTypeEnum::StructType(closure_ty), "closure_arg")?;
+                    let closure_alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(closure_ty), "closure_arg")?;
                     let fn_gep = self
                         .gep()
                         .build_struct_gep(closure_ty, closure_alloca, 0, "fn_gep")
@@ -535,12 +539,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         for i in 0..param_tys.len() {
-            let param = wrapper_fn
-                .get_nth_param((i + 1) as u32)
-                .ok_or_else(|| {
-                    CompileError::LlvmError(format!("wrapper: param {} not found", i + 1))
-                })?;
-            call_args.push(basic_value_to_metadata_value(&param, self.context.i64_type()));
+            let param = wrapper_fn.get_nth_param((i + 1) as u32).ok_or_else(|| {
+                CompileError::LlvmError(format!("wrapper: param {} not found", i + 1))
+            })?;
+            call_args.push(basic_value_to_metadata_value(
+                &param,
+                self.context.i64_type(),
+            ));
         }
 
         let call = self.build_call(orig_fn, &call_args, "wrapper_call")?;
@@ -569,9 +574,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 }
 
 /// Convert a BasicValueEnum to its metadata type for indirect calls.
-fn basic_value_to_metadata_type<'ctx>(
-    val: &BasicValueEnum<'ctx>,
-) -> BasicMetadataTypeEnum<'ctx> {
+fn basic_value_to_metadata_type<'ctx>(val: &BasicValueEnum<'ctx>) -> BasicMetadataTypeEnum<'ctx> {
     match val {
         BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
         BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),

@@ -606,8 +606,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         ef: &crate::ast::ExternFunc,
         sig: &ExternFnSignature<'ctx>,
         abi: &str,
-    ) -> MimiResult<(inkwell::values::FunctionValue<'ctx>, inkwell::values::FunctionValue<'ctx>)>
-    {
+    ) -> MimiResult<(
+        inkwell::values::FunctionValue<'ctx>,
+        inkwell::values::FunctionValue<'ctx>,
+    )> {
         let extern_name = format!("__mimi_extern_{}", ef.name);
         let extern_fn = self.module.add_function(
             &extern_name,
@@ -646,9 +648,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicValueEnum::PointerValue(pv) => self
                             .builder
                             .build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_{}", i))
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("bitcast error: {}", e))
-                            })?
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_int_value(),
                         _ => {
                             return Err(CompileError::TypeMismatch(format!(
@@ -836,8 +836,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         || (self.record_type_names.contains(n.as_str())
                             && !self.repr_c_record_names.contains(n.as_str())) =>
                 {
-                    let json_val =
-                        self.emit_list_or_record_arg_conversion(param, &p.ty, i, sig)?;
+                    let json_val = self.emit_list_or_record_arg_conversion(param, &p.ty, i, sig)?;
                     json_strings.push(json_val);
                     wrapper_args.push(BasicMetadataValueEnum::PointerValue(json_val));
                 }
@@ -847,9 +846,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     wrapper_args.push(BasicMetadataValueEnum::PointerValue(json_val));
                 }
                 _ => {
-                    if let Some(arg) =
-                        self.emit_reprc_record_arg_conversion(param, &p.ty, i)?
-                    {
+                    if let Some(arg) = self.emit_reprc_record_arg_conversion(param, &p.ty, i)? {
                         wrapper_args.push(arg);
                     } else {
                         wrapper_args.push(match param {
@@ -861,9 +858,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicValueEnum::StructValue(v) => {
                                 BasicMetadataValueEnum::StructValue(v)
                             }
-                            BasicValueEnum::ArrayValue(v) => {
-                                BasicMetadataValueEnum::ArrayValue(v)
-                            }
+                            BasicValueEnum::ArrayValue(v) => BasicMetadataValueEnum::ArrayValue(v),
                             BasicValueEnum::VectorValue(v) => {
                                 BasicMetadataValueEnum::VectorValue(v)
                             }
@@ -927,7 +922,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &format!("list_data_gep_{}", i),
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let len_val = self.build_load(self.context.i64_type(), len_gep, &format!("list_len_{}", i))?;
+        let len_val =
+            self.build_load(self.context.i64_type(), len_gep, &format!("list_len_{}", i))?;
         let data_ptr_val = self.build_load(
             self.context.ptr_type(inkwell::AddressSpace::default()),
             data_gep,
@@ -1004,22 +1000,27 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let struct_val = param.into_struct_value();
         let struct_ty = struct_val.get_type();
-        let alloca = self.build_alloca(BasicTypeEnum::StructType(struct_ty), &format!("tuple_alloca_{}", i))?;
+        let alloca = self.build_alloca(
+            BasicTypeEnum::StructType(struct_ty),
+            &format!("tuple_alloca_{}", i),
+        )?;
         self.build_store(alloca, param)?;
 
         let arr_ty = i64_ty.array_type(n as u32);
-        let vals_alloca = self.build_alloca(BasicTypeEnum::ArrayType(arr_ty), &format!("tuple_vals_{}", i))?;
-        let tys_alloca = self.build_alloca(BasicTypeEnum::ArrayType(arr_ty), &format!("tuple_tys_{}", i))?;
+        let vals_alloca = self.build_alloca(
+            BasicTypeEnum::ArrayType(arr_ty),
+            &format!("tuple_vals_{}", i),
+        )?;
+        let tys_alloca = self.build_alloca(
+            BasicTypeEnum::ArrayType(arr_ty),
+            &format!("tuple_tys_{}", i),
+        )?;
 
         for (ei, elem_ty) in elems.iter().enumerate() {
             let idx = i32_ty.const_int(ei as u64, false);
             let elem_raw = self
                 .builder
-                .build_extract_value(
-                    struct_val,
-                    ei as u32,
-                    &format!("tuple_elem_{}_{}", i, ei),
-                )
+                .build_extract_value(struct_val, ei as u32, &format!("tuple_elem_{}_{}", i, ei))
                 .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?;
             let elem_i64 = self.tuple_elem_to_i64(elem_raw, i, ei)?;
 
@@ -1127,10 +1128,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicValueEnum::StructValue(sv) => {
                 let s_ty = sv.get_type();
-                let s_alloca = self.build_alloca(
-                    BasicTypeEnum::StructType(s_ty),
-                    &format!("ts_{}_{}", i, ei),
-                )?;
+                let s_alloca = self
+                    .build_alloca(BasicTypeEnum::StructType(s_ty), &format!("ts_{}_{}", i, ei))?;
                 self.build_store(s_alloca, sv)?;
                 let cast = self
                     .builder
@@ -1209,11 +1208,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             let zext = self
                 .builder
-                .build_int_z_extend(
-                    truncated_i32,
-                    i64_ty,
-                    &format!("{}_{}_zext", n, f.name),
-                )
+                .build_int_z_extend(truncated_i32, i64_ty, &format!("{}_{}_zext", n, f.name))
                 .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?;
             if fi == 0 {
                 packed = zext;
@@ -1228,11 +1223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("shift: {}", e)))?;
                 packed = self
                     .builder
-                    .build_or(
-                        packed,
-                        shifted,
-                        &format!("{}_{}_packed", n, f.name),
-                    )
+                    .build_or(packed, shifted, &format!("{}_{}_packed", n, f.name))
                     .map_err(|e| CompileError::LlvmError(format!("or: {}", e)))?;
             }
         }
@@ -1325,8 +1316,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_pointer_cast(
                 c_alloca,
-                self.context
-                    .ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 &format!("c_struct_ptr_{}", n),
             )
             .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?;
@@ -1395,9 +1385,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         if let Some(ens_expr) = &ef.ensures {
             let ret_val = call_try_basic_value(call).ok_or_else(|| {
-                CompileError::LlvmError(
-                    "extern wrapper call did not return a value".to_string(),
-                )
+                CompileError::LlvmError("extern wrapper call did not return a value".to_string())
             })?;
             let mut contract_vars = self.contract_vars_from_params(ef, wrapper_fn)?;
             let result_ty = ret_val.get_type();
@@ -1444,9 +1432,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.emit_string_return(call, sig)?;
         } else if sig.wrapper_fn_type.get_return_type().is_some() {
             let ret = call_try_basic_value(call).ok_or_else(|| {
-                CompileError::LlvmError(
-                    "extern wrapper call did not return a value".to_string(),
-                )
+                CompileError::LlvmError("extern wrapper call did not return a value".to_string())
             })?;
             self.build_return(Some(&ret))?;
         } else {
@@ -1507,9 +1493,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "json_deser",
             )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| {
-                CompileError::LlvmError("json deserialize returned void".to_string())
-            })?
+            .ok_or_else(|| CompileError::LlvmError("json deserialize returned void".to_string()))?
             .into_pointer_value();
 
         let len_val = self.build_load(self.context.i64_type(), out_len_alloca, "list_len")?;
@@ -1544,9 +1528,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         call: &CallSiteValue<'ctx>,
     ) -> MimiResult<()> {
         let tuple_ty = ef.ret.as_ref().ok_or_else(|| {
-            CompileError::LlvmError(
-                "expected tuple return type for extern function".to_string(),
-            )
+            CompileError::LlvmError("expected tuple return type for extern function".to_string())
         })?;
         let elems = match tuple_ty {
             crate::ast::Type::Tuple(e) => e,
@@ -1561,7 +1543,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("extern call returned void".to_string()))?;
         let json_pv = match ret {
             BasicValueEnum::PointerValue(pv) => pv,
-            _ => return Err(CompileError::LlvmError("tuple return must be pointer".to_string())),
+            _ => {
+                return Err(CompileError::LlvmError(
+                    "tuple return must be pointer".to_string(),
+                ))
+            }
         };
 
         let arr_ty = i64_ty.array_type(n_elems as u32);
@@ -1646,10 +1632,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap_or(BasicTypeEnum::IntType(i64_ty));
             let field_val: BasicValueEnum = match elem_llvm_ty {
                 BasicTypeEnum::FloatType(ft) => {
-                    let tmp_alloca = self.build_alloca(
-                        BasicTypeEnum::IntType(i64_ty),
-                        &format!("f_tmp_{}", ei),
-                    )?;
+                    let tmp_alloca = self
+                        .build_alloca(BasicTypeEnum::IntType(i64_ty), &format!("f_tmp_{}", ei))?;
                     self.build_store(tmp_alloca, raw_i64)?;
                     let cast = self
                         .builder

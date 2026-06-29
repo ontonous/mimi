@@ -56,17 +56,35 @@ impl CppBindGenerator {
         writeln!(out, "class MimiString {{")?;
         writeln!(out, "public:")?;
         writeln!(out, "    explicit MimiString(char* raw) : data_(raw) {{}}")?;
-        writeln!(out, "    ~MimiString() {{ if (data_) mimi_string_free(data_); }}")?;
+        writeln!(
+            out,
+            "    ~MimiString() {{ if (data_) mimi_string_free(data_); }}"
+        )?;
         writeln!(out, "    MimiString(const MimiString&) = delete;")?;
-        writeln!(out, "    MimiString& operator=(const MimiString&) = delete;")?;
-        writeln!(out, "    MimiString(MimiString&& o) noexcept : data_(o.data_) {{ o.data_ = nullptr; }}")?;
+        writeln!(
+            out,
+            "    MimiString& operator=(const MimiString&) = delete;"
+        )?;
+        writeln!(
+            out,
+            "    MimiString(MimiString&& o) noexcept : data_(o.data_) {{ o.data_ = nullptr; }}"
+        )?;
         writeln!(out, "    MimiString& operator=(MimiString&& o) noexcept {{")?;
         writeln!(out, "        if (this != &o) {{ if (data_) mimi_string_free(data_); data_ = o.data_; o.data_ = nullptr; }}")?;
         writeln!(out, "        return *this;")?;
         writeln!(out, "    }}")?;
-        writeln!(out, "    const char* c_str() const {{ return data_ ? data_ : \"\"; }}")?;
-        writeln!(out, "    std::string str() const {{ return std::string(c_str()); }}")?;
-        writeln!(out, "    explicit operator bool() const {{ return data_ != nullptr; }}")?;
+        writeln!(
+            out,
+            "    const char* c_str() const {{ return data_ ? data_ : \"\"; }}"
+        )?;
+        writeln!(
+            out,
+            "    std::string str() const {{ return std::string(c_str()); }}"
+        )?;
+        writeln!(
+            out,
+            "    explicit operator bool() const {{ return data_ != nullptr; }}"
+        )?;
         writeln!(out, "private:")?;
         writeln!(out, "    char* data_;")?;
         writeln!(out, "}};")?;
@@ -82,7 +100,11 @@ impl CppBindGenerator {
             self.write_cpp_wrapper(&mut out, func, &contract)?;
         }
 
-        writeln!(out, "}} // namespace {}", sanitize_cpp_ns(&self.module_name))?;
+        writeln!(
+            out,
+            "}} // namespace {}",
+            sanitize_cpp_ns(&self.module_name)
+        )?;
         writeln!(out, "}} // namespace mimi")?;
         writeln!(out)?;
         writeln!(out, "#endif // {}", guard)?;
@@ -119,7 +141,11 @@ impl CppBindGenerator {
         for func in extern_funcs {
             let contract = self.build_contract(func);
             for (i, p) in func.params.iter().enumerate() {
-                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                if let FfiArgContract::Callback {
+                    param_types,
+                    ret_type,
+                } = &contract.args[i]
+                {
                     let slot = format!("{}_{}_cb", func.name, p.name);
                     let tramp = format!("mimi_cb_{}_{}_trampoline", func.name, p.name);
                     let cpp_sig = self.callback_cpp_type(param_types, ret_type);
@@ -128,9 +154,15 @@ impl CppBindGenerator {
                     writeln!(out, "thread_local static {} {};", cpp_sig, slot)?;
                     writeln!(out, "{}", c_sig)?;
                     writeln!(out, "    if (!{}) {{", slot)?;
-                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(
+                        out,
+                        "        return {};",
+                        self.callback_default_ret(ret_type)
+                    )?;
                     writeln!(out, "    }}")?;
-                    let c_args: Vec<String> = param_types.iter().enumerate()
+                    let c_args: Vec<String> = param_types
+                        .iter()
+                        .enumerate()
                         .map(|(j, _)| format!("arg{}", j))
                         .collect();
                     writeln!(out, "    return {}({});", slot, c_args.join(", "))?;
@@ -162,11 +194,19 @@ impl CppBindGenerator {
         for (i, p) in func.params.iter().enumerate() {
             match contract.args[i] {
                 FfiArgContract::StringBorrow => {
-                    writeln!(conversions, "        auto {}_cstr = {}.c_str();", p.name, p.name)?;
+                    writeln!(
+                        conversions,
+                        "        auto {}_cstr = {}.c_str();",
+                        p.name, p.name
+                    )?;
                     c_args.push(format!("{}_cstr", p.name));
                 }
                 FfiArgContract::StringTransfer | FfiArgContract::Json => {
-                    writeln!(conversions, "        auto {}_cstr = {}.c_str();", p.name, p.name)?;
+                    writeln!(
+                        conversions,
+                        "        auto {}_cstr = {}.c_str();",
+                        p.name, p.name
+                    )?;
                     c_args.push(format!("{}_cstr", p.name));
                 }
                 FfiArgContract::Callback { .. } => {
@@ -176,25 +216,46 @@ impl CppBindGenerator {
                     c_args.push(tramp);
                 }
                 _ => {
-                    c_args.push(format!("static_cast<{}>({})", self.mimi_type_to_c(contract, i), p.name));
+                    c_args.push(format!(
+                        "static_cast<{}>({})",
+                        self.mimi_type_to_c(contract, i),
+                        p.name
+                    ));
                 }
             }
         }
 
-        writeln!(out, "inline {} {}({}) {{", ret_cpp, func.name, cpp_params.join(", "))?;
+        writeln!(
+            out,
+            "inline {} {}({}) {{",
+            ret_cpp,
+            func.name,
+            cpp_params.join(", ")
+        )?;
         write!(out, "{}", conversions)?;
 
         // Use :: prefix to call C functions (avoids recursion with same-named wrappers)
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => {
-                writeln!(out, "        MimiString mimi_ret(::{}({}));", func.name, c_args.join(", "))?;
+                writeln!(
+                    out,
+                    "        MimiString mimi_ret(::{}({}));",
+                    func.name,
+                    c_args.join(", ")
+                )?;
             }
             crate::ffi::contract::FfiRetContract::Unit => {
                 writeln!(out, "        ::{}({});", func.name, c_args.join(", "))?;
             }
             _ => {
-                writeln!(out, "        {} mimi_ret = ::{}({});", ret_cpp, func.name, c_args.join(", "))?;
+                writeln!(
+                    out,
+                    "        {} mimi_ret = ::{}({});",
+                    ret_cpp,
+                    func.name,
+                    c_args.join(", ")
+                )?;
             }
         }
 
@@ -218,38 +279,55 @@ impl CppBindGenerator {
             return "void*".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "int64_t".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             FfiArgContract::Float => "double".to_string(),
-            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "const char*".to_string(),
+            FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => {
+                "const char*".to_string()
+            }
             FfiArgContract::Cap(_) => "int64_t".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
             FfiArgContract::Json => "const char*".to_string(),
             FfiArgContract::StructByValue(name) => format!("struct {}", name),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_c_type(param_types, ret_type)
-            }
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_c_type(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
-
 
     fn mimi_type_to_cpp(&self, contract: &FfiContract, index: usize) -> String {
         if index >= contract.args.len() {
             return "void*".to_string();
         }
         match &contract.args[index] {
-            FfiArgContract::Int => "int64_t".to_string(),
+            FfiArgContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             FfiArgContract::Float => "double".to_string(),
             FfiArgContract::StringBorrow => "const std::string&".to_string(),
-            FfiArgContract::StringTransfer | FfiArgContract::Json => "const std::string&".to_string(),
+            FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                "const std::string&".to_string()
+            }
             FfiArgContract::Cap(_) => "int64_t".to_string(),
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "void*".to_string(),
-            FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
+            FfiArgContract::CShared(_)
+            | FfiArgContract::CBorrow(_)
+            | FfiArgContract::CBorrowMut(_) => "int64_t".to_string(),
             FfiArgContract::StructByValue(name) => format!("const struct {}&", name),
-            FfiArgContract::Callback { param_types, ret_type } => {
-                self.callback_cpp_type(param_types, ret_type)
-            }
+            FfiArgContract::Callback {
+                param_types,
+                ret_type,
+            } => self.callback_cpp_type(param_types, ret_type),
             FfiArgContract::Unsupported(_) => "void*".to_string(),
         }
     }
@@ -257,9 +335,14 @@ impl CppBindGenerator {
     fn ret_type_to_cpp(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
-            crate::ffi::contract::FfiRetContract::Int => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::Int(scalar) => match scalar {
+                crate::ffi::contract::FfiScalarType::I32 => "int32_t".to_string(),
+                crate::ffi::contract::FfiScalarType::I64 => "int64_t".to_string(),
+                crate::ffi::contract::FfiScalarType::Bool => "bool".to_string(),
+            },
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
-            crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "MimiString".to_string(),
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned => "MimiString".to_string(),
             crate::ffi::contract::FfiRetContract::RawPtr(_)
             | crate::ffi::contract::FfiRetContract::RawPtrMut(_) => "void*".to_string(),
             crate::ffi::contract::FfiRetContract::CShared(_)
@@ -302,7 +385,11 @@ impl CppBindGenerator {
             .enumerate()
             .map(|(i, ty)| format!("{} arg{}", self.mimi_type_to_c_type(ty), i))
             .collect();
-        let args_str = if args.is_empty() { "void".to_string() } else { args.join(", ") };
+        let args_str = if args.is_empty() {
+            "void".to_string()
+        } else {
+            args.join(", ")
+        };
         format!("extern \"C\" {} {}({}) {{", ret, name, args_str)
     }
 
@@ -333,6 +420,12 @@ impl CppBindGenerator {
 
 fn sanitize_cpp_ns(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

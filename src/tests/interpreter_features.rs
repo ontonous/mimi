@@ -8,7 +8,8 @@ use super::*;
 #[test]
 fn stress_deeply_nested_if() {
     // 10 levels of nested if/else — tests stack depth and scope management
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let x = 1
     if x == 1 {
@@ -31,14 +32,16 @@ func main() -> i32 {
         } else { 0 }
     } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
 fn stress_deeply_nested_arithmetic() {
     // Deeply nested arithmetic expression — tests expression evaluator depth
-    let v = run_source("func main() -> i32 { 1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10)))))))) }");
+    let v =
+        run_source("func main() -> i32 { 1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10)))))))) }");
     assert_eq!(v, interp::Value::Int(55));
 }
 
@@ -54,7 +57,8 @@ fn stress_long_chain_addition() {
 #[test]
 fn stress_nested_generic_inference() {
     // List of Lists — tests nested type parameter inference
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let nested = [[1, 2], [3, 4], [5, 6]]
     let mut sum = 0
@@ -65,14 +69,16 @@ func main() -> i32 {
     }
     sum
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(21));
 }
 
 #[test]
 fn stress_record_with_all_types() {
     // Record containing every basic type — tests type system completeness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Mixed {
     i: i32
     f: f64
@@ -83,14 +89,16 @@ func main() -> i32 {
     let m = Mixed { i: 42, f: 3.14, s: "hello", b: true }
     if m.b { m.i } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
 fn stress_enum_with_mixed_payloads() {
     // Enum with different payload types — tests pattern matching completeness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Value {
     Int(i32)
     Float(f64)
@@ -108,7 +116,8 @@ func describe(v: Value) -> string {
 func main() -> string {
     describe(Int(42))
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("int:42".to_string()));
 }
 
@@ -117,7 +126,8 @@ func main() -> string {
 #[test]
 fn stress_loop_break_continue_interaction() {
     // break and continue in nested loops — tests control flow correctness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let mut sum = 0
     let mut i = 0
@@ -129,14 +139,16 @@ func main() -> i32 {
     }
     sum
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(16)); // 1+3+5+7
 }
 
 #[test]
 fn stress_match_with_guard_complex() {
     // Match guards with complex conditions — tests guard evaluation
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func classify(n: i32) -> string {
     match n {
         x if x < 0 => "negative",
@@ -149,14 +161,16 @@ func classify(n: i32) -> string {
 func main() -> string {
     classify(5)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("small".to_string()));
 }
 
 #[test]
 fn stress_early_return_from_nested() {
     // Early return from nested function — tests scope cleanup
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func check(x: i32) -> i32 {
     if x > 5 {
         if x > 10 { return 100 }
@@ -165,7 +179,8 @@ func check(x: i32) -> i32 {
     0
 }
 func main() -> i32 { check(7) }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(50));
 }
 
@@ -174,7 +189,8 @@ func main() -> i32 { check(7) }
 #[test]
 fn stress_chain_error_propagation() {
     // Multiple ? operators in chain — tests error propagation depth
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Res { Ok(i32) Err(string) }
 func step1(x: i32) -> Res { if x > 0 { Ok(x * 2) } else { Err("step1 failed") } }
 func step2(x: i32) -> Res { if x < 100 { Ok(x + 10) } else { Err("step2 failed") } }
@@ -191,14 +207,16 @@ func main() -> i32 {
         Err(e) => -1
     }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(10)); // (5*2+10)/2 = 10
 }
 
 #[test]
 fn stress_error_at_different_stages() {
     // Error at each stage of pipeline — tests error message preservation
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Res { Ok(i32) Err(string) }
 func step1(x: i32) -> Res { if x > 0 { Ok(x) } else { Err("bad input") } }
 func step2(x: i32) -> Res { if x < 100 { Ok(x) } else { Err("too large") } }
@@ -209,7 +227,8 @@ func main() -> string {
         Err(e) => e
     }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("bad input".to_string()));
 }
 
@@ -218,38 +237,44 @@ func main() -> string {
 #[test]
 fn stress_empty_string_operations() {
     // Operations on empty strings — tests null/empty handling
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let s = ""
     let parts = str_split(s, ",")
     let joined = str_join(parts, "-")
     len(s) + len(joined)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
 fn stress_string_with_special_chars() {
     // Strings with special characters — tests string handling robustness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let s = "hello world"
     len(s)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(11));
 }
 
 #[test]
 fn stress_unicode_string() {
     // Unicode string operations — tests multi-byte character handling
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let s = "你好世界"
     len(s)
 }
-"#);
+"#,
+    );
     // Unicode chars may be counted as bytes or characters
     match v {
         interp::Value::Int(n) => assert!(n >= 4, "expected >= 4, got {}", n),
@@ -260,12 +285,14 @@ func main() -> i32 {
 #[test]
 fn stress_string_split_empty_delimiter() {
     // Split with empty delimiter — tests edge case in split implementation
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let parts = str_split("abc", "")
     len(parts)
 }
-"#);
+"#,
+    );
     // Behavior with empty delimiter varies; just ensure no crash
     match v {
         interp::Value::Int(_) => {}
@@ -278,12 +305,14 @@ func main() -> i32 {
 #[test]
 fn stress_empty_list_operations() {
     // Operations on empty lists — tests null/empty handling
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let xs: List<i32> = []
     len(xs)
 }
-"#);
+"#,
+    );
     // Empty list might not be supported; test what happens
     if let interp::Value::Int(n) = v {
         assert_eq!(n, 0);
@@ -293,7 +322,8 @@ func main() -> i32 {
 #[test]
 fn stress_list_with_nested_records() {
     // List of records — tests compound type handling in collections
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Point { x: i32, y: i32 }
 func main() -> i32 {
     let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }, Point { x: 5, y: 6 }]
@@ -303,14 +333,16 @@ func main() -> i32 {
     }
     sum
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(21)); // (1+2)+(3+4)+(5+6)
 }
 
 #[test]
 fn stress_large_list_iteration() {
     // Iterate over a large list — tests performance and correctness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let mut sum = 0
     for i in range(0, 1000) {
@@ -318,7 +350,8 @@ func main() -> i32 {
     }
     sum
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(499500));
 }
 
@@ -327,7 +360,8 @@ func main() -> i32 {
 #[test]
 fn stress_closure_multiple_captures() {
     // Closure capturing multiple variables — tests capture mechanism
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let a = 10
     let b = 20
@@ -335,20 +369,23 @@ func main() -> i32 {
     let f = fn(x: i32) -> i32 { a + b + c + x }
     f(5)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(65));
 }
 
 #[test]
 fn stress_closure_as_argument() {
     // Passing closure as function argument — tests closure passing
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func apply(f: func(i32) -> i32, x: i32) -> i32 { f(x) }
 func main() -> i32 {
     let double = fn(x: i32) -> i32 { x * 2 }
     apply(double, 21)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -357,25 +394,29 @@ func main() -> i32 {
 #[test]
 fn stress_mutual_recursion() {
     // Two functions calling each other — tests call stack management
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func is_even(n: i32) -> bool { if n == 0 { true } else { is_odd(n - 1) } }
 func is_odd(n: i32) -> bool { if n == 0 { false } else { is_even(n - 1) } }
 func main() -> i32 {
     if is_even(10) { 1 } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(1));
 }
 
 #[test]
 fn stress_deep_recursion() {
     // Deep recursion — tests stack depth limits
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func countdown(n: i32) -> i32 {
     if n <= 0 { 0 } else { 1 + countdown(n - 1) }
 }
 func main() -> i32 { countdown(20) }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(20));
 }
 
@@ -413,7 +454,8 @@ fn stress_float_precision() {
 #[test]
 fn stress_nested_pattern_match() {
     // Match on nested enum — tests pattern matching depth
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 type Inner { A(i32) B }
 type Outer { Wrap(Inner) Raw(i32) }
 func extract(o: Outer) -> i32 {
@@ -423,14 +465,16 @@ func extract(o: Outer) -> i32 {
     }
 }
 func main() -> i32 { extract(Wrap(A(42))) }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(42));
 }
 
 #[test]
 fn stress_match_wildcard_position() {
     // Wildcard at different positions — tests match exhaustiveness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let x = 5
     match x {
@@ -438,7 +482,8 @@ func main() -> i32 {
         _ => 99
     }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(99));
 }
 
@@ -447,12 +492,14 @@ func main() -> i32 {
 #[test]
 fn stress_read_file_nonexistent() {
     // Reading nonexistent file — tests error handling
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let r = read_file("/nonexistent_path_xyz_12345")
     if r.is_ok() { 1 } else { 0 }
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(0));
 }
 
@@ -466,7 +513,8 @@ fn stress_listdir_nonexistent() {
 #[test]
 fn stress_sha256_various_inputs() {
     // SHA-256 of various inputs — tests crypto robustness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let h1 = sha256("")
     let h2 = sha256("a")
@@ -475,7 +523,8 @@ func main() -> i32 {
     // All should be 64 hex chars
     len(h1) + len(h2) + len(h3) + len(h4)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(256)); // 4 * 64
 }
 
@@ -484,7 +533,8 @@ func main() -> i32 {
 #[test]
 fn stress_config_parser_simulation() {
     // Simulates a config parser — tests realistic usage pattern
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func parse_line(line: string) -> string {
     let trimmed = str_trim(line)
     if len(trimmed) == 0 { return "" }
@@ -506,14 +556,16 @@ func main() -> i32 {
     }
     count
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(3));
 }
 
 #[test]
 fn stress_html_escape_simulation() {
     // Simulates HTML escaping — tests string replacement chains
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func escape_html(s: string) -> string {
     let mut r = str_replace(s, "&", "&amp;")
     r = str_replace(r, "<", "&lt;")
@@ -523,14 +575,19 @@ func escape_html(s: string) -> string {
 func main() -> string {
     escape_html("<div class=\"test\">&hello</div>")
 }
-"#);
-    assert_eq!(v, interp::Value::String("&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string()));
+"#,
+    );
+    assert_eq!(
+        v,
+        interp::Value::String("&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string())
+    );
 }
 
 #[test]
 fn stress_word_count_simulation() {
     // Simulates word counting — tests split+iterate+count pattern
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func count_words(text: string) -> i32 {
     let words = str_split(str_trim(text), " ")
     let mut count = 0
@@ -542,27 +599,36 @@ func count_words(text: string) -> i32 {
 func main() -> i32 {
     count_words("  hello   world   foo  bar  ")
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(4));
 }
 
 #[test]
 fn stress_json_builder_simulation() {
     // Simulates manual JSON building — tests string concatenation under load
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func kv(key: string, val: string) -> string { "\"" + key + "\":\"" + val + "\"" }
 func main() -> string {
     let json = "{" + kv("name", "mimi") + "," + kv("version", "1.0") + "," + kv("lang", "mimi") + "}"
     json
 }
-"#);
-    assert_eq!(v, interp::Value::String("{\"name\":\"mimi\",\"version\":\"1.0\",\"lang\":\"mimi\"}".to_string()));
+"#,
+    );
+    assert_eq!(
+        v,
+        interp::Value::String(
+            "{\"name\":\"mimi\",\"version\":\"1.0\",\"lang\":\"mimi\"}".to_string()
+        )
+    );
 }
 
 #[test]
 fn stress_base64_roundtrip_various() {
     // Base64 encode/decode with various inputs — tests crypto correctness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> i32 {
     let inputs = ["", "a", "ab", "abc", "abcd", "Hello, World!"]
     let mut ok_count = 0
@@ -576,14 +642,16 @@ func main() -> i32 {
     }
     ok_count
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::Int(6));
 }
 
 #[test]
 fn stress_path_operations_chain() {
     // Chain multiple path operations — tests path utility robustness
-    let v = run_source(r#"
+    let v = run_source(
+        r#"
 func main() -> string {
     let base = "/usr/local"
     let sub = "bin"
@@ -591,6 +659,7 @@ func main() -> string {
     let full = path_join(path_join(base, sub), file)
     path_basename(full)
 }
-"#);
+"#,
+    );
     assert_eq!(v, interp::Value::String("mimi".to_string()));
 }

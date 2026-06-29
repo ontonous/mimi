@@ -208,7 +208,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Pattern::Variable(name) = pat {
                         if let Some(Type::Name(tn, args)) = &ty {
                             if tn == "List" && !args.is_empty() {
-                                if let Some(full) = self.get_full_type_name(ty.as_ref().expect("ty is Some")) {
+                                if let Some(full) =
+                                    self.get_full_type_name(ty.as_ref().expect("ty is Some"))
+                                {
                                     self.var_type_names.insert(name.clone(), full);
                                 }
                             } else {
@@ -229,10 +231,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if let Some(first) = list_elems.first() {
                                 let elem_type = self.infer_object_type(first, vars);
                                 if !elem_type.is_empty() {
-                                    self.var_type_names.insert(
-                                        name.clone(),
-                                        format!("List<{}>", elem_type),
-                                    );
+                                    self.var_type_names
+                                        .insert(name.clone(), format!("List<{}>", elem_type));
                                 }
                             }
                         } else if let Expr::Index(_, _) = init {
@@ -303,20 +303,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         // Track return types for builtins
                                         match func_name.as_str() {
                                             "listdir" | "walk_dir" | "str_split" => {
-                                                self.var_type_names.insert(name.clone(), "List<string>".to_string());
-                                                self.var_types.insert(name.clone(), Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]));
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    "List<string>".to_string(),
+                                                );
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "List".into(),
+                                                        vec![Type::Name("string".into(), vec![])],
+                                                    ),
+                                                );
                                             }
                                             "exec" => {
-                                                self.var_type_names.insert(name.clone(), "ExecResult".to_string());
+                                                self.var_type_names
+                                                    .insert(name.clone(), "ExecResult".to_string());
                                             }
                                             "file_stat" => {
-                                                self.var_type_names.insert(name.clone(), "StatResult".to_string());
+                                                self.var_type_names
+                                                    .insert(name.clone(), "StatResult".to_string());
                                             }
                                             "append_file" => {
-                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                                self.var_type_names
+                                                    .insert(name.clone(), "bool".to_string());
                                             }
                                             "set_env" => {
-                                                self.var_type_names.insert(name.clone(), "bool".to_string());
+                                                self.var_type_names
+                                                    .insert(name.clone(), "bool".to_string());
                                             }
                                             _ => {}
                                         }

@@ -47,13 +47,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         field: &RecordFieldExpr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) = (&val, field_ty) else {
+        let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) = (&val, field_ty)
+        else {
             return Ok(val);
         };
         let needs_load = matches!(
             &field.value,
-            Expr::List(_) | Expr::Tuple(_) | Expr::Comprehension { .. }
-                | Expr::SetLiteral(_) | Expr::Block(_)
+            Expr::List(_)
+                | Expr::Tuple(_)
+                | Expr::Comprehension { .. }
+                | Expr::SetLiteral(_)
+                | Expr::Block(_)
         ) || {
             let val_type = self.infer_object_type(&field.value, vars);
             val_type.starts_with("List")
@@ -113,7 +117,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_ptr_i64 = self
             .build_bit_cast(
                 data_ptr.into(),
-                self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
                 "data_ptr_i64",
             )?
             .into_pointer_value();
@@ -210,7 +216,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let data_void_ptr = self.build_bit_cast(
             data_ptr.into(),
-            self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+            self.context
+                .ptr_type(inkwell::AddressSpace::default())
+                .into(),
             "data_void",
         )?;
         self.build_store(data_gep, data_void_ptr)?;
@@ -226,7 +234,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let string_struct_ty = self.context.struct_type(
-            &[BasicTypeEnum::PointerType(i8_ptr), BasicTypeEnum::IntType(i64_ty)],
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
             false,
         );
         let mut field_vals = Vec::new();
@@ -277,7 +288,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_function("strlen")
             .ok_or_else(|| "strlen not declared".to_string())?;
         let s_len = self
-            .build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(pv)], "strlen_call")?
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(pv)],
+                "strlen_call",
+            )?
             .try_as_basic_value_opt()
             .ok_or("strlen returned void")?
             .into_int_value();
@@ -343,7 +358,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_ptr = self
             .build_bit_cast(
                 data_i8.into(),
-                self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
                 "data_i64",
             )?
             .into_pointer_value();
@@ -382,7 +399,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let out_i64 = self
             .build_bit_cast(
                 out_ptr.into(),
-                self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
                 "out_i64",
             )?
             .into_pointer_value();
@@ -436,7 +455,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut comp_vars = vars.clone();
         let elem_alloca = self.build_alloca(i64_ty, var)?;
         self.build_store(elem_alloca, elem)?;
-        comp_vars.insert(var.to_string(), (elem_alloca, BasicTypeEnum::IntType(i64_ty)));
+        comp_vars.insert(
+            var.to_string(),
+            (elem_alloca, BasicTypeEnum::IntType(i64_ty)),
+        );
 
         let include = self.eval_guard(guard, &comp_vars, i64_ty)?;
         let store_bb = self.context.append_basic_block(function, "comp_store");
@@ -505,9 +527,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_float_to_signed_int(fv, i64_ty, "f_to_i")
                 .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?,
-            BasicValueEnum::PointerValue(pv) => {
-                self.build_ptr_to_int(pv, i64_ty, "p_to_i")?
-            }
+            BasicValueEnum::PointerValue(pv) => self.build_ptr_to_int(pv, i64_ty, "p_to_i")?,
             _ => return Err("comprehension expression must produce i64-compatible value".into()),
         };
         self.build_store(out_elem_ptr, result_i64)?;

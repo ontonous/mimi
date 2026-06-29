@@ -160,7 +160,9 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
 #[no_mangle]
 pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     if !ptr.is_null() {
-        unsafe { libc::free(ptr as *mut std::ffi::c_void); }
+        unsafe {
+            libc::free(ptr as *mut std::ffi::c_void);
+        }
     }
 }
 
@@ -275,7 +277,10 @@ pub extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
         std::process::abort();
     }
     let layout = std::alloc::Layout::new::<RcHeader>()
-        .extend(std::alloc::Layout::array::<u8>(size as usize).unwrap_or_else(|_| std::process::abort()))
+        .extend(
+            std::alloc::Layout::array::<u8>(size as usize)
+                .unwrap_or_else(|_| std::process::abort()),
+        )
         .unwrap_or_else(|_| std::process::abort())
         .0
         .pad_to_align();
@@ -298,7 +303,9 @@ pub extern "C" fn mimi_rc_retain(ptr: *mut std::ffi::c_void) {
         return;
     }
     let hdr = unsafe { rc_header_from_ptr(ptr) };
-    unsafe { (*hdr).strong.fetch_add(1, Ordering::Relaxed); }
+    unsafe {
+        (*hdr).strong.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Helper: build the dealloc Layout from RcHeader's stored alloc_size.
@@ -310,7 +317,9 @@ unsafe fn rc_dealloc_layout(hdr: *mut RcHeader) -> std::alloc::Layout {
         std::process::abort();
     }
     std::alloc::Layout::new::<RcHeader>()
-        .extend(std::alloc::Layout::array::<u8>(user_size).unwrap_or_else(|_| std::process::abort()))
+        .extend(
+            std::alloc::Layout::array::<u8>(user_size).unwrap_or_else(|_| std::process::abort()),
+        )
         .unwrap_or_else(|_| std::process::abort())
         .0
         .pad_to_align()
@@ -350,7 +359,11 @@ pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
             return; // Object already freed or being freed
         }
         // Try to increment weak; if strong went to 0 between our load and CAS, retry.
-        let prev = unsafe { (*hdr).weak.compare_exchange(w, w + 1, Ordering::AcqRel, Ordering::Relaxed) };
+        let prev = unsafe {
+            (*hdr)
+                .weak
+                .compare_exchange(w, w + 1, Ordering::AcqRel, Ordering::Relaxed)
+        };
         if prev.is_ok() {
             return;
         }
@@ -454,7 +467,13 @@ pub extern "C" fn mimi_map_get(handle: MapHandle, key: *const std::ffi::c_char) 
         return 0;
     }
     let s = unsafe { cstr_to_string(key) };
-    unsafe { (*map_from_handle(handle)).inner.get(&s).copied().unwrap_or(0) }
+    unsafe {
+        (*map_from_handle(handle))
+            .inner
+            .get(&s)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 #[no_mangle]
@@ -1269,9 +1288,7 @@ pub extern "C" fn json_get_int(
 }
 
 #[no_mangle]
-pub extern "C" fn json_array_length(
-    json_str: *const std::ffi::c_char,
-) -> i64 {
+pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         return 0;
     }
@@ -1462,7 +1479,9 @@ pub extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> S
     if handle == 0 {
         return handle;
     }
-    unsafe { (*set_from_handle(handle)).inner.insert(value); }
+    unsafe {
+        (*set_from_handle(handle)).inner.insert(value);
+    }
     handle
 }
 
@@ -1479,7 +1498,9 @@ pub extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> S
     if handle == 0 {
         return handle;
     }
-    unsafe { (*set_from_handle(handle)).inner.remove(&value); }
+    unsafe {
+        (*set_from_handle(handle)).inner.remove(&value);
+    }
     handle
 }
 
@@ -1501,7 +1522,9 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
         return std::ptr::null_mut();
     }
     if handle == 0 {
-        unsafe { *out_len = -1; }
+        unsafe {
+            *out_len = -1;
+        }
         return -1isize as *mut SetValueHandle;
     }
     let set = unsafe { &*set_from_handle(handle) };
@@ -1850,32 +1873,39 @@ pub extern "C" fn mimi_regex_find_all(
         return alloc_c_string("[]");
     }
     let t = unsafe { cstr_to_string(text) };
-let p = unsafe { cstr_to_string(pattern) };
+    let p = unsafe { cstr_to_string(pattern) };
     let mut matches = Vec::new();
     let mut cursor = 0;
     let t_bytes = t.as_bytes();
     let p_bytes = p.as_bytes();
     loop {
-        if cursor >= t_bytes.len() { break; }
+        if cursor >= t_bytes.len() {
+            break;
+        }
         let mut found = -1;
         let mut found_start = 0;
         for start in cursor..t_bytes.len() {
             let consumed = RegexEngine::match_here_with_depth(p_bytes, &t_bytes[start..], 0);
             if consumed >= 0 {
-                let matched = std::str::from_utf8(&t_bytes[start..start + consumed as usize]).unwrap_or("");
+                let matched =
+                    std::str::from_utf8(&t_bytes[start..start + consumed as usize]).unwrap_or("");
                 matches.push(matched.to_string());
                 found = consumed;
                 found_start = start;
                 break;
             }
         }
-        if found < 0 { break; }
+        if found < 0 {
+            break;
+        }
         cursor = found_start + found as usize;
     }
     let mut result = String::from("[");
     let mut first = true;
     for m in &matches {
-        if !first { result.push(','); }
+        if !first {
+            result.push(',');
+        }
         first = false;
         result.push('"');
         for ch in m.chars() {
@@ -1885,7 +1915,9 @@ let p = unsafe { cstr_to_string(pattern) };
                 '\n' => result.push_str("\\n"),
                 '\r' => result.push_str("\\r"),
                 '\t' => result.push_str("\\t"),
-                c if c < '\x20' => { result.push_str(&format!("\\u{:04x}", c as u32)); }
+                c if c < '\x20' => {
+                    result.push_str(&format!("\\u{:04x}", c as u32));
+                }
                 c => result.push(c),
             }
         }
@@ -1914,10 +1946,7 @@ pub extern "C" fn mimi_regex_capture_groups(
 /// Sorts an f64 list in place (ascending). data points to the raw element buffer.
 /// count is the number of elements. Each f64 is 8 bytes (stored as i64 bits).
 #[no_mangle]
-pub extern "C" fn mimi_sort_f64_inplace(
-    data: *mut u8,
-    count: i64,
-) {
+pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
     if data.is_null() || count <= 1 {
         return;
     }
@@ -1929,12 +1958,24 @@ pub extern "C" fn mimi_sort_f64_inplace(
             let a_off = j * elem_size;
             let b_off = (j + 1) * elem_size;
             let a_bits = u64::from_ne_bytes([
-                slice[a_off], slice[a_off+1], slice[a_off+2], slice[a_off+3],
-                slice[a_off+4], slice[a_off+5], slice[a_off+6], slice[a_off+7],
+                slice[a_off],
+                slice[a_off + 1],
+                slice[a_off + 2],
+                slice[a_off + 3],
+                slice[a_off + 4],
+                slice[a_off + 5],
+                slice[a_off + 6],
+                slice[a_off + 7],
             ]);
             let b_bits = u64::from_ne_bytes([
-                slice[b_off], slice[b_off+1], slice[b_off+2], slice[b_off+3],
-                slice[b_off+4], slice[b_off+5], slice[b_off+6], slice[b_off+7],
+                slice[b_off],
+                slice[b_off + 1],
+                slice[b_off + 2],
+                slice[b_off + 3],
+                slice[b_off + 4],
+                slice[b_off + 5],
+                slice[b_off + 6],
+                slice[b_off + 7],
             ]);
             if f64::from_bits(a_bits) > f64::from_bits(b_bits) {
                 for k in 0..elem_size {
@@ -2888,7 +2929,6 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
     sum
 }
 
-
 // FFI-4: The UB trigger __mimi_extern_test_segfault is always compiled into the
 // staticlib. It ALWAYS performs the UB (no cfg gate). The test wrapper
 // test_segfault is gated #[cfg(test)] so only Mimi test code can trigger it.
@@ -3417,29 +3457,45 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
 #[no_mangle]
 pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
     let path_str = if path.is_null() {
-        return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true }));
+        return Box::into_raw(Box::new(MimiList {
+            len: 0,
+            data: std::ptr::null_mut(),
+            owns_data: true,
+        }));
     } else {
         match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
-            Err(_) => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+            Err(_) => {
+                return Box::into_raw(Box::new(MimiList {
+                    len: 0,
+                    data: std::ptr::null_mut(),
+                    owns_data: true,
+                }))
+            }
         }
     };
     let entries: Vec<*mut std::ffi::c_char> = match std::fs::read_dir(path_str) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(alloc_c_string)
-            })
+            .filter_map(|e| e.file_name().to_str().map(alloc_c_string))
             .collect(),
-        Err(_) => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+        Err(_) => {
+            return Box::into_raw(Box::new(MimiList {
+                len: 0,
+                data: std::ptr::null_mut(),
+                owns_data: true,
+            }))
+        }
     };
     let len = entries.len() as i64;
     let mut items = entries;
     let data_ptr = items.as_mut_ptr();
     std::mem::forget(items);
-    Box::into_raw(Box::new(MimiList { len, data: data_ptr, owns_data: true }))
+    Box::into_raw(Box::new(MimiList {
+        len,
+        data: data_ptr,
+        owns_data: true,
+    }))
 }
 
 /// Returns 1 if path is a directory, 0 otherwise.
@@ -3452,7 +3508,11 @@ pub extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    if std::path::Path::new(path_str).is_dir() { 1 } else { 0 }
+    if std::path::Path::new(path_str).is_dir() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Returns 1 if path is a regular file, 0 otherwise.
@@ -3465,7 +3525,11 @@ pub extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    if std::path::Path::new(path_str).is_file() { 1 } else { 0 }
+    if std::path::Path::new(path_str).is_file() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Joins two path components. Returns a new allocated string.
@@ -3545,7 +3609,13 @@ pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::
 /// Recursively walks a directory and returns all file paths (as a Mimi List).
 #[no_mangle]
 pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList {
-    let empty = || Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true }));
+    let empty = || {
+        Box::into_raw(Box::new(MimiList {
+            len: 0,
+            data: std::ptr::null_mut(),
+            owns_data: true,
+        }))
+    };
     let path_str = if path.is_null() {
         return empty();
     } else {
@@ -3557,10 +3627,15 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
     let mut results = Vec::new();
     walk_dir_recursive(path_str, &mut results);
     let len = results.len() as i64;
-    let mut items: Vec<*mut std::ffi::c_char> = results.into_iter().map(|s| alloc_c_string(&s)).collect();
+    let mut items: Vec<*mut std::ffi::c_char> =
+        results.into_iter().map(|s| alloc_c_string(&s)).collect();
     let data_ptr = items.as_mut_ptr();
     std::mem::forget(items);
-    Box::into_raw(Box::new(MimiList { len, data: data_ptr, owns_data: true }))
+    Box::into_raw(Box::new(MimiList {
+        len,
+        data: data_ptr,
+        owns_data: true,
+    }))
 }
 
 fn walk_dir_recursive(dir: &str, results: &mut Vec<String>) {
@@ -3589,7 +3664,11 @@ pub extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    if std::fs::create_dir_all(path_str).is_ok() { 1 } else { 0 }
+    if std::fs::create_dir_all(path_str).is_ok() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Removes a file. Returns 1 on success, 0 on failure.
@@ -3602,7 +3681,11 @@ pub extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    if std::fs::remove_file(path_str).is_ok() { 1 } else { 0 }
+    if std::fs::remove_file(path_str).is_ok() {
+        1
+    } else {
+        0
+    }
 }
 
 // ─── Process & advanced file operations ─────────────────────────
@@ -3815,7 +3898,11 @@ pub extern "C" fn mimi_append_file(
         .open(path_str)
     {
         Ok(mut file) => {
-            if file.write_all(content_str.as_bytes()).is_ok() { 1 } else { 0 }
+            if file.write_all(content_str.as_bytes()).is_ok() {
+                1
+            } else {
+                0
+            }
         }
         Err(_) => 0,
     }
@@ -3861,18 +3948,20 @@ pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c
 
 pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     // Pre-processing: padding
@@ -3890,13 +3979,19 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
-                chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3],
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
             ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
@@ -3904,7 +3999,11 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -3994,20 +4093,34 @@ pub fn base64_decode_str(input: &str) -> Result<String, ()> {
     const REV: [i8; 128] = {
         let mut table = [-1i8; 128];
         let mut i = 0;
-        while i < 26 { table[(b'A' + i) as usize] = i as i8; i += 1; }
-        while i < 52 { table[(b'a' + i - 26) as usize] = i as i8; i += 1; }
-        while i < 62 { table[(b'0' + i - 52) as usize] = i as i8; i += 1; }
+        while i < 26 {
+            table[(b'A' + i) as usize] = i as i8;
+            i += 1;
+        }
+        while i < 52 {
+            table[(b'a' + i - 26) as usize] = i as i8;
+            i += 1;
+        }
+        while i < 62 {
+            table[(b'0' + i - 52) as usize] = i as i8;
+            i += 1;
+        }
         table[b'+' as usize] = 62;
         table[b'/' as usize] = 63;
         table
     };
-    let clean: Vec<u8> = input.bytes().filter(|&b| b != b'=' && !b.is_ascii_whitespace()).collect();
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'=' && !b.is_ascii_whitespace())
+        .collect();
     let mut output = Vec::new();
     for chunk in clean.chunks(4) {
         let mut buf = 0u32;
         let mut bits = 0;
         for &b in chunk {
-            if b >= 128 || REV[b as usize] < 0 { return Err(()); }
+            if b >= 128 || REV[b as usize] < 0 {
+                return Err(());
+            }
             buf = (buf << 6) | (REV[b as usize] as u32);
             bits += 6;
         }
@@ -4097,9 +4210,7 @@ pub extern "C" fn mimi_read_file_partial(
 /// Reads an entire file as raw bytes, returned as a C string (may contain null bytes).
 /// Caller must free with mimi_string_free.
 #[no_mangle]
-pub extern "C" fn mimi_read_file_bytes(
-    path: *const std::ffi::c_char,
-) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_read_file_bytes(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if path.is_null() {
         return alloc_c_string("");
     }
@@ -4178,9 +4289,7 @@ pub extern "C" fn mimi_read_lines_each(
 /// it uses BufReader, but still returns all lines as a single JSON string.
 /// Caller must free with mimi_string_free.
 #[no_mangle]
-pub extern "C" fn mimi_read_lines_json(
-    path: *const std::ffi::c_char,
-) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_read_lines_json(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     use std::io::BufRead;
     if path.is_null() {
         return alloc_c_string("[]");
@@ -4198,26 +4307,26 @@ pub extern "C" fn mimi_read_lines_json(
     let mut first = true;
     let mut lines = reader.lines();
     while let Some(Ok(line)) = lines.next() {
-            if !first {
-                result.push(',');
-            }
-            first = false;
-            // Escape the line for JSON
-            result.push('"');
-            for ch in line.chars() {
-                match ch {
-                    '"' => result.push_str("\\\""),
-                    '\\' => result.push_str("\\\\"),
-                    '\n' => result.push_str("\\n"),
-                    '\r' => result.push_str("\\r"),
-                    '\t' => result.push_str("\\t"),
-                    c if c < '\x20' => {
-                        result.push_str(&format!("\\u{:04x}", c as u32));
-                    }
-                    c => result.push(c),
+        if !first {
+            result.push(',');
+        }
+        first = false;
+        // Escape the line for JSON
+        result.push('"');
+        for ch in line.chars() {
+            match ch {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c < '\x20' => {
+                    result.push_str(&format!("\\u{:04x}", c as u32));
                 }
+                c => result.push(c),
             }
-            result.push('"');
+        }
+        result.push('"');
     }
     result.push(']');
     alloc_c_string(&result)
@@ -4300,15 +4409,23 @@ impl MimiLexer {
                 None => break,
                 Some('/') if self.pos + 1 < self.chars.len() && self.chars[self.pos + 1] == '/' => {
                     while let Some(ch) = self.peek() {
-                        if ch == '\n' { break; }
+                        if ch == '\n' {
+                            break;
+                        }
                         self.advance();
                     }
                 }
                 Some('/') if self.pos + 1 < self.chars.len() && self.chars[self.pos + 1] == '*' => {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     while let Some(ch) = self.peek() {
-                        if ch == '*' && self.pos + 1 < self.chars.len() && self.chars[self.pos + 1] == '/' {
-                            self.advance(); self.advance(); break;
+                        if ch == '*'
+                            && self.pos + 1 < self.chars.len()
+                            && self.chars[self.pos + 1] == '/'
+                        {
+                            self.advance();
+                            self.advance();
+                            break;
                         }
                         self.advance();
                     }
@@ -4317,62 +4434,109 @@ impl MimiLexer {
                     self.advance();
                     let mut s = String::new();
                     while let Some(ch) = self.peek() {
-                        if ch == '"' { self.advance(); break; }
+                        if ch == '"' {
+                            self.advance();
+                            break;
+                        }
                         if ch == '\\' {
                             self.advance();
                             if let Some(esc) = self.peek() {
                                 match esc {
-                                    'n' => s.push('\n'), 't' => s.push('\t'),
-                                    'r' => s.push('\r'), '"' => s.push('"'),
-                                    '\\' => s.push('\\'), c => s.push(c),
+                                    'n' => s.push('\n'),
+                                    't' => s.push('\t'),
+                                    'r' => s.push('\r'),
+                                    '"' => s.push('"'),
+                                    '\\' => s.push('\\'),
+                                    c => s.push(c),
                                 }
                                 self.advance();
                             }
-                        } else { s.push(ch); self.advance(); }
-                    }
-                    tokens.push(MimiToken { kind: "STRING".into(), value: s, line, col });
-                }
-                Some(c) if c.is_ascii_digit() || (c == '-' && self.pos + 1 < self.chars.len()
-                    && self.chars[self.pos + 1].is_ascii_digit()) =>
-                {
-                    let mut s = String::new();
-                    if c == '-' { s.push('-'); self.advance(); }
-                    let mut is_float = false;
-                    while let Some(ch) = self.peek() {
-                        if ch.is_ascii_digit() { s.push(ch); self.advance(); }
-                        else if ch == '.' { is_float = true; s.push(ch); self.advance(); }
-                        else { break; }
+                        } else {
+                            s.push(ch);
+                            self.advance();
+                        }
                     }
                     tokens.push(MimiToken {
-                        kind: if is_float { "FLOAT".into() } else { "INT".into() },
-                        value: s, line, col,
+                        kind: "STRING".into(),
+                        value: s,
+                        line,
+                        col,
+                    });
+                }
+                Some(c)
+                    if c.is_ascii_digit()
+                        || (c == '-'
+                            && self.pos + 1 < self.chars.len()
+                            && self.chars[self.pos + 1].is_ascii_digit()) =>
+                {
+                    let mut s = String::new();
+                    if c == '-' {
+                        s.push('-');
+                        self.advance();
+                    }
+                    let mut is_float = false;
+                    while let Some(ch) = self.peek() {
+                        if ch.is_ascii_digit() {
+                            s.push(ch);
+                            self.advance();
+                        } else if ch == '.' {
+                            is_float = true;
+                            s.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    tokens.push(MimiToken {
+                        kind: if is_float {
+                            "FLOAT".into()
+                        } else {
+                            "INT".into()
+                        },
+                        value: s,
+                        line,
+                        col,
                     });
                 }
                 Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                     let mut s = String::new();
                     while let Some(ch) = self.peek() {
-                        if ch.is_ascii_alphanumeric() || ch == '_' { s.push(ch); self.advance(); }
-                        else { break; }
+                        if ch.is_ascii_alphanumeric() || ch == '_' {
+                            s.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
                     let kind = match s.as_str() {
                         "func" | "pub" | "let" | "mut" | "if" | "else" | "while" | "for"
-                        | "return" | "break" | "continue" | "true" | "false" | "module"
-                        | "use" | "const" | "type" | "extern" | "match" | "in" | "as"
-                        | "struct" | "enum" | "union" | "newtype" | "where" | "trait"
-                        | "impl" | "cap" | "shared" | "local_shared" | "weak" | "loop"
-                        | "parasteps" | "alloc" | "arena" | "unsafe" | "drop"
-                        | "on_failure" | "comptime" | "async" | "requires" | "ensures"
-                        | "desc" | "rule" | "mms" | "invariant" | "math" | "Record" | "Any"
-                        | "Option" | "Result" | "List" | "Set" | "Map" | "Future"
-                        | "String" | "bool" | "i32" | "i64" | "f32" | "f64" => "KEYWORD",
+                        | "return" | "break" | "continue" | "true" | "false" | "module" | "use"
+                        | "const" | "type" | "extern" | "match" | "in" | "as" | "struct"
+                        | "enum" | "union" | "newtype" | "where" | "trait" | "impl" | "cap"
+                        | "shared" | "local_shared" | "weak" | "loop" | "parasteps" | "alloc"
+                        | "arena" | "unsafe" | "drop" | "on_failure" | "comptime" | "async"
+                        | "requires" | "ensures" | "desc" | "rule" | "mms" | "invariant"
+                        | "math" | "Record" | "Any" | "Option" | "Result" | "List" | "Set"
+                        | "Map" | "Future" | "String" | "bool" | "i32" | "i64" | "f32" | "f64" => {
+                            "KEYWORD"
+                        }
                         _ => "IDENT",
                     };
-                    tokens.push(MimiToken { kind: kind.into(), value: s, line, col });
+                    tokens.push(MimiToken {
+                        kind: kind.into(),
+                        value: s,
+                        line,
+                        col,
+                    });
                 }
                 Some(c) => {
                     let mut val = String::new();
-                    val.push(c); self.advance();
-                    if matches!(c, '=' | '!' | '<' | '>' | '&' | '|' | '+' | '-' | '*' | '/' | '.' | ':') {
+                    val.push(c);
+                    self.advance();
+                    if matches!(
+                        c,
+                        '=' | '!' | '<' | '>' | '&' | '|' | '+' | '-' | '*' | '/' | '.' | ':'
+                    ) {
                         if let Some(next) = self.peek() {
                             if (matches!(c, '=' | '!' | '<' | '>') && next == '=')
                                 || (c == '&' && next == '&')
@@ -4381,18 +4545,47 @@ impl MimiLexer {
                                 || (c == '-' && (next == '=' || next == '>'))
                                 || (c == ':' && next == ':')
                                 || (c == '.' && next == '.')
-                            { val.push(next); self.advance(); }
+                            {
+                                val.push(next);
+                                self.advance();
+                            }
                         }
                     }
                     tokens.push(MimiToken {
-                        kind: if matches!(c, '{' | '}' | '(' | ')' | '[' | ']' | ';' | ',' | ':' | '|' | '&'
-                            | '#' | '@' | '~' | '?') { "PUNCT".into() } else { "OP".into() },
-                        value: val, line, col,
+                        kind: if matches!(
+                            c,
+                            '{' | '}'
+                                | '('
+                                | ')'
+                                | '['
+                                | ']'
+                                | ';'
+                                | ','
+                                | ':'
+                                | '|'
+                                | '&'
+                                | '#'
+                                | '@'
+                                | '~'
+                                | '?'
+                        ) {
+                            "PUNCT".into()
+                        } else {
+                            "OP".into()
+                        },
+                        value: val,
+                        line,
+                        col,
                     });
                 }
             }
         }
-        tokens.push(MimiToken { kind: "EOF".into(), value: String::new(), line: self.line, col: self.col });
+        tokens.push(MimiToken {
+            kind: "EOF".into(),
+            value: String::new(),
+            line: self.line,
+            col: self.col,
+        });
         tokens
     }
 }
@@ -4400,10 +4593,14 @@ impl MimiLexer {
 fn mimi_tokens_to_json(tokens: &[MimiToken]) -> String {
     let mut json = String::from("[");
     for (i, tok) in tokens.iter().enumerate() {
-        if i > 0 { json.push(','); }
+        if i > 0 {
+            json.push(',');
+        }
         let v_escaped = tok.value.replace('\\', "\\\\").replace('"', "\\\"");
-        json.push_str(&format!(r#"{{"kind":"{}","value":"{}","line":{},"col":{}}}"#,
-            tok.kind, v_escaped, tok.line, tok.col));
+        json.push_str(&format!(
+            r#"{{"kind":"{}","value":"{}","line":{},"col":{}}}"#,
+            tok.kind, v_escaped, tok.line, tok.col
+        ));
     }
     json.push(']');
     json
@@ -4460,18 +4657,27 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
 
     while idx < tokens.len() {
         let tok = &tokens[idx];
-        if tok.kind == "EOF" { break; }
-        if tok.kind != "KEYWORD" && tok.kind != "IDENT" { idx += 1; continue; }
+        if tok.kind == "EOF" {
+            break;
+        }
+        if tok.kind != "KEYWORD" && tok.kind != "IDENT" {
+            idx += 1;
+            continue;
+        }
 
         match tok.value.as_str() {
             "pub" => {
                 if idx + 1 < tokens.len() && tokens[idx + 1].value == "func" {
                     let (func_json, consumed, is_main) = parse_func_decl(tokens, idx, true);
                     if !func_json.is_empty() {
-                        if !first_func { out.push(','); }
+                        if !first_func {
+                            out.push(',');
+                        }
                         out.push_str(&func_json);
                         first_func = false;
-                        if is_main { has_main = true; }
+                        if is_main {
+                            has_main = true;
+                        }
                     }
                     idx += consumed;
                 } else {
@@ -4481,10 +4687,14 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
             "func" => {
                 let (func_json, consumed, is_main) = parse_func_decl(tokens, idx, false);
                 if !func_json.is_empty() {
-                    if !first_func { out.push(','); }
+                    if !first_func {
+                        out.push(',');
+                    }
                     out.push_str(&func_json);
                     first_func = false;
-                    if is_main { has_main = true; }
+                    if is_main {
+                        has_main = true;
+                    }
                 }
                 idx += consumed;
             }
@@ -4494,49 +4704,83 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
                 let kind = tok.value.clone();
                 idx += 1;
                 let mut name = String::from("_");
-                if idx < tokens.len() && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD") {
+                if idx < tokens.len()
+                    && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD")
+                {
                     name = tokens[idx].value.clone();
                     idx += 1;
                 }
                 if idx < tokens.len() && tokens[idx].value == "<" {
-                    let mut depth = 1; idx += 1;
+                    let mut depth = 1;
+                    idx += 1;
                     while idx < tokens.len() && depth > 0 {
-                        if tokens[idx].value == "<" { depth += 1; }
-                        else if tokens[idx].value == ">" { depth -= 1; }
+                        if tokens[idx].value == "<" {
+                            depth += 1;
+                        } else if tokens[idx].value == ">" {
+                            depth -= 1;
+                        }
                         idx += 1;
                     }
                 }
                 if idx < tokens.len() && tokens[idx].value == "{" {
-                    let mut depth = 1; idx += 1;
+                    let mut depth = 1;
+                    idx += 1;
                     while idx < tokens.len() && depth > 0 {
-                        if tokens[idx].value == "{" { depth += 1; }
-                        else if tokens[idx].value == "}" { depth -= 1; }
+                        if tokens[idx].value == "{" {
+                            depth += 1;
+                        } else if tokens[idx].value == "}" {
+                            depth -= 1;
+                        }
                         idx += 1;
                     }
                 } else {
-                    while idx < tokens.len() && tokens[idx].value != ";" && tokens[idx].kind != "EOF" { idx += 1; }
-                    if idx < tokens.len() && tokens[idx].value == ";" { idx += 1; }
+                    while idx < tokens.len()
+                        && tokens[idx].value != ";"
+                        && tokens[idx].kind != "EOF"
+                    {
+                        idx += 1;
+                    }
+                    if idx < tokens.len() && tokens[idx].value == ";" {
+                        idx += 1;
+                    }
                 }
-                types_json.push(format!(r#"{{"name":"{}","line":{},"col":{},"kind":"{}"}}"#,
-                    json_escape(&name), line, col, json_escape(&kind)));
+                types_json.push(format!(
+                    r#"{{"name":"{}","line":{},"col":{},"kind":"{}"}}"#,
+                    json_escape(&name),
+                    line,
+                    col,
+                    json_escape(&kind)
+                ));
             }
             "module" => {
                 idx += 1;
-                if idx < tokens.len() && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD") {
+                if idx < tokens.len()
+                    && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD")
+                {
                     let mname = tokens[idx].value.clone();
                     let mline = tokens[idx].line;
                     let mcol = tokens[idx].col;
                     idx += 1;
-                    if idx < tokens.len() && tokens[idx].value == ";" { idx += 1; }
-                    else if idx < tokens.len() && tokens[idx].value == "{" {
-                        let mut depth = 1; idx += 1;
+                    if idx < tokens.len() && tokens[idx].value == ";" {
+                        idx += 1;
+                    } else if idx < tokens.len() && tokens[idx].value == "{" {
+                        let mut depth = 1;
+                        idx += 1;
                         while idx < tokens.len() && depth > 0 {
-                            if tokens[idx].value == "{" { depth += 1; }
-                            else if tokens[idx].value == "}" { depth -= 1; }
+                            if tokens[idx].value == "{" {
+                                depth += 1;
+                            } else if tokens[idx].value == "}" {
+                                depth -= 1;
+                            }
                             idx += 1;
                         }
                     }
-                    modules_json.push(format!(r#"{{"name":"{}","line":{},"col":{}}}"#, json_escape(&mname), mline, mcol));
+                    modules_json.push(format!(
+                        r#"{{"name":"{}","line":{},"col":{}}}"#,
+                        json_escape(&mname),
+                        mline,
+                        mcol
+                    ));
                 }
             }
             "use" | "import" => {
@@ -4544,11 +4788,16 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
                 let mut path_parts: Vec<String> = Vec::new();
                 let line = tok.line;
                 let col = tok.col;
-                while idx < tokens.len() && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD") {
+                while idx < tokens.len()
+                    && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD")
+                {
                     path_parts.push(tokens[idx].value.clone());
                     idx += 1;
-                    if idx < tokens.len() && tokens[idx].value == "::" { idx += 1; }
-                    else { break; }
+                    if idx < tokens.len() && tokens[idx].value == "::" {
+                        idx += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let mut alias: Option<String> = None;
                 if idx + 1 < tokens.len() && tokens[idx].value == "as" && idx + 1 < tokens.len() {
@@ -4558,28 +4807,52 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
                         idx += 1;
                     }
                 }
-                while idx < tokens.len() && tokens[idx].value != ";" && tokens[idx].kind != "EOF" { idx += 1; }
-                if idx < tokens.len() && tokens[idx].value == ";" { idx += 1; }
-                imports_json.push(format!(r#"{{"path":[{}],"alias":{},"line":{},"col":{}}}"#,
-                    path_parts.iter().map(|p| format!("\"{}\"", json_escape(p))).collect::<Vec<_>>().join(","),
-                    alias.as_ref().map_or("null".to_string(), |a| format!("\"{}\"", json_escape(a))),
-                    line, col));
+                while idx < tokens.len() && tokens[idx].value != ";" && tokens[idx].kind != "EOF" {
+                    idx += 1;
+                }
+                if idx < tokens.len() && tokens[idx].value == ";" {
+                    idx += 1;
+                }
+                imports_json.push(format!(
+                    r#"{{"path":[{}],"alias":{},"line":{},"col":{}}}"#,
+                    path_parts
+                        .iter()
+                        .map(|p| format!("\"{}\"", json_escape(p)))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    alias
+                        .as_ref()
+                        .map_or("null".to_string(), |a| format!("\"{}\"", json_escape(a))),
+                    line,
+                    col
+                ));
             }
             "const" => {
                 idx += 1;
-                while idx < tokens.len() && tokens[idx].value != ";" && tokens[idx].kind != "EOF" { idx += 1; }
-                if idx < tokens.len() && tokens[idx].value == ";" { idx += 1; }
+                while idx < tokens.len() && tokens[idx].value != ";" && tokens[idx].kind != "EOF" {
+                    idx += 1;
+                }
+                if idx < tokens.len() && tokens[idx].value == ";" {
+                    idx += 1;
+                }
             }
             "extern" => {
                 idx += 1;
                 let mut depth = 0;
                 while idx < tokens.len() {
-                    if tokens[idx].value == "{" { depth += 1; }
-                    else if tokens[idx].value == "}" {
-                        if depth == 0 { idx += 1; break; }
+                    if tokens[idx].value == "{" {
+                        depth += 1;
+                    } else if tokens[idx].value == "}" {
+                        if depth == 0 {
+                            idx += 1;
+                            break;
+                        }
                         depth -= 1;
                     }
-                    if depth == 0 && tokens[idx].value == ";" { idx += 1; break; }
+                    if depth == 0 && tokens[idx].value == ";" {
+                        idx += 1;
+                        break;
+                    }
                     idx += 1;
                 }
             }
@@ -4587,16 +4860,25 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
                 idx += 1;
                 let mut depth = 0;
                 while idx < tokens.len() {
-                    if tokens[idx].value == "{" { depth += 1; }
-                    else if tokens[idx].value == "}" {
-                        if depth == 0 { idx += 1; break; }
+                    if tokens[idx].value == "{" {
+                        depth += 1;
+                    } else if tokens[idx].value == "}" {
+                        if depth == 0 {
+                            idx += 1;
+                            break;
+                        }
                         depth -= 1;
                     }
-                    if depth == 0 && tokens[idx].value == ";" { idx += 1; break; }
+                    if depth == 0 && tokens[idx].value == ";" {
+                        idx += 1;
+                        break;
+                    }
                     idx += 1;
                 }
             }
-            _ => { idx += 1; }
+            _ => {
+                idx += 1;
+            }
         }
     }
 
@@ -4614,7 +4896,10 @@ fn mimi_build_ast_json(tokens: &[MimiToken]) -> String {
     } else {
         out.push_str(",\"imports\":[]");
     }
-    out.push_str(&format!(r#","has_main":{}}}"#, if has_main { "true" } else { "false" }));
+    out.push_str(&format!(
+        r#","has_main":{}}}"#,
+        if has_main { "true" } else { "false" }
+    ));
     out
 }
 
@@ -4623,16 +4908,25 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
     let line = tokens[idx].line;
     let col = tokens[idx].col;
 
-    if tokens[idx].value == "pub" { idx += 1; }
+    if tokens[idx].value == "pub" {
+        idx += 1;
+    }
 
     let mut is_comptime = false;
     let mut is_async = false;
     if idx < tokens.len() && tokens[idx].kind == "KEYWORD" {
-        if tokens[idx].value == "comptime" { is_comptime = true; idx += 1; }
-        else if tokens[idx].value == "async" { is_async = true; idx += 1; }
+        if tokens[idx].value == "comptime" {
+            is_comptime = true;
+            idx += 1;
+        } else if tokens[idx].value == "async" {
+            is_async = true;
+            idx += 1;
+        }
     }
 
-    if idx >= tokens.len() || tokens[idx].value != "func" { return (String::new(), 1, false); }
+    if idx >= tokens.len() || tokens[idx].value != "func" {
+        return (String::new(), 1, false);
+    }
     idx += 1;
 
     let mut name = String::from("_");
@@ -4643,10 +4937,14 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
     let is_main = name == "main";
 
     if idx < tokens.len() && tokens[idx].value == "<" {
-        let mut depth = 1; idx += 1;
+        let mut depth = 1;
+        idx += 1;
         while idx < tokens.len() && depth > 0 {
-            if tokens[idx].value == "<" { depth += 1; }
-            else if tokens[idx].value == ">" { depth -= 1; }
+            if tokens[idx].value == "<" {
+                depth += 1;
+            } else if tokens[idx].value == ">" {
+                depth -= 1;
+            }
             idx += 1;
         }
     }
@@ -4658,7 +4956,10 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
     if idx < tokens.len() && tokens[idx].value == "(" {
         idx += 1;
         while idx < tokens.len() && tokens[idx].value != ")" {
-            if tokens[idx].value == "," { idx += 1; continue; }
+            if tokens[idx].value == "," {
+                idx += 1;
+                continue;
+            }
             let pline = tokens[idx].line;
             let pcol = tokens[idx].col;
             let mut pname = String::from("_");
@@ -4667,72 +4968,118 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
                 is_mut_param = true;
                 idx += 1;
             }
-            if idx < tokens.len() && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD") {
+            if idx < tokens.len() && (tokens[idx].kind == "IDENT" || tokens[idx].kind == "KEYWORD")
+            {
                 pname = tokens[idx].value.clone();
                 idx += 1;
             }
             if idx < tokens.len() && tokens[idx].value == ":" {
                 idx += 1;
                 let mut ptype = String::new();
-                while idx < tokens.len() && !matches!(tokens[idx].value.as_str(), "," | ")" | "=")
+                while idx < tokens.len()
+                    && !matches!(tokens[idx].value.as_str(), "," | ")" | "=")
                     && tokens[idx].kind != "EOF"
                 {
                     ptype.push_str(&tokens[idx].value);
                     idx += 1;
                 }
-                params_json.push(format!(r#"{{"name":"{}","type":"{}","mut":{},"line":{},"col":{}}}"#,
-                    json_escape(&pname), json_escape(ptype.trim()), is_mut_param, pline, pcol));
+                params_json.push(format!(
+                    r#"{{"name":"{}","type":"{}","mut":{},"line":{},"col":{}}}"#,
+                    json_escape(&pname),
+                    json_escape(ptype.trim()),
+                    is_mut_param,
+                    pline,
+                    pcol
+                ));
             } else {
-                params_json.push(format!(r#"{{"name":"{}","type":"_","mut":{},"line":{},"col":{}}}"#,
-                    json_escape(&pname), is_mut_param, pline, pcol));
+                params_json.push(format!(
+                    r#"{{"name":"{}","type":"_","mut":{},"line":{},"col":{}}}"#,
+                    json_escape(&pname),
+                    is_mut_param,
+                    pline,
+                    pcol
+                ));
             }
             if idx < tokens.len() && tokens[idx].value == "=" {
                 idx += 1;
                 let mut depth = 0;
                 while idx < tokens.len() {
-                    if matches!(tokens[idx].value.as_str(), "(" | "{" | "[") { depth += 1; }
-                    else if matches!(tokens[idx].value.as_str(), ")" | "}" | "]") {
-                        if depth == 0 { break; } depth -= 1;
+                    if matches!(tokens[idx].value.as_str(), "(" | "{" | "[") {
+                        depth += 1;
+                    } else if matches!(tokens[idx].value.as_str(), ")" | "}" | "]") {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
                     }
-                    if depth == 0 && matches!(tokens[idx].value.as_str(), "," | ")") { break; }
+                    if depth == 0 && matches!(tokens[idx].value.as_str(), "," | ")") {
+                        break;
+                    }
                     idx += 1;
                 }
             }
         }
-        if idx < tokens.len() && tokens[idx].value == ")" { idx += 1; }
+        if idx < tokens.len() && tokens[idx].value == ")" {
+            idx += 1;
+        }
     }
 
     let mut ret_type = String::new();
     if idx < tokens.len() && tokens[idx].value == "->" {
         idx += 1;
-        while idx < tokens.len() && !matches!(tokens[idx].value.as_str(), "{" | "where") && tokens[idx].kind != "EOF" {
+        while idx < tokens.len()
+            && !matches!(tokens[idx].value.as_str(), "{" | "where")
+            && tokens[idx].kind != "EOF"
+        {
             ret_type.push_str(&tokens[idx].value);
             idx += 1;
         }
     }
 
     if idx < tokens.len() && tokens[idx].value == "where" {
-        while idx < tokens.len() && tokens[idx].value != "{" && tokens[idx].kind != "EOF" { idx += 1; }
+        while idx < tokens.len() && tokens[idx].value != "{" && tokens[idx].kind != "EOF" {
+            idx += 1;
+        }
     }
 
     let mut stmts_json = Vec::new();
     if idx < tokens.len() && tokens[idx].value == "{" {
         let body_start = idx;
-        let mut depth = 1; idx += 1;
+        let mut depth = 1;
+        idx += 1;
         while idx < tokens.len() && depth > 0 {
-            if tokens[idx].value == "{" { depth += 1; }
-            else if tokens[idx].value == "}" { depth -= 1; }
-            if depth > 0 { idx += 1; }
+            if tokens[idx].value == "{" {
+                depth += 1;
+            } else if tokens[idx].value == "}" {
+                depth -= 1;
+            }
+            if depth > 0 {
+                idx += 1;
+            }
         }
-        if idx < tokens.len() { body_end_line = tokens[idx].line; idx += 1; }
+        if idx < tokens.len() {
+            body_end_line = tokens[idx].line;
+            idx += 1;
+        }
         has_body = true;
 
         let mut bi = body_start + 1;
         let mut body_depth = 1;
         while bi < idx - 1 && body_depth > 0 {
-            if tokens[bi].value == "{" { body_depth += 1; bi += 1; continue; }
-            if tokens[bi].value == "}" { body_depth -= 1; bi += 1; continue; }
-            if body_depth != 1 { bi += 1; continue; }
+            if tokens[bi].value == "{" {
+                body_depth += 1;
+                bi += 1;
+                continue;
+            }
+            if tokens[bi].value == "}" {
+                body_depth -= 1;
+                bi += 1;
+                continue;
+            }
+            if body_depth != 1 {
+                bi += 1;
+                continue;
+            }
 
             match tokens[bi].kind.as_str() {
                 "KEYWORD" => {
@@ -4743,44 +5090,80 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
                             bi += 1;
                             let mut is_mut = false;
                             let mut sname = String::new();
-                            if bi < tokens.len() && tokens[bi].value == "mut" { is_mut = true; bi += 1; }
-                            if bi < tokens.len() && tokens[bi].kind == "IDENT" { sname = tokens[bi].value.clone(); bi += 1; }
+                            if bi < tokens.len() && tokens[bi].value == "mut" {
+                                is_mut = true;
+                                bi += 1;
+                            }
+                            if bi < tokens.len() && tokens[bi].kind == "IDENT" {
+                                sname = tokens[bi].value.clone();
+                                bi += 1;
+                            }
                             if bi < tokens.len() && tokens[bi].value == ":" {
                                 bi += 1;
-                                while bi < tokens.len() && !matches!(tokens[bi].value.as_str(), "=" | ";" | "{" | "}")
-                                    && tokens[bi].kind != "EOF" { bi += 1; }
+                                while bi < tokens.len()
+                                    && !matches!(tokens[bi].value.as_str(), "=" | ";" | "{" | "}")
+                                    && tokens[bi].kind != "EOF"
+                                {
+                                    bi += 1;
+                                }
                             }
                             if bi < tokens.len() && tokens[bi].value == "=" {
                                 bi += 1;
                                 let mut ed = 0;
                                 while bi < tokens.len() {
-                                    if matches!(tokens[bi].value.as_str(), "{" | "(" | "[") { ed += 1; }
-                                    else if matches!(tokens[bi].value.as_str(), "}" | ")" | "]") {
-                                        if ed == 0 { break; } ed -= 1;
+                                    if matches!(tokens[bi].value.as_str(), "{" | "(" | "[") {
+                                        ed += 1;
+                                    } else if matches!(tokens[bi].value.as_str(), "}" | ")" | "]") {
+                                        if ed == 0 {
+                                            break;
+                                        }
+                                        ed -= 1;
                                     }
-                                    if ed == 0 && tokens[bi].value == ";" { break; }
+                                    if ed == 0 && tokens[bi].value == ";" {
+                                        break;
+                                    }
                                     bi += 1;
                                 }
                             }
-                            if bi < tokens.len() && tokens[bi].value == ";" { bi += 1; }
-                            stmts_json.push(format!(r#"{{"kind":"let","name":"{}","mut":{},"line":{},"col":{}}}"#,
-                                json_escape(&sname), is_mut, stmt_line, stmt_col));
+                            if bi < tokens.len() && tokens[bi].value == ";" {
+                                bi += 1;
+                            }
+                            stmts_json.push(format!(
+                                r#"{{"kind":"let","name":"{}","mut":{},"line":{},"col":{}}}"#,
+                                json_escape(&sname),
+                                is_mut,
+                                stmt_line,
+                                stmt_col
+                            ));
                         }
                         "return" => {
                             bi += 1;
-                            while bi < tokens.len() && !matches!(tokens[bi].value.as_str(), ";" | "}")
-                                && tokens[bi].kind != "EOF" {
+                            while bi < tokens.len()
+                                && !matches!(tokens[bi].value.as_str(), ";" | "}")
+                                && tokens[bi].kind != "EOF"
+                            {
                                 if tokens[bi].value == "{" {
-                                    let mut d = 1; bi += 1;
+                                    let mut d = 1;
+                                    bi += 1;
                                     while bi < tokens.len() && d > 0 {
-                                        if tokens[bi].value == "{" { d += 1; }
-                                        else if tokens[bi].value == "}" { d -= 1; }
+                                        if tokens[bi].value == "{" {
+                                            d += 1;
+                                        } else if tokens[bi].value == "}" {
+                                            d -= 1;
+                                        }
                                         bi += 1;
                                     }
-                                } else { bi += 1; }
+                                } else {
+                                    bi += 1;
+                                }
                             }
-                            if bi < tokens.len() && tokens[bi].value == ";" { bi += 1; }
-                            stmts_json.push(format!(r#"{{"kind":"return","line":{},"col":{}}}"#, stmt_line, stmt_col));
+                            if bi < tokens.len() && tokens[bi].value == ";" {
+                                bi += 1;
+                            }
+                            stmts_json.push(format!(
+                                r#"{{"kind":"return","line":{},"col":{}}}"#,
+                                stmt_line, stmt_col
+                            ));
                         }
                         "if" | "while" | "for" | "loop" => {
                             let sk = tokens[bi].value.clone();
@@ -4788,16 +5171,29 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
                             let mut ed = 0;
                             while bi < tokens.len() {
                                 if tokens[bi].value == "{" {
-                                    bi += 1; let mut d = 1;
+                                    bi += 1;
+                                    let mut d = 1;
                                     while bi < tokens.len() && d > 0 {
-                                        if tokens[bi].value == "{" { d += 1; }
-                                        else if tokens[bi].value == "}" { d -= 1; }
-                                        if d > 0 { bi += 1; }
+                                        if tokens[bi].value == "{" {
+                                            d += 1;
+                                        } else if tokens[bi].value == "}" {
+                                            d -= 1;
+                                        }
+                                        if d > 0 {
+                                            bi += 1;
+                                        }
                                     }
                                     break;
                                 }
-                                if tokens[bi].value == "(" { ed += 1; }
-                                else if tokens[bi].value == ")" { if ed == 0 { bi += 1; break; } ed -= 1; }
+                                if tokens[bi].value == "(" {
+                                    ed += 1;
+                                } else if tokens[bi].value == ")" {
+                                    if ed == 0 {
+                                        bi += 1;
+                                        break;
+                                    }
+                                    ed -= 1;
+                                }
                                 bi += 1;
                             }
                             if sk == "if" {
@@ -4806,57 +5202,99 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
                                     bi = bi2 + 1;
                                     if bi < tokens.len() && tokens[bi].value == "if" {
                                         bi += 1;
-                                        while bi < tokens.len() && tokens[bi].value != "{" { bi += 1; }
+                                        while bi < tokens.len() && tokens[bi].value != "{" {
+                                            bi += 1;
+                                        }
                                         if bi < tokens.len() && tokens[bi].value == "{" {
-                                            bi += 1; let mut d = 1;
+                                            bi += 1;
+                                            let mut d = 1;
                                             while bi < tokens.len() && d > 0 {
-                                                if tokens[bi].value == "{" { d += 1; }
-                                                else if tokens[bi].value == "}" { d -= 1; }
-                                                if d > 0 { bi += 1; }
+                                                if tokens[bi].value == "{" {
+                                                    d += 1;
+                                                } else if tokens[bi].value == "}" {
+                                                    d -= 1;
+                                                }
+                                                if d > 0 {
+                                                    bi += 1;
+                                                }
                                             }
                                         }
                                     } else if bi < tokens.len() && tokens[bi].value == "{" {
-                                        bi += 1; let mut d = 1;
+                                        bi += 1;
+                                        let mut d = 1;
                                         while bi < tokens.len() && d > 0 {
-                                            if tokens[bi].value == "{" { d += 1; }
-                                            else if tokens[bi].value == "}" { d -= 1; }
-                                            if d > 0 { bi += 1; }
+                                            if tokens[bi].value == "{" {
+                                                d += 1;
+                                            } else if tokens[bi].value == "}" {
+                                                d -= 1;
+                                            }
+                                            if d > 0 {
+                                                bi += 1;
+                                            }
                                         }
                                     }
                                 }
                             }
-                            stmts_json.push(format!(r#"{{"kind":"{}","line":{},"col":{}}}"#, sk, stmt_line, stmt_col));
+                            stmts_json.push(format!(
+                                r#"{{"kind":"{}","line":{},"col":{}}}"#,
+                                sk, stmt_line, stmt_col
+                            ));
                         }
                         "break" | "continue" => {
                             let sk = tokens[bi].value.clone();
                             bi += 1;
-                            if bi < tokens.len() && tokens[bi].value == ";" { bi += 1; }
-                            stmts_json.push(format!(r#"{{"kind":"{}","line":{},"col":{}}}"#, sk, stmt_line, stmt_col));
+                            if bi < tokens.len() && tokens[bi].value == ";" {
+                                bi += 1;
+                            }
+                            stmts_json.push(format!(
+                                r#"{{"kind":"{}","line":{},"col":{}}}"#,
+                                sk, stmt_line, stmt_col
+                            ));
                         }
                         "requires" | "ensures" | "desc" | "rule" => {
                             let sk = tokens[bi].value.clone();
                             bi += 1;
-                            while bi < tokens.len() && !matches!(tokens[bi].value.as_str(), ";" | "{" | "}")
-                                && tokens[bi].kind != "EOF" { bi += 1; }
-                            if bi < tokens.len() && tokens[bi].value == ";" { bi += 1; }
-                            stmts_json.push(format!(r#"{{"kind":"{}","line":{},"col":{}}}"#, sk, stmt_line, stmt_col));
+                            while bi < tokens.len()
+                                && !matches!(tokens[bi].value.as_str(), ";" | "{" | "}")
+                                && tokens[bi].kind != "EOF"
+                            {
+                                bi += 1;
+                            }
+                            if bi < tokens.len() && tokens[bi].value == ";" {
+                                bi += 1;
+                            }
+                            stmts_json.push(format!(
+                                r#"{{"kind":"{}","line":{},"col":{}}}"#,
+                                sk, stmt_line, stmt_col
+                            ));
                         }
                         "mms" => {
                             bi += 1;
                             if bi < tokens.len() && tokens[bi].value == "{" {
-                                bi += 1; let mut d = 1;
+                                bi += 1;
+                                let mut d = 1;
                                 while bi < tokens.len() && d > 0 {
-                                    if tokens[bi].value == "{" { d += 1; }
-                                    else if tokens[bi].value == "}" { d -= 1; }
+                                    if tokens[bi].value == "{" {
+                                        d += 1;
+                                    } else if tokens[bi].value == "}" {
+                                        d -= 1;
+                                    }
                                     bi += 1;
                                 }
                             }
-                            stmts_json.push(format!(r#"{{"kind":"mms","line":{},"col":{}}}"#, stmt_line, stmt_col));
+                            stmts_json.push(format!(
+                                r#"{{"kind":"mms","line":{},"col":{}}}"#,
+                                stmt_line, stmt_col
+                            ));
                         }
-                        _ => { bi += 1; }
+                        _ => {
+                            bi += 1;
+                        }
                     }
                 }
-                _ => { bi += 1; }
+                _ => {
+                    bi += 1;
+                }
             }
         }
     }
@@ -4864,14 +5302,19 @@ fn parse_func_decl(tokens: &[MimiToken], start: usize, is_pub: bool) -> (String,
     let name_esc = json_escape(&name);
     let ret_esc = json_escape(ret_type.trim());
     let params_s = params_json.join(",");
-    let mut json = format!(r#"{{"name":"{}","line":{},"col":{},"is_pub":{},"is_comptime":{},"is_async":{},"params":[{}],"return_type":"{}","has_body":{},"body_end_line":{}"#,
-        name_esc, line, col,
+    let mut json = format!(
+        r#"{{"name":"{}","line":{},"col":{},"is_pub":{},"is_comptime":{},"is_async":{},"params":[{}],"return_type":"{}","has_body":{},"body_end_line":{}"#,
+        name_esc,
+        line,
+        col,
         if is_pub { "true" } else { "false" },
         if is_comptime { "true" } else { "false" },
         if is_async { "true" } else { "false" },
-        params_s, ret_esc,
+        params_s,
+        ret_esc,
         if has_body { "true" } else { "false" },
-        body_end_line);
+        body_end_line
+    );
 
     if !stmts_json.is_empty() {
         json.push_str(&format!(r#","stmts":[{}]"#, stmts_json.join(",")));

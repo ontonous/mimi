@@ -885,14 +885,16 @@ impl<'a> Interpreter<'a> {
                         Err(InterpError::new(msg))
                     }
 
-                    ("Some", "unwrap_or") | ("Ok", "unwrap_or")
-                    | ("Some", "value_or") | ("Ok", "value_or") => Ok(vals[0].clone()),
-                    ("None", "unwrap_or") | ("Err", "unwrap_or")
-                    | ("None", "value_or") | ("Err", "value_or") => {
-                        args.into_iter().next().ok_or_else(|| {
-                            InterpError::new("unwrap_or requires a default value".to_string())
-                        })
-                    }
+                    ("Some", "unwrap_or")
+                    | ("Ok", "unwrap_or")
+                    | ("Some", "value_or")
+                    | ("Ok", "value_or") => Ok(vals[0].clone()),
+                    ("None", "unwrap_or")
+                    | ("Err", "unwrap_or")
+                    | ("None", "value_or")
+                    | ("Err", "value_or") => args.into_iter().next().ok_or_else(|| {
+                        InterpError::new("unwrap_or requires a default value".to_string())
+                    }),
 
                     ("Some", "is_some")
                     | ("Ok", "is_some")
@@ -999,7 +1001,9 @@ impl<'a> Interpreter<'a> {
 
     fn builtin_option_value_or(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("option_value_or expects 2 arguments (option, default)"));
+            return Err(InterpError::new(
+                "option_value_or expects 2 arguments (option, default)",
+            ));
         }
         match &args[0] {
             Value::Variant(name, inner) if name == "Some" => {
