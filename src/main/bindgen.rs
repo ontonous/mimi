@@ -1,7 +1,7 @@
 //! `mimi bindgen` — generate FFI bindings for all supported languages.
 //!
 //! Takes a `.mimi` file with `extern "C"` declarations and generates
-//! binding code for C, C++, Rust, Go, Node.js, and Java.
+//! binding code for C, C++, Rust, Go, Node.js, Python, and Java.
 
 use std::collections::HashMap;
 use std::fs;
@@ -108,6 +108,22 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {}", ts_path.display(), e))?;
     println!("  [Typescript] {}", ts_path.display());
 
+    // Generate Python bindings
+    let py_gen = ffi::py_bind::PyBindGenerator::new(type_defs.clone(), &pkg_name);
+    let py_cpp = py_gen.generate(&extern_funcs)
+        .map_err(|e| format!("Python binding generation failed: {}", e))?;
+    let py_path = output_dir.join(format!("{}_pybind.cpp", pkg_name));
+    fs::write(&py_path, &py_cpp)
+        .map_err(|e| format!("failed to write {}: {}", py_path.display(), e))?;
+    println!("  [Python]   {}", py_path.display());
+
+    let pyi = py_gen.generate_pyi(&extern_funcs)
+        .map_err(|e| format!("Python stub generation failed: {}", e))?;
+    let pyi_path = output_dir.join(format!("{}.pyi", pkg_name));
+    fs::write(&pyi_path, &pyi)
+        .map_err(|e| format!("failed to write {}: {}", pyi_path.display(), e))?;
+    println!("  [Python stub] {}", pyi_path.display());
+
     // Generate Java bindings
     let java_gen = ffi::jni_bind::JniBindGenerator::new(type_defs.clone(), &pkg_name);
     let java_c = java_gen.generate_c(&extern_funcs)
@@ -125,7 +141,7 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     println!("  [Java]     {}", java_path.display());
 
     println!();
-    println!("Generated 7 binding files for {} functions.", extern_funcs.len());
+    println!("Generated 9 binding files for {} functions.", extern_funcs.len());
 
     Ok(())
 }

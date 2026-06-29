@@ -120,6 +120,18 @@ impl JniBindGenerator {
         }
         writeln!(out, ") {{")?;
 
+        // Convert Java string arguments to C strings before the call.
+        for (i, p) in func.params.iter().enumerate() {
+            match &contract.args[i] {
+                FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
+                    let jname = sanitize_java_name(&p.name);
+                    writeln!(out, "    const char* {}_str = (*env)->GetStringUTFChars(env, {}, NULL);", jname, jname)?;
+                }
+                _ => {}
+            }
+        }
+        writeln!(out)?;
+
         // Build C call arguments
         let c_args: Vec<String> = func
             .params
@@ -129,7 +141,7 @@ impl JniBindGenerator {
                 let jname = sanitize_java_name(&p.name);
                 match &contract.args[i] {
                     FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
-                        format!("(char*)(*env)->GetStringUTFChars(env, {}, NULL)", jname)
+                        format!("(char*){}_str", jname)
                     }
                     FfiArgContract::Int | FfiArgContract::Cap(_) | FfiArgContract::CShared(_)
                     | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => jname,
@@ -169,7 +181,7 @@ impl JniBindGenerator {
             match &contract.args[i] {
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
-                    writeln!(out, "    (*env)->ReleaseStringUTFChars(env, {}, (char*){}_str);", jname, jname)?;
+                    writeln!(out, "    if ({}_str) (*env)->ReleaseStringUTFChars(env, {}, {}_str);", jname, jname, jname)?;
                 }
                 _ => {}
             }

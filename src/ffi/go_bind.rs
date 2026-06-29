@@ -38,7 +38,7 @@ impl GoBindGenerator {
         writeln!(out, "/*")?;
         writeln!(out, "#cgo LDFLAGS: -lmimi_runtime -lpthread -ldl -lm")?;
         writeln!(out, "#include <stdlib.h>")?;
-        writeln!(out, "extern void* mimi_string_free(char* s);")?;
+        writeln!(out, "extern void mimi_string_free(char* s);")?;
         for func in extern_funcs {
             let contract = self.build_contract(func);
             self.write_c_decl(&mut out, func, &contract)?;
