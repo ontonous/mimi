@@ -8,14 +8,33 @@
   - `mimi_string_len(void* mimi_string) -> int64_t`：从 C 侧查询 Mimi 字符串字节长度。
   - `mimi_string_as_c_str_free_all(void)`：批量释放当前线程由 `mimi_string_as_c_str`
     分配的所有待处理 C 字符串。
+  - `mimi_value_new_int` / `mimi_value_new_bool` / `mimi_value_new_float`：从 C 侧构造
+    标量 Mimi Value。
+  - `mimi_value_as_int` / `mimi_value_as_bool` / `mimi_value_as_float`：从 C 侧读取
+    标量 Mimi Value。
+  - `mimi_shared_create(void* value)`：从 C 侧将 Value 包装为 shared handle。
 - **FFI 运行时 C API 单元测试**：在 `src/ffi/runtime.rs` 新增 cap / shared / string
-  三类运行时 API 的单元测试，覆盖注册/校验/消费、引用计数、字符串长度与批量释放。
+  / value 四类运行时 API 的单元测试，覆盖注册/校验/消费、引用计数、字符串长度与批量释放、
+  Value 构造/读取、shared handle 创建。
 - **C header 完整性测试**：在 `src/ffi/c_header.rs` 新增测试，确保生成的
-  `mimi_ffi.h` 包含 shared handle、capability、string 全部运行时 API 声明。
+  `mimi_ffi.h` 包含 shared handle、capability、string、value、callback、thread pool、
+  error handler 全部运行时 API 声明。
+- **多语言绑定生成器冒烟测试**：新增 `src/ffi/bindgen_tests.rs`，为 C header、Rust、
+  Go、Node.js、C++、Java、Python 生成器提供回归测试。
+- **`mimi bindgen` 支持 Python**：`src/main/bindgen.rs` 现在会生成 Python pybind11
+  `.cpp` 与 `.pyi` stub 文件。
 
 ### Changed
 
 ### Fixed
+
+- **绑定生成器一致性修复**:
+  - `src/ffi/c_header.rs` 补充 `mimi_string_free`、`mimi_cap_register`、
+    `mimi_runtime_set_error_handler`、`mimi_callback_deregister`、`mimi_pool_submit`、
+    `mimi_pool_join_all` 等缺失声明。
+  - `src/ffi/go_bind.rs` 修正 `mimi_string_free` 的 C 返回类型（`void*` → `void`）。
+  - `src/ffi/jni_bind.rs` 修正 Java 字符串参数释放逻辑：先缓存
+    `GetStringUTFChars` 结果，再用同一变量释放，避免使用未定义的 `_str` 变量。
 
 ### Security
 
