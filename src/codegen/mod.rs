@@ -9,6 +9,9 @@ mod registry;
 mod scope;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 use crate::ast::*;
 use crate::error::CompileError;
 use inkwell::builder::Builder;
