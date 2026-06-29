@@ -68,7 +68,9 @@ mimi bindgen math.mimi -o bindings
 - ✅ Go：使用类型别名 + `//export` trampoline + package-level slot。
 - ✅ Python：使用 `std::function` + thread-local slot + C trampoline，`.pyi` 输出 `Callable`。
 - ✅ Node.js：使用 N-API env/ref slot + thread-local 存储 + C trampoline，`.d.ts` 输出具体函数签名。
-- ⏳ Java：生成类型签名，但 idiomatic 闭包包装仍在开发中。
+- ✅ Java：生成 JNI C bridge + Java 函数式接口 + thread-local slot + C trampoline。
+
+所有回调生成器目前都基于“每次调用前设置 slot、调用后清理 slot”的同步模型。该模型满足同线程即时调用，但**不支持**跨线程调用或 C 侧长期持有回调句柄。
 
 ## 7. 错误处理
 

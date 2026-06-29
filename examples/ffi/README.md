@@ -105,6 +105,8 @@ p.x = 10
 p.y = 20
 print(math.point_sum(p))
 print(math.greet("Mimi"))
+
+print(math.apply_callback(lambda a, b: a + b, 5))
 ```
 
 ## 7. Node.js 调用示例
@@ -115,6 +117,8 @@ import * as math from './bindings/math.node';
 console.log(math.add(2, 3));
 console.log(math.point_sum({ x: 10, y: 20 }));
 console.log(math.greet("Mimi"));
+
+console.log(math.apply_callback((a: number, b: number) => a + b, 5));
 ```
 
 ## 8. Java 调用示例
@@ -131,6 +135,9 @@ public class Main {
         p.x = 10; p.y = 20;
         System.out.println(Math.point_sum(p));
         System.out.println(Math.greet("Mimi"));
+
+        Math.ApplyCallbackFCallback cb = (a, b) -> a + b;
+        System.out.println(Math.apply_callback(cb, 5));
     }
 }
 ```
@@ -139,4 +146,5 @@ public class Main {
 
 - 字符串返回值由 Mimi 运行时分配，调用方需使用 `mimi_string_free` 释放。
 - `#[repr(C)]` record 以值传递，绑定生成器会生成对应的语言结构体。
-- 当前 Rust / Go / C++ / Python / Node.js 绑定生成器已支持 `func(...)` 回调参数；Java 的回调包装仍在完善中。
+- Rust / Go / C++ / Python / Node.js / Java 绑定生成器均已支持 `func(...)` 回调参数。
+- 回调目前采用“每次调用前设置、调用后清理”的同步模型，不适用于跨线程或调用方长期持有回调句柄的场景。
