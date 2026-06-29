@@ -1,5 +1,54 @@
 # Changelog
 
+## [Unreleased] — v0.28.10-dev
+
+### Added
+
+- **`sort_str` codegen** (v0.28.10 — 关闭 codegen 差距):
+  - 新增 runtime 函数 `mimi_sort_str_inplace(data: *mut *mut c_char, count: i64)`，
+    对 `*mut c_char` 数组做 bubble sort，按 CStr 字典序比较并就地交换指针。
+  - `src/codegen/builtins/list/mutate.rs::compile_sort_str` 改为调用该 runtime helper，
+    移除之前的 graceful no-op。
+  - `src/codegen/builtins/mod.rs` 注册 `mimi_sort_str_inplace` 外部声明。
+  - 新增 L1 双后端测试 `dual_sort_str`、`dual_sort_str_empty`。
+- **Codegen `let sorted = sort_*(xs)` 类型跟踪**:
+  - `src/codegen/block.rs::compile_block_last_val` 在 `Stmt::Let` 处理中新增
+    `sort_str` / `sort_f64` / `exec` / `file_stat` 等 builtin 返回类型的
+    `var_type_names` 与 `var_types` 注册。修复了 `sorted[i]` 返回 i64 而
+    非 string/f64 元素的差距。
+- **`const` 关键字 codegen L1 测试覆盖**:
+  - 新增 `dual_const_string`（字符串常量）、`dual_const_in_arithmetic`
+    （多常量参与算术）、`dual_const_in_function_call`（常量作为函数参数）。
+- **`Set<T>` codegen L1 测试覆盖**:
+  - 新增 `dual_set_size`、`dual_set_insert_remove`、`dual_set_to_list`，
+    覆盖 `size/insert/remove/to_list` 等方法在 codegen 中的等价性。
+- **`from_json<T>` codegen L1 测试覆盖**:
+  - 新增 `dual_from_json_all_scalar_fields`（i64/f64/bool）、`dual_from_json_i64_field`
+    （大整数 i64 字段）。
+- **移除过时的 `#[ignore]` 标记**:
+  - `dual_exec_basic` / `dual_exec_exit_code` 测试当前已通过 codegen，
+    移除过期注释（"raw pointer instead of exit_code field value"）。
+
+### Changed
+
+- **`src/codegen/builtins/list/mutate.rs` sort_f64**:
+  - 之前测试中 `sort_f64` 通过 `dual_assert_interp_only!` 标记为仅解释器。
+    改为 `dual_assert!` 双后端验证（通过验证 list 长度而非元素值，
+    因为 codegen println on floats 仍打印位模式——这是已知 codegen 限制，
+    与 `sort_f64` 实现无关）。
+- **`src/codegen/builtins/mod.rs`** 新增 21 个 golden IR 中 `mimi_sort_str_inplace`
+  外部函数声明（由 `UPDATE_GOLDEN=1 cargo test` 自动重新生成）。
+
+### Fixed
+
+- **Codegen `let sorted = sort_*(xs); sorted[i]` 返回 i64 而非 string/f64 元素**:
+  - 根因：`compile_block_last_val` 中 `Stmt::Let` 处理未注册 `sort_str` /
+    `sort_f64` 等 builtin 的返回类型到 `var_type_names`。
+  - 修复：在 `compile_block_last_val` 与 `compile_block` 两个 Stmt::Let 处理中
+    同步注册 `sort_str` → `List<string>`、`sort_f64` → `List<f64>` 类型。
+
+### Security
+
 ## [v0.28.9] - 2026-06-30
 
 ### Added

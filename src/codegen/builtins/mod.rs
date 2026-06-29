@@ -449,6 +449,22 @@ fn register_regex_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
 
+    // mimi_sort_str_inplace(data: *mut *mut c_char, count: i64) -> void
+    // `data` is a pointer to an array of `*mut c_char` (i8**) — the list's
+    // element buffer for `List<string>`. The function reorders the pointer
+    // slots in place using lexicographic C-string comparison.
+    module.add_function(
+        "mimi_sort_str_inplace",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+
     // mimi_try_exit(payload): print error and exit(1) for ? operator
     module.add_function(
         "mimi_try_exit",

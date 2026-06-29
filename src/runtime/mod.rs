@@ -1986,6 +1986,38 @@ pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
     }
 }
 
+/// Sorts a list of UTF-8 C strings in place (ascending lexicographic order).
+/// `data` points to an array of `count` `*mut c_char` pointers.
+/// Each pointer is preserved across the sort (the underlying C strings are
+/// not freed or duplicated — only the pointer slots are reordered).
+#[no_mangle]
+pub extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count: i64) {
+    if data.is_null() || count <= 1 {
+        return;
+    }
+    let n = count as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(data, n) };
+    // Bubble sort: stable, O(n^2) but fine for typical small lists.
+    for i in 0..n {
+        for j in 0..(n - 1 - i) {
+            let a = slice[j];
+            let b = slice[j + 1];
+            if a.is_null() || b.is_null() {
+                // Treat null as greater than any real string to keep them at the tail.
+                if a.is_null() && !b.is_null() {
+                    slice.swap(j, j + 1);
+                }
+                continue;
+            }
+            let a_str = unsafe { CStr::from_ptr(a) };
+            let b_str = unsafe { CStr::from_ptr(b) };
+            if a_str > b_str {
+                slice.swap(j, j + 1);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Network / Socket
 // ---------------------------------------------------------------------------
