@@ -55,10 +55,11 @@
 
 | 差距 | 解释器 | Codegen | 状态 |
 |------|--------|---------|------|
-| `from_json::<T>` 类型化反序列化 | ✅ | ⬜ | 待实现 |
-| `Set<T>` 操作 | ✅ | ⬜ | 待实现 |
-| `sort_f64` / `sort_str` | ✅ | ⬜ | 待实现 |
-| `const` 关键字 | ✅ | ⬜ | 待实现 |
+| `from_json::<T>` 类型化反序列化 | ✅ | ✅ | 已实现（i32/i64/f64/bool/string 字段） |
+| `Set<T>` 操作 | ✅ | ✅ | 已实现（literal/contains/size/insert/remove/to_list） |
+| `sort_f64` / `sort_str` | ✅ | ✅ | 已实现（runtime `mimi_sort_f64_inplace` / `mimi_sort_str_inplace`） |
+| `const` 关键字 | ✅ | ✅ | 已实现（标量 + string + 函数调用） |
+| `exec(...)` Record 布局 | ✅ | ✅ | 已实现（ExecResult 字段偏移正确） |
 | `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持 |
 
 ---
@@ -109,6 +110,8 @@
 | v0.28.5 file_stat | L1 先行 → interp → codegen → 2 测试通过 | ✅ |
 | v0.28.5 append_file | L1 先行 → interp → codegen → 1 测试通过 | ✅ |
 | v0.28.5 set_env | L1 先行 → interp → codegen → 1 测试通过 | ✅ |
+| v0.28.10 sort_str codegen | L1 先行 → runtime helper → codegen 集成 → 4 测试通过 | ✅ |
+| v0.28.10 Set/sort/from_json/const 缺口清零 | 5 大差距全部关闭，L1 测试覆盖 | ✅ |
 
 ---
 
