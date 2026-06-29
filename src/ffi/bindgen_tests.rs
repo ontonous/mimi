@@ -200,6 +200,7 @@ mod tests {
     fn java_binding_smoke() {
         let gen = jni_bind::JniBindGenerator::new(sample_type_defs(), "math");
         let c = gen.generate_c(&sample_extern_funcs()).unwrap();
+        eprintln!("JAVA C:\n{}", c);
         let java = gen.generate_java(&sample_extern_funcs()).unwrap();
         assert!(c.contains("JNIEXPORT jlong JNICALL Java_Math_add"));
         assert!(c.contains("JNIEXPORT jstring JNICALL Java_Math_greet"));
@@ -209,10 +210,15 @@ mod tests {
         assert!(c.contains("typedef struct Point"));
         assert!(c.contains("struct Point p_struct"));
         assert!(c.contains("jclass Point_cls = (*env)->FindClass(env, \"Math$Point\")"));
+        assert!(c.contains("mimi_cb_apply_callback_f_trampoline"));
+        assert!(c.contains("mimi_cb_apply_callback_f_setup(env, f)"));
+        assert!(c.contains("mimi_cb_apply_callback_f_teardown(env)"));
         assert!(java.contains("public static native long add("));
         assert!(java.contains("public static native String greet("));
         assert!(java.contains("public static class Point"));
         assert!(java.contains("public static native long point_sum(Point p)"));
+        assert!(java.contains("public interface ApplyCallbackFCallback"));
+        assert!(java.contains("public static native long apply_callback(ApplyCallbackFCallback f, long x)"));
     }
 
     #[test]

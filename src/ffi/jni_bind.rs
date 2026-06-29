@@ -42,6 +42,7 @@ impl JniBindGenerator {
         writeln!(out)?;
 
         self.write_c_struct_decls(&mut out)?;
+        self.write_c_callback_support(&mut out, extern_funcs)?;
 
         let java_class = sanitize_java_class(&self.module_name);
 
@@ -68,13 +69,23 @@ impl JniBindGenerator {
 
         self.write_java_struct_defs(&mut out)?;
 
+        // Functional interfaces for callback parameters
+        self.write_java_callback_interfaces(&mut out, extern_funcs)?;
+
         for func in extern_funcs {
             let contract = self.build_contract(func);
             let params: Vec<String> = func
                 .params
                 .iter()
                 .enumerate()
-                .map(|(i, p)| format!("{} {}", self.mimi_type_to_java(&contract, i), sanitize_java_name(&p.name)))
+                .map(|(i, p)| {
+                    let ty = if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                        self.callback_interface_name(&func.name, &p.name, param_types, ret_type)
+                    } else {
+                        self.mimi_type_to_java(&contract, i)
+                    };
+                    format!("{} {}", ty, sanitize_java_name(&p.name))
+                })
                 .collect();
             let ret = self.ret_type_to_java(&contract);
             writeln!(out, "    public static native {} {}({});", ret, func.name, params.join(", "))?;
@@ -143,6 +154,15 @@ impl JniBindGenerator {
                 _ => {}
             }
         }
+
+        // Set up callback slots for function-pointer parameters.
+        for (i, p) in func.params.iter().enumerate() {
+            if let FfiArgContract::Callback { .. } = &contract.args[i] {
+                let jname = sanitize_java_name(&p.name);
+                let setup = self.callback_setup_name(&func.name, &p.name);
+                writeln!(out, "    {}(env, {});", setup, jname)?;
+            }
+        }
         writeln!(out)?;
 
         // Build C call arguments
@@ -160,6 +180,7 @@ impl JniBindGenerator {
                     | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => jname,
                     FfiArgContract::Float => jname,
                     FfiArgContract::StructByValue(_) => format!("{}_struct", jname),
+                    FfiArgContract::Callback { .. } => self.callback_trampoline_name(&func.name, &p.name),
                     _ => format!("(intptr_t)NULL /* {} */", jname),
                 }
             })
@@ -170,39 +191,47 @@ impl JniBindGenerator {
                 writeln!(out, "    {}({});", func.name, c_args.join(", "))?;
             }
             crate::ffi::contract::FfiRetContract::Int => {
-                writeln!(out, "    jlong ret = (jlong)({}({}));", func.name, c_args.join(", "))?;
-                writeln!(out, "    return ret;")?;
+                writeln!(out, "    jlong mimi_ret = (jlong)({}({}));", func.name, c_args.join(", "))?;
             }
             crate::ffi::contract::FfiRetContract::Float => {
-                writeln!(out, "    jdouble ret = (jdouble)({}({}));", func.name, c_args.join(", "))?;
-                writeln!(out, "    return ret;")?;
+                writeln!(out, "    jdouble mimi_ret = (jdouble)({}({}));", func.name, c_args.join(", "))?;
             }
             crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => {
-                writeln!(out, "    char* ret = {}({});", func.name, c_args.join(", "))?;
-                writeln!(out, "    if (!ret) return NULL;")?;
-                writeln!(out, "    jstring jret = (*env)->NewStringUTF(env, ret);")?;
-                writeln!(out, "    mimi_string_free(ret);")?;
-                writeln!(out, "    return jret;")?;
+                writeln!(out, "    char* raw_ret = {}({});", func.name, c_args.join(", "))?;
+                writeln!(out, "    jstring mimi_ret = NULL;")?;
+                writeln!(out, "    if (raw_ret) {{")?;
+                writeln!(out, "        mimi_ret = (*env)->NewStringUTF(env, raw_ret);")?;
+                writeln!(out, "        mimi_string_free(raw_ret);")?;
+                writeln!(out, "    }}")?;
             }
             crate::ffi::contract::FfiRetContract::StructByValue(name) => {
-                writeln!(out, "    struct {} ret = {}({});", name, func.name, c_args.join(", "))?;
-                self.write_struct_return_build(out, java_class, name)?;
+                writeln!(out, "    struct {} mimi_struct_ret = {}({});", name, func.name, c_args.join(", "))?;
+                writeln!(out, "    jobject mimi_ret = NULL;")?;
+                self.write_struct_return_build(out, java_class, name, "mimi_ret")?;
             }
             _ => {
                 writeln!(out, "    // Unsupported return type")?;
-                writeln!(out, "    return 0;")?;
+                writeln!(out, "    jlong mimi_ret = 0;")?;
             }
         }
 
-        // Release string arguments
+        // Release string arguments and tear down callback slots
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
                 FfiArgContract::StringBorrow | FfiArgContract::StringTransfer | FfiArgContract::Json => {
                     let jname = sanitize_java_name(&p.name);
                     writeln!(out, "    if ({}_str) (*env)->ReleaseStringUTFChars(env, {}, {}_str);", jname, jname, jname)?;
                 }
+                FfiArgContract::Callback { .. } => {
+                    let teardown = self.callback_teardown_name(&func.name, &p.name);
+                    writeln!(out, "    {}(env);", teardown)?;
+                }
                 _ => {}
             }
+        }
+
+        if !matches!(&contract.ret, crate::ffi::contract::FfiRetContract::Unit) {
+            writeln!(out, "    return mimi_ret;")?;
         }
 
         writeln!(out, "}}")?;
@@ -233,6 +262,90 @@ impl JniBindGenerator {
         Ok(())
     }
 
+    fn write_c_callback_support(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        let java_class = sanitize_java_class(&self.module_name);
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let slot = self.callback_slot_name(&func.name, &p.name);
+                    let tramp = self.callback_trampoline_name(&func.name, &p.name);
+                    let iface = self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
+                    let sig = self.callback_jni_signature(param_types, ret_type);
+                    writeln!(out, "typedef struct {{")?;
+                    writeln!(out, "    JNIEnv* env;")?;
+                    writeln!(out, "    jobject global_ref;")?;
+                    writeln!(out, "    jmethodID method;")?;
+                    writeln!(out, "}} {0}_t;", slot)?;
+                    writeln!(out, "static __thread {0}_t {0} = {{NULL, NULL, NULL}};", slot)?;
+                    let ret_c = self.callback_c_type(ret_type);
+                    let c_args: Vec<String> = param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(j, ty)| format!("{} arg{}", self.callback_c_type(ty), j))
+                        .collect();
+                    writeln!(
+                        out,
+                        "static {} {}({}) {{",
+                        ret_c, tramp, c_args.join(", ")
+                    )?;
+                    writeln!(out, "    if (!{}.env || !{}.global_ref || !{}.method) {{", slot, slot, slot)?;
+                    writeln!(out, "        return {};", self.callback_default_ret(ret_type))?;
+                    writeln!(out, "    }}")?;
+                    let jargs: Vec<String> = (0..param_types.len()).map(|j| format!("jarg{}", j)).collect();
+                    for (j, ty) in param_types.iter().enumerate() {
+                        let local_ty = self.callback_jni_arg_type(ty);
+                        writeln!(out, "    {} jarg{} = ({})arg{};", local_ty, j, local_ty, j)?;
+                    }
+                    let call = self.callback_jni_call(ret_type);
+                    if call == "Void" {
+                        writeln!(
+                            out,
+                            "    (*{}.env)->CallVoidMethod({}.env, {}.global_ref, {}.method, {});",
+                            slot, slot, slot, slot, jargs.join(", ")
+                        )?;
+                    } else {
+                        let ret_local = self.callback_jni_ret_type(ret_type);
+                        writeln!(
+                            out,
+                            "    {} jret = (*{}.env)->Call{}Method({}.env, {}.global_ref, {}.method, {});",
+                            ret_local, slot, call, slot, slot, slot, jargs.join(", ")
+                        )?;
+                        writeln!(out, "    return ({})jret;", ret_c)?;
+                    }
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                    let cb_setup = self.callback_setup_name(&func.name, &p.name);
+                    writeln!(
+                        out,
+                        "static void {}(JNIEnv* env, jobject cb) {{",
+                        cb_setup
+                    )?;
+                    writeln!(out, "    jclass cb_cls = (*env)->FindClass(env, \"{}${}\");", java_class, iface)?;
+                    writeln!(out, "    {0}.method = (*env)->GetMethodID(env, cb_cls, \"apply\", \"{1}\");", slot, sig)?;
+                    writeln!(out, "    {0}.global_ref = (*env)->NewGlobalRef(env, cb);", slot)?;
+                    writeln!(out, "    {0}.env = env;", slot)?;
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                    let cb_teardown = self.callback_teardown_name(&func.name, &p.name);
+                    writeln!(
+                        out,
+                        "static void {}(JNIEnv* env) {{",
+                        cb_teardown
+                    )?;
+                    writeln!(out, "    if ({0}.global_ref) {{ (*env)->DeleteGlobalRef(env, {0}.global_ref); {0}.global_ref = NULL; {0}.env = NULL; {0}.method = NULL; }}", slot)?;
+                    writeln!(out, "}}")?;
+                    writeln!(out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn write_java_struct_defs(&self, out: &mut String) -> Result<(), std::fmt::Error> {
         let mut repr_c: Vec<(&String, &TypeDef)> = self
             .type_defs
@@ -253,6 +366,33 @@ impl JniBindGenerator {
                 }
                 writeln!(out, "    }}")?;
                 writeln!(out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_java_callback_interfaces(
+        &self,
+        out: &mut String,
+        extern_funcs: &[ExternFunc],
+    ) -> Result<(), std::fmt::Error> {
+        for func in extern_funcs {
+            let contract = self.build_contract(func);
+            for (i, p) in func.params.iter().enumerate() {
+                if let FfiArgContract::Callback { param_types, ret_type } = &contract.args[i] {
+                    let iface = self.callback_interface_name(&func.name, &p.name, param_types, ret_type);
+                    let ret_java = self.callback_java_ret_type(ret_type);
+                    let params: Vec<String> = param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(j, ty)| format!("{} arg{}", self.callback_java_arg_type(ty), j))
+                        .collect();
+                    writeln!(out, "    @FunctionalInterface")?;
+                    writeln!(out, "    public interface {} {{", iface)?;
+                    writeln!(out, "        {} apply({});", ret_java, params.join(", "))?;
+                    writeln!(out, "    }}")?;
+                    writeln!(out)?;
+                }
             }
         }
         Ok(())
@@ -293,6 +433,7 @@ impl JniBindGenerator {
         out: &mut String,
         java_class: &str,
         type_name: &str,
+        result_var: &str,
     ) -> Result<(), std::fmt::Error> {
         writeln!(out, "    jclass ret_cls = (*env)->FindClass(env, \"{}${}\");", java_class, type_name)?;
         writeln!(out, "    jmethodID ret_init = (*env)->GetMethodID(env, ret_cls, \"<init>\", \"()V\");")?;
@@ -315,7 +456,7 @@ impl JniBindGenerator {
                 }
             }
         }
-        writeln!(out, "    return ret_obj;")?;
+        writeln!(out, "    {} = ret_obj;", result_var)?;
         Ok(())
     }
 
@@ -387,6 +528,113 @@ impl JniBindGenerator {
             .unwrap_or(false)
     }
 
+    fn callback_interface_name(&self, func_name: &str, param_name: &str, _param_types: &[Type], _ret_type: &Type) -> String {
+        format!("{}{}Callback", sanitize_java_class(func_name), sanitize_java_class(param_name))
+    }
+
+    fn callback_jni_signature(&self, param_types: &[Type], ret_type: &Type) -> String {
+        let mut sig = String::from("(");
+        for ty in param_types {
+            sig.push_str(&self.jni_type_signature(ty));
+        }
+        sig.push(')');
+        sig.push_str(&self.jni_type_signature(ret_type));
+        sig
+    }
+
+    fn jni_type_signature(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "I".to_string(),
+                "i64" => "J".to_string(),
+                "f64" => "D".to_string(),
+                "bool" => "Z".to_string(),
+                "unit" => "V".to_string(),
+                _ => "J".to_string(),
+            },
+            _ => "J".to_string(),
+        }
+    }
+
+    fn callback_java_arg_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            _ => "long".to_string(),
+        }
+    }
+
+    fn callback_java_ret_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "unit" => "void".to_string(),
+            _ => "long".to_string(),
+        }
+    }
+
+    fn callback_c_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "unit" => "void".to_string(),
+            _ => "int64_t".to_string(),
+        }
+    }
+
+    fn callback_default_ret(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "f64" => "0.0".to_string(),
+            Type::Name(name, _) if name == "unit" => "".to_string(),
+            _ => "0".to_string(),
+        }
+    }
+
+    fn callback_jni_arg_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "i32" => "jint".to_string(),
+            Type::Name(name, _) if name == "i64" => "jlong".to_string(),
+            Type::Name(name, _) if name == "f64" => "jdouble".to_string(),
+            Type::Name(name, _) if name == "bool" => "jboolean".to_string(),
+            _ => "jlong".to_string(),
+        }
+    }
+
+    fn callback_jni_ret_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "i32" => "jint".to_string(),
+            Type::Name(name, _) if name == "i64" => "jlong".to_string(),
+            Type::Name(name, _) if name == "f64" => "jdouble".to_string(),
+            Type::Name(name, _) if name == "bool" => "jboolean".to_string(),
+            Type::Name(name, _) if name == "unit" => "void".to_string(),
+            _ => "jlong".to_string(),
+        }
+    }
+
+    fn callback_jni_call(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) if name == "i32" => "Int".to_string(),
+            Type::Name(name, _) if name == "i64" => "Long".to_string(),
+            Type::Name(name, _) if name == "f64" => "Double".to_string(),
+            Type::Name(name, _) if name == "bool" => "Boolean".to_string(),
+            Type::Name(name, _) if name == "unit" => "Void".to_string(),
+            _ => "Long".to_string(),
+        }
+    }
+
+    fn callback_slot_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_slot", func_name, param_name)
+    }
+
+    fn callback_trampoline_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_trampoline", func_name, param_name)
+    }
+
+    fn callback_setup_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_setup", func_name, param_name)
+    }
+
+    fn callback_teardown_name(&self, func_name: &str, param_name: &str) -> String {
+        format!("mimi_cb_{}_{}_teardown", func_name, param_name)
+    }
+
     fn mimi_type_to_jni(&self, contract: &FfiContract, index: usize) -> String {
         if index >= contract.args.len() {
             return "jlong".to_string();
@@ -400,7 +648,7 @@ impl JniBindGenerator {
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "jlong".to_string(),
             FfiArgContract::Json => "jstring".to_string(),
             FfiArgContract::StructByValue(_) => "jobject".to_string(),
-            FfiArgContract::Callback { .. } => "jlong".to_string(),
+            FfiArgContract::Callback { .. } => "jobject".to_string(),
             FfiArgContract::Unsupported(_) => "jlong".to_string(),
         }
     }
