@@ -44,6 +44,26 @@ impl CHeaderGenerator {
         writeln!(header, "void mimi_shared_release(MimiHandle handle);")?;
         writeln!(header, "/** Get a raw pointer to the inner value. Pointer valid only while handle alive. Returns NULL if invalid. */")?;
         writeln!(header, "void* mimi_shared_get_ptr(MimiHandle handle);")?;
+        writeln!(header, "/** Create a shared handle from a heap-allocated Value (transfers ownership). */")?;
+        writeln!(header, "MimiHandle mimi_shared_create(void* value);")?;
+        writeln!(header)?;
+
+        // Value API
+        writeln!(header, "// Value constructors / accessors")?;
+        writeln!(header, "/** Free a Value obtained via mimi_shared_get_ptr or mimi_value_new_*. */")?;
+        writeln!(header, "void mimi_value_free(void* value);")?;
+        writeln!(header, "/** Create a new integer Value (caller frees with mimi_value_free). */")?;
+        writeln!(header, "void* mimi_value_new_int(int64_t n);")?;
+        writeln!(header, "/** Create a new boolean Value (caller frees with mimi_value_free). */")?;
+        writeln!(header, "void* mimi_value_new_bool(bool b);")?;
+        writeln!(header, "/** Create a new floating-point Value (caller frees with mimi_value_free). */")?;
+        writeln!(header, "void* mimi_value_new_float(double f);")?;
+        writeln!(header, "/** Read an integer from a Value, or 0 if not an integer. */")?;
+        writeln!(header, "int64_t mimi_value_as_int(void* value);")?;
+        writeln!(header, "/** Read a boolean from a Value, or false if not a boolean. */")?;
+        writeln!(header, "bool mimi_value_as_bool(void* value);")?;
+        writeln!(header, "/** Read a float from a Value, or 0.0 if not a float. */")?;
+        writeln!(header, "double mimi_value_as_float(void* value);")?;
         writeln!(header)?;
 
         // Cap API
@@ -68,6 +88,8 @@ impl CHeaderGenerator {
             header,
             "bool mimi_cap_consume(MimiCap cap, const char* name);"
         )?;
+        writeln!(header, "/** Register a new capability and return its opaque handle. */")?;
+        writeln!(header, "MimiCap mimi_cap_register(const char* name);")?;
         writeln!(header)?;
 
         // String API
@@ -91,6 +113,22 @@ impl CHeaderGenerator {
         writeln!(header, "void mimi_string_as_c_str_free_all(void);")?;
         writeln!(header, "/** Return the byte length of a Mimi string value, or -1 on error. */")?;
         writeln!(header, "int64_t mimi_string_len(void* mimi_string);")?;
+        writeln!(header, "/** Free a C string allocated by the Mimi runtime (e.g. returned by extern functions). */")?;
+        writeln!(header, "void mimi_string_free(char* c_str);")?;
+        writeln!(header)?;
+
+        // Callback / runtime misc API
+        writeln!(header, "// Runtime misc API")?;
+        writeln!(header, "/** Callback signature for the runtime error handler. */")?;
+        writeln!(header, "typedef void (*MimiErrorHandler)(const char* message);")?;
+        writeln!(header, "/** Set a global error handler invoked on FFI contract violations. Pass NULL to reset. */")?;
+        writeln!(header, "void mimi_runtime_set_error_handler(MimiErrorHandler handler);")?;
+        writeln!(header, "/** Deregister a callback previously passed to C. Safe to call from any thread. */")?;
+        writeln!(header, "void mimi_callback_deregister(int64_t callback_id);")?;
+        writeln!(header, "/** Submit a raw task to the global Mimi thread pool. */")?;
+        writeln!(header, "void mimi_pool_submit(void* (*fn_ptr)(void*), void* arg);")?;
+        writeln!(header, "/** Block until all submitted pool tasks complete. */")?;
+        writeln!(header, "void mimi_pool_join_all(void);")?;
         writeln!(header)?;
 
         // Generate struct definitions for #[repr(C)] types
@@ -469,10 +507,21 @@ mod tests {
         assert!(header.contains("mimi_shared_retain"));
         assert!(header.contains("mimi_shared_release"));
         assert!(header.contains("mimi_shared_get_ptr"));
+        assert!(header.contains("mimi_shared_create"));
+
+        // Value API
+        assert!(header.contains("mimi_value_free"));
+        assert!(header.contains("mimi_value_new_int"));
+        assert!(header.contains("mimi_value_new_bool"));
+        assert!(header.contains("mimi_value_new_float"));
+        assert!(header.contains("mimi_value_as_int"));
+        assert!(header.contains("mimi_value_as_bool"));
+        assert!(header.contains("mimi_value_as_float"));
 
         // Capability API
         assert!(header.contains("mimi_cap_check"));
         assert!(header.contains("mimi_cap_consume"));
+        assert!(header.contains("mimi_cap_register"));
 
         // String API
         assert!(header.contains("mimi_string_as_c_str"));
@@ -482,5 +531,12 @@ mod tests {
         assert!(header.contains("mimi_string_into_raw"));
         assert!(header.contains("mimi_string_from_raw"));
         assert!(header.contains("mimi_string_free_raw"));
+        assert!(header.contains("mimi_string_free"));
+
+        // Runtime misc API
+        assert!(header.contains("mimi_runtime_set_error_handler"));
+        assert!(header.contains("mimi_callback_deregister"));
+        assert!(header.contains("mimi_pool_submit"));
+        assert!(header.contains("mimi_pool_join_all"));
     }
 }

@@ -484,8 +484,9 @@ pub extern "C" fn mimi_shared_get_ptr(handle: i64) -> *const Value {
     })
 }
 
-/// Free a Value that was obtained via `mimi_shared_get_ptr`.
-/// This must be called for every non-null pointer returned by `mimi_shared_get_ptr`.
+/// Free a Value that was obtained via `mimi_shared_get_ptr` or any other
+/// `mimi_value_new_*` constructor.
+/// This must be called for every non-null pointer returned by those functions.
 #[no_mangle]
 pub extern "C" fn mimi_value_free(ptr: *const Value) {
     if !ptr.is_null() {
@@ -494,6 +495,115 @@ pub extern "C" fn mimi_value_free(ptr: *const Value) {
             drop(Box::from_raw(ptr as *mut Value));
         }
     }
+}
+
+/// Create a new integer Value. The caller takes ownership of the returned pointer
+/// and must free it with `mimi_value_free`.
+#[no_mangle]
+pub extern "C" fn mimi_value_new_int(n: i64) -> *mut Value {
+    let boxed = Box::new(Value::Int(n));
+    Box::into_raw(boxed)
+}
+
+/// Create a new boolean Value. The caller takes ownership of the returned pointer
+/// and must free it with `mimi_value_free`.
+#[no_mangle]
+pub extern "C" fn mimi_value_new_bool(b: bool) -> *mut Value {
+    let boxed = Box::new(Value::Bool(b));
+    Box::into_raw(boxed)
+}
+
+/// Create a new floating-point Value. The caller takes ownership of the returned
+/// pointer and must free it with `mimi_value_free`.
+#[no_mangle]
+pub extern "C" fn mimi_value_new_float(f: f64) -> *mut Value {
+    let boxed = Box::new(Value::Float(f));
+    Box::into_raw(boxed)
+}
+
+/// Read an integer from a Value pointer. Returns 0 if the pointer is null or
+/// does not contain an integer.
+///
+/// # Safety
+/// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
+/// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_value_as_int(ptr: *const Value) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: ptr was null-checked above.
+    unsafe {
+        match &*ptr {
+            Value::Int(n) => *n,
+            Value::Bool(b) => *b as i64,
+            Value::Float(f) => *f as i64,
+            _ => 0,
+        }
+    }
+}
+
+/// Read a boolean from a Value pointer. Returns false if the pointer is null or
+/// does not contain a boolean.
+///
+/// # Safety
+/// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
+/// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_value_as_bool(ptr: *const Value) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    // SAFETY: ptr was null-checked above.
+    unsafe {
+        match &*ptr {
+            Value::Bool(b) => *b,
+            Value::Int(n) => *n != 0,
+            Value::Float(f) => *f != 0.0,
+            _ => false,
+        }
+    }
+}
+
+/// Read a floating-point number from a Value pointer. Returns 0.0 if the pointer
+/// is null or does not contain a float.
+///
+/// # Safety
+/// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
+/// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_value_as_float(ptr: *const Value) -> f64 {
+    if ptr.is_null() {
+        return 0.0;
+    }
+    // SAFETY: ptr was null-checked above.
+    unsafe {
+        match &*ptr {
+            Value::Float(f) => *f,
+            Value::Int(n) => *n as f64,
+            _ => 0.0,
+        }
+    }
+}
+
+/// Create a shared handle from a heap-allocated Value. The Value ownership is
+/// transferred to the shared handle; the caller must NOT call `mimi_value_free`
+/// on the same pointer after this call. Returns the opaque handle ID, or 0 on
+/// error (in which case the Value is dropped).
+///
+/// # Safety
+/// `value_ptr` must be null or a valid pointer to a heap-allocated `Value`
+/// obtained via `mimi_value_new_*` or `mimi_string_from_raw`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_shared_create(value_ptr: *mut Value) -> i64 {
+    if value_ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: value_ptr is non-null and points to a heap-allocated Value obtained
+    // via Box::into_raw. We re-take ownership here.
+    let value = unsafe { Box::from_raw(value_ptr) };
+    let arc = Arc::new(RwLock::new(*value));
+    shared_table_create(arc)
 }
 
 /// Free a raw string that was obtained via `string.into_raw()`.
@@ -1055,5 +1165,51 @@ mod tests {
         assert!(unsafe { mimi_string_as_c_str(std::ptr::null()) }.is_null());
         // Free on null / unknown pointer should be a no-op.
         mimi_string_as_c_str_free(std::ptr::null());
+    }
+
+    // ─── Value C API tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn value_c_api_constructors_and_accessors() {
+        let int_val = mimi_value_new_int(42);
+        assert_eq!(unsafe { mimi_value_as_int(int_val) }, 42);
+        assert!(unsafe { mimi_value_as_bool(int_val) }); // non-zero int is truthy
+        mimi_value_free(int_val);
+
+        let bool_val = mimi_value_new_bool(true);
+        assert!(unsafe { mimi_value_as_bool(bool_val) });
+        assert_eq!(unsafe { mimi_value_as_int(bool_val) }, 1);
+        mimi_value_free(bool_val);
+
+        let float_val = mimi_value_new_float(2.5);
+        assert!((unsafe { mimi_value_as_float(float_val) } - 2.5).abs() < 0.001);
+        assert_eq!(unsafe { mimi_value_as_int(float_val) }, 2);
+        mimi_value_free(float_val);
+
+        // Null inputs are safe.
+        assert_eq!(unsafe { mimi_value_as_int(std::ptr::null()) }, 0);
+        assert!(!unsafe { mimi_value_as_bool(std::ptr::null()) });
+        assert_eq!(unsafe { mimi_value_as_float(std::ptr::null()) }, 0.0);
+        mimi_value_free(std::ptr::null());
+    }
+
+    #[test]
+    fn shared_c_api_create_from_value() {
+        let value = mimi_value_new_int(123);
+        let id = unsafe { mimi_shared_create(value) };
+        assert!(id > 0);
+
+        let ptr = mimi_shared_get_ptr(id);
+        assert!(!ptr.is_null());
+        assert_eq!(unsafe { mimi_value_as_int(ptr) }, 123);
+        mimi_value_free(ptr);
+
+        mimi_shared_release(id);
+        assert!(mimi_shared_get_ptr(id).is_null());
+    }
+
+    #[test]
+    fn shared_c_api_create_null_is_safe() {
+        assert_eq!(unsafe { mimi_shared_create(std::ptr::null_mut()) }, 0);
     }
 }
