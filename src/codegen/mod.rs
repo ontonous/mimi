@@ -337,7 +337,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build an unconditional branch.
-    #[allow(dead_code)] // Will be adopted by upcoming codegen refactors.
     pub(super) fn build_br(
         &self,
         dest: inkwell::basic_block::BasicBlock<'ctx>,
@@ -384,7 +383,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build a `return` instruction with an optional value.
-    #[allow(dead_code)] // Will be adopted by upcoming codegen refactors.
     pub(super) fn build_return(
         &self,
         val: Option<&dyn inkwell::values::BasicValue<'ctx>>,
