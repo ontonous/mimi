@@ -220,9 +220,14 @@ mod tests {
         assert!(out.contains("m.def(\"add\""));
         assert!(out.contains("py::class_<Point>(m, \"Point\")"));
         assert!(out.contains("m.def(\"point_sum\", [](Point p) -> int64_t"));
+        assert!(out.contains("thread_local static std::function<int64_t(int64_t, int64_t)> g_apply_callback_f_cb"));
+        assert!(out.contains("extern \"C\" int64_t mimi_cb_apply_callback_f_trampoline"));
+        assert!(out.contains("g_apply_callback_f_cb = f"));
+        assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
         assert!(pyi.contains("def add("));
         assert!(pyi.contains("def greet("));
         assert!(pyi.contains("class Point:"));
         assert!(pyi.contains("def point_sum(p: Point) -> int"));
+        assert!(pyi.contains("def apply_callback(f: Callable[[int, int], int], x: int) -> int"));
     }
 }

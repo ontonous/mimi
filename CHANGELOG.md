@@ -11,6 +11,8 @@
   - Rust：为 `func(...)` 参数生成 `unsafe extern "C" fn(...)` 函数指针类型，可直接传入 Rust 函数。
   - C++：生成 `std::function<...>` wrapper 参数、thread-local callback slot 与 `extern "C"` trampoline。
   - Go：生成 Go callback 类型别名、`//export` trampoline 与 package-level slot。
+  - Python：生成 `std::function<...>` wrapper 参数、thread-local callback slot、`extern "C"` trampoline，
+    `.pyi` 输出 `Callable[[...], ...]` 类型注解。
 - **FFI 真实 E2E 示例**：新增 `examples/ffi/math.mimi` + `README.md`，覆盖 C/Rust/Go/Python/Node.js/Java 调用片段。
 - **FFI 开发者指南**：新增 `docs/ffi-guide.md`，说明双向 FFI、类型映射、内存所有权、回调现状与错误处理。
   - C/C++ (`c_header.rs` / `cpp_bind.rs`)：为 `#[repr(C)]` record 生成 C struct 声明，

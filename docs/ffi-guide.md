@@ -66,7 +66,8 @@ mimi bindgen math.mimi -o bindings
 - ✅ Rust：生成 `unsafe extern "C" fn` 函数指针类型，可直接传递 Rust 函数。
 - ✅ C++：使用 `std::function` + thread-local slot + C trampoline。
 - ✅ Go：使用类型别名 + `//export` trampoline + package-level slot。
-- ⏳ Python / Node.js / Java：生成类型签名，但 idiomatic 闭包包装仍在开发中。
+- ✅ Python：使用 `std::function` + thread-local slot + C trampoline，`.pyi` 输出 `Callable`。
+- ⏳ Node.js / Java：生成类型签名，但 idiomatic 闭包包装仍在开发中。
 
 ## 7. 错误处理
 
