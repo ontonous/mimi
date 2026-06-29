@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — 0.28.9-dev
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Security
+
 ## [v0.28.8] — 2026-06-29
 
 ### Added
