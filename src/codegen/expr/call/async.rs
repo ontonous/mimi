@@ -91,13 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
             let env_ptr_val = self
-                .builder
-                .build_load(
-                    BasicTypeEnum::PointerType(i8_ptr),
-                    env_ptr_typed,
-                    "env_ptr_val",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                .build_load(BasicTypeEnum::PointerType(i8_ptr), env_ptr_typed, "env_ptr_val")?;
             let env_ptr = if let BasicValueEnum::PointerValue(pv) = env_ptr_val {
                 pv
             } else {
@@ -116,17 +110,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &format!("spawn_env_{}_gep", name),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                let field_val = self
-                    .builder
-                    .build_load(ty, field_gep, &format!("spawn_cap_{}", name))
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-                let alloca = self
-                    .builder
-                    .build_alloca(ty, &format!("spawn_cap_{}_alloca", name))
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(alloca, field_val)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let field_val = self.build_load(ty, field_gep, &format!("spawn_cap_{}", name))?;
+                let alloca = self.build_alloca(ty, &format!("spawn_cap_{}_alloca", name))?;
+                self.build_store(alloca, field_val)?;
                 poll_vars.insert(name.clone(), (alloca, ty));
             }
         }
@@ -154,9 +140,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_pointer_cast(result_ptr_i8, result_ptr_type, "spawn_result_typed")
             .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-        self.builder
-            .build_store(result_typed_ptr, result)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(result_typed_ptr, result)?;
 
         // Discard the poll function's heap scope instead of calling free_heap_allocs.
         // free_heap_allocs would emit free() calls that free the heap data embedded
@@ -167,38 +151,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.heap_allocs.borrow_mut().pop();
 
         // Set completed
-        let set_c_fn = self
-            .module
-            .get_function("mimi_future_set_completed")
-            .ok_or_else(|| {
-                CompileError::LlvmError("mimi_future_set_completed not declared".into())
-            })?;
-        self.builder
-            .build_call(
-                set_c_fn,
-                &[BasicMetadataValueEnum::PointerValue(future_ptr_param)],
-                "spawn_set_completed",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("set_completed error: {}", e)))?;
+        let set_c_fn = self.get_runtime_fn("mimi_future_set_completed")?;
+        self.build_call(
+            set_c_fn,
+            &[BasicMetadataValueEnum::PointerValue(future_ptr_param)],
+            "spawn_set_completed",
+        )?;
 
         // Free env (if any) — use the env_ptr saved BEFORE result overwrote future+8
         if let Some(env_ptr) = env_ptr_opt {
-            let free_fn = self
-                .module
-                .get_function("free")
-                .ok_or_else(|| "free not declared".to_string())?;
-            self.builder
-                .build_call(
-                    free_fn,
-                    &[BasicMetadataValueEnum::PointerValue(env_ptr)],
-                    "spawn_free_env",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+            let free_fn = self.get_runtime_fn("free")?;
+            self.build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(env_ptr)],
+                "spawn_free_env",
+            )?;
         }
 
-        self.builder
-            .build_return(None)
-            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        self.build_return(None)?;
 
         // Restore insertion point
         if let Some(bb) = saved_block {
@@ -206,21 +176,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // ── At spawn site: allocate future + env, call mimi_spawn_future ──
-        let alloc_fn = self
-            .module
-            .get_function("mimi_future_alloc")
-            .ok_or_else(|| CompileError::LlvmError("mimi_future_alloc not declared".into()))?;
+        let alloc_fn = self.get_runtime_fn("mimi_future_alloc")?;
         // Request at least 76 bytes (MimiFutureRepr size: 8+4+64 = 76, aligned to 8)
         let future_total_size = 8u64 + 64u64; // 8 header + 64 data
         let total_size_val = i64_ty.const_int(future_total_size, false);
         let future_ptr = self
-            .builder
             .build_call(
                 alloc_fn,
                 &[BasicMetadataValueEnum::IntValue(total_size_val)],
                 "spawn_future_alloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("future_alloc error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
             .map(|v: BasicValueEnum<'ctx>| v.into_pointer_value())
             .ok_or_else(|| CompileError::LlvmError("future_alloc returned non-pointer".into()))?;
@@ -233,27 +198,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             let env_byte_size = env_struct_type
                 .size_of()
                 .ok_or_else(|| "size_of error".to_string())?;
-            let malloc_fn = self
-                .module
-                .get_function("malloc")
-                .ok_or_else(|| "malloc not declared".to_string())?;
+            let malloc_fn = self.get_runtime_fn("malloc")?;
             let env_heap_ptr = self
-                .builder
                 .build_call(
                     malloc_fn,
                     &[BasicMetadataValueEnum::IntValue(env_byte_size)],
                     "spawn_env_heap",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                )?
                 .try_as_basic_value_opt()
-                .ok_or("malloc returned void")?
+                .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
                 .into_pointer_value();
 
             for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
-                let val = self
-                    .builder
-                    .build_load(ty, var_alloca, &format!("spawn_cap_val_{}", name))
-                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                let val = self.build_load(ty, var_alloca, &format!("spawn_cap_val_{}", name))?;
                 let field_gep = self
                     .gep()
                     .build_struct_gep(
@@ -263,9 +220,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &format!("spawn_env_{}_gep", name),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                self.builder
-                    .build_store(field_gep, val)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.build_store(field_gep, val)?;
             }
 
             // Store env pointer at future+8
@@ -286,9 +241,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "env_ptr_typed",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-            self.builder
-                .build_store(env_ptr_typed, BasicValueEnum::PointerValue(env_heap_ptr))
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            self.build_store(env_ptr_typed, BasicValueEnum::PointerValue(env_heap_ptr))?;
         } else {
             // No free vars: store null at future+8
             let env_ptr_slot = self
@@ -308,19 +261,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "null_env_typed",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
-            self.builder
-                .build_store(
-                    env_ptr_typed,
-                    BasicValueEnum::PointerValue(i8_ptr.const_null()),
-                )
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            self.build_store(env_ptr_typed, BasicValueEnum::PointerValue(i8_ptr.const_null()))?;
         }
 
         // Call mimi_spawn_future(future, poll_fn)
-        let spawn_fn = self
-            .module
-            .get_function("mimi_spawn_future")
-            .ok_or_else(|| CompileError::LlvmError("mimi_spawn_future not declared".into()))?;
+        let spawn_fn = self.get_runtime_fn("mimi_spawn_future")?;
         let poll_fn_as_i8 = self
             .builder
             .build_pointer_cast(
@@ -329,16 +274,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "poll_fn_i8",
             )
             .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?;
-        self.builder
-            .build_call(
-                spawn_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(future_ptr),
-                    BasicMetadataValueEnum::PointerValue(poll_fn_as_i8),
-                ],
-                "spawn_future_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("spawn_future error: {}", e)))?;
+        self.build_call(
+            spawn_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(future_ptr),
+                BasicMetadataValueEnum::PointerValue(poll_fn_as_i8),
+            ],
+            "spawn_future_call",
+        )?;
 
         Ok((future_ptr, result_type))
     }
