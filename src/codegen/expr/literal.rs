@@ -119,17 +119,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 iv
                             };
                             let temp_buf = self
-                                .builder
                                 .build_call(
                                     malloc_fn,
                                     &[BasicMetadataValueEnum::IntValue(
                                         i64_ty.const_int(32, false),
                                     )],
                                     &format!("fstr_temp_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("malloc error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("malloc returned void")?
                                 .into_pointer_value();
@@ -140,31 +136,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("string error: {}", e))
                                 })?;
-                            self.builder
-                                .build_call(
-                                    sprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(temp_buf),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            fmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::IntValue(ext_iv),
-                                    ],
-                                    &format!("fstr_sprintf_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("sprintf error: {}", e))
-                                })?;
+                            self.build_call(
+                                sprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(temp_buf),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::IntValue(ext_iv),
+                                ],
+                                &format!("fstr_sprintf_{}", i),
+                            )?;
                             let len = self
-                                .builder
                                 .build_call(
                                     strlen_fn,
                                     &[BasicMetadataValueEnum::PointerValue(temp_buf)],
                                     &format!("fstr_strlen_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("strlen error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
@@ -178,17 +164,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         BasicValueEnum::FloatValue(fv) => {
                             let temp_buf = self
-                                .builder
                                 .build_call(
                                     malloc_fn,
                                     &[BasicMetadataValueEnum::IntValue(
                                         i64_ty.const_int(64, false),
                                     )],
                                     &format!("fstr_temp_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("malloc error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("malloc returned void")?
                                 .into_pointer_value();
@@ -199,31 +181,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("string error: {}", e))
                                 })?;
-                            self.builder
-                                .build_call(
-                                    sprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(temp_buf),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            fmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::FloatValue(fv),
-                                    ],
-                                    &format!("fstr_sprintf_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("sprintf error: {}", e))
-                                })?;
+                            self.build_call(
+                                sprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(temp_buf),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::FloatValue(fv),
+                                ],
+                                &format!("fstr_sprintf_{}", i),
+                            )?;
                             let len = self
-                                .builder
                                 .build_call(
                                     strlen_fn,
                                     &[BasicMetadataValueEnum::PointerValue(temp_buf)],
                                     &format!("fstr_strlen_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("strlen error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
@@ -237,15 +209,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         BasicValueEnum::PointerValue(pv) => {
                             let len = self
-                                .builder
                                 .build_call(
                                     strlen_fn,
                                     &[BasicMetadataValueEnum::PointerValue(pv)],
                                     &format!("fstr_strlen_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("strlen error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
@@ -268,17 +236,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     CompileError::LlvmError(format!("string error: {}", e))
                                 })?;
                             let len = self
-                                .builder
                                 .build_call(
                                     strlen_fn,
                                     &[BasicMetadataValueEnum::PointerValue(
                                         unknown.as_pointer_value(),
                                     )],
                                     &format!("fstr_strlen_{}", i),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("strlen error: {}", e))
-                                })?
+                                )?
                                 .try_as_basic_value_opt()
                                 .ok_or("strlen returned void")?
                                 .into_int_value();
@@ -298,13 +262,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Phase 2: Allocate correctly-sized buffer and fill
         let buf = self
-            .builder
             .build_call(
                 malloc_fn,
                 &[BasicMetadataValueEnum::IntValue(total_size)],
                 "fstr_buf",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
             .ok_or("malloc returned void")?
             .into_pointer_value();
@@ -314,16 +276,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("", "fstr_empty_init")
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-        self.builder
-            .build_call(
-                strcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(empty.as_pointer_value()),
-                ],
-                "fstr_init",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strcpy error: {}", e)))?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(empty.as_pointer_value()),
+            ],
+            "fstr_init",
+        )?;
 
         for (i, part) in compiled_parts.iter().enumerate() {
             match part {
@@ -335,16 +295,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_global_string_ptr(t, &format!("fstr_part_{}", i))
                         .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                    self.builder
-                        .build_call(
-                            strcat_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(global.as_pointer_value()),
-                            ],
-                            &format!("fstr_cat_{}", i),
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
+                    self.build_call(
+                        strcat_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::PointerValue(global.as_pointer_value()),
+                        ],
+                        &format!("fstr_cat_{}", i),
+                    )?;
                 }
                 CompiledPart::InterpStr(pv) => {
                     let ptr = match pv {
@@ -355,16 +313,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ))
                         }
                     };
-                    self.builder
-                        .build_call(
-                            strcat_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(ptr),
-                            ],
-                            &format!("fstr_cat_{}", i),
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("strcat error: {}", e)))?;
+                    self.build_call(
+                        strcat_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::PointerValue(ptr),
+                        ],
+                        &format!("fstr_cat_{}", i),
+                    )?;
                 }
             }
         }
