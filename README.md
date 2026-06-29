@@ -4,7 +4,7 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.28.2--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.8-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-2388%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
@@ -310,6 +310,7 @@ mimi/
 
 | Version | Highlight |
 |---|---|
+| **v0.28.8** | Codegen quality refactor + helper unit tests + lexer/parse dual-backend tests, clippy clean |
 | **v0.28.2** | Usability: Record/Any type annotations, codegen map ops, `const`, `as` cast, `desc{}`/`rule{}` blocks |
 | **v0.28.1** | mimi-kv embedded store, map type inference fix, dual-backend map tests |
 | **v0.28** 🚀 | Use-driven evolution: dir/path/crypto builtins, multi-language FFI (7 langs), profiler, `mimi stat`/`mimi bindgen`, 2 design defect fixes |

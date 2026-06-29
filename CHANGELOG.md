@@ -1,15 +1,24 @@
 # Changelog
 
-## [Unreleased] — 0.28.8-dev
+## [v0.28.8] — 2026-06-29
 
 ### Added
+
+- **Codegen helper 单元测试**: 为 v0.28.8 重构提取的 `CodeGenerator` LLVM 构建辅助方法
+  新增 `src/codegen/tests.rs`，覆盖 `build_alloca`/`build_store`/`build_load`/
+  `build_call`/`build_br`/`build_cond_br`/`build_return`/`build_in_bounds_gep`/
+  `build_extract_value`/`build_ptr_to_int`/`build_int_to_ptr`/`build_bit_cast`/
+  `build_pointer_cast`/`entry_alloca` 以及泛型类型字符串解析 helper。
+- **`lexer()` / `parse()` 双后端等价性测试**: 在 `src/tests/dual_backend.rs` 补充 L1 测试，
+  验证解释器与 codegen 对 `lexer("...")` 和 `parse("...")` 输出一致。
 
 ### Changed
 
 - **Codegen 质量重构**: 提取 `CodeGenerator` LLVM 构建辅助方法族
   (`build_alloca`, `build_store`, `build_load`, `build_call`, `build_br`,
   `build_cond_br`, `build_return`, `get_runtime_fn`, `build_extract_value`,
-  `build_ptr_to_int`, `build_bit_cast`)，消除数百处重复的错误包装样板。
+  `build_ptr_to_int`, `build_bit_cast`, `build_int_to_ptr`,
+  `build_in_bounds_gep`, `build_pointer_cast`)，消除数百处重复的错误包装样板。
 - **拆分超长 codegen 函数**:
   - `builtins/mod.rs::register_runtime` → 16 个按功能分组的注册 helper
   - `func.rs::compile_func` → `bind_func_params` / `compile_func_body` /
@@ -28,6 +37,15 @@
   - `func/body.rs` → 共享 `emit_loop_body_block` 与 for 循环 index/list helper
   - `expr/call/helpers.rs::compile_builtin_intrinsic` → 按内建类别分组的 helper
   - `actors.rs::compile_actor_method` → prologue/body/epilogue helper
+  - `expr/access.rs::compile_index_expr` → pointer/struct/array 分支 helper
+  - `expr/call/simple.rs::compile_call_expr` / `compile_call` → fn ptr、closure var、
+    enum ctor、callback arg、repr(C) struct、list-by-value、closure wrapper 等 helper
+  - `expr/lambda.rs::compile_lambda_expr` → captured vars、param binding、body、
+    closure struct、env allocation helper
+  - `expr/record.rs` → record field、list、tuple、comprehension 拆分 helper
+  - `builtins/string/transform.rs` → string pointer、strlen、malloc、memcpy、
+    null-terminate、whitespace scan、case transform 等共享 helper；合并 upper/lower
+  - `builtins/io.rs` → 采用新的 LLVM 构建辅助方法，减少样板代码
 - 在 `scope.rs`、`actors.rs`、`expr/call/async.rs`、`expr.rs` 等文件中采用新的
   LLVM 构建辅助方法，进一步减少样板代码。
 

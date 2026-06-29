@@ -4,7 +4,7 @@
 
 **带合约验证、结构化并发与线性能力的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.28.2--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.8-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-2388%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
@@ -302,6 +302,7 @@ mimi/
 
 | 版本 | 亮点 |
 |---|---|
+| **v0.28.8** | Codegen 质量重构 + helper 单元测试 + lexer/parse 双后端测试，clippy 清零 |
 | **v0.27** 🔨 | 审计修复: P0/P1/P2/P3 安全与正确性 (arena, FFI, JSON, runtime) |
 | **v0.26** | 类型统一引擎 + 双向推断 + FFI P0/P1 安全修复 |
 | **v0.25** | 类型系统重构: TypeId Arena + Checker 修复 + Newtype/ADT codegen |
