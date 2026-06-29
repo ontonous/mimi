@@ -4,6 +4,15 @@
 
 ### Added
 
+- **FFI 运行时 C API 功能补充**:
+  - `mimi_string_len(void* mimi_string) -> int64_t`：从 C 侧查询 Mimi 字符串字节长度。
+  - `mimi_string_as_c_str_free_all(void)`：批量释放当前线程由 `mimi_string_as_c_str`
+    分配的所有待处理 C 字符串。
+- **FFI 运行时 C API 单元测试**：在 `src/ffi/runtime.rs` 新增 cap / shared / string
+  三类运行时 API 的单元测试，覆盖注册/校验/消费、引用计数、字符串长度与批量释放。
+- **C header 完整性测试**：在 `src/ffi/c_header.rs` 新增测试，确保生成的
+  `mimi_ffi.h` 包含 shared handle、capability、string 全部运行时 API 声明。
+
 ### Changed
 
 ### Fixed
