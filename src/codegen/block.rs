@@ -315,6 +315,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     ),
                                                 );
                                             }
+                                            "sort_str" => {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    "List<string>".to_string(),
+                                                );
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "List".into(),
+                                                        vec![Type::Name("string".into(), vec![])],
+                                                    ),
+                                                );
+                                            }
+                                            "sort_f64" => {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "List<f64>".to_string());
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "List".into(),
+                                                        vec![Type::Name("f64".into(), vec![])],
+                                                    ),
+                                                );
+                                            }
                                             "exec" => {
                                                 self.var_type_names
                                                     .insert(name.clone(), "ExecResult".to_string());
@@ -754,6 +778,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             if self.cap_type_names.contains(fn_name.as_str()) {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
+                            }
+                            // Track return types for builtins whose result is
+                            // a List<T> or other type the caller needs to
+                            // recover when indexing. Without this, `let xs =
+                            // sort_str(ys)` would leave `xs` untyped and
+                            // `xs[i]` would be returned as i64 (the raw
+                            // element slot) instead of the proper struct/
+                            // string pointer.
+                            match fn_name.as_str() {
+                                "listdir" | "walk_dir" | "str_split" | "sort_str" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "List<string>".to_string());
+                                    self.var_types.insert(
+                                        name.clone(),
+                                        Type::Name(
+                                            "List".into(),
+                                            vec![Type::Name("string".into(), vec![])],
+                                        ),
+                                    );
+                                }
+                                "sort_f64" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "List<f64>".to_string());
+                                    self.var_types.insert(
+                                        name.clone(),
+                                        Type::Name(
+                                            "List".into(),
+                                            vec![Type::Name("f64".into(), vec![])],
+                                        ),
+                                    );
+                                }
+                                "exec" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "ExecResult".to_string());
+                                }
+                                "file_stat" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "StatResult".to_string());
+                                }
+                                _ => {}
                             }
                         }
                     }

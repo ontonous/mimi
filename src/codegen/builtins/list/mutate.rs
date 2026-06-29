@@ -657,15 +657,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // sort_str: call mimi_sort_str runtime helper
-        // Delegate to a runtime function that sorts the list of strings
+        // sort_str: delegate to runtime mimi_sort_str_inplace(data, count)
+        // which reorders the *mut c_char slots in place using lexicographic
+        // comparison via CStr. The list's data buffer for List<string> is
+        // already `*mut *mut c_char`, matching the runtime signature.
         if args.len() != 1 {
             return Err(CompileError::WrongArgCount(
                 "sort_str expects 1 argument (list)".to_string(),
             ));
         }
-        // For now, return the list unchanged as a graceful degradation
-        // Full implementation would require runtime sort function or complex codegen
         let list_ptr = match args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => pv,
             _ => {
@@ -674,6 +674,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
+        let list_len = self.load_list_len(list_ptr)?;
+        // For List<string>, data is *mut *mut c_char — load as i8* (raw).
+        let data_ptr = self.load_list_data_raw(list_ptr)?;
+        let func = self
+            .module
+            .get_function("mimi_sort_str_inplace")
+            .ok_or_else(|| "mimi_sort_str_inplace not declared".to_string())?;
+        self.builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(list_len),
+                ],
+                "sort_str_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("sort_str call error: {}", e)))?;
+        // Return the same list (sorted in place)
         Ok(list_ptr.into())
     }
 }
