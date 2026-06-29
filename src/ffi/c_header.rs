@@ -87,6 +87,10 @@ impl CHeaderGenerator {
         writeln!(header, "void mimi_string_free_raw(char* c_str);")?;
         writeln!(header, "/** Free a C string pointer obtained from mimi_string_as_c_str() when no longer needed. */")?;
         writeln!(header, "void mimi_string_as_c_str_free(const char* c_str);")?;
+        writeln!(header, "/** Free all pending C strings allocated by mimi_string_as_c_str() on this thread. */")?;
+        writeln!(header, "void mimi_string_as_c_str_free_all(void);")?;
+        writeln!(header, "/** Return the byte length of a Mimi string value, or -1 on error. */")?;
+        writeln!(header, "int64_t mimi_string_len(void* mimi_string);")?;
         writeln!(header)?;
 
         // Generate struct definitions for #[repr(C)] types
@@ -454,5 +458,29 @@ mod tests {
         let header = generate_c_header(&extern_funcs, HashMap::new())
             .expect("src/ffi/c_header.rs:396 unwrap failed");
         assert!(header.contains("int64_t add(int64_t a, int64_t b);"));
+    }
+
+    #[test]
+    fn test_header_contains_runtime_api_declarations() {
+        let header = generate_c_header(&[], HashMap::new())
+            .expect("src/ffi/c_header.rs:runtime_api unwrap failed");
+
+        // Shared handle API
+        assert!(header.contains("mimi_shared_retain"));
+        assert!(header.contains("mimi_shared_release"));
+        assert!(header.contains("mimi_shared_get_ptr"));
+
+        // Capability API
+        assert!(header.contains("mimi_cap_check"));
+        assert!(header.contains("mimi_cap_consume"));
+
+        // String API
+        assert!(header.contains("mimi_string_as_c_str"));
+        assert!(header.contains("mimi_string_as_c_str_free"));
+        assert!(header.contains("mimi_string_as_c_str_free_all"));
+        assert!(header.contains("mimi_string_len"));
+        assert!(header.contains("mimi_string_into_raw"));
+        assert!(header.contains("mimi_string_from_raw"));
+        assert!(header.contains("mimi_string_free_raw"));
     }
 }

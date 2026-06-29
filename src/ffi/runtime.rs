@@ -566,9 +566,39 @@ thread_local! {
     /// Per-thread registry of CStrings allocated by `mimi_string_as_c_str`.
     /// Each call to `mimi_string_as_c_str` pushes a new `CString` here to
     /// keep the pointer alive.  Callers MUST call `mimi_string_as_c_str_free`
-    /// to release the entry.  Entries that are never freed will leak until
-    /// thread exit.
+    /// to release the entry.  When the thread exits the thread-local Vec is
+    /// dropped and any remaining CStrings are freed automatically.
     static PENDING_C_STRINGS: RefCell<Vec<std::ffi::CString>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Return the byte length of a Mimi string value.
+/// Returns -1 if the pointer is null or does not point to a string.
+///
+/// # Safety
+/// `mimi_string` must be either null or a valid pointer to a heap-allocated
+/// `Value` previously obtained via `Box::into_raw` or `mimi_value_*` functions.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_string_len(mimi_string: *const Value) -> i64 {
+    if mimi_string.is_null() {
+        return -1;
+    }
+    // SAFETY: null-checked above.
+    unsafe {
+        match &*mimi_string {
+            Value::String(s) => s.len() as i64,
+            _ => -1,
+        }
+    }
+}
+
+/// Free all pending C strings allocated by `mimi_string_as_c_str` on the
+/// current thread. This is a convenience for bulk cleanup; individual pointers
+/// previously returned by `mimi_string_as_c_str` become invalid after this call.
+#[no_mangle]
+pub extern "C" fn mimi_string_as_c_str_free_all() {
+    PENDING_C_STRINGS.with(|pending| {
+        pending.borrow_mut().clear();
+    });
 }
 
 /// Convert a Mimi string to a raw C string (transfer ownership to C).
@@ -842,6 +872,7 @@ pub extern "C" fn mimi_pool_join_all() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{mimi_cap_check, mimi_cap_consume, mimi_cap_register};
 
     /// Regression test for FFI-BUG-1: create_dedup must remove stale dedup
     /// entries when retain() returns false (handle was cleaned up from under
@@ -920,5 +951,109 @@ mod tests {
             start.elapsed() < Duration::from_secs(1),
             "drop(pool) took >1s — FFI-BUG-4: Drop impl may still be calling join()"
         );
+    }
+
+    // ─── Capability C API tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cap_c_api_lifecycle() {
+        let name = std::ffi::CString::new("read").unwrap();
+        let id = mimi_cap_register(name.as_ptr());
+        assert!(id > 0);
+
+        // Check succeeds before consume, fails for wrong name.
+        assert!(mimi_cap_check(id, name.as_ptr()));
+        let wrong = std::ffi::CString::new("write").unwrap();
+        assert!(!mimi_cap_check(id, wrong.as_ptr()));
+
+        // Consume succeeds once and only with the correct name.
+        assert!(mimi_cap_consume(id, name.as_ptr()));
+        assert!(!mimi_cap_consume(id, name.as_ptr()));
+        assert!(!mimi_cap_check(id, name.as_ptr()));
+    }
+
+    #[test]
+    fn cap_c_api_invalid_id() {
+        let name = std::ffi::CString::new("read").unwrap();
+        assert!(!mimi_cap_check(9999, name.as_ptr()));
+        assert!(!mimi_cap_consume(9999, name.as_ptr()));
+    }
+
+    // ─── Shared handle C API tests ──────────────────────────────────────────
+
+    #[test]
+    fn shared_c_api_retain_release_get_ptr() {
+        let value = Arc::new(RwLock::new(Value::Int(42)));
+        let id = with_shared_table(|table| table.create(Arc::clone(&value)));
+        assert!(id > 0);
+
+        // Retain bumps the C-side reference count.
+        assert_eq!(mimi_shared_retain(id), id);
+
+        // Get a heap copy of the inner value.
+        let ptr = mimi_shared_get_ptr(id);
+        assert!(!ptr.is_null());
+        unsafe {
+            assert!(matches!(&*ptr, Value::Int(42)));
+        }
+        mimi_value_free(ptr);
+
+        // Release twice to balance the initial + retain references.
+        mimi_shared_release(id);
+        mimi_shared_release(id);
+
+        // Handle is no longer valid.
+        assert!(mimi_shared_get_ptr(id).is_null());
+    }
+
+    #[test]
+    fn shared_c_api_invalid_handle() {
+        assert!(mimi_shared_get_ptr(9999).is_null());
+        // Release on invalid handle should be a no-op and not panic.
+        mimi_shared_release(9999);
+    }
+
+    // ─── String C API tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn string_c_api_len_and_borrow() {
+        let value = Box::new(Value::String("hello".to_string()));
+        let raw = Box::into_raw(value);
+
+        assert_eq!(unsafe { mimi_string_len(raw) }, 5);
+
+        let c_str = unsafe { mimi_string_as_c_str(raw) };
+        assert!(!c_str.is_null());
+        unsafe {
+            assert_eq!(
+                std::ffi::CStr::from_ptr(c_str).to_str().unwrap(),
+                "hello"
+            );
+        }
+
+        mimi_string_as_c_str_free(c_str);
+        mimi_value_free(raw);
+    }
+
+    #[test]
+    fn string_c_api_free_all_clears_pending() {
+        let value = Box::new(Value::String("bulk".to_string()));
+        let raw = Box::into_raw(value);
+
+        let c_str = unsafe { mimi_string_as_c_str(raw) };
+        assert!(!c_str.is_null());
+
+        // Free all pending strings; the individual pointer becomes invalid.
+        mimi_string_as_c_str_free_all();
+
+        mimi_value_free(raw);
+    }
+
+    #[test]
+    fn string_c_api_null_inputs() {
+        assert_eq!(unsafe { mimi_string_len(std::ptr::null()) }, -1);
+        assert!(unsafe { mimi_string_as_c_str(std::ptr::null()) }.is_null());
+        // Free on null / unknown pointer should be a no-op.
+        mimi_string_as_c_str_free(std::ptr::null());
     }
 }
