@@ -1,7 +1,7 @@
 use crate::codegen::{call_try_basic_value, CodeGenerator};
 use crate::error::CompileError;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{AggregateValueEnum, BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Extract {fn_ptr, env_ptr} from a closure value (StructValue or PointerValue).
@@ -17,48 +17,29 @@ impl<'ctx> CodeGenerator<'ctx> {
     > {
         match closure_val {
             BasicValueEnum::StructValue(sv) => {
+                let agg = AggregateValueEnum::StructValue(sv);
                 let fn_ptr = self
-                    .builder
-                    .build_extract_value(sv, 0, "fn_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract fn_ptr: {}", e)))?
+                    .build_extract_value(agg, 0, "fn_ptr")?
                     .into_pointer_value();
                 let env_ptr = self
-                    .builder
-                    .build_extract_value(sv, 1, "env_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract env_ptr: {}", e)))?
+                    .build_extract_value(agg, 1, "env_ptr")?
                     .into_pointer_value();
                 Ok((fn_ptr, env_ptr))
             }
             BasicValueEnum::PointerValue(pv) => {
-                let closure_struct_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                        BasicTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                    ],
-                    false,
-                );
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let closure_struct_ty =
+                    self.context
+                        .struct_type(&[BasicTypeEnum::PointerType(i8_ptr); 2], false);
                 let loaded = self
-                    .builder
-                    .build_load(
-                        BasicTypeEnum::StructType(closure_struct_ty),
-                        pv,
-                        "closure_loaded",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("load closure: {}", e)))?
+                    .build_load(BasicTypeEnum::StructType(closure_struct_ty), pv, "closure_loaded")?
                     .into_struct_value();
+                let agg = AggregateValueEnum::StructValue(loaded);
                 let fn_ptr = self
-                    .builder
-                    .build_extract_value(loaded, 0, "fn_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract fn_ptr: {}", e)))?
+                    .build_extract_value(agg, 0, "fn_ptr")?
                     .into_pointer_value();
                 let env_ptr = self
-                    .builder
-                    .build_extract_value(loaded, 1, "env_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract env_ptr: {}", e)))?
+                    .build_extract_value(agg, 1, "env_ptr")?
                     .into_pointer_value();
                 Ok((fn_ptr, env_ptr))
             }
@@ -94,14 +75,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         }
         let indirect_fn_type = i64_ty.fn_type(&all_meta, false);
-        let fn_ptr_typed = self
-            .builder
-            .build_pointer_cast(
-                fn_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "fn_typed",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("pointer cast: {}", e)))?;
+        let fn_ptr_typed = self.build_bit_cast(
+            BasicValueEnum::PointerValue(fn_ptr),
+            BasicTypeEnum::PointerType(i8_ptr),
+            "fn_typed",
+        )?;
         let mut call_args = vec![BasicMetadataValueEnum::PointerValue(env_ptr)];
         for arg in args {
             call_args.push(match arg {
@@ -118,7 +96,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let call = self
             .builder
-            .build_indirect_call(indirect_fn_type, fn_ptr_typed, &call_args, "closure_call")
+            .build_indirect_call(indirect_fn_type, fn_ptr_typed.into_pointer_value(), &call_args, "closure_call")
             .map_err(|e| CompileError::LlvmError(format!("indirect call: {}", e)))?;
         Ok(call_try_basic_value(&call)
             .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false))))

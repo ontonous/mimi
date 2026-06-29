@@ -42,10 +42,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Allocate actor struct
         let alloca = match actor_ty {
-            BasicTypeEnum::StructType(sty) => self
-                .builder
-                .build_alloca(sty, &actor.name)
-                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?,
+            BasicTypeEnum::StructType(sty) => self.build_alloca(sty, &actor.name)?,
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
@@ -56,20 +53,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .gep()
                     .build_struct_gep(*sty, alloca, i as u32, &actor.fields[i].name)
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                self.builder
-                    .build_store(gep, *param)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.build_store(gep, *param)?;
             }
         }
 
         // Return the actor struct
-        let ret_val = self
-            .builder
-            .build_load(actor_ty, alloca, &actor.name)
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        self.builder
-            .build_return(Some(&ret_val))
-            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        let ret_val = self.build_load(actor_ty, alloca, &actor.name)?;
+        self.build_return(Some(&ret_val))?;
 
         // Compile all actor methods
         for method in &actor.methods {
@@ -101,10 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Allocate actor struct
         let alloca = match actor_ty {
-            BasicTypeEnum::StructType(sty) => self
-                .builder
-                .build_alloca(sty, &actor.name)
-                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?,
+            BasicTypeEnum::StructType(sty) => self.build_alloca(sty, &actor.name)?,
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
@@ -129,20 +116,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => self.context.i64_type().const_int(0, false).into(),
                     }
                 };
-                self.builder
-                    .build_store(gep, val)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                self.build_store(gep, val)?;
             }
         }
 
         // Return the actor struct
-        let ret_val = self
-            .builder
-            .build_load(actor_ty, alloca, &actor.name)
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        self.builder
-            .build_return(Some(&ret_val))
-            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        let ret_val = self.build_load(actor_ty, alloca, &actor.name)?;
+        self.build_return(Some(&ret_val))?;
 
         Ok(())
     }
@@ -152,14 +132,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         actor: &crate::ast::ActorDef,
         method: &FuncDef,
     ) -> MimiResult<()> {
+        let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
+        let last_val = self.compile_actor_method_body(method, &mut vars)?;
+        self.emit_actor_method_epilogue(&vars, ret_type, last_val)
+    }
+
+    /// Build the LLVM function for an actor method, push scopes, and bind `self`
+    /// and the method parameters.
+    fn build_actor_method_function(
+        &mut self,
+        actor: &crate::ast::ActorDef,
+        method: &FuncDef,
+    ) -> Result<(BasicTypeEnum<'ctx>, HashMap<String, VarEntry<'ctx>>), CompileError> {
         let actor_ty = *self.type_llvm.get(&actor.name).ok_or_else(|| {
             CompileError::TypeNotFound(format!("actor type '{}' not found", actor.name))
         })?;
 
-        // Method name: ActorName__methodName
         let mangled = format!("{}__{}__method", actor.name, method.name);
 
-        // Build function type: self (ptr to actor struct) + params -> ret
         let actor_ptr_ty = match actor_ty {
             BasicTypeEnum::StructType(_) => {
                 BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default()))
@@ -201,50 +191,48 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut vars: HashMap<String, VarEntry> = HashMap::new();
 
-        // Bind self: allocate space for actor struct and store pointer
-        let self_alloca = self
-            .builder
-            .build_alloca(actor_ptr_ty, "self")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        self.builder
-            .build_store(
-                self_alloca,
-                function.get_nth_param(0).ok_or_else(|| {
-                    CompileError::LlvmError(
-                        "codegen: missing self param in actor method".to_string(),
-                    )
-                })?,
-            )
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        // Bind self: allocate space for the actor pointer and store the parameter.
+        let self_alloca = self.build_alloca(actor_ptr_ty, "self")?;
+        self.build_store(
+            self_alloca,
+            function.get_nth_param(0).ok_or_else(|| {
+                CompileError::LlvmError("codegen: missing self param in actor method".to_string())
+            })?,
+        )?;
         vars.insert("self".to_string(), (self_alloca, actor_ptr_ty));
         self.var_type_names
             .insert("self".to_string(), actor.name.clone());
 
         // Bind method params
-        let param_offset = 1; // param 0 is self
+        let param_offset = 1;
         for (i, param) in method.params.iter().enumerate() {
             let ty = types::mimi_type_to_llvm(self.context, &param.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-            let alloca = self
-                .builder
-                .build_alloca(ty, &param.name)
-                .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-            self.builder
-                .build_store(
-                    alloca,
-                    function
-                        .get_nth_param((i + param_offset) as u32)
-                        .ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "codegen: missing param {} in actor method",
-                                i + param_offset
-                            ))
-                        })?,
-                )
-                .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+            let alloca = self.build_alloca(ty, &param.name)?;
+            self.build_store(
+                alloca,
+                function
+                    .get_nth_param((i + param_offset) as u32)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "codegen: missing param {} in actor method",
+                            i + param_offset
+                        ))
+                    })?,
+            )?;
             vars.insert(param.name.clone(), (alloca, ty));
         }
 
+        Ok((ret_llvm, vars))
+    }
+
+    /// Compile the body statements of an actor method, returning the value that
+    /// should be returned if the method falls through.
+    fn compile_actor_method_body(
+        &mut self,
+        method: &FuncDef,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let ret_type = self.current_fn_ret_type();
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
@@ -253,313 +241,314 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let mut last_val: BasicValueEnum = default_val;
         for stmt in &method.body {
-            // Run compensations before exit()
-            if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
-                if let Expr::Ident(name) = &**callee {
-                    if name == "exit" {
-                        self.compile_compensations(&mut vars)?;
-                    }
-                }
+            if self.compile_actor_method_stmt(stmt, vars, &mut last_val, ret_type)? {
+                return Ok(last_val);
             }
-            match stmt {
-                Stmt::Expr(expr) => {
-                    last_val = self.compile_expr(expr, &vars)?;
-                    last_val = self.adjust_int_val(last_val, ret_type)?;
+        }
+        Ok(last_val)
+    }
+
+    /// Compile a single actor-method statement.
+    /// Returns `true` if the statement is a `return` that terminates the method.
+    fn compile_actor_method_stmt(
+        &mut self,
+        stmt: &Stmt,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+        last_val: &mut BasicValueEnum<'ctx>,
+        ret_type: BasicTypeEnum<'ctx>,
+    ) -> Result<bool, CompileError> {
+        // Run compensations before exit()
+        if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
+            if let Expr::Ident(name) = &**callee {
+                if name == "exit" {
+                    self.compile_compensations(vars)?;
                 }
-                Stmt::Return(Some(expr)) => {
-                    self.pop_shared_scope()?;
-                    self.free_heap_allocs()?;
-                    self.pop_comp_scope();
-                    self.pop_cap_scope();
-                    let mut val = self.compile_expr(expr, &vars)?;
-                    val = self.adjust_int_val(val, self.current_fn_ret_type())?;
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
-                    }
-                    self.builder
-                        .build_return(Some(&val))
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
-                    return Ok(());
-                }
-                Stmt::Return(None) => {
-                    self.pop_shared_scope()?;
-                    self.free_heap_allocs()?;
-                    self.pop_comp_scope();
-                    self.pop_cap_scope();
-                    let ensures = self.ensures_stmts.clone();
-                    for ensures_expr in &ensures {
-                        self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
-                    }
-                    self.builder
-                        .build_return(None)
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
-                    return Ok(());
-                }
-                Stmt::Let {
-                    pat,
-                    init: Some(init),
-                    ty,
-                    ..
-                } => {
-                    // Shared ref copy: let v = shared_var
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Ident(src_name) = init {
-                            if self.shared_var_names.contains(src_name.as_str()) {
-                                self.compile_shared_ref_copy(name, src_name, &mut vars)?;
-                                continue;
-                            }
-                        }
-                    }
-                    // Shared var clone: let v = shared_var.clone()
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Call(callee, cargs) = init {
-                            if cargs.is_empty() {
-                                if let Expr::Field(obj, method_name) = callee.as_ref() {
-                                    if method_name == "clone" {
-                                        if let Expr::Ident(src_name) = obj.as_ref() {
-                                            if self.shared_var_names.contains(src_name.as_str()) {
-                                                self.compile_shared_ref_copy(
-                                                    name, src_name, &mut vars,
-                                                )?;
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let mut val = self.compile_expr(init, &vars)?;
-                    if let Some(decl_ty) = ty {
-                        let target = types::mimi_type_to_llvm(self.context, decl_ty)
-                            .unwrap_or_else(|| val.get_type());
-                        val = self.adjust_int_val(val, target)?;
-                    }
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Record { ty: Some(tn), .. } = init {
-                            self.var_type_names.insert(name.clone(), tn.clone());
-                        } else if let Expr::Call(callee, _) = init {
-                            if let Expr::Field(obj, method_name) = callee.as_ref() {
-                                if method_name == "spawn" {
-                                    let obj_type = self.infer_object_type(obj, &vars);
-                                    if !obj_type.is_empty() {
-                                        self.var_type_names.insert(name.clone(), obj_type);
-                                    }
-                                } else if matches!(
-                                    method_name.as_str(),
-                                    "map" | "and_then" | "map_err" | "ok_or"
-                                ) {
-                                    let obj_type = self.infer_object_type(obj, &vars);
-                                    if obj_type == "Result" || obj_type == "Option" {
-                                        self.var_type_names.insert(name.clone(), obj_type);
-                                    }
-                                }
-                            } else if let Expr::Ident(func_name) = callee.as_ref() {
-                                match func_name.as_str() {
-                                    "Ok" | "Err" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Result".to_string());
-                                    }
-                                    "Some" | "None" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Option".to_string());
-                                    }
-                                    _ => {
-                                        if let Some(fdef) = self.func_defs.get(func_name) {
-                                            if let Some(ret_ty) = &fdef.ret {
-                                                match ret_ty {
-                                                    Type::ImplTrait(traits) => {
-                                                        self.var_type_names.insert(
-                                                            name.clone(),
-                                                            format!("impl {}", traits.join(" + ")),
-                                                        );
-                                                    }
-                                                    Type::Name(tn, _) => {
-                                                        self.var_type_names
-                                                            .insert(name.clone(), tn.clone());
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Track list element type for nested List<List<T>> indexing
-                    if let Pattern::Variable(name) = pat {
-                        if let Some(decl_ty) = &ty {
-                            self.register_list_elem_type(name, decl_ty);
-                        }
-                    }
-                    self.compile_pattern_bind(pat, val, &mut vars)?;
-                }
-                Stmt::Assign { target, value } => {
-                    self.compile_assign_stmt(target, value, &mut vars)?;
-                }
-                Stmt::If { cond, then_, else_ } => {
-                    let cond_val = self.compile_expr(cond, &vars)?;
-                    let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-                        iv
-                    } else {
-                        return Err(CompileError::TypeMismatch(
-                            "if condition must be boolean".to_string(),
-                        ));
-                    };
-                    let function = self.current_function().ok_or_else(|| {
-                        CompileError::LlvmError(
-                            "codegen: no current function for if in actor method".to_string(),
-                        )
-                    })?;
-                    let then_bb = self.context.append_basic_block(function, "then");
-                    let else_bb = self.context.append_basic_block(function, "else");
-                    let merge_bb = self.context.append_basic_block(function, "ifcont");
-                    self.builder
-                        .build_conditional_branch(cond_bool, then_bb, else_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    self.builder.position_at_end(then_bb);
-                    self.compile_block(then_, &mut vars)?;
-                    if !self.block_has_terminator() {
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    }
-                    self.builder.position_at_end(else_bb);
-                    if let Some(else_block) = else_ {
-                        self.compile_block(else_block, &mut vars)?;
-                    }
-                    if !self.block_has_terminator() {
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    }
-                    self.builder.position_at_end(merge_bb);
-                }
-                Stmt::For {
-                    var,
-                    iterable,
-                    body,
-                } => {
-                    self.compile_for_stmt(var, iterable, body, &mut vars)?;
-                }
-                Stmt::While { cond, body } => {
-                    let function = self.current_function().ok_or_else(|| {
-                        CompileError::LlvmError(
-                            "codegen: no current function for while loop in actor method"
-                                .to_string(),
-                        )
-                    })?;
-                    let loop_bb = self.context.append_basic_block(function, "loop");
-                    let body_bb = self.context.append_basic_block(function, "loopbody");
-                    let merge_bb = self.context.append_basic_block(function, "loopcont");
-                    self.builder
-                        .build_unconditional_branch(loop_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    self.builder.position_at_end(loop_bb);
-                    let cond_val = self.compile_expr(cond, &vars)?;
-                    let cond_bool = cond_val.into_int_value();
-                    self.builder
-                        .build_conditional_branch(cond_bool, body_bb, merge_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    self.builder.position_at_end(body_bb);
-                    let old_break = self.loop_break.take();
-                    let old_continue = self.loop_continue.take();
-                    self.loop_break = Some(merge_bb);
-                    self.loop_continue = Some(loop_bb);
-                    self.compile_block(body, &mut vars)?;
-                    if !self.block_has_terminator() {
-                        self.builder
-                            .build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    }
-                    self.loop_break = old_break;
-                    self.loop_continue = old_continue;
-                    self.builder.position_at_end(merge_bb);
-                }
-                Stmt::WhileLet { pat, init, body } => {
-                    self.compile_while_let_stmt(pat, init, body, &mut vars)?;
-                }
-                Stmt::Loop(body) => {
-                    let function = self.current_function().ok_or_else(|| {
-                        CompileError::LlvmError(
-                            "codegen: no current function for loop in actor method".to_string(),
-                        )
-                    })?;
-                    let loop_bb = self.context.append_basic_block(function, "loop");
-                    let body_bb = self.context.append_basic_block(function, "loopbody");
-                    let merge_bb = self.context.append_basic_block(function, "loopcont");
-                    self.builder
-                        .build_unconditional_branch(loop_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    self.builder.position_at_end(loop_bb);
-                    let true_val = self.context.bool_type().const_int(1, false);
-                    self.builder
-                        .build_conditional_branch(true_val, body_bb, merge_bb)
-                        .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    self.builder.position_at_end(body_bb);
-                    let old_break = self.loop_break.take();
-                    let old_continue = self.loop_continue.take();
-                    self.loop_break = Some(merge_bb);
-                    self.loop_continue = Some(loop_bb);
-                    self.compile_block(body, &mut vars)?;
-                    if !self.block_has_terminator() {
-                        self.builder
-                            .build_unconditional_branch(loop_bb)
-                            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-                    }
-                    self.loop_break = old_break;
-                    self.loop_continue = old_continue;
-                    self.builder.position_at_end(merge_bb);
-                }
-                Stmt::MmsBlock { .. } => {}
-                Stmt::Parasteps(block) => {
-                    // Parasteps: execute spawn statements in parallel, join at block end
-                    self.enter_parasteps();
-                    self.compile_block(block, &mut vars)?;
-                    self.leave_parasteps()?;
-                }
-                Stmt::Drop(expr) => {
-                    self.compile_expr(expr, &vars)?;
-                }
-                Stmt::OnFailure(block) => {
-                    self.register_comp(block);
-                }
-                Stmt::Arena(block) => {
-                    self.compile_arena_block(block, &mut vars, "arena")?;
-                }
-                Stmt::Alloc {
-                    kind: AllocKind::Arena,
-                    body,
-                } => {
-                    self.compile_arena_block(body, &mut vars, "alloc(Arena)")?;
-                }
-                Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
-                    self.compile_block(block, &mut vars)?;
-                }
-                Stmt::SharedLet {
-                    kind,
-                    name,
-                    ty,
-                    init,
-                } => {
-                    self.compile_shared_let_stmt(kind, name, ty, init, &mut vars)?;
-                }
-                Stmt::Desc(..)
-                | Stmt::Rule(..)
-                | Stmt::Requires(_, _)
-                | Stmt::Ensures(_, _)
-                | Stmt::Invariant(_, _)
-                | Stmt::Math(_)
-                | Stmt::Ellipsis => {}
-                Stmt::Block(block) => {
-                    self.compile_block(block, &mut vars)?;
-                }
-                _ => {}
             }
         }
 
+        match stmt {
+            Stmt::Expr(expr) => {
+                *last_val = self.compile_expr(expr, vars)?;
+                *last_val = self.adjust_int_val(*last_val, ret_type)?;
+            }
+            Stmt::Return(Some(expr)) => {
+                self.pop_shared_scope()?;
+                self.free_heap_allocs()?;
+                self.pop_comp_scope();
+                self.pop_cap_scope();
+                let mut val = self.compile_expr(expr, vars)?;
+                val = self.adjust_int_val(val, self.current_fn_ret_type())?;
+                let ensures = self.ensures_stmts.clone();
+                for ensures_expr in &ensures {
+                    self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
+                }
+                self.build_return(Some(&val))?;
+                return Ok(true);
+            }
+            Stmt::Return(None) => {
+                self.pop_shared_scope()?;
+                self.free_heap_allocs()?;
+                self.pop_comp_scope();
+                self.pop_cap_scope();
+                let ensures = self.ensures_stmts.clone();
+                for ensures_expr in &ensures {
+                    self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
+                }
+                self.build_return(None)?;
+                return Ok(true);
+            }
+            Stmt::Let {
+                pat,
+                init: Some(init),
+                ty,
+                ..
+            } => {
+                // Shared ref copy: let v = shared_var
+                if let Pattern::Variable(name) = pat {
+                    if let Expr::Ident(src_name) = init {
+                        if self.shared_var_names.contains(src_name.as_str()) {
+                            self.compile_shared_ref_copy(name, src_name, vars)?;
+                            return Ok(false);
+                        }
+                    }
+                }
+                // Shared var clone: let v = shared_var.clone()
+                if let Pattern::Variable(name) = pat {
+                    if let Expr::Call(callee, cargs) = init {
+                        if cargs.is_empty() {
+                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if method_name == "clone" {
+                                    if let Expr::Ident(src_name) = obj.as_ref() {
+                                        if self.shared_var_names.contains(src_name.as_str()) {
+                                            self.compile_shared_ref_copy(name, src_name, vars)?;
+                                            return Ok(false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut val = self.compile_expr(init, vars)?;
+                if let Some(decl_ty) = ty {
+                    let target = types::mimi_type_to_llvm(self.context, decl_ty)
+                        .unwrap_or_else(|| val.get_type());
+                    val = self.adjust_int_val(val, target)?;
+                }
+                if let Pattern::Variable(name) = pat {
+                    if let Expr::Record { ty: Some(tn), .. } = init {
+                        self.var_type_names.insert(name.clone(), tn.clone());
+                    } else if let Expr::Call(callee, _) = init {
+                        if let Expr::Field(obj, method_name) = callee.as_ref() {
+                            if method_name == "spawn" {
+                                let obj_type = self.infer_object_type(obj, vars);
+                                if !obj_type.is_empty() {
+                                    self.var_type_names.insert(name.clone(), obj_type);
+                                }
+                            } else if matches!(
+                                method_name.as_str(),
+                                "map" | "and_then" | "map_err" | "ok_or"
+                            ) {
+                                let obj_type = self.infer_object_type(obj, vars);
+                                if obj_type == "Result" || obj_type == "Option" {
+                                    self.var_type_names.insert(name.clone(), obj_type);
+                                }
+                            }
+                        } else if let Expr::Ident(func_name) = callee.as_ref() {
+                            match func_name.as_str() {
+                                "Ok" | "Err" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "Result".to_string());
+                                }
+                                "Some" | "None" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "Option".to_string());
+                                }
+                                _ => {
+                                    if let Some(fdef) = self.func_defs.get(func_name) {
+                                        if let Some(ret_ty) = &fdef.ret {
+                                            match ret_ty {
+                                                Type::ImplTrait(traits) => {
+                                                    self.var_type_names.insert(
+                                                        name.clone(),
+                                                        format!("impl {}", traits.join(" + ")),
+                                                    );
+                                                }
+                                                Type::Name(tn, _) => {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), tn.clone());
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Track list element type for nested List<List<T>> indexing
+                if let Pattern::Variable(name) = pat {
+                    if let Some(decl_ty) = &ty {
+                        self.register_list_elem_type(name, decl_ty);
+                    }
+                }
+                self.compile_pattern_bind(pat, val, vars)?;
+            }
+            Stmt::Assign { target, value } => {
+                self.compile_assign_stmt(target, value, vars)?;
+            }
+            Stmt::If { cond, then_, else_ } => {
+                let cond_val = self.compile_expr(cond, vars)?;
+                let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
+                    iv
+                } else {
+                    return Err(CompileError::TypeMismatch(
+                        "if condition must be boolean".to_string(),
+                    ));
+                };
+                let function = self.current_function().ok_or_else(|| {
+                    CompileError::LlvmError(
+                        "codegen: no current function for if in actor method".to_string(),
+                    )
+                })?;
+                let then_bb = self.context.append_basic_block(function, "then");
+                let else_bb = self.context.append_basic_block(function, "else");
+                let merge_bb = self.context.append_basic_block(function, "ifcont");
+                self.build_cond_br(cond_bool, then_bb, else_bb)?;
+                self.builder.position_at_end(then_bb);
+                self.compile_block(then_, vars)?;
+                if !self.block_has_terminator() {
+                    self.build_br(merge_bb)?;
+                }
+                self.builder.position_at_end(else_bb);
+                if let Some(else_block) = else_ {
+                    self.compile_block(else_block, vars)?;
+                }
+                if !self.block_has_terminator() {
+                    self.build_br(merge_bb)?;
+                }
+                self.builder.position_at_end(merge_bb);
+            }
+            Stmt::For {
+                var,
+                iterable,
+                body,
+            } => {
+                self.compile_for_stmt(var, iterable, body, vars)?;
+            }
+            Stmt::While { cond, body } => {
+                let function = self.current_function().ok_or_else(|| {
+                    CompileError::LlvmError(
+                        "codegen: no current function for while loop in actor method".to_string(),
+                    )
+                })?;
+                let loop_bb = self.context.append_basic_block(function, "loop");
+                let body_bb = self.context.append_basic_block(function, "loopbody");
+                let merge_bb = self.context.append_basic_block(function, "loopcont");
+                self.build_br(loop_bb)?;
+                self.builder.position_at_end(loop_bb);
+                let cond_val = self.compile_expr(cond, vars)?;
+                let cond_bool = cond_val.into_int_value();
+                self.build_cond_br(cond_bool, body_bb, merge_bb)?;
+                self.builder.position_at_end(body_bb);
+                let old_break = self.loop_break.take();
+                let old_continue = self.loop_continue.take();
+                self.loop_break = Some(merge_bb);
+                self.loop_continue = Some(loop_bb);
+                self.compile_block(body, vars)?;
+                if !self.block_has_terminator() {
+                    self.build_br(loop_bb)?;
+                }
+                self.loop_break = old_break;
+                self.loop_continue = old_continue;
+                self.builder.position_at_end(merge_bb);
+            }
+            Stmt::WhileLet { pat, init, body } => {
+                self.compile_while_let_stmt(pat, init, body, vars)?;
+            }
+            Stmt::Loop(body) => {
+                let function = self.current_function().ok_or_else(|| {
+                    CompileError::LlvmError(
+                        "codegen: no current function for loop in actor method".to_string(),
+                    )
+                })?;
+                let loop_bb = self.context.append_basic_block(function, "loop");
+                let body_bb = self.context.append_basic_block(function, "loopbody");
+                let merge_bb = self.context.append_basic_block(function, "loopcont");
+                self.build_br(loop_bb)?;
+                self.builder.position_at_end(loop_bb);
+                let true_val = self.context.bool_type().const_int(1, false);
+                self.build_cond_br(true_val, body_bb, merge_bb)?;
+                self.builder.position_at_end(body_bb);
+                let old_break = self.loop_break.take();
+                let old_continue = self.loop_continue.take();
+                self.loop_break = Some(merge_bb);
+                self.loop_continue = Some(loop_bb);
+                self.compile_block(body, vars)?;
+                if !self.block_has_terminator() {
+                    self.build_br(loop_bb)?;
+                }
+                self.loop_break = old_break;
+                self.loop_continue = old_continue;
+                self.builder.position_at_end(merge_bb);
+            }
+            Stmt::MmsBlock { .. } => {}
+            Stmt::Parasteps(block) => {
+                self.enter_parasteps();
+                self.compile_block(block, vars)?;
+                self.leave_parasteps()?;
+            }
+            Stmt::Drop(expr) => {
+                self.compile_expr(expr, vars)?;
+            }
+            Stmt::OnFailure(block) => {
+                self.register_comp(block);
+            }
+            Stmt::Arena(block) => {
+                self.compile_arena_block(block, vars, "arena")?;
+            }
+            Stmt::Alloc {
+                kind: AllocKind::Arena,
+                body,
+            } => {
+                self.compile_arena_block(body, vars, "alloc(Arena)")?;
+            }
+            Stmt::Unsafe(block) | Stmt::Alloc { body: block, .. } => {
+                self.compile_block(block, vars)?;
+            }
+            Stmt::SharedLet {
+                kind,
+                name,
+                ty,
+                init,
+            } => {
+                self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
+            }
+            Stmt::Desc(..)
+            | Stmt::Rule(..)
+            | Stmt::Requires(_, _)
+            | Stmt::Ensures(_, _)
+            | Stmt::Invariant(_, _)
+            | Stmt::Math(_)
+            | Stmt::Ellipsis => {}
+            Stmt::Block(block) => {
+                self.compile_block(block, vars)?;
+            }
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    /// Emit the epilogue of an actor method: scope cleanup, contract checks,
+    /// and the implicit return.
+    fn emit_actor_method_epilogue(
+        &mut self,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        ret_type: BasicTypeEnum<'ctx>,
+        last_val: BasicValueEnum<'ctx>,
+    ) -> MimiResult<()> {
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;
         self.free_heap_allocs()?;
@@ -569,12 +558,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.block_has_terminator() {
             let ensures = self.ensures_stmts.clone();
             for ensures_expr in &ensures {
-                self.compile_contract_assert(ensures_expr, &vars, "ensures violation")?;
+                self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
             }
             let last_val = self.adjust_int_val(last_val, ret_type)?;
-            self.builder
-                .build_return(Some(&last_val))
-                .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+            self.build_return(Some(&last_val))?;
         }
         Ok(())
     }
