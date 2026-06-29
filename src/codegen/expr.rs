@@ -334,12 +334,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(*pv)
             }
             BasicMetadataValueEnum::StructValue(sv) => {
-                let extracted = self
-                    .builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("extract str ptr error: {}", e))
-                    })?;
+                let extracted = self.build_extract_value((*sv).into(), 0, "str_ptr")?;
                 match extracted {
                     BasicValueEnum::PointerValue(pv) => Ok(pv),
                     _ => Err("string struct field 0 is not a pointer".into()),
@@ -400,22 +395,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         entries: &[(Expr, Expr)],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let map_new = self
-            .module
-            .get_function("mimi_map_new")
-            .ok_or("mimi_map_new not declared")?;
-        let result = self
-            .builder
-            .build_call(map_new, &[], "map_new_call")
-            .map_err(|e| format!("map_new error: {}", e))?;
+        let map_new = self.get_runtime_fn("mimi_map_new")?;
+        let result = self.build_call(map_new, &[], "map_new_call")?;
         let map_handle = call_try_basic_value(&result)
-            .ok_or("mimi_map_new returned void")?
+            .ok_or_else(|| CompileError::LlvmError("mimi_map_new returned void".to_string()))?
             .into_int_value();
 
-        let map_set = self
-            .module
-            .get_function("mimi_map_set")
-            .ok_or("mimi_map_set not declared")?;
+        let map_set = self.get_runtime_fn("mimi_map_set")?;
 
         for (key, value) in entries {
             let key_val = self.compile_expr(key, vars)?;
@@ -424,25 +410,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             let key_ptr = match &key_val {
                 BasicValueEnum::PointerValue(pv) => *pv,
                 BasicValueEnum::StructValue(sv) => self
-                    .builder
-                    .build_extract_value(*sv, 0, "key_str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract key str ptr: {}", e)))?
+                    .build_extract_value((*sv).into(), 0, "key_str_ptr")?
                     .into_pointer_value(),
                 _ => return Err("map literal key must be a string".into()),
             };
             // Value is cast to i64 (ValueHandle) for storage
             let val_i64 = self.any_value_to_handle(val_val)?;
-            self.builder
-                .build_call(
-                    map_set,
-                    &[
-                        BasicMetadataValueEnum::IntValue(map_handle),
-                        BasicMetadataValueEnum::PointerValue(key_ptr),
-                        BasicMetadataValueEnum::IntValue(val_i64),
-                    ],
-                    "map_set_call",
-                )
-                .map_err(|e| format!("map_set error: {}", e))?;
+            self.build_call(
+                map_set,
+                &[
+                    BasicMetadataValueEnum::IntValue(map_handle),
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                    BasicMetadataValueEnum::IntValue(val_i64),
+                ],
+                "map_set_call",
+            )?;
         }
 
         Ok(BasicValueEnum::IntValue(map_handle))
@@ -453,36 +435,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         elems: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let set_new = self
-            .module
-            .get_function("mimi_set_new")
-            .ok_or("mimi_set_new not declared")?;
-        let result = self
-            .builder
-            .build_call(set_new, &[], "set_new_call")
-            .map_err(|e| format!("set_new error: {}", e))?;
+        let set_new = self.get_runtime_fn("mimi_set_new")?;
+        let result = self.build_call(set_new, &[], "set_new_call")?;
         let set_handle = call_try_basic_value(&result)
-            .ok_or("mimi_set_new returned void")?
+            .ok_or_else(|| CompileError::LlvmError("mimi_set_new returned void".to_string()))?
             .into_int_value();
 
-        let set_insert = self
-            .module
-            .get_function("mimi_set_insert")
-            .ok_or("mimi_set_insert not declared")?;
+        let set_insert = self.get_runtime_fn("mimi_set_insert")?;
 
         for elem in elems {
             let val = self.compile_expr(elem, vars)?;
             let val_i64 = self.any_value_to_handle(val)?;
-            self.builder
-                .build_call(
-                    set_insert,
-                    &[
-                        BasicMetadataValueEnum::IntValue(set_handle),
-                        BasicMetadataValueEnum::IntValue(val_i64),
-                    ],
-                    "set_insert_call",
-                )
-                .map_err(|e| format!("set_insert error: {}", e))?;
+            self.build_call(
+                set_insert,
+                &[
+                    BasicMetadataValueEnum::IntValue(set_handle),
+                    BasicMetadataValueEnum::IntValue(val_i64),
+                ],
+                "set_insert_call",
+            )?;
         }
 
         Ok(BasicValueEnum::IntValue(set_handle))
@@ -495,29 +466,22 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, CompileError> {
         Ok(match val {
             BasicValueEnum::IntValue(iv) => iv,
-            BasicValueEnum::PointerValue(pv) => self
-                .builder
-                .build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_handle")
-                .map_err(|e| CompileError::LlvmError(format!("ptr_to_int: {}", e)))?,
+            BasicValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_handle")?
+            }
             BasicValueEnum::StructValue(sv) => {
                 // Extract first field (string struct has ptr at 0)
-                let field = self
-                    .builder
-                    .build_extract_value(sv, 0, "struct_field")
-                    .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?;
+                let field = self.build_extract_value(sv.into(), 0, "struct_field")?;
                 match field {
-                    BasicValueEnum::PointerValue(pv) => self
-                        .builder
-                        .build_ptr_to_int(pv, self.context.i64_type(), "struct_ptr_to_handle")
-                        .map_err(|e| CompileError::LlvmError(format!("ptr_to_int: {}", e)))?,
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.build_ptr_to_int(pv, self.context.i64_type(), "struct_ptr_to_handle")?
+                    }
                     BasicValueEnum::IntValue(iv) => iv,
                     _ => return Err("unsupported struct field type for map value handle".into()),
                 }
             }
             BasicValueEnum::FloatValue(fv) => self
-                .builder
-                .build_bit_cast(fv, self.context.i64_type(), "float_to_handle")
-                .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                .build_bit_cast(fv.into(), self.context.i64_type().into(), "float_to_handle")?
                 .into_int_value(),
             _ => return Err("unsupported value type for map storage".into()),
         })

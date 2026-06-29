@@ -393,6 +393,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Build an `extractvalue` instruction.
+    pub(super) fn build_extract_value(
+        &self,
+        agg: inkwell::values::AggregateValueEnum<'ctx>,
+        index: u32,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.builder
+            .build_extract_value(agg, index, name)
+            .map_err(|e| CompileError::LlvmError(format!("extractvalue error ({}): {}", name, e)))
+    }
+
+    /// Build a `ptrtoint` instruction.
+    pub(super) fn build_ptr_to_int(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        int_ty: inkwell::types::IntType<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        self.builder
+            .build_ptr_to_int(ptr, int_ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("ptrtoint error ({}): {}", name, e)))
+    }
+
+    /// Build a `bitcast` instruction.
+    pub(super) fn build_bit_cast(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.builder
+            .build_bit_cast(val, ty, name)
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error ({}): {}", name, e)))
+    }
+
     fn current_function(&self) -> Option<inkwell::values::FunctionValue<'ctx>> {
         self.builder.get_insert_block()?.get_parent()
     }
