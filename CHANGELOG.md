@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`#[repr(C)]` struct-by-value 跨语言绑定生成**:
+  - Rust (`rust_bind.rs`)：生成 `#[repr(C)] #[derive(Debug, Clone, Copy)] pub struct MimiX`，
+    `StructByValue` 参数/返回映射为值类型 `MimiX`。
+  - C/C++ (`c_header.rs` / `cpp_bind.rs`)：为 `#[repr(C)]` record 生成 C struct 声明，
+    C header 函数签名使用 `struct X`，C++ wrapper 使用 `const struct X&` / `struct X`。
+  - Go (`go_bind.rs`)：生成 `type X struct { ... }`，`StructByValue` 映射为 `C.struct_X`。
+  - Node.js (`node_bind.rs`)：生成 C struct 与 TypeScript `interface X`，N-API wrapper 在
+    JS 对象与 C struct 之间转换字段。
+  - Java JNI (`jni_bind.rs`)：生成 C struct 与 Java 静态嵌套类，JNI bridge 通过
+    `Get/Set<Field>Type` 在 jobject 与 C struct 之间转换。
+  - Python (`py_bind.rs`)：通过 pybind11 `py::class_<X>` 暴露 `#[repr(C)]` 结构体，
+    Python stub 生成对应 `class X:` 类型注解。
 - **FFI 运行时 C API 功能补充**:
   - `mimi_string_len(void* mimi_string) -> int64_t`：从 C 侧查询 Mimi 字符串字节长度。
   - `mimi_string_as_c_str_free_all(void)`：批量释放当前线程由 `mimi_string_as_c_str`

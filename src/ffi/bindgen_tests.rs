@@ -137,9 +137,14 @@ mod tests {
         assert!(out.contains("napi_add"));
         assert!(out.contains("napi_greet"));
         assert!(out.contains("napi_point_sum"));
+        assert!(out.contains("typedef struct Point"));
+        assert!(out.contains("struct Point p_struct"));
+        assert!(out.contains("napi_get_named_property(env, args[0], \"x\""));
         let dts = gen.generate_dts(&sample_extern_funcs()).unwrap();
+        assert!(dts.contains("export interface Point"));
         assert!(dts.contains("export function add("));
         assert!(dts.contains("export function greet("));
+        assert!(dts.contains("point_sum(p: Point): number"));
     }
 
     #[test]
@@ -163,8 +168,13 @@ mod tests {
         // Regression: string args must be converted and released with the same variable name.
         assert!(c.contains("const char* name_str ="));
         assert!(c.contains("if (name_str) (*env)->ReleaseStringUTFChars(env, name, name_str)"));
+        assert!(c.contains("typedef struct Point"));
+        assert!(c.contains("struct Point p_struct"));
+        assert!(c.contains("jclass Point_cls = (*env)->FindClass(env, \"Math$Point\")"));
         assert!(java.contains("public static native long add("));
         assert!(java.contains("public static native String greet("));
+        assert!(java.contains("public static class Point"));
+        assert!(java.contains("public static native long point_sum(Point p)"));
     }
 
     #[test]
@@ -174,7 +184,11 @@ mod tests {
         let pyi = gen.generate_pyi(&sample_extern_funcs()).unwrap();
         assert!(out.contains("PYBIND11_MODULE(math"));
         assert!(out.contains("m.def(\"add\""));
+        assert!(out.contains("py::class_<Point>(m, \"Point\")"));
+        assert!(out.contains("m.def(\"point_sum\", [](Point p) -> int64_t"));
         assert!(pyi.contains("def add("));
         assert!(pyi.contains("def greet("));
+        assert!(pyi.contains("class Point:"));
+        assert!(pyi.contains("def point_sum(p: Point) -> int"));
     }
 }

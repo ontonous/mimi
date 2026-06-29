@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, TypeDef};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// Java JNI binding generator.
@@ -35,10 +35,13 @@ impl JniBindGenerator {
         writeln!(out, "#include <jni.h>")?;
         writeln!(out, "#include <stdlib.h>")?;
         writeln!(out, "#include <string.h>")?;
+        writeln!(out, "#include <stdint.h>")?;
         writeln!(out)?;
         writeln!(out, "// Mimi runtime")?;
         writeln!(out, "extern void mimi_string_free(char* s);")?;
         writeln!(out)?;
+
+        self.write_c_struct_decls(&mut out)?;
 
         let java_class = sanitize_java_class(&self.module_name);
 
@@ -62,6 +65,8 @@ impl JniBindGenerator {
         writeln!(out, "        System.loadLibrary(\"mimi_{}\");", self.module_name)?;
         writeln!(out, "    }}")?;
         writeln!(out)?;
+
+        self.write_java_struct_defs(&mut out)?;
 
         for func in extern_funcs {
             let contract = self.build_contract(func);
@@ -120,6 +125,14 @@ impl JniBindGenerator {
         }
         writeln!(out, ") {{")?;
 
+        // Extract struct-by-value arguments first.
+        for (i, p) in func.params.iter().enumerate() {
+            if let FfiArgContract::StructByValue(name) = &contract.args[i] {
+                let jname = sanitize_java_name(&p.name);
+                self.write_struct_arg_extract(out, java_class, name, &jname)?;
+            }
+        }
+
         // Convert Java string arguments to C strings before the call.
         for (i, p) in func.params.iter().enumerate() {
             match &contract.args[i] {
@@ -146,6 +159,7 @@ impl JniBindGenerator {
                     FfiArgContract::Int | FfiArgContract::Cap(_) | FfiArgContract::CShared(_)
                     | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => jname,
                     FfiArgContract::Float => jname,
+                    FfiArgContract::StructByValue(_) => format!("{}_struct", jname),
                     _ => format!("(intptr_t)NULL /* {} */", jname),
                 }
             })
@@ -170,6 +184,10 @@ impl JniBindGenerator {
                 writeln!(out, "    mimi_string_free(ret);")?;
                 writeln!(out, "    return jret;")?;
             }
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => {
+                writeln!(out, "    struct {} ret = {}({});", name, func.name, c_args.join(", "))?;
+                self.write_struct_return_build(out, java_class, name)?;
+            }
             _ => {
                 writeln!(out, "    // Unsupported return type")?;
                 writeln!(out, "    return 0;")?;
@@ -191,6 +209,184 @@ impl JniBindGenerator {
         writeln!(out)
     }
 
+    fn write_c_struct_decls(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        if !repr_c.is_empty() {
+            writeln!(out, "// #[repr(C)] struct definitions")?;
+            for (name, td) in repr_c {
+                if let TypeDefKind::Record(fields) = &td.kind {
+                    writeln!(out, "typedef struct {} {{", name)?;
+                    for field in fields {
+                        let c_type = self.mimi_type_to_c_field(&field.ty);
+                        writeln!(out, "    {} {};", c_type, field.name)?;
+                    }
+                    writeln!(out, "}} {};", name)?;
+                }
+            }
+            writeln!(out)?;
+        }
+        Ok(())
+    }
+
+    fn write_java_struct_defs(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        for (name, td) in repr_c {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                writeln!(out, "    public static class {} {{", name)?;
+                for field in fields {
+                    writeln!(
+                        out,
+                        "        public {} {};",
+                        self.java_field_type(&field.ty),
+                        field.name
+                    )?;
+                }
+                writeln!(out, "    }}")?;
+                writeln!(out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_struct_arg_extract(
+        &self,
+        out: &mut String,
+        java_class: &str,
+        type_name: &str,
+        param_name: &str,
+    ) -> Result<(), std::fmt::Error> {
+        writeln!(out, "    struct {} {}_struct;", type_name, param_name)?;
+        writeln!(out, "    jclass {0}_cls = (*env)->FindClass(env, \"{1}${0}\");", type_name, java_class)?;
+        if let Some(td) = self.type_defs.get(type_name) {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                for field in fields {
+                    let sig = self.jni_field_signature(&field.ty);
+                    writeln!(
+                        out,
+                        "    jfieldID {0}_{1}_fid = (*env)->GetFieldID(env, {0}_cls, \"{1}\", \"{2}\");",
+                        param_name, field.name, sig
+                    )?;
+                    let (jtype, cast) = self.jni_field_access(&field.ty);
+                    writeln!(
+                        out,
+                        "    {0}_struct.{1} = ({2})(*env)->Get{3}Field(env, {0}, {0}_{1}_fid);",
+                        param_name, field.name, cast, jtype
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_struct_return_build(
+        &self,
+        out: &mut String,
+        java_class: &str,
+        type_name: &str,
+    ) -> Result<(), std::fmt::Error> {
+        writeln!(out, "    jclass ret_cls = (*env)->FindClass(env, \"{}${}\");", java_class, type_name)?;
+        writeln!(out, "    jmethodID ret_init = (*env)->GetMethodID(env, ret_cls, \"<init>\", \"()V\");")?;
+        writeln!(out, "    jobject ret_obj = (*env)->NewObject(env, ret_cls, ret_init);")?;
+        if let Some(td) = self.type_defs.get(type_name) {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                for field in fields {
+                    let sig = self.jni_field_signature(&field.ty);
+                    writeln!(
+                        out,
+                        "    jfieldID ret_{}_fid = (*env)->GetFieldID(env, ret_cls, \"{}\", \"{}\");",
+                        field.name, field.name, sig
+                    )?;
+                    let jtype = self.jni_field_access(&field.ty).0;
+                    writeln!(
+                        out,
+                        "    (*env)->Set{}Field(env, ret_obj, ret_{}_fid, ret.{});",
+                        jtype, field.name, field.name
+                    )?;
+                }
+            }
+        }
+        writeln!(out, "    return ret_obj;")?;
+        Ok(())
+    }
+
+    fn mimi_type_to_c_field(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "int32_t".to_string(),
+                "i64" => "int64_t".to_string(),
+                "f64" => "double".to_string(),
+                "bool" => "bool".to_string(),
+                other => {
+                    if self.is_repr_c_record(other) {
+                        format!("struct {}", other)
+                    } else {
+                        "void*".to_string()
+                    }
+                }
+            },
+            _ => "void*".to_string(),
+        }
+    }
+
+    fn java_field_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "int".to_string(),
+                "i64" => "long".to_string(),
+                "f64" => "double".to_string(),
+                "bool" => "boolean".to_string(),
+                _ => "long".to_string(),
+            },
+            _ => "Object".to_string(),
+        }
+    }
+
+    fn jni_field_signature(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => "I".to_string(),
+                "i64" => "J".to_string(),
+                "f64" => "D".to_string(),
+                "bool" => "Z".to_string(),
+                _ => "J".to_string(),
+            },
+            _ => "Ljava/lang/Object;".to_string(),
+        }
+    }
+
+    fn jni_field_access(&self, ty: &Type) -> (String, String) {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => ("Int".to_string(), "int32_t".to_string()),
+                "i64" => ("Long".to_string(), "int64_t".to_string()),
+                "f64" => ("Double".to_string(), "double".to_string()),
+                "bool" => ("Boolean".to_string(), "bool".to_string()),
+                _ => ("Long".to_string(), "int64_t".to_string()),
+            },
+            _ => ("Object".to_string(), "jobject".to_string()),
+        }
+    }
+
+    fn is_repr_c_record(&self, name: &str) -> bool {
+        self.type_defs
+            .get(name)
+            .map(|td| {
+                matches!(td.kind, TypeDefKind::Record(_))
+                    && td.attributes.contains(&TypeAttribute::ReprC)
+            })
+            .unwrap_or(false)
+    }
+
     fn mimi_type_to_jni(&self, contract: &FfiContract, index: usize) -> String {
         if index >= contract.args.len() {
             return "jlong".to_string();
@@ -203,7 +399,7 @@ impl JniBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "jlong".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "jlong".to_string(),
             FfiArgContract::Json => "jstring".to_string(),
-            FfiArgContract::StructByValue(_) => "jlong".to_string(),
+            FfiArgContract::StructByValue(_) => "jobject".to_string(),
             FfiArgContract::Callback { .. } => "jlong".to_string(),
             FfiArgContract::Unsupported(_) => "jlong".to_string(),
         }
@@ -215,6 +411,7 @@ impl JniBindGenerator {
             crate::ffi::contract::FfiRetContract::Int => "jlong".to_string(),
             crate::ffi::contract::FfiRetContract::Float => "jdouble".to_string(),
             crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "jstring".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(_) => "jobject".to_string(),
             _ => "jlong".to_string(),
         }
     }
@@ -231,7 +428,7 @@ impl JniBindGenerator {
             FfiArgContract::RawPtr(_) | FfiArgContract::RawPtrMut(_) => "long".to_string(),
             FfiArgContract::CShared(_) | FfiArgContract::CBorrow(_) | FfiArgContract::CBorrowMut(_) => "long".to_string(),
             FfiArgContract::Json => "String".to_string(),
-            FfiArgContract::StructByValue(_) => "long".to_string(),
+            FfiArgContract::StructByValue(name) => name.clone(),
             FfiArgContract::Callback { .. } => "long".to_string(),
             FfiArgContract::Unsupported(_) => "long".to_string(),
         }
@@ -243,6 +440,7 @@ impl JniBindGenerator {
             crate::ffi::contract::FfiRetContract::Int => "long".to_string(),
             crate::ffi::contract::FfiRetContract::Float => "double".to_string(),
             crate::ffi::contract::FfiRetContract::String | crate::ffi::contract::FfiRetContract::StringOwned => "String".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             _ => "long".to_string(),
         }
     }

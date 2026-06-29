@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, Type, TypeDef};
+use crate::ast::{ExternFunc, Type, TypeAttribute, TypeDef, TypeDefKind};
 use crate::ffi::contract::{FfiArgContract, FfiContract, ERRNO_CHECK_FUNC_NAMES};
 
 /// Python binding generator — produces a pybind11 `.cpp` file.
@@ -41,6 +41,7 @@ impl PyBindGenerator {
         self.write_includes(&mut out)?;
         self.write_c_type_forward_decls(&mut out)?;
         self.write_module_def(&mut out)?;
+        self.write_struct_bindings(&mut out)?;
 
         for func in extern_funcs {
             self.write_function(&mut out, func)?;
@@ -57,6 +58,8 @@ impl PyBindGenerator {
         writeln!(out, "# Type stubs for module: {}", self.module_name)?;
         writeln!(out, "from typing import Any, List, Optional, Dict, Tuple")?;
         writeln!(out)?;
+
+        self.write_pyi_structs(&mut out)?;
 
         for func in extern_funcs {
             let contract = self.build_contract(func);
@@ -116,7 +119,7 @@ impl PyBindGenerator {
             | FfiArgContract::CBorrow(_)
             | FfiArgContract::CBorrowMut(_) => "int".to_string(),
             FfiArgContract::Json => "str".to_string(),
-            FfiArgContract::StructByValue(_) => "int".to_string(), // opaque struct handle
+            FfiArgContract::StructByValue(name) => name.clone(),
             FfiArgContract::Callback { .. } => "callable".to_string(),
             FfiArgContract::Unsupported(_) => "Any".to_string(),
         }
@@ -135,7 +138,7 @@ impl PyBindGenerator {
             | crate::ffi::contract::FfiRetContract::CBorrow(_)
             | crate::ffi::contract::FfiRetContract::CBorrowMut(_) => "int".to_string(),
             crate::ffi::contract::FfiRetContract::Json => "Dict[str, Any]".to_string(),
-            crate::ffi::contract::FfiRetContract::StructByValue(_) => "int".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "Any".to_string(),
         }
     }
@@ -203,6 +206,68 @@ impl PyBindGenerator {
         )?;
         writeln!(out)?;
         Ok(())
+    }
+
+    fn write_struct_bindings(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        for (name, td) in repr_c {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                writeln!(out, "    py::class_<{}>(m, \"{}\")", name, name)?;
+                writeln!(out, "        .def(py::init<>())")?;
+                for field in fields {
+                    writeln!(
+                        out,
+                        "        .def_readwrite(\"{}\", &{}::{})",
+                        field.name, name, field.name
+                    )?;
+                }
+                writeln!(out, "        ;")?;
+                writeln!(out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_pyi_structs(&self, out: &mut String) -> Result<(), std::fmt::Error> {
+        let mut repr_c: Vec<(&String, &TypeDef)> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .collect();
+        repr_c.sort_by_key(|(name, _)| *name);
+        for (name, td) in repr_c {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                writeln!(out, "class {}:", name)?;
+                for field in fields {
+                    writeln!(
+                        out,
+                        "    {}: {}",
+                        field.name,
+                        self.mimi_type_to_python_field(&field.ty)
+                    )?;
+                }
+                writeln!(out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn mimi_type_to_python_field(&self, ty: &Type) -> String {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" | "i64" => "int".to_string(),
+                "f64" => "float".to_string(),
+                "bool" => "bool".to_string(),
+                "string" => "str".to_string(),
+                _ => "Any".to_string(),
+            },
+            _ => "Any".to_string(),
+        }
     }
 
     fn write_function(&self, out: &mut String, func: &ExternFunc) -> Result<(), std::fmt::Error> {
@@ -374,7 +439,7 @@ impl PyBindGenerator {
                 format!("MimiHandle /* {} */", self.mimi_type_to_cpp(inner))
             }
             FfiArgContract::Json => "const std::string&".to_string(),
-            FfiArgContract::StructByValue(_) => "int64_t".to_string(),
+            FfiArgContract::StructByValue(name) => name.clone(),
             FfiArgContract::Callback { .. } => "py::function".to_string(),
             FfiArgContract::Unsupported(_) => "py::object".to_string(),
         }
@@ -399,7 +464,7 @@ impl PyBindGenerator {
             | crate::ffi::contract::FfiRetContract::CBorrowMut(inner) => {
                 format!("MimiHandle /* {} */", self.mimi_type_to_cpp(inner))
             }
-            crate::ffi::contract::FfiRetContract::StructByValue(_) => "int64_t".to_string(),
+            crate::ffi::contract::FfiRetContract::StructByValue(name) => name.clone(),
             crate::ffi::contract::FfiRetContract::Unsupported(_) => "py::object".to_string(),
         }
     }
