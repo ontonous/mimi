@@ -376,6 +376,14 @@ impl PyBindGenerator {
         }
         let ret_expr = self.ret_to_native(&contract, func_name, &native_args);
 
+        let mut callback_clear = String::new();
+        for (i, param) in func.params.iter().enumerate() {
+            if let FfiArgContract::Callback { .. } = &contract.args[i] {
+                let slot = self.callback_slot_name(&func.name, &param.name);
+                writeln!(callback_clear, "            {} = nullptr;", slot)?;
+            }
+        }
+
         write!(out, "{}", callback_assignments)?;
 
         if matches!(contract.ret, crate::ffi::contract::FfiRetContract::Unit) {
@@ -386,6 +394,7 @@ impl PyBindGenerator {
                 func_name,
                 native_args.join(", ")
             )?;
+            write!(out, "{}", callback_clear)?;
             writeln!(out, "            mimi_runtime_set_error_handler(nullptr);")?;
             if check_errno {
                 writeln!(out, "            if (errno != 0) {{")?;
@@ -395,12 +404,14 @@ impl PyBindGenerator {
             }
             writeln!(out, "            return py::none();")?;
             writeln!(out, "        }} catch (const std::exception& e) {{")?;
+            write!(out, "{}", callback_clear)?;
             writeln!(out, "            mimi_runtime_set_error_handler(nullptr);")?;
             writeln!(out, "            throw py::value_error(e.what());")?;
             writeln!(out, "        }}")?;
         } else {
             writeln!(out, "        try {{")?;
             writeln!(out, "            auto _ret = {};", ret_expr)?;
+            write!(out, "{}", callback_clear)?;
             writeln!(out, "            mimi_runtime_set_error_handler(nullptr);")?;
             if check_errno {
                 writeln!(out, "            if (errno != 0) {{")?;
@@ -410,6 +421,7 @@ impl PyBindGenerator {
             }
             writeln!(out, "            return _ret;")?;
             writeln!(out, "        }} catch (const std::exception& e) {{")?;
+            write!(out, "{}", callback_clear)?;
             writeln!(out, "            mimi_runtime_set_error_handler(nullptr);")?;
             writeln!(out, "            throw py::value_error(e.what());")?;
             writeln!(out, "        }}")?;
@@ -625,11 +637,11 @@ impl PyBindGenerator {
             }
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => {
-                // Safe nullptr handling: lambda captures result once, checks before constructing string
-                format!("[&]() -> std::string {{ const char* _r = {}({}); return _r ? std::string(_r) : std::string(); }}()", func_name, args)
+                // Safe nullptr handling: capture result, build std::string, then free the runtime-owned C string.
+                format!("[&]() -> std::string {{ char* _r = {}({}); if (!_r) return std::string(); std::string s(_r); mimi_string_free(_r); return s; }}()", func_name, args)
             }
             crate::ffi::contract::FfiRetContract::Json => {
-                format!("[&]() -> std::string {{ const char* _r = {}({}); return _r ? std::string(_r) : std::string(); }}()", func_name, args)
+                format!("[&]() -> std::string {{ char* _r = {}({}); if (!_r) return std::string(); std::string s(_r); mimi_string_free(_r); return s; }}()", func_name, args)
             }
             _ => format!("{}({})", func_name, args),
         }

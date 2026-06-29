@@ -141,6 +141,9 @@ mod tests {
         assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_longlong"));
         assert!(out.contains("pub fn apply_callback(f: unsafe extern \"C\" fn(c_longlong, c_longlong) -> c_longlong, x: c_longlong) -> c_longlong"));
         assert!(out.contains("extern \"C\""));
+        // Regression: safe wrapper for string returns must copy and free the runtime-owned C string.
+        assert!(out.contains("std::ffi::CStr::from_ptr(raw)"));
+        assert!(out.contains("super::mimi_string_free(raw)"));
     }
 
     #[test]
@@ -148,14 +151,18 @@ mod tests {
         let gen = go_bind::GoBindGenerator::new(sample_type_defs(), "math");
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         assert!(out.contains("package math"));
-        assert!(out.contains("func add("));
-        assert!(out.contains("func greet("));
+        assert!(out.contains("func Add("));
+        assert!(out.contains("func Greet("));
         assert!(out.contains("type Point struct"));
-        assert!(out.contains("func point_sum(p Point) int64"));
-        assert!(out.contains("type apply_callback_f_cb func(int64, int64) int64"));
-        assert!(out.contains("var apply_callback_f_cb_slot apply_callback_f_cb"));
+        assert!(out.contains("func Point_sum(p Point) int64"));
+        assert!(out.contains("type Apply_callback_f_cb func(int64, int64) int64"));
+        assert!(out.contains("var apply_callback_f_cb_slot Apply_callback_f_cb"));
         assert!(out.contains("//export mimi_cb_apply_callback_f"));
-        assert!(out.contains("func apply_callback(f apply_callback_f_cb, x int64) int64"));
+        assert!(out.contains("func Apply_callback(f Apply_callback_f_cb, x int64) int64"));
+        // Regression: struct field access must use Go field selector (p.X), not p_X.
+        assert!(out.contains("p_c.x = C.int(p.X)"));
+        // Regression: callback slot must be cleared after the call to avoid leaking the closure.
+        assert!(out.contains("defer func() { apply_callback_f_cb_slot = nil }()"));
         // Regression: return type of mimi_string_free must be void, not void*.
         assert!(!out.contains("extern void* mimi_string_free"));
         assert!(out.contains("extern void mimi_string_free"));
@@ -194,6 +201,8 @@ mod tests {
         assert!(out.contains("std::function<int64_t(int64_t, int64_t)> apply_callback_f_cb"));
         assert!(out.contains("apply_callback_f_cb = f"));
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
+        // Regression: callback slot must be cleared after the call to release the closure.
+        assert!(out.contains("apply_callback_f_cb = {}"));
     }
 
     #[test]
@@ -218,6 +227,7 @@ mod tests {
         assert!(java.contains("public static class Point"));
         assert!(java.contains("public static native long point_sum(Point p)"));
         assert!(java.contains("public interface ApplyCallbackFCallback"));
+        assert!(java.contains("int apply(int arg0, int arg1)"));
         assert!(java.contains("public static native long apply_callback(ApplyCallbackFCallback f, long x)"));
     }
 
@@ -234,10 +244,46 @@ mod tests {
         assert!(out.contains("extern \"C\" int64_t mimi_cb_apply_callback_f_trampoline"));
         assert!(out.contains("g_apply_callback_f_cb = f"));
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
+        // Regression: callback slot must be cleared after the call to release the Python callable.
+        assert!(out.contains("g_apply_callback_f_cb = nullptr;"));
+        // Regression: string returns must be freed after copying to std::string.
+        assert!(out.contains("mimi_string_free(_r)"));
         assert!(pyi.contains("def add("));
         assert!(pyi.contains("def greet("));
         assert!(pyi.contains("class Point:"));
         assert!(pyi.contains("def point_sum(p: Point) -> int"));
         assert!(pyi.contains("def apply_callback(f: Callable[[int, int], int], x: int) -> int"));
+    }
+
+    #[test]
+    fn node_callback_float_smoke() {
+        let gen = node_bind::NodeBindGenerator::new(sample_type_defs(), "math");
+        let funcs = vec![ExternFunc {
+            name: "apply_f64_cb".to_string(),
+            params: vec![
+                ExternParam {
+                    name: "f".to_string(),
+                    ty: Type::Func(
+                        vec![Type::Name("f64".to_string(), vec![])],
+                        Box::new(Type::Name("f64".to_string(), vec![])),
+                    ),
+                    cap_mode: None,
+                },
+                ExternParam {
+                    name: "x".to_string(),
+                    ty: Type::Name("f64".to_string(), vec![]),
+                    cap_mode: None,
+                },
+            ],
+            ret: Some(Type::Name("f64".to_string(), vec![])),
+            requires: None,
+            ensures: None,
+            variadic: false,
+            no_panic: false,
+        }];
+        let out = gen.generate(&funcs).unwrap();
+        // Regression: callback argument/return marshalling must be type-aware.
+        assert!(out.contains("napi_create_double"));
+        assert!(out.contains("napi_get_value_double"));
     }
 }

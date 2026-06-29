@@ -186,13 +186,19 @@ impl NodeBindGenerator {
                     writeln!(out, "    }}")?;
                     writeln!(out, "    napi_value fn;")?;
                     writeln!(out, "    napi_get_reference_value({}.env, {}.ref, &fn);", slot, slot)?;
-                    for j in 0..param_types.len() {
+                    for (j, ty) in param_types.iter().enumerate() {
                         writeln!(out, "    napi_value argv{};", j)?;
-                        writeln!(
-                            out,
-                            "    napi_create_int64({}.env, arg{}, &argv{});",
-                            slot, j, j
-                        )?;
+                        match ty {
+                            Type::Name(name, _) if name == "f64" => {
+                                writeln!(out, "    napi_create_double({}.env, (double)arg{}, &argv{});", slot, j, j)?;
+                            }
+                            Type::Name(name, _) if name == "bool" => {
+                                writeln!(out, "    napi_get_boolean({}.env, (bool)arg{}, &argv{});", slot, j, j)?;
+                            }
+                            _ => {
+                                writeln!(out, "    napi_create_int64({}.env, arg{}, &argv{});", slot, j, j)?;
+                            }
+                        }
                     }
                     let argv_list: Vec<String> = (0..param_types.len()).map(|j| format!("&argv{}", j)).collect();
                     writeln!(out, "    napi_value result;")?;
@@ -211,11 +217,17 @@ impl NodeBindGenerator {
                             "    {} ret;",
                             ret_c
                         )?;
-                        writeln!(
-                            out,
-                            "    napi_get_value_int64({}.env, result, &ret);",
-                            slot
-                        )?;
+                        match ret_type.as_ref() {
+                            Type::Name(name, _) if name == "f64" => {
+                                writeln!(out, "    napi_get_value_double({}.env, result, &ret);", slot)?;
+                            }
+                            Type::Name(name, _) if name == "bool" => {
+                                writeln!(out, "    napi_get_value_bool({}.env, result, &ret);", slot)?;
+                            }
+                            _ => {
+                                writeln!(out, "    napi_get_value_int64({}.env, result, &ret);", slot)?;
+                            }
+                        }
                         writeln!(out, "    return ret;")?;
                     }
                     writeln!(out, "}}")?;

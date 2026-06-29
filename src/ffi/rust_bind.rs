@@ -188,7 +188,20 @@ impl RustBindGenerator {
 
         writeln!(out, "    pub fn {}({}) -> {} {{", func.name, params.join(", "), ret)?;
         write!(out, "{}", conversions)?;
-        writeln!(out, "        unsafe {{ super::{}({}) }}", func.name, call_args.join(", "))?;
+        match &contract.ret {
+            crate::ffi::contract::FfiRetContract::String
+            | crate::ffi::contract::FfiRetContract::StringOwned
+            | crate::ffi::contract::FfiRetContract::Json => {
+                writeln!(out, "        let raw = unsafe {{ super::{}({}) }};", func.name, call_args.join(", "))?;
+                writeln!(out, "        if raw.is_null() {{ return String::new(); }}")?;
+                writeln!(out, "        let s = unsafe {{ std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned() }};")?;
+                writeln!(out, "        unsafe {{ super::mimi_string_free(raw) }};")?;
+                writeln!(out, "        s")?;
+            }
+            _ => {
+                writeln!(out, "        unsafe {{ super::{}({}) }}", func.name, call_args.join(", "))?;
+            }
+        }
         writeln!(out, "    }}")?;
         writeln!(out)
     }

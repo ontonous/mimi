@@ -558,14 +558,20 @@ impl JniBindGenerator {
 
     fn callback_java_arg_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "int".to_string(),
+            Type::Name(name, _) if name == "i64" => "long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "boolean".to_string(),
             _ => "long".to_string(),
         }
     }
 
     fn callback_java_ret_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "int".to_string(),
+            Type::Name(name, _) if name == "i64" => "long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "boolean".to_string(),
             Type::Name(name, _) if name == "unit" => "void".to_string(),
             _ => "long".to_string(),
         }

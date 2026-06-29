@@ -201,7 +201,7 @@ impl GoBindGenerator {
     }
 
     fn callback_type_name(&self, func_name: &str, param_name: &str) -> String {
-        format!("{}_{}_cb", func_name, param_name)
+        go_export_name(&format!("{}_{}_cb", func_name, param_name))
     }
 
     fn callback_slot_name(&self, func_name: &str, param_name: &str) -> String {
@@ -364,7 +364,7 @@ impl GoBindGenerator {
                         if let TypeDefKind::Record(fields) = &td.kind {
                             for field in fields {
                                 let go_field = capitalize(&field.name);
-                                writeln!(conversions, "\t{}_c.{} = C.{}({}_{})", p.name, field.name, self.mimi_type_to_c_field(&field.ty), p.name, go_field)?;
+                                writeln!(conversions, "\t{}_c.{} = C.{}({}.{})", p.name, field.name, self.mimi_type_to_c_field(&field.ty), p.name, go_field)?;
                             }
                         }
                     }
@@ -382,6 +382,7 @@ impl GoBindGenerator {
                     let tramp = self.callback_trampoline_name(&func.name, &p.name);
                     let type_name = self.callback_type_name(&func.name, &p.name);
                     writeln!(conversions, "\t{} = ({})({})", slot, type_name, p.name)?;
+                    writeln!(conversions, "\tdefer func() {{ {} = nil }}()", slot)?;
                     c_args.push(format!("C.{}", tramp));
                 }
                 _ => {
@@ -390,7 +391,8 @@ impl GoBindGenerator {
             }
         }
 
-        writeln!(out, "func {}({}) {} {{", func.name, go_params.join(", "), go_ret)?;
+        let go_func_name = go_export_name(&func.name);
+        writeln!(out, "func {}({}) {} {{", go_func_name, go_params.join(", "), go_ret)?;
         write!(out, "{}", conversions)?;
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::String
@@ -538,6 +540,14 @@ fn sanitize_go_package(name: &str) -> String {
 }
 
 fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn go_export_name(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().to_string() + chars.as_str(),

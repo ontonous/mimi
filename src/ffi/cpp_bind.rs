@@ -188,14 +188,26 @@ impl CppBindGenerator {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned => {
-                writeln!(out, "        return MimiString(::{}({}));", func.name, c_args.join(", "))?;
+                writeln!(out, "        MimiString mimi_ret(::{}({}));", func.name, c_args.join(", "))?;
             }
             crate::ffi::contract::FfiRetContract::Unit => {
                 writeln!(out, "        ::{}({});", func.name, c_args.join(", "))?;
             }
             _ => {
-                writeln!(out, "        return ::{}({});", func.name, c_args.join(", "))?;
+                writeln!(out, "        {} mimi_ret = ::{}({});", ret_cpp, func.name, c_args.join(", "))?;
             }
+        }
+
+        // Clear callback slots so closures/captures are released after the call.
+        for (i, p) in func.params.iter().enumerate() {
+            if let FfiArgContract::Callback { .. } = &contract.args[i] {
+                let slot = format!("{}_{}_cb", func.name, p.name);
+                writeln!(out, "        {} = {{}};", slot)?;
+            }
+        }
+
+        if !matches!(&contract.ret, crate::ffi::contract::FfiRetContract::Unit) {
+            writeln!(out, "        return mimi_ret;")?;
         }
         writeln!(out, "}}")?;
         writeln!(out)
