@@ -176,6 +176,7 @@ impl PyBindGenerator {
     fn write_includes(&self, out: &mut String) -> Result<(), std::fmt::Error> {
         writeln!(out, "#include <pybind11/pybind11.h>")?;
         writeln!(out, "#include <pybind11/stl.h>")?;
+        writeln!(out, "#include <pybind11/functional.h>")?;
         writeln!(out, "#include <cstdint>")?;
         writeln!(out, "#include <cstddef>")?;
         writeln!(out, "#include <cerrno>")?;
@@ -486,8 +487,13 @@ impl PyBindGenerator {
     }
 
     fn callback_c_type(&self, ty: &Type) -> String {
+        // Use the original Mimi scalar widths so generated C trampolines match
+        // the function-pointer ABI expected by the compiled extern function.
         match ty {
+            Type::Name(name, _) if name == "i32" => "int32_t".to_string(),
+            Type::Name(name, _) if name == "i64" => "int64_t".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             Type::Name(name, _) if name == "unit" => "void".to_string(),
             _ => "int64_t".to_string(),
         }

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::ast::{ExternFunc, FuncDef, Type, TypeAttribute, TypeDef, TypeDefKind, VariantPayload};
+use crate::ast::{ExternFunc, ExternParam, FuncDef, Type, TypeAttribute, TypeDef, TypeDefKind, VariantPayload};
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
 /// C header generator
@@ -285,8 +285,8 @@ impl CHeaderGenerator {
             if i > 0 {
                 write!(header, ", ")?;
             }
-            let c_type = self.contract_arg_to_c_type(&contract, i);
-            write!(header, "{} {}", c_type, param.name)?;
+            let c_type = self.contract_arg_to_c_type(&contract, i, &param.name);
+            write!(header, "{}", c_type)?;
         }
 
         writeln!(header, ");")?;
@@ -298,7 +298,6 @@ impl CHeaderGenerator {
         if let Some(ensures) = &func.ensures {
             writeln!(header, "    // Ensures: {:?}", ensures)?;
         }
-
         Ok(())
     }
 
@@ -346,27 +345,27 @@ impl CHeaderGenerator {
     }
 
     /// Convert an FFI argument contract to a C type string
-    fn contract_arg_to_c_type(&self, contract: &FfiContract, index: usize) -> String {
+    fn contract_arg_to_c_type(&self, contract: &FfiContract, index: usize, name: &str) -> String {
         if index >= contract.args.len() {
-            return "void*".to_string();
+            return format!("void* {}", name);
         }
 
         match &contract.args[index] {
-            FfiArgContract::Int => "int64_t".to_string(),
-            FfiArgContract::Float => "double".to_string(),
-            FfiArgContract::StringBorrow => "const char*".to_string(),
-            FfiArgContract::StringTransfer => "char*".to_string(),
-            FfiArgContract::Cap(_) => "MimiCap".to_string(),
+            FfiArgContract::Int => format!("int64_t {}", name),
+            FfiArgContract::Float => format!("double {}", name),
+            FfiArgContract::StringBorrow => format!("const char* {}", name),
+            FfiArgContract::StringTransfer => format!("char* {}", name),
+            FfiArgContract::Cap(_) => format!("MimiCap {}", name),
             FfiArgContract::RawPtr(inner) | FfiArgContract::RawPtrMut(inner) => {
-                format!("{}*", self.mimi_type_to_c_type(inner))
+                format!("{}* {}", self.mimi_type_to_c_type(inner), name)
             }
             FfiArgContract::CShared(inner)
             | FfiArgContract::CBorrow(inner)
             | FfiArgContract::CBorrowMut(inner) => {
-                format!("MimiHandle /* {} */", self.mimi_type_to_c_type(inner))
+                format!("MimiHandle /* {} */ {}", self.mimi_type_to_c_type(inner), name)
             }
-            FfiArgContract::Json => "const char*".to_string(),
-            FfiArgContract::StructByValue(type_name) => format!("struct {}", type_name),
+            FfiArgContract::Json => format!("const char* {}", name),
+            FfiArgContract::StructByValue(type_name) => format!("struct {} {}", type_name, name),
             FfiArgContract::Callback {
                 param_types,
                 ret_type,
@@ -381,9 +380,9 @@ impl CHeaderGenerator {
                 } else {
                     params_c.join(", ")
                 };
-                format!("{} (*)({})", ret_c, params_str)
+                format!("{} (*{})({})", ret_c, name, params_str)
             }
-            FfiArgContract::Unsupported(_) => "void*".to_string(),
+            FfiArgContract::Unsupported(_) => format!("void* {}", name),
         }
     }
 
@@ -436,25 +435,59 @@ pub fn generate_c_header_with_exported(
 }
 
 impl CHeaderGenerator {
-    /// Generate a C function declaration for a Mimi function exported with extern "C"
+    /// Generate a C function declaration for a Mimi function exported with extern "C".
+    /// Uses the same FFI contract as the binding generators so the header matches the
+    /// actual C ABI (e.g. i32 is widened to int64_t, callbacks become function pointers).
     fn generate_exported_func_decl(
         &self,
         header: &mut String,
         func: &FuncDef,
     ) -> Result<(), std::fmt::Error> {
-        let ret_type = func
-            .ret
-            .as_ref()
-            .map(|ty| self.mimi_type_to_c_type(ty))
-            .unwrap_or_else(|| "void".to_string());
+        let record_type_names: std::collections::HashSet<String> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let repr_c_record_names: std::collections::HashSet<String> = self
+            .type_defs
+            .iter()
+            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
+            .map(|(name, _)| name.clone())
+            .collect();
 
+        let extern_func = ExternFunc {
+            name: func.name.clone(),
+            params: func
+                .params
+                .iter()
+                .map(|p| ExternParam {
+                    name: p.name.clone(),
+                    ty: p.ty.clone(),
+                    cap_mode: None,
+                })
+                .collect(),
+            ret: func.ret.clone(),
+            requires: None,
+            ensures: None,
+            variadic: false,
+            no_panic: false,
+        };
+        let contract = FfiContract::from_extern_with_caps_repr(
+            &extern_func,
+            &std::collections::HashSet::new(),
+            &record_type_names,
+            &repr_c_record_names,
+        );
+
+        let ret_type = self.contract_ret_to_c_type(&contract);
         write!(header, "{} {}(", ret_type, func.name)?;
         for (i, param) in func.params.iter().enumerate() {
             if i > 0 {
                 write!(header, ", ")?;
             }
-            let c_type = self.mimi_type_to_c_type(&param.ty);
-            write!(header, "{} {}", c_type, param.name)?;
+            let c_type = self.contract_arg_to_c_type(&contract, i, &param.name);
+            write!(header, "{}", c_type)?;
         }
         writeln!(header, ");")?;
         Ok(())

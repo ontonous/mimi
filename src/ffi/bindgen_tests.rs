@@ -139,11 +139,14 @@ mod tests {
         assert!(out.contains("pub fn add("));
         assert!(out.contains("pub fn greet("));
         assert!(out.contains("pub fn point_sum(p: MimiPoint) -> c_longlong"));
-        assert!(out.contains("pub fn apply_callback(f: unsafe extern \"C\" fn(c_longlong, c_longlong) -> c_longlong, x: c_longlong) -> c_longlong"));
+        assert!(out.contains("pub fn apply_callback(f: unsafe extern \"C\" fn(i32, i32) -> i32, x: c_longlong) -> c_longlong"));
         assert!(out.contains("extern \"C\""));
+        // Regression: raw extern symbols must be in a submodule so wrappers can reuse function names.
+        assert!(out.contains("mod ffi_raw"));
+        assert!(out.contains("super::ffi_raw::add("));
         // Regression: safe wrapper for string returns must copy and free the runtime-owned C string.
         assert!(out.contains("std::ffi::CStr::from_ptr(raw)"));
-        assert!(out.contains("super::mimi_string_free(raw)"));
+        assert!(out.contains("super::ffi_raw::mimi_string_free(raw)"));
     }
 
     #[test]
@@ -198,9 +201,9 @@ mod tests {
         assert!(out.contains("inline MimiString greet("));
         assert!(out.contains("inline int64_t point_sum(const struct Point& p)"));
         assert!(out.contains("MimiString"));
-        assert!(out.contains("std::function<int64_t(int64_t, int64_t)> apply_callback_f_cb"));
+        assert!(out.contains("std::function<int32_t(int32_t, int32_t)> apply_callback_f_cb"));
         assert!(out.contains("apply_callback_f_cb = f"));
-        assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
+        assert!(out.contains("extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"));
         // Regression: callback slot must be cleared after the call to release the closure.
         assert!(out.contains("apply_callback_f_cb = {}"));
     }
@@ -237,11 +240,12 @@ mod tests {
         let out = gen.generate(&sample_extern_funcs()).unwrap();
         let pyi = gen.generate_pyi(&sample_extern_funcs()).unwrap();
         assert!(out.contains("PYBIND11_MODULE(math"));
+        assert!(out.contains("#include <pybind11/functional.h>"));
         assert!(out.contains("m.def(\"add\""));
         assert!(out.contains("py::class_<Point>(m, \"Point\")"));
         assert!(out.contains("m.def(\"point_sum\", [](Point p) -> int64_t"));
-        assert!(out.contains("thread_local static std::function<int64_t(int64_t, int64_t)> g_apply_callback_f_cb"));
-        assert!(out.contains("extern \"C\" int64_t mimi_cb_apply_callback_f_trampoline"));
+        assert!(out.contains("thread_local static std::function<int32_t(int32_t, int32_t)> g_apply_callback_f_cb"));
+        assert!(out.contains("extern \"C\" int32_t mimi_cb_apply_callback_f_trampoline(int32_t arg0, int32_t arg1)"));
         assert!(out.contains("g_apply_callback_f_cb = f"));
         assert!(out.contains("mimi_cb_apply_callback_f_trampoline"));
         // Regression: callback slot must be cleared after the call to release the Python callable.

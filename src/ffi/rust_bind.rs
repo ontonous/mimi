@@ -41,13 +41,21 @@ impl RustBindGenerator {
         // Generate type definitions
         self.write_type_definitions(&mut out)?;
 
-        writeln!(out, "extern \"C\" {{")?;
-
+        // Raw extern declarations are scoped so safe wrappers can use the same names.
+        writeln!(out, "mod ffi_raw {{")?;
+        writeln!(out, "    use super::*;")?;
+        writeln!(out, "    extern \"C\" {{")?;
+        writeln!(
+            out,
+            "        // Mimi runtime helpers referenced by generated wrappers"
+        )?;
+        writeln!(out, "        pub fn mimi_string_free(c_str: *mut c_char);")?;
+        writeln!(out)?;
         for func in extern_funcs {
             let contract = self.build_contract(func);
             self.write_function(&mut out, func, &contract)?;
         }
-
+        writeln!(out, "    }}")?;
         writeln!(out, "}}")?;
         writeln!(out)?;
 
@@ -192,14 +200,14 @@ impl RustBindGenerator {
             crate::ffi::contract::FfiRetContract::String
             | crate::ffi::contract::FfiRetContract::StringOwned
             | crate::ffi::contract::FfiRetContract::Json => {
-                writeln!(out, "        let raw = unsafe {{ super::{}({}) }};", func.name, call_args.join(", "))?;
+                writeln!(out, "        let raw = unsafe {{ super::ffi_raw::{}({}) }};", func.name, call_args.join(", "))?;
                 writeln!(out, "        if raw.is_null() {{ return String::new(); }}")?;
                 writeln!(out, "        let s = unsafe {{ std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned() }};")?;
-                writeln!(out, "        unsafe {{ super::mimi_string_free(raw) }};")?;
+                writeln!(out, "        unsafe {{ super::ffi_raw::mimi_string_free(raw) }};")?;
                 writeln!(out, "        s")?;
             }
             _ => {
-                writeln!(out, "        unsafe {{ super::{}({}) }}", func.name, call_args.join(", "))?;
+                writeln!(out, "        unsafe {{ super::ffi_raw::{}({}) }}", func.name, call_args.join(", "))?;
             }
         }
         writeln!(out, "    }}")?;
@@ -257,15 +265,22 @@ impl RustBindGenerator {
 
     /// Build a C function-pointer type string from Mimi callback parameter/return types.
     fn callback_signature_to_rust(&self, param_types: &[Type], ret_type: &Type) -> String {
+        // Match the original Mimi scalar widths in the extern "C" function-pointer ABI.
         let arg_types: Vec<String> = param_types
             .iter()
             .map(|ty| match ty {
-                Type::Name(name, _) if name == "f64" => "c_double".to_string(),
+                Type::Name(name, _) if name == "i32" => "i32".to_string(),
+                Type::Name(name, _) if name == "i64" => "i64".to_string(),
+                Type::Name(name, _) if name == "f64" => "f64".to_string(),
+                Type::Name(name, _) if name == "bool" => "bool".to_string(),
                 _ => "c_longlong".to_string(),
             })
             .collect();
         let ret = match ret_type {
-            Type::Name(name, _) if name == "f64" => "c_double".to_string(),
+            Type::Name(name, _) if name == "i32" => "i32".to_string(),
+            Type::Name(name, _) if name == "i64" => "i64".to_string(),
+            Type::Name(name, _) if name == "f64" => "f64".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             Type::Name(name, _) if name == "unit" => "()".to_string(),
             _ => "c_longlong".to_string(),
         };

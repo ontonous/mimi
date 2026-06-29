@@ -38,6 +38,7 @@ impl GoBindGenerator {
         writeln!(out, "/*")?;
         writeln!(out, "#cgo LDFLAGS: -lmimi_runtime -lpthread -ldl -lm")?;
         writeln!(out, "#include <stdlib.h>")?;
+        writeln!(out, "#include <stdbool.h>")?;
         writeln!(out, "extern void mimi_string_free(char* s);")?;
 
         // C struct definitions for #[repr(C)] records
@@ -240,15 +241,22 @@ impl GoBindGenerator {
     }
 
     fn c_callback_arg_type(&self, ty: &Type) -> String {
+        // Match the original Mimi scalar widths in the C trampoline ABI.
         match ty {
+            Type::Name(name, _) if name == "i32" => "int".to_string(),
+            Type::Name(name, _) if name == "i64" => "long long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "_Bool".to_string(),
             _ => "long long".to_string(),
         }
     }
 
     fn c_callback_ret_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "int".to_string(),
+            Type::Name(name, _) if name == "i64" => "long long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
+            Type::Name(name, _) if name == "bool" => "_Bool".to_string(),
             Type::Name(name, _) if name == "unit" => "void".to_string(),
             _ => "long long".to_string(),
         }
@@ -257,6 +265,7 @@ impl GoBindGenerator {
     fn go_callback_arg_type(&self, ty: &Type) -> String {
         match ty {
             Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             _ => "int64".to_string(),
         }
     }
@@ -264,6 +273,7 @@ impl GoBindGenerator {
     fn go_callback_ret_type(&self, ty: &Type) -> String {
         match ty {
             Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "int64".to_string(),
         }
@@ -271,14 +281,20 @@ impl GoBindGenerator {
 
     fn go_cgo_param_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "C.int".to_string(),
+            Type::Name(name, _) if name == "i64" => "C.longlong".to_string(),
             Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            Type::Name(name, _) if name == "bool" => "C._Bool".to_string(),
             _ => "C.longlong".to_string(),
         }
     }
 
     fn go_cgo_ret_type(&self, ty: &Type) -> String {
         match ty {
+            Type::Name(name, _) if name == "i32" => "C.int".to_string(),
+            Type::Name(name, _) if name == "i64" => "C.longlong".to_string(),
             Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            Type::Name(name, _) if name == "bool" => "C._Bool".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "C.longlong".to_string(),
         }
@@ -287,6 +303,7 @@ impl GoBindGenerator {
     fn go_cast_from_c(&self, ty: &Type) -> String {
         match ty {
             Type::Name(name, _) if name == "f64" => "float64".to_string(),
+            Type::Name(name, _) if name == "bool" => "bool".to_string(),
             _ => "int64".to_string(),
         }
     }
@@ -294,6 +311,7 @@ impl GoBindGenerator {
     fn go_cast_to_c(&self, ty: &Type) -> String {
         match ty {
             Type::Name(name, _) if name == "f64" => "C.double".to_string(),
+            Type::Name(name, _) if name == "bool" => "C._Bool".to_string(),
             _ => "C.longlong".to_string(),
         }
     }

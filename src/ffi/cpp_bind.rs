@@ -315,10 +315,15 @@ impl CppBindGenerator {
     }
 
     fn mimi_type_to_c_type(&self, ty: &Type) -> String {
+        // Use the original Mimi scalar widths so generated C function-pointer
+        // types match the ABI of the compiled extern function.
         match ty {
             Type::Name(name, _) => match name.as_str() {
-                "i32" | "i64" | "bool" => "int64_t".to_string(),
+                "i32" => "int32_t".to_string(),
+                "i64" => "int64_t".to_string(),
                 "f64" => "double".to_string(),
+                "bool" => "bool".to_string(),
+                "unit" => "void".to_string(),
                 _ => "int64_t".to_string(),
             },
             _ => "int64_t".to_string(),
