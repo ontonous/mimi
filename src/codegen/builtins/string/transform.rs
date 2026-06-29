@@ -2,7 +2,7 @@ use crate::codegen::CallSiteValueExt;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, PointerValue};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_str_repeat(
@@ -14,165 +14,61 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_repeat expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_repeat: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let n = match args[1] {
-            BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_repeat: second arg must be integer count".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_repeat")?;
+        let n = require_int_arg(&args[1], "str_repeat: second arg must be integer count")?;
+
         let i8_ty = self.context.i8_type();
-        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        // strlen(s)
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let s_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(s_ptr)],
-                "s_len",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
-        // total = s_len * n + 1 (null)
+        let s_len = self.string_len(s_ptr)?;
         let total = self
             .builder
             .build_int_mul(s_len, n, "total")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let one = i64_ty.const_int(1, false);
         let alloc_size = self
             .builder
-            .build_int_add(total, one, "alloc_size")
+            .build_int_add(total, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        // malloc(total)
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        // memcpy loop (simplified: one copy + multiple memcpy)
-        // First copy: memcpy(buf, s, s_len)
-        let memcpy_fn = self
-            .module
-            .get_function("memcpy")
-            .ok_or_else(|| "memcpy not declared".to_string())?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::IntValue(s_len),
-                ],
-                "memcpy_first",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-        // For remaining repeats, copy from buf to buf+(i*s_len)
+        let buf = self.malloc_buffer(alloc_size)?;
+        self.memcpy_buffer(buf, s_ptr, s_len, "memcpy_first")?;
+
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no current function for str_repeat loop".to_string())?;
         let loop_bb = self.context.append_basic_block(function, "repeat_loop");
         let body_bb = self.context.append_basic_block(function, "repeat_body");
         let done_bb = self.context.append_basic_block(function, "repeat_done");
-        // i = 1 (first copy already done)
-        let i_alloca = self
-            .builder
-            .build_alloca(i64_ty, "ri")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, i64_ty.const_int(1, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        let i_alloca = self.build_alloca(i64_ty, "ri")?;
+        self.build_store(i_alloca, i64_ty.const_int(1, false))?;
+        self.build_br(loop_bb)?;
+
         self.builder.position_at_end(loop_bb);
-        let i = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
+        let i = self.build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")?;
         let cmp = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, i, n, "repeat_cmp")
+            .build_int_compare(inkwell::IntPredicate::SLT, i.into_int_value(), n, "repeat_cmp")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(cmp, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(cmp, body_bb, done_bb)?;
+
         self.builder.position_at_end(body_bb);
-        // dst = buf + i * s_len
         let offset = self
             .builder
-            .build_int_mul(i, s_len, "offset")
+            .build_int_mul(i.into_int_value(), s_len, "offset")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let dst = { self.gep().build_in_bounds_gep(i8_ty, buf, &[offset], "dst") }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(dst),
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::IntValue(s_len),
-                ],
-                "memcpy_loop",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-        // i++
+        let dst = self.build_in_bounds_gep(i8_ty, buf, &[offset], "dst")?;
+        self.memcpy_buffer(dst, s_ptr, s_len, "memcpy_loop")?;
         let next = self
             .builder
-            .build_int_add(i, i64_ty.const_int(1, false), "next")
+            .build_int_add(i.into_int_value(), i64_ty.const_int(1, false), "next")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, next)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_store(i_alloca, next)?;
+        self.build_br(loop_bb)?;
+
         self.builder.position_at_end(done_bb);
-        // Null-terminate
-        let null_pos = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, buf, &[total], "null_pos")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(null_pos, i8_ty.const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Return raw pointer for consistency
-        
+        self.null_terminate(buf, total)?;
         Ok(buf.into())
     }
+
     pub(in crate::codegen) fn compile_str_trim(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -182,216 +78,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_trim expects 1 argument".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_trim: first arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_trim")?;
         let i8_ty = self.context.i8_type();
-        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        // strlen(s)
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let s_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(s_ptr)],
-                "strlen_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
         let zero = i64_ty.const_int(0, false);
-        // Scan forward for first non-space
+        let s_len = self.string_len(s_ptr)?;
+
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no current function for str_trim".to_string())?;
-        let fwd_loop = self.context.append_basic_block(function, "trim_fwd");
-        let fwd_body = self.context.append_basic_block(function, "trim_fwd_body");
-        let fwd_done = self.context.append_basic_block(function, "trim_fwd_done");
-        let start_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "start")?;
-        self.builder
-            .build_store(start_alloca, zero)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(fwd_loop)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(fwd_loop);
-        let start = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), start_alloca, "start")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let fwd_cmp = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, start, s_len, "fwd_cmp")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(fwd_cmp, fwd_body, fwd_done)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(fwd_body);
-        let ch_ptr = { self.gep().build_in_bounds_gep(i8_ty, s_ptr, &[start], "ch") }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let ch = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        // isspace check: ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
-        let space = i8_ty.const_int(b' ' as u64, false);
-        let tab = i8_ty.const_int(b'\t' as u64, false);
-        let nl = i8_ty.const_int(b'\n' as u64, false);
-        let cr = i8_ty.const_int(b'\r' as u64, false);
-        let is_space = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                ch.into_int_value(),
-                space,
-                "is_space",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_tab = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                ch.into_int_value(),
-                tab,
-                "is_tab",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_nl = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch.into_int_value(), nl, "is_nl")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_cr = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch.into_int_value(), cr, "is_cr")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws1 = self
-            .builder
-            .build_or(is_space, is_tab, "is_ws1")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let is_ws2 = self
-            .builder
-            .build_or(is_nl, is_cr, "is_ws2")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let is_ws = self
-            .builder
-            .build_or(is_ws1, is_ws2, "is_ws")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let next = self
-            .builder
-            .build_int_add(start, i64_ty.const_int(1, false), "next")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        // if is_ws: continue; else: done
-        self.builder
-            .build_store(start_alloca, next)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(is_ws, fwd_loop, fwd_done)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(fwd_done);
-        // Scan backward for last non-space
-        let bwd_loop = self.context.append_basic_block(function, "trim_bwd");
-        let bwd_body = self.context.append_basic_block(function, "trim_bwd_body");
-        let bwd_done = self.context.append_basic_block(function, "trim_bwd_done");
-        let end_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "end")?;
-        self.builder
-            .build_store(end_alloca, s_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(bwd_loop)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(bwd_loop);
-        let end = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), end_alloca, "end")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let bwd_cmp = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, end, zero, "bwd_cmp")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(bwd_cmp, bwd_body, bwd_done)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(bwd_body);
-        let prev = self
-            .builder
-            .build_int_sub(end, i64_ty.const_int(1, false), "prev")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let ch_ptr2 = { self.gep().build_in_bounds_gep(i8_ty, s_ptr, &[prev], "ch") }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let ch2 = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr2, "ch_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        let is_ws2_1 = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                ch2.into_int_value(),
-                space,
-                "is_space",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws2_2 = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                ch2.into_int_value(),
-                tab,
-                "is_tab",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws2_3 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch2.into_int_value(), nl, "is_nl")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws2_4 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, ch2.into_int_value(), cr, "is_cr")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_ws2a = self
-            .builder
-            .build_or(is_ws2_1, is_ws2_2, "is_ws_a")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let is_ws2b = self
-            .builder
-            .build_or(is_ws2_3, is_ws2_4, "is_ws_b")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        let is_ws2 = self
-            .builder
-            .build_or(is_ws2a, is_ws2b, "is_ws")
-            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
-        self.builder
-            .build_store(end_alloca, prev)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(is_ws2, bwd_loop, bwd_done)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(bwd_done);
-        // result = substr(start, end - start)
+
+        // Forward scan
+        let start = self.scan_whitespace(function, s_ptr, s_len, zero, true)?;
+        // Backward scan
+        let end = self.scan_whitespace(function, s_ptr, s_len, s_len, false)?;
+
         let trimmed_len = self
             .builder
             .build_int_sub(end, start, "trimmed_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // Clamp to 0 if start >= end (all-whitespace string)
-        let zero = i64_ty.const_int(0, false);
         let is_negative = self
             .builder
             .build_int_compare(inkwell::IntPredicate::SLE, trimmed_len, zero, "is_neg")
@@ -401,381 +106,248 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_select(is_negative, zero, trimmed_len, "safe_len")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        // malloc + memcpy
+
         let alloc_size = self
             .builder
             .build_int_add(safe_len, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        let src = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        // Only memcpy if safe_len > 0
+        let buf = self.malloc_buffer(alloc_size)?;
+        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")?;
+
         let should_copy = self
             .builder
             .build_int_compare(inkwell::IntPredicate::SGT, safe_len, zero, "should_copy")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         let copy_bb = self.context.append_basic_block(function, "trim_copy");
         let done_bb = self.context.append_basic_block(function, "trim_done");
-        self.builder
-            .build_conditional_branch(should_copy, copy_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(should_copy, copy_bb, done_bb)?;
+
         self.builder.position_at_end(copy_bb);
-        let memcpy_fn = self
-            .module
-            .get_function("memcpy")
-            .ok_or_else(|| "memcpy not declared".to_string())?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(src),
-                    BasicMetadataValueEnum::IntValue(safe_len),
-                ],
-                "memcpy_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(done_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.memcpy_buffer(buf, src, safe_len, "memcpy_call")?;
+        self.build_br(done_bb)?;
+
         self.builder.position_at_end(done_bb);
-        let null_pos = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, buf, &[safe_len], "null")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(null_pos, i8_ty.const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Return raw pointer for consistency
-        
+        self.null_terminate(buf, safe_len)?;
         Ok(buf.into())
     }
+
+    /// Scan from `start` forward or backward skipping whitespace.
+    /// Returns the index of the first non-whitespace character (forward)
+    /// or the index after the last non-whitespace character (backward).
+    fn scan_whitespace(
+        &self,
+        function: inkwell::values::FunctionValue<'ctx>,
+        s_ptr: PointerValue<'ctx>,
+        s_len: IntValue<'ctx>,
+        start: IntValue<'ctx>,
+        forward: bool,
+    ) -> MimiResult<IntValue<'ctx>> {
+        let i8_ty = self.context.i8_type();
+        let i64_ty = self.context.i64_type();
+        let zero = i64_ty.const_int(0, false);
+        let loop_bb = self.context.append_basic_block(function, "trim_loop");
+        let body_bb = self.context.append_basic_block(function, "trim_body");
+        let done_bb = self.context.append_basic_block(function, "trim_done");
+
+        let idx_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "idx")?;
+        self.build_store(idx_alloca, start)?;
+        self.build_br(loop_bb)?;
+
+        self.builder.position_at_end(loop_bb);
+        let idx = self.build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "idx")?;
+        let idx_iv = idx.into_int_value();
+        let cmp = if forward {
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::SLT, idx_iv, s_len, "trim_cmp")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+        } else {
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::SGT, idx_iv, zero, "trim_cmp")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+        };
+        self.build_cond_br(cmp, body_bb, done_bb)?;
+
+        self.builder.position_at_end(body_bb);
+        let ch_idx = if forward {
+            idx_iv
+        } else {
+            self.builder
+                .build_int_sub(idx_iv, i64_ty.const_int(1, false), "prev")
+                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
+        };
+        let ch_ptr = self.build_in_bounds_gep(i8_ty, s_ptr, &[ch_idx], "ch")?;
+        let ch = self.build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")?;
+        let is_ws = self.is_whitespace(ch.into_int_value(), i8_ty)?;
+        let next = if forward {
+            self.builder
+                .build_int_add(idx_iv, i64_ty.const_int(1, false), "next")
+                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?
+        } else {
+            self.builder
+                .build_int_sub(idx_iv, i64_ty.const_int(1, false), "next")
+                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
+        };
+        self.build_store(idx_alloca, next)?;
+        self.build_cond_br(is_ws, loop_bb, done_bb)?;
+
+        self.builder.position_at_end(done_bb);
+        Ok(idx_iv)
+    }
+
+    fn is_whitespace(
+        &self,
+        ch: IntValue<'ctx>,
+        i8_ty: inkwell::types::IntType<'ctx>,
+    ) -> MimiResult<IntValue<'ctx>> {
+        let space = i8_ty.const_int(b' ' as u64, false);
+        let tab = i8_ty.const_int(b'\t' as u64, false);
+        let nl = i8_ty.const_int(b'\n' as u64, false);
+        let cr = i8_ty.const_int(b'\r' as u64, false);
+        let is_space = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, ch, space, "is_space")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_tab = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, ch, tab, "is_tab")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_nl = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, ch, nl, "is_nl")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_cr = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, ch, cr, "is_cr")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let is_ws1 = self
+            .builder
+            .build_or(is_space, is_tab, "is_ws1")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        let is_ws2 = self
+            .builder
+            .build_or(is_nl, is_cr, "is_ws2")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+        self.builder
+            .build_or(is_ws1, is_ws2, "is_ws")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))
+    }
+
     pub(in crate::codegen) fn compile_str_to_upper(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        if args.len() != 1 {
-            return Err(CompileError::WrongArgCount(
-                "str_to_upper expects 1 argument".to_string(),
-            ));
-        }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_to_upper: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let i8_ty = self.context.i8_type();
-        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let i64_ty = self.context.i64_type();
-        // strlen, malloc copy + toupper each char
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let s_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(s_ptr)],
-                "strlen_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
-        let alloc_size = self
-            .builder
-            .build_int_add(s_len, i64_ty.const_int(1, false), "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        // Copy s to buf first, then transform
-        let memcpy_fn = self
-            .module
-            .get_function("memcpy")
-            .ok_or_else(|| "memcpy not declared".to_string())?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::IntValue(alloc_size),
-                ],
-                "memcpy_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-        // Loop: for i = 0..s_len: if buf[i] in 'a'..'z', buf[i] -= 32
-        let function = self
-            .current_function()
-            .ok_or_else(|| "codegen: no current function for str_to_upper loop".to_string())?;
-        let loop_bb = self.context.append_basic_block(function, "upper_loop");
-        let body_bb = self.context.append_basic_block(function, "upper_body");
-        let done_bb = self.context.append_basic_block(function, "upper_done");
-        let i_alloca = self
-            .builder
-            .build_alloca(i64_ty, "ui")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, i64_ty.const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(loop_bb);
-        let i = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let cmp = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, i, s_len, "upper_cmp")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(cmp, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(body_bb);
-        let ch_ptr = { self.gep().build_in_bounds_gep(i8_ty, buf, &[i], "ch") }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let ch = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        // Check 'a' <= ch <= 'z'
-        let a = i8_ty.const_int(b'a' as u64, false);
-        let z = i8_ty.const_int(b'z' as u64, false);
-        let is_lower1 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, ch, a, "ge_a")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_lower2 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLE, ch, z, "le_z")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_lower = self
-            .builder
-            .build_and(is_lower1, is_lower2, "is_lower")
-            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
-        let upper_ch = self
-            .builder
-            .build_int_sub(ch, i8_ty.const_int(32, false), "upper")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let result_ch = self
-            .builder
-            .build_select(is_lower, upper_ch, ch, "result_ch")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
-        self.builder
-            .build_store(ch_ptr, result_ch)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let next = self
-            .builder
-            .build_int_add(i, i64_ty.const_int(1, false), "next")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, next)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
-        self.builder.position_at_end(done_bb);
-        // Return raw pointer for consistency
-        
-        Ok(buf.into())
+        self.compile_str_case_transform(args, true, "str_to_upper")
     }
+
     pub(in crate::codegen) fn compile_str_to_lower(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_str_case_transform(args, false, "str_to_lower")
+    }
+
+    fn compile_str_case_transform(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        to_upper: bool,
+        name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err(CompileError::WrongArgCount(
-                "str_to_lower expects 1 argument".to_string(),
-            ));
+            return Err(CompileError::WrongArgCount(format!(
+                "{} expects 1 argument",
+                name
+            )));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_to_lower: first arg must be string".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], name)?;
         let i8_ty = self.context.i8_type();
-        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        let strlen_fn = self
-            .module
-            .get_function("strlen")
-            .ok_or_else(|| "strlen not declared".to_string())?;
-        let s_len = self
-            .builder
-            .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(s_ptr)],
-                "strlen_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("strlen returned void")?
-            .into_int_value();
+        let s_len = self.string_len(s_ptr)?;
         let alloc_size = self
             .builder
             .build_int_add(s_len, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        let memcpy_fn = self
-            .module
-            .get_function("memcpy")
-            .ok_or_else(|| "memcpy not declared".to_string())?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::IntValue(alloc_size),
-                ],
-                "memcpy_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
+        let buf = self.malloc_buffer(alloc_size)?;
+        self.memcpy_buffer(buf, s_ptr, alloc_size, "memcpy_call")?;
+
         let function = self
             .current_function()
-            .ok_or_else(|| "codegen: no current function for str_to_lower loop".to_string())?;
-        let loop_bb = self.context.append_basic_block(function, "lower_loop");
-        let body_bb = self.context.append_basic_block(function, "lower_body");
-        let done_bb = self.context.append_basic_block(function, "lower_done");
-        let i_alloca = self
-            .builder
-            .build_alloca(i64_ty, "li")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, i64_ty.const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            .ok_or_else(|| format!("codegen: no current function for {} loop", name))?;
+        let loop_bb = self.context.append_basic_block(function, "case_loop");
+        let body_bb = self.context.append_basic_block(function, "case_body");
+        let done_bb = self.context.append_basic_block(function, "case_done");
+
+        let i_alloca = self.build_alloca(i64_ty, "ci")?;
+        self.build_store(i_alloca, i64_ty.const_int(0, false))?;
+        self.build_br(loop_bb)?;
+
         self.builder.position_at_end(loop_bb);
-        let i = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
+        let i = self.build_load(BasicTypeEnum::IntType(i64_ty), i_alloca, "i")?;
         let cmp = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, i, s_len, "lower_cmp")
+            .build_int_compare(inkwell::IntPredicate::SLT, i.into_int_value(), s_len, "case_cmp")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        self.builder
-            .build_conditional_branch(cmp, body_bb, done_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(cmp, body_bb, done_bb)?;
+
         self.builder.position_at_end(body_bb);
-        let ch_ptr = { self.gep().build_in_bounds_gep(i8_ty, buf, &[i], "ch") }
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let ch_ptr = self.build_in_bounds_gep(i8_ty, buf, &[i.into_int_value()], "ch")?;
         let ch = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .build_load(BasicTypeEnum::IntType(i8_ty), ch_ptr, "ch_val")?
             .into_int_value();
-        let a_up = i8_ty.const_int(b'A' as u64, false);
-        let z_up = i8_ty.const_int(b'Z' as u64, false);
-        let is_upper1 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, ch, a_up, "ge_A")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_upper2 = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLE, ch, z_up, "le_Z")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let is_upper = self
-            .builder
-            .build_and(is_upper1, is_upper2, "is_upper")
-            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
-        let lower_ch = self
-            .builder
-            .build_int_add(ch, i8_ty.const_int(32, false), "lower")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let result_ch = self
-            .builder
-            .build_select(is_upper, lower_ch, ch, "result_ch")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
-        self.builder
-            .build_store(ch_ptr, result_ch)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let transformed = if to_upper {
+            self.transform_case(ch, i8_ty, b'a', b'z', -32)?
+        } else {
+            self.transform_case(ch, i8_ty, b'A', b'Z', 32)?
+        };
+        self.build_store(ch_ptr, transformed)?;
         let next = self
             .builder
-            .build_int_add(i, i64_ty.const_int(1, false), "next")
+            .build_int_add(i.into_int_value(), i64_ty.const_int(1, false), "next")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        self.builder
-            .build_store(i_alloca, next)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(loop_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_store(i_alloca, next)?;
+        self.build_br(loop_bb)?;
+
         self.builder.position_at_end(done_bb);
-        // Return raw pointer for consistency
-        
         Ok(buf.into())
     }
+
+    fn transform_case(
+        &self,
+        ch: IntValue<'ctx>,
+        i8_ty: inkwell::types::IntType<'ctx>,
+        lo: u8,
+        hi: u8,
+        delta: i8,
+    ) -> MimiResult<IntValue<'ctx>> {
+        let lo_val = i8_ty.const_int(lo as u64, false);
+        let hi_val = i8_ty.const_int(hi as u64, false);
+        let in_range1 = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGE, ch, lo_val, "ge_lo")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let in_range2 = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLE, ch, hi_val, "le_hi")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let in_range = self
+            .builder
+            .build_and(in_range1, in_range2, "in_range")
+            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
+        let delta_abs = delta.unsigned_abs() as u64;
+        let transformed = if delta < 0 {
+            self.builder
+                .build_int_sub(ch, i8_ty.const_int(delta_abs, false), "case_result")
+                .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?
+        } else {
+            self.builder
+                .build_int_add(ch, i8_ty.const_int(delta_abs, false), "case_result")
+                .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?
+        };
+        self.builder
+            .build_select(in_range, transformed, ch, "result_ch")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))
+            .map(|v| v.into_int_value())
+    }
+
     pub(in crate::codegen) fn compile_str_substring(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -785,43 +357,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_substring expects 3 arguments (s, start, end)".to_string(),
             ));
         }
-        // Handle both string representations:
-        // - PointerValue: char* directly (literal strings)
-        // - StructValue: {i8*, i64} (Record field access, builtin results)
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_substring: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let start = match args[1] {
-            BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_substring: second arg must be integer start".to_string(),
-                ))
-            }
-        };
-        let end = match args[2] {
-            BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_substring: third arg must be integer end".to_string(),
-                ))
-            }
-        };
+        let s_ptr = self.extract_string_arg(&args[0], "str_substring")?;
+        let start = require_int_arg(&args[1], "str_substring: start must be integer")?;
+        let end = require_int_arg(&args[2], "str_substring: end must be integer")?;
+
         let i8_ty = self.context.i8_type();
-        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        // len = end - start
         let sub_len = self
             .builder
             .build_int_sub(end, start, "sub_len")
@@ -830,56 +371,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_add(sub_len, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        // src = s + start
-        let src = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        // memcpy(buf, src, sub_len)
-        let memcpy_fn = self
-            .module
-            .get_function("memcpy")
-            .ok_or_else(|| "memcpy not declared".to_string())?;
-        self.builder
-            .build_call(
-                memcpy_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::PointerValue(src),
-                    BasicMetadataValueEnum::IntValue(sub_len),
-                ],
-                "memcpy_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
-        // Null-terminate
-        let null_pos = {
-            self.gep()
-                .build_in_bounds_gep(i8_ty, buf, &[sub_len], "null")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(null_pos, i8_ty.const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Return raw pointer (not struct) for consistency with other string builtins
-        
+        let buf = self.malloc_buffer(alloc_size)?;
+        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")?;
+        self.memcpy_buffer(buf, src, sub_len, "memcpy_call")?;
+        self.null_terminate(buf, sub_len)?;
         Ok(buf.into())
     }
+
     pub(in crate::codegen) fn compile_str_split(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -889,40 +387,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_split expects 2 arguments (string, delimiter)".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_split: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let delim_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_split: second arg must be string".to_string(),
-                ))
-            }
-        };
-        let func = self
-            .module
-            .get_function("mimi_str_split")
-            .ok_or("mimi_str_split not declared")?;
+        let s_ptr = self.extract_string_arg(&args[0], "str_split")?;
+        let delim_ptr = self.extract_string_arg(&args[1], "str_split")?;
+        let func = self.get_runtime_fn("mimi_str_split")?;
         let result_ptr = self
-            .builder
             .build_call(
                 func,
                 &[
@@ -930,80 +398,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(delim_ptr),
                 ],
                 "str_split_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("str_split error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
             .ok_or("mimi_str_split returned void")?
             .into_pointer_value();
-        // MimiList* is {i64 len, const char** data} — same layout as our list struct
-        let i64_ty = self.context.i64_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let list_struct_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::PointerType(i8_ptr),
-            ],
-            false,
-        );
-        let list_ptr = self
-            .builder
-            .build_bit_cast(
-                result_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "list_ptr",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-            .into_pointer_value();
-        let len_gep = self
-            .gep()
-            .build_struct_gep(list_struct_ty, list_ptr, 0, "len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_struct_ty, list_ptr, 1, "data")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let len_val = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        let data_val = self
-            .builder
-            .build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        let result_struct = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::PointerType(i8_ptr),
-            ],
-            false,
-        );
-        let result_alloca = self
-            .builder
-            .build_alloca(result_struct, "str_split_result")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let r_len_gep = self
-            .gep()
-            .build_struct_gep(result_struct, result_alloca, 0, "r_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let r_data_gep = self
-            .gep()
-            .build_struct_gep(result_struct, result_alloca, 1, "r_data")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(r_len_gep, len_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.builder
-            .build_store(r_data_gep, data_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        Ok(result_alloca.into())
+        self.copy_list_struct_fields(result_ptr)
     }
+
     pub(in crate::codegen) fn compile_str_join(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
             return Err(CompileError::WrongArgCount(
-                "str_join expects 2 arguments (list, separator)".to_string(),
+                "str_join expects 2 arguments (list, delimiter)".to_string(),
             ));
         }
         let list_ptr = match args[0] {
@@ -1014,109 +422,175 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let sep_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_join: second arg must be string".to_string(),
-                ))
-            }
-        };
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Bitcast list pointer to i8* for C function
-        let c_list_ptr = self
-            .builder
-            .build_bit_cast(list_ptr, i8_ptr, "c_list_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-            .into_pointer_value();
-        let func = self
-            .module
-            .get_function("mimi_str_join")
-            .ok_or("mimi_str_join not declared")?;
-        let result = self
-            .builder
+        let delim_ptr = self.extract_string_arg(&args[1], "str_join")?;
+        let func = self.get_runtime_fn("mimi_str_join")?;
+        let result_ptr = self
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::PointerValue(c_list_ptr),
-                    BasicMetadataValueEnum::PointerValue(sep_ptr),
+                    BasicMetadataValueEnum::PointerValue(list_ptr),
+                    BasicMetadataValueEnum::PointerValue(delim_ptr),
                 ],
                 "str_join_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("str_join error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_join returned void")?;
-        Ok(result)
+            .ok_or("mimi_str_join returned void")?
+            .into_pointer_value();
+        Ok(result_ptr.into())
     }
+
     pub(in crate::codegen) fn compile_str_replace(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 3 {
             return Err(CompileError::WrongArgCount(
-                "str_replace expects 3 arguments".to_string(),
+                "str_replace expects 3 arguments (s, old, new)".to_string(),
             ));
         }
-        let s_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_replace: first arg must be string".to_string(),
-                ))
-            }
-        };
-        let from_ptr = match &args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_replace: second arg must be string".to_string(),
-                ))
-            }
-        };
-        let to_ptr = match &args[2] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            BasicMetadataValueEnum::StructValue(sv) => {
-                self.builder
-                    .build_extract_value(*sv, 0, "str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?
-                    .into_pointer_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_replace: third arg must be string".to_string(),
-                ))
-            }
-        };
-        let func = self
-            .module
-            .get_function("mimi_str_replace")
-            .ok_or("mimi_str_replace not declared")?;
-        let result = self
-            .builder
+        let s_ptr = self.extract_string_arg(&args[0], "str_replace")?;
+        let old_ptr = self.extract_string_arg(&args[1], "str_replace")?;
+        let new_ptr = self.extract_string_arg(&args[2], "str_replace")?;
+        let func = self.get_runtime_fn("mimi_str_replace")?;
+        let result_ptr = self
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
-                    BasicMetadataValueEnum::PointerValue(from_ptr),
-                    BasicMetadataValueEnum::PointerValue(to_ptr),
+                    BasicMetadataValueEnum::PointerValue(old_ptr),
+                    BasicMetadataValueEnum::PointerValue(new_ptr),
                 ],
                 "str_replace_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("str_replace error: {}", e)))?
+            )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_replace returned void")?;
-        Ok(result)
+            .ok_or("mimi_str_replace returned void")?
+            .into_pointer_value();
+        Ok(result_ptr.into())
+    }
+
+    // -------------------------------------------------------------------------
+    // String transform helpers
+    // -------------------------------------------------------------------------
+
+    /// Extract a raw string pointer from a PointerValue or StructValue argument.
+    fn extract_string_arg(
+        &self,
+        arg: &BasicMetadataValueEnum<'ctx>,
+        context: &str,
+    ) -> MimiResult<PointerValue<'ctx>> {
+        match arg {
+            BasicMetadataValueEnum::PointerValue(pv) => Ok(*pv),
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .build_extract_value((*sv).into(), 0, "str_ptr")
+                .map(|v| v.into_pointer_value())
+                .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e))),
+            _ => Err(CompileError::TypeMismatch(format!(
+                "{}: string argument expected",
+                context
+            ))),
+        }
+    }
+
+    /// Call strlen on a raw string pointer.
+    fn string_len(&self, ptr: PointerValue<'ctx>) -> MimiResult<IntValue<'ctx>> {
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        Ok(self.build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(ptr)], "s_len")?
+            .try_as_basic_value_opt()
+            .ok_or("strlen returned void")?
+            .into_int_value())
+    }
+
+    /// Allocate a buffer of `size` bytes via malloc.
+    fn malloc_buffer(&self, size: IntValue<'ctx>) -> MimiResult<PointerValue<'ctx>> {
+        let malloc_fn = self.get_runtime_fn("malloc")?;
+        Ok(self
+            .build_call(
+                malloc_fn,
+                &[BasicMetadataValueEnum::IntValue(size)],
+                "malloc_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
+            .into_pointer_value())
+    }
+
+    /// Copy `len` bytes from `src` to `dst`.
+    fn memcpy_buffer(
+        &self,
+        dst: PointerValue<'ctx>,
+        src: PointerValue<'ctx>,
+        len: IntValue<'ctx>,
+        name: &str,
+    ) -> MimiResult<()> {
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let _ = self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(dst),
+                BasicMetadataValueEnum::PointerValue(src),
+                BasicMetadataValueEnum::IntValue(len),
+            ],
+            name,
+        )?;
+        Ok(())
+    }
+
+    /// Write a null byte at `buf[offset]`.
+    fn null_terminate(
+        &self,
+        buf: PointerValue<'ctx>,
+        offset: IntValue<'ctx>,
+    ) -> MimiResult<()> {
+        let i8_ty = self.context.i8_type();
+        let null_pos = self.build_in_bounds_gep(i8_ty, buf, &[offset], "null_pos")?;
+        self.build_store(null_pos, i8_ty.const_int(0, false))
+    }
+
+    /// Copy the `{len, data}` fields from a MimiList* pointer into a freshly
+    /// allocated on-stack list struct and return the struct alloca.
+    fn copy_list_struct_fields(
+        &self,
+        result_ptr: PointerValue<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_struct_ty = self.list_struct_type();
+        let list_ptr = self.build_pointer_cast(
+            result_ptr,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "list_ptr",
+        )?;
+        let len_gep = self
+            .gep()
+            .build_struct_gep(list_struct_ty, list_ptr, 0, "len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_struct_ty, list_ptr, 1, "data")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let len_val = self.build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "len_val")?;
+        let data_val = self.build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "data_val")?;
+        let result_alloca = self.build_alloca(list_struct_ty, "str_split_result")?;
+        let r_len_gep = self
+            .gep()
+            .build_struct_gep(list_struct_ty, result_alloca, 0, "r_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let r_data_gep = self
+            .gep()
+            .build_struct_gep(list_struct_ty, result_alloca, 1, "r_data")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(r_len_gep, len_val)?;
+        self.build_store(r_data_gep, data_val)?;
+        Ok(result_alloca.into())
+    }
+}
+
+fn require_int_arg<'ctx>(
+    arg: &BasicMetadataValueEnum<'ctx>,
+    message: &str,
+) -> MimiResult<IntValue<'ctx>> {
+    match arg {
+        BasicMetadataValueEnum::IntValue(iv) => Ok(*iv),
+        _ => Err(CompileError::TypeMismatch(message.to_string())),
     }
 }
