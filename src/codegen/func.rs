@@ -392,6 +392,92 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Snapshot live variable values at function entry so that `old(x)` in
+    /// postconditions refers to the value at call time, not the current value.
+    fn snapshot_old_values(
+        &mut self,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        self.old_snapshots.clear();
+        if self.ensures_stmts.is_empty() {
+            return Ok(());
+        }
+        for (name, &(alloca, ty)) in vars {
+            let old_alloca = self.build_alloca(ty, &format!("{}_old", name))?;
+            let val = self.build_load(ty, alloca, &format!("{}_snap", name))?;
+            self.build_store(old_alloca, val)?;
+            self.old_snapshots.insert(name.clone(), (old_alloca, ty));
+        }
+        Ok(())
+    }
+
+    /// Collect `ensures` contracts and compile `requires` contracts as runtime
+    /// assertions when contract verification is enabled.
+    fn prepare_func_contracts(
+        &mut self,
+        func: &FuncDef,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        self.ensures_stmts = if self.verify_contracts {
+            collect_ensures(&func.body)
+        } else {
+            Vec::new()
+        };
+        if self.verify_contracts {
+            for stmt in &func.body {
+                if let Stmt::Requires(expr, _) = stmt {
+                    self.compile_contract_assert(
+                        expr,
+                        vars,
+                        &format!("requires violation in '{}'", func.name),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a function return: check `ensures` contracts, clean up scopes, and
+    /// build the LLVM return instruction. `val` of `None` means a bare `return;`.
+    fn emit_return(
+        &mut self,
+        ret_type: BasicTypeEnum<'ctx>,
+        val: Option<BasicValueEnum<'ctx>>,
+        func_name: &str,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        let ensures = self.ensures_stmts.clone();
+        if !ensures.is_empty() {
+            let result_alloca = self.build_alloca(ret_type, "result")?;
+            let stored_val = val.unwrap_or_else(|| {
+                self.context.i64_type().const_int(0, false).into()
+            });
+            let adjusted = self.adjust_int_val(stored_val, ret_type)?;
+            self.build_store(result_alloca, adjusted)?;
+            let mut ensures_vars = vars.clone();
+            ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
+            for ensures_expr in &ensures {
+                self.compile_contract_assert(
+                    ensures_expr,
+                    &ensures_vars,
+                    &format!("ensures violation in '{}'", func_name),
+                )?;
+            }
+        }
+        self.pop_shared_scope()?;
+        self.free_heap_allocs()?;
+        self.pop_comp_scope();
+        self.pop_cap_scope();
+        match val {
+            Some(v) => {
+                let adjusted = self.adjust_int_val(v, ret_type)?;
+                self.build_return(Some(&adjusted))?;
+            }
+            None => self.build_return(None)?,
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Delegate async funcs to compile_async_func
         if func.is_async {
@@ -457,23 +543,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         for (i, param) in func.params.iter().enumerate() {
             if let Some(ty) = self.llvm_type_for(&param.ty) {
-                let alloca = self
-                    .builder
-                    .build_alloca(ty, &param.name)
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(
-                        alloca,
-                        function.get_nth_param(i as u32).ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "param index {} out of range for function '{}' with {} params",
-                                i,
-                                func.name,
-                                function.count_params()
-                            ))
-                        })?,
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let alloca = self.build_alloca(ty, &param.name)?;
+                self.build_store(
+                    alloca,
+                    function.get_nth_param(i as u32).ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "param index {} out of range for function '{}' with {} params",
+                            i,
+                            func.name,
+                            function.count_params()
+                        ))
+                    })?,
+                )?;
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
@@ -505,55 +586,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Collect ensures contracts for runtime checking at return points.
-        // Recursively walks nested blocks (if, while, for, parasteps, lambda).
-        self.ensures_stmts = if self.verify_contracts {
-            collect_ensures(&func.body)
-        } else {
-            Vec::new()
-        };
-
-        // Snapshot parameters for old() in ensures contracts.
-        // At function entry, copy each parameter to an old-snapshot alloca so that
-        // old(x) in postconditions reads the entry-time value, not the current value.
-        self.old_snapshots.clear();
-        if !self.ensures_stmts.is_empty() {
-            let snap_vars: Vec<(
-                String,
-                inkwell::values::PointerValue<'ctx>,
-                BasicTypeEnum<'ctx>,
-            )> = vars
-                .iter()
-                .map(|(name, &(alloca, ty))| (name.clone(), alloca, ty))
-                .collect();
-            for (name, alloca, ty) in snap_vars {
-                let old_alloca = self
-                    .builder
-                    .build_alloca(ty, &format!("{}_old", name))
-                    .map_err(|e| CompileError::LlvmError(format!("old snapshot alloca: {}", e)))?;
-                let val = self
-                    .builder
-                    .build_load(ty, alloca, &format!("{}_snap", name))
-                    .map_err(|e| CompileError::LlvmError(format!("old snapshot load: {}", e)))?;
-                self.builder
-                    .build_store(old_alloca, val)
-                    .map_err(|e| CompileError::LlvmError(format!("old snapshot store: {}", e)))?;
-                self.old_snapshots.insert(name, (old_alloca, ty));
-            }
-        }
-
-        // Compile requires contracts as runtime asserts when verify_contracts is enabled
-        if self.verify_contracts {
-            for stmt in &func.body {
-                if let Stmt::Requires(expr, _) = stmt {
-                    self.compile_contract_assert(
-                        expr,
-                        &vars,
-                        &format!("requires violation in '{}'", func.name),
-                    )?;
-                }
-            }
-        }
+        // Prepare and compile function contracts.
+        self.prepare_func_contracts(func, &vars)?;
+        self.snapshot_old_values(&vars)?;
 
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
@@ -578,61 +613,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(Some(expr)) => {
                     let val = self.compile_expr(expr, &vars)?;
                     let val = self.adjust_int_val(val, ret_type)?;
-                    let ensures = self.ensures_stmts.clone();
-                    if !ensures.is_empty() {
-                        let result_alloca =
-                            self.builder.build_alloca(ret_type, "result").map_err(|e| {
-                                CompileError::LlvmError(format!("result alloca: {}", e))
-                            })?;
-                        self.builder
-                            .build_store(result_alloca, val)
-                            .map_err(|e| CompileError::LlvmError(format!("result store: {}", e)))?;
-                        let mut ensures_vars = vars.clone();
-                        ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
-                        for ensures_expr in &ensures {
-                            self.compile_contract_assert(
-                                ensures_expr,
-                                &ensures_vars,
-                                &format!("ensures violation in '{}'", func.name),
-                            )?;
-                        }
-                    }
-                    self.pop_shared_scope()?;
-                    self.free_heap_allocs()?;
-                    self.pop_comp_scope();
-                    self.pop_cap_scope();
-                    self.builder
-                        .build_return(Some(&val))
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+                    self.emit_return(ret_type, Some(val), &func.name, &vars)?;
                     return Ok(());
                 }
                 Stmt::Return(None) => {
-                    let ensures = self.ensures_stmts.clone();
-                    if !ensures.is_empty() {
-                        let result_alloca =
-                            self.builder.build_alloca(ret_type, "result").map_err(|e| {
-                                CompileError::LlvmError(format!("result alloca: {}", e))
-                            })?;
-                        self.builder
-                            .build_store(result_alloca, self.context.i64_type().const_int(0, false))
-                            .map_err(|e| CompileError::LlvmError(format!("result store: {}", e)))?;
-                        let mut ensures_vars = vars.clone();
-                        ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
-                        for ensures_expr in &ensures {
-                            self.compile_contract_assert(
-                                ensures_expr,
-                                &ensures_vars,
-                                &format!("ensures violation in '{}'", func.name),
-                            )?;
-                        }
-                    }
-                    self.pop_shared_scope()?;
-                    self.free_heap_allocs()?;
-                    self.pop_comp_scope();
-                    self.pop_cap_scope();
-                    self.builder
-                        .build_return(None)
-                        .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+                    self.emit_return(ret_type, None, &func.name, &vars)?;
                     return Ok(());
                 }
                 Stmt::Let {
@@ -1263,14 +1248,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.block_has_terminator() {
             let ensures = self.ensures_stmts.clone();
             if !ensures.is_empty() {
-                let result_alloca = self
-                    .builder
-                    .build_alloca(ret_type, "result")
-                    .map_err(|e| CompileError::LlvmError(format!("result alloca: {}", e)))?;
+                let result_alloca = self.build_alloca(ret_type, "result")?;
                 let adjusted = self.adjust_int_val(last_val, ret_type)?;
-                self.builder
-                    .build_store(result_alloca, adjusted)
-                    .map_err(|e| CompileError::LlvmError(format!("result store: {}", e)))?;
+                self.build_store(result_alloca, adjusted)?;
                 let mut ensures_vars = vars.clone();
                 ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
                 for ensures_expr in &ensures {
@@ -1283,9 +1263,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         let last_val = self.adjust_int_val(last_val, ret_type)?;
-        self.builder
-            .build_return(Some(&last_val))
-            .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+        self.build_return(Some(&last_val))?;
         Ok(())
     }
 
@@ -1365,18 +1343,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, param) in func.params.iter().enumerate() {
             let resolved = self.resolve_type(&param.ty);
             if let Some(ty) = self.llvm_type_for(&resolved) {
-                let alloca = self
-                    .builder
-                    .build_alloca(ty, &param.name)
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(
-                        alloca,
-                        function.get_nth_param(i as u32).ok_or_else(|| {
-                            CompileError::LlvmError("param index matches".to_string())
-                        })?,
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                let alloca = self.build_alloca(ty, &param.name)?;
+                self.build_store(
+                    alloca,
+                    function.get_nth_param(i as u32).ok_or_else(|| {
+                        CompileError::LlvmError("param index matches".to_string())
+                    })?,
+                )?;
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
@@ -1405,26 +1378,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Collect ensures contracts for runtime checking at return points.
-        // Recursively walks nested blocks (if, while, for, parasteps, lambda).
-        self.ensures_stmts = if self.verify_contracts {
-            collect_ensures(&func.body)
-        } else {
-            Vec::new()
-        };
-
-        // Compile requires contracts as runtime asserts when verify_contracts is enabled
-        if self.verify_contracts {
-            for stmt in &func.body {
-                if let Stmt::Requires(expr, _) = stmt {
-                    self.compile_contract_assert(
-                        expr,
-                        &vars,
-                        &format!("requires violation in '{}'", func.name),
-                    )?;
-                }
-            }
-        }
+        // Prepare and compile function contracts.
+        self.prepare_func_contracts(func, &vars)?;
+        self.snapshot_old_values(&vars)?;
 
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
@@ -1477,9 +1433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             let adjusted = self.adjust_int_val(last_val, ret_type)?;
-            self.builder
-                .build_return(Some(&adjusted))
-                .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;
+            self.build_return(Some(&adjusted))?;
         }
         self.type_map = prev_type_map;
         Ok(())
