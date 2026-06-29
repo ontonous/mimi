@@ -19,13 +19,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Single string pointer: use puts (which appends newline automatically)
         if args.len() == 1 {
             if let BasicMetadataValueEnum::PointerValue(_) = args[0] {
-                let puts = self
-                    .module
-                    .get_function("puts")
-                    .ok_or_else(|| "puts not declared".to_string())?;
-                self.builder
-                    .build_call(puts, args, "puts_call")
-                    .map_err(|e| CompileError::LlvmError(format!("puts error: {}", e)))?;
+                let puts = self.get_runtime_fn("puts")?;
+                self.build_call(puts, args, "puts_call")?;
                 return Ok(i64_ty.const_int(0, false).into());
             }
         }
@@ -46,13 +41,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             fmt_global.as_pointer_value(),
         )];
         printf_args.extend(print_args);
-        let printf = self
-            .module
-            .get_function("printf")
-            .ok_or_else(|| "printf not declared".to_string())?;
-        self.builder
-            .build_call(printf, &printf_args, "printf_call")
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+        let printf = self.get_runtime_fn("printf")?;
+        self.build_call(printf, &printf_args, "printf_call")?;
         Ok(i64_ty.const_int(0, false).into())
     }
 
@@ -67,10 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let num_fields = fields.len();
                 // Detect Mimi string struct: {i8*, i64}
                 if num_fields == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_)) {
-                    let ptr = self
-                        .builder
-                        .build_extract_value(*sv, 0, "str_ptr")
-                        .map_err(|e| CompileError::LlvmError(format!("extract str ptr: {}", e)))?;
+                    let ptr = self.build_extract_value((*sv).into(), 0, "str_ptr")?;
                     match ptr {
                         BasicValueEnum::PointerValue(pv) => {
                             Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string()))
@@ -78,10 +65,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => Ok((BasicMetadataValueEnum::StructValue(*sv), "%p".to_string())),
                     }
                 } else if num_fields >= 2 {
-                    let payload = self
-                        .builder
-                        .build_extract_value(*sv, 1, "payload")
-                        .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+                    let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
                             let ext = if iv.get_type().get_bit_width() < 64 {
@@ -131,13 +115,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             fmt_global.as_pointer_value(),
         )];
         printf_args.push(print_arg);
-        let printf = self
-            .module
-            .get_function("printf")
-            .ok_or_else(|| "printf not declared".to_string())?;
-        self.builder
-            .build_call(printf, &printf_args, "printf_call")
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+        let printf = self.get_runtime_fn("printf")?;
+        self.build_call(printf, &printf_args, "printf_call")?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
@@ -165,9 +144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("printf")
             .ok_or_else(|| "printf not declared".to_string())?;
-        self.builder
-            .build_call(printf, &printf_args, "eprintf_call")
-            .map_err(|e| CompileError::LlvmError(format!("eprintf error: {}", e)))?;
+        self.build_call(printf, &printf_args, "eprintf_call")?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
@@ -193,9 +170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "codegen: no current function for assert".to_string())?;
         let ok_bb = self.context.append_basic_block(function, "assert_ok");
         let fail_bb = self.context.append_basic_block(function, "assert_fail");
-        self.builder
-            .build_conditional_branch(cond, ok_bb, fail_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(cond, ok_bb, fail_bb)?;
 
         self.builder.position_at_end(fail_bb);
         let printf = self
@@ -212,44 +187,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ))
                 }
             };
-            self.builder
-                .build_call(
+            self.build_call(
                     printf,
                     &[BasicMetadataValueEnum::PointerValue(msg_ptr)],
                     "assert_printf",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                )?;
         } else {
             let fmt_global = self
                 .builder
                 .build_global_string_ptr("assertion failed\n", "assert_msg")
                 .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-            self.builder
-                .build_call(
+            self.build_call(
                     printf,
                     &[BasicMetadataValueEnum::PointerValue(
                         fmt_global.as_pointer_value(),
                     )],
                     "assert_printf",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+                )?;
         }
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
-        self.builder
-            .build_call(
+        self.build_call(
                 exit_fn,
                 &[BasicMetadataValueEnum::IntValue(
                     self.context.i32_type().const_int(1, false),
                 )],
                 "assert_exit",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("exit error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(ok_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            )?;
+        self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
@@ -345,9 +312,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "codegen: no current function for assert_eq".to_string())?;
         let ok_bb = self.context.append_basic_block(function, "aeq_ok");
         let fail_bb = self.context.append_basic_block(function, "aeq_fail");
-        self.builder
-            .build_conditional_branch(eq, ok_bb, fail_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(eq, ok_bb, fail_bb)?;
 
         self.builder.position_at_end(fail_bb);
         let printf = self
@@ -360,15 +325,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("assertion failed: ", "aeq_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(
                     prefix.as_pointer_value(),
                 )],
                 "aeq_prefix_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
 
         // Print left value
         self.build_print_value(printf, &a)?;
@@ -377,13 +340,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(" != ", "aeq_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
                 "aeq_sep_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -391,30 +352,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("\n", "aeq_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
                 "aeq_nl_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
 
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
-        self.builder
-            .build_call(
+        self.build_call(
                 exit_fn,
                 &[BasicMetadataValueEnum::IntValue(
                     self.context.i32_type().const_int(1, false),
                 )],
                 "aeq_exit",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("exit error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(ok_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            )?;
+        self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
@@ -510,9 +465,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "codegen: no current function for assert_ne".to_string())?;
         let ok_bb = self.context.append_basic_block(function, "ane_ok");
         let fail_bb = self.context.append_basic_block(function, "ane_fail");
-        self.builder
-            .build_conditional_branch(ne, ok_bb, fail_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(ne, ok_bb, fail_bb)?;
 
         self.builder.position_at_end(fail_bb);
         let printf = self
@@ -524,15 +477,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("assertion failed: ", "ane_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(
                     prefix.as_pointer_value(),
                 )],
                 "ane_prefix_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         // Print left value
         self.build_print_value(printf, &a)?;
         // Print " == "
@@ -540,13 +491,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(" == ", "ane_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
                 "ane_sep_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -554,29 +503,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("\n", "ane_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
                 "ane_nl_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
-        self.builder
-            .build_call(
+        self.build_call(
                 exit_fn,
                 &[BasicMetadataValueEnum::IntValue(
                     self.context.i32_type().const_int(1, false),
                 )],
                 "ane_exit",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("exit error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(ok_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            )?;
+        self.build_br(ok_bb)?;
 
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
@@ -639,9 +582,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "codegen: no current function for assert_approx_eq".to_string())?;
         let ok_bb = self.context.append_basic_block(function, "aaeq_ok");
         let fail_bb = self.context.append_basic_block(function, "aaeq_fail");
-        self.builder
-            .build_conditional_branch(eq, ok_bb, fail_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+        self.build_cond_br(eq, ok_bb, fail_bb)?;
         self.builder.position_at_end(fail_bb);
         let printf = self
             .module
@@ -652,15 +593,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("assertion failed: ", "aaeq_prefix")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(
                     prefix.as_pointer_value(),
                 )],
                 "aaeq_prefix_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         // Print left value
         self.build_print_value(printf, &a)?;
         // Print " !≈ "
@@ -668,13 +607,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(" !≈ ", "aaeq_sep")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(sep.as_pointer_value())],
                 "aaeq_sep_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         // Print right value
         self.build_print_value(printf, &b)?;
         // Print newline
@@ -682,29 +619,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr("\n", "aaeq_nl")
             .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        self.builder
-            .build_call(
+        self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(nl.as_pointer_value())],
                 "aaeq_nl_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("printf error: {}", e)))?;
+            )?;
         let exit_fn = self
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
-        self.builder
-            .build_call(
+        self.build_call(
                 exit_fn,
                 &[BasicMetadataValueEnum::IntValue(
                     self.context.i32_type().const_int(1, false),
                 )],
                 "aaeq_exit",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("exit error: {}", e)))?;
-        self.builder
-            .build_unconditional_branch(ok_bb)
-            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+            )?;
+        self.build_br(ok_bb)?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
     }
@@ -762,8 +693,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fgets", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 fgets_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(buf),
@@ -771,8 +701,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(stdin_val),
                 ],
                 "fgets_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fgets error: {}", e)))?;
+            )?;
         // strlen(buf) for string struct length
         let strlen_fn = self
             .module
@@ -804,16 +733,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(ptr_gep, buf)?;
         let len_gep = self
             .gep()
             .build_struct_gep(string_ty, str_alloca, 1, "str_len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, str_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(len_gep, str_len)?;
         Ok(str_alloca.into())
     }
 
@@ -1009,13 +934,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("rewind", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 rewind_fn,
                 &[BasicMetadataValueEnum::PointerValue(file)],
                 "rewind_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("rewind error: {}", e)))?;
+            )?;
         // malloc(file_size + 1)
         let one = self.context.i64_type().const_int(1, false);
         let alloc_size = self
@@ -1053,8 +976,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fread", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 fread_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(buf),
@@ -1063,11 +985,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(file),
                 ],
                 "fread_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fread error: {}", e)))?;
+            )?;
         // Null-terminate
         let null_gep = {
-            self.gep().build_in_bounds_gep(
+            self.build_in_bounds_gep(
                 BasicTypeEnum::IntType(self.context.i8_type()),
                 buf,
                 &[file_size],
@@ -1075,9 +996,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(null_gep, self.context.i8_type().const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(null_gep, self.context.i8_type().const_int(0, false))?;
         // fclose(file)
         let fclose_fn = self.module.get_function("fclose").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1085,13 +1004,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 fclose_fn,
                 &[BasicMetadataValueEnum::PointerValue(file)],
                 "fclose_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fclose error: {}", e)))?;
+            )?;
         // Build string struct { i8*, i64 }
         let string_ty = self.context.struct_type(
             &[
@@ -1108,16 +1025,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(ptr_gep, buf)?;
         let len_gep = self
             .gep()
             .build_struct_gep(string_ty, str_alloca, 1, "str_len")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, file_size)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(len_gep, file_size)?;
         Ok(str_alloca.into())
     }
 
@@ -1193,8 +1106,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fwrite", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 fwrite_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(content_ptr),
@@ -1203,8 +1115,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(file),
                 ],
                 "fwrite_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fwrite error: {}", e)))?;
+            )?;
         // fclose(file)
         let i32_ty = self.context.i32_type();
         let fclose_fn = self.module.get_function("fclose").unwrap_or_else(|| {
@@ -1213,13 +1124,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
-        self.builder
-            .build_call(
+        self.build_call(
                 fclose_fn,
                 &[BasicMetadataValueEnum::PointerValue(file)],
                 "fclose_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("fclose error: {}", e)))?;
+            )?;
         Ok(self.context.i64_type().const_int(0, false).into())
     }
 
@@ -1235,8 +1144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%lld", "int_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
-                self.builder
-                    .build_call(
+                self.build_call(
                         printf,
                         &[
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
@@ -1251,8 +1159,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%f", "float_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
-                self.builder
-                    .build_call(
+                self.build_call(
                         printf,
                         &[
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
@@ -1267,8 +1174,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%s", "str_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
-                self.builder
-                    .build_call(
+                self.build_call(
                         printf,
                         &[
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
@@ -1280,14 +1186,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::StructValue(sv) => {
                 if let Ok(BasicValueEnum::PointerValue(pv)) =
-                    self.builder.build_extract_value(*sv, 0, "str_field")
+                    self.build_extract_value((*sv).into(), 0, "str_field")
                 {
                     let fmt = self
                         .builder
                         .build_global_string_ptr("%s", "struct_str_fmt")
                         .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
-                    self.builder
-                        .build_call(
+                    self.build_call(
                             printf,
                             &[
                                 BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
@@ -1316,7 +1221,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let fn_val = self.module.get_function(runtime_fn_name)
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
-        let result = self.builder.build_call(
+        let result = self.build_call(
             fn_val,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             &format!("{}_call", runtime_fn_name),
@@ -1337,7 +1242,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let fn_val = self.module.get_function(runtime_fn_name)
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", runtime_fn_name)))?;
-        let result = self.builder.build_call(
+        let result = self.build_call(
             fn_val,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             &format!("{}_call", runtime_fn_name),
@@ -1358,7 +1263,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let fn_val = self.module.get_function("mimi_listdir")
             .ok_or("mimi_listdir not declared")?;
-        let result = self.builder.build_call(
+        let result = self.build_call(
             fn_val,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             "listdir_call",
@@ -1388,7 +1293,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let b_ptr = self.extract_raw_str_ptr(&args[1])?;
         let fn_val = self.module.get_function("mimi_path_join")
             .ok_or("mimi_path_join not declared")?;
-        let result = self.builder.build_call(
+        let result = self.build_call(
             fn_val,
             &[
                 BasicMetadataValueEnum::PointerValue(a_ptr),
@@ -1423,7 +1328,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let fn_val = self.module.get_function("mimi_walk_dir")
             .ok_or("mimi_walk_dir not declared")?;
-        let result = self.builder.build_call(
+        let result = self.build_call(
             fn_val,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             "walk_dir_call",
@@ -1451,9 +1356,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Call mimi_exec(cmd) -> MimiExecResult*
-        let exec_fn = self.module.get_function("mimi_exec")
-            .ok_or_else(|| "mimi_exec not declared".to_string())?;
-        let res_ptr = self.builder.build_call(
+        let exec_fn = self.get_runtime_fn("mimi_exec")?;
+        let res_ptr = self.build_call(
             exec_fn,
             &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
             "exec_call",
@@ -1473,9 +1377,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
 
         // Extract exit_code
-        let exit_gep = self.gep().build_struct_gep(res_ty, res_ptr, 0, "exit_code_ptr")
+        let exit_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 0, "exit_code_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let exit_code_raw = self.builder.build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
+        let exit_code_raw = self.build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         // Truncate to i32 for ExecResult.exit_code field
@@ -1483,29 +1389,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
 
         // Extract stdout
-        let stdout_gep = self.gep().build_struct_gep(res_ty, res_ptr, 1, "stdout_ptr")
+        let stdout_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 1, "stdout_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let stdout_raw = self.builder.build_load(i8_ptr, stdout_gep, "stdout_raw")
+        let stdout_raw = self.build_load(i8_ptr, stdout_gep, "stdout_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         let stdout_str = self.wrap_c_string(stdout_raw)?;
 
         // Extract stderr
-        let stderr_gep = self.gep().build_struct_gep(res_ty, res_ptr, 2, "stderr_ptr")
+        let stderr_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 2, "stderr_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let stderr_raw = self.builder.build_load(i8_ptr, stderr_gep, "stderr_raw")
+        let stderr_raw = self.build_load(i8_ptr, stderr_gep, "stderr_raw")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         let stderr_str = self.wrap_c_string(stderr_raw)?;
 
         // Free the runtime struct (not the strings — they're owned by ExecResult)
-        let free_struct_fn = self.module.get_function("mimi_exec_free_struct")
-            .ok_or_else(|| "mimi_exec_free_struct not declared".to_string())?;
-        self.builder.build_call(
+        let free_struct_fn = self.get_runtime_fn("mimi_exec_free_struct")?;
+        self.build_call(
             free_struct_fn,
             &[BasicMetadataValueEnum::PointerValue(res_ptr)],
             "exec_free_struct",
-        ).map_err(|e| CompileError::LlvmError(format!("exec_free_struct error: {}", e)))?;
+        )?;
 
         // Build ExecResult LLVM struct { i32, {i8*,i64}, {i8*,i64} }
         let string_ty = self.context.struct_type(
@@ -1523,26 +1432,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             false,
         );
-        let alloca = self.builder.build_alloca(exec_result_ty, "exec_result")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let alloca = self.build_alloca(exec_result_ty, "exec_result")?;
 
         // Store exit_code
-        let f0 = self.gep().build_struct_gep(exec_result_ty, alloca, 0, "f0")
+        let f0 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 0, "f0")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(f0, exit_code)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(f0, exit_code)?;
 
         // Store stdout string
-        let f1 = self.gep().build_struct_gep(exec_result_ty, alloca, 1, "f1")
+        let f1 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 1, "f1")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(f1, stdout_str)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(f1, stdout_str)?;
 
         // Store stderr string
-        let f2 = self.gep().build_struct_gep(exec_result_ty, alloca, 2, "f2")
+        let f2 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 2, "f2")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(f2, stderr_str)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(f2, stderr_str)?;
 
         Ok(alloca.into())
     }
@@ -1556,15 +1467,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
 
         // Allocate err_out pointer
-        let err_alloca = self.builder.build_alloca(i8_ptr, "err_out")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        self.builder.build_store(err_alloca, i8_ptr.const_null())
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        let err_alloca = self.build_alloca(i8_ptr, "err_out")?;
+        self.build_store(err_alloca, i8_ptr.const_null())?;
 
         // Call mimi_file_stat(path, &err_out)
-        let stat_fn = self.module.get_function("mimi_file_stat")
-            .ok_or_else(|| "mimi_file_stat not declared".to_string())?;
-        let stat_ptr = self.builder.build_call(
+        let stat_fn = self.get_runtime_fn("mimi_file_stat")?;
+        let stat_ptr = self.build_call(
             stat_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(path_ptr),
@@ -1606,8 +1514,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             false,
         );
-        let alloca = self.builder.build_alloca(stat_result_ty, "stat_result")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let alloca = self.build_alloca(stat_result_ty, "stat_result")?;
 
         // Extract fields from MimiStatResult (or use defaults if null)
         let zero_i64 = i64_ty.const_int(0, false);
@@ -1615,27 +1522,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         let false_val = bool_ty.const_int(0, false);
 
         // size
-        let size_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 0, "size_ptr")
+        let size_gep = self
+            .gep()
+            .build_struct_gep(mimi_stat_ty, stat_ptr, 0, "size_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let size_loaded = self.builder.build_load(i64_ty, size_gep, "size_loaded")
+        let size_loaded = self.build_load(i64_ty, size_gep, "size_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         let size_val = self.builder.build_select(is_null, neg_one_i64, size_loaded, "size_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // modified
-        let mod_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 1, "mod_ptr")
+        let mod_gep = self
+            .gep()
+            .build_struct_gep(mimi_stat_ty, stat_ptr, 1, "mod_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let mod_loaded = self.builder.build_load(i64_ty, mod_gep, "mod_loaded")
+        let mod_loaded = self.build_load(i64_ty, mod_gep, "mod_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         let mod_val = self.builder.build_select(is_null, zero_i64, mod_loaded, "mod_sel")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // is_file
-        let isf_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 2, "isf_ptr")
+        let isf_gep = self
+            .gep()
+            .build_struct_gep(mimi_stat_ty, stat_ptr, 2, "isf_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let isf_raw = self.builder.build_load(i64_ty, isf_gep, "isf_loaded")
+        let isf_raw = self.build_load(i64_ty, isf_gep, "isf_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         let isf_bool = self.builder.build_int_compare(
@@ -1645,9 +1558,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // is_dir
-        let isd_gep = self.gep().build_struct_gep(mimi_stat_ty, stat_ptr, 3, "isd_ptr")
+        let isd_gep = self
+            .gep()
+            .build_struct_gep(mimi_stat_ty, stat_ptr, 3, "isd_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let isd_raw = self.builder.build_load(i64_ty, isd_gep, "isd_loaded")
+        let isd_raw = self.build_load(i64_ty, isd_gep, "isd_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
         let isd_bool = self.builder.build_int_compare(
@@ -1658,31 +1573,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
 
         // Store into StatResult struct
-        let s0 = self.gep().build_struct_gep(stat_result_ty, alloca, 0, "s0")
+        let s0 = self
+            .gep()
+            .build_struct_gep(stat_result_ty, alloca, 0, "s0")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(s0, size_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let s1 = self.gep().build_struct_gep(stat_result_ty, alloca, 1, "s1")
+        self.build_store(s0, size_val)?;
+        let s1 = self
+            .gep()
+            .build_struct_gep(stat_result_ty, alloca, 1, "s1")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(s1, mod_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let s2 = self.gep().build_struct_gep(stat_result_ty, alloca, 2, "s2")
+        self.build_store(s1, mod_val)?;
+        let s2 = self
+            .gep()
+            .build_struct_gep(stat_result_ty, alloca, 2, "s2")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(s2, isf_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let s3 = self.gep().build_struct_gep(stat_result_ty, alloca, 3, "s3")
+        self.build_store(s2, isf_val)?;
+        let s3 = self
+            .gep()
+            .build_struct_gep(stat_result_ty, alloca, 3, "s3")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder.build_store(s3, isd_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.build_store(s3, isd_val)?;
 
         // Free the stat result (uses Rust allocator via Box::from_raw)
-        let free_fn = self.module.get_function("mimi_file_stat_free")
-            .ok_or_else(|| "mimi_file_stat_free not declared".to_string())?;
-        self.builder.build_call(
+        let free_fn = self.get_runtime_fn("mimi_file_stat_free")?;
+        self.build_call(
             free_fn,
             &[BasicMetadataValueEnum::PointerValue(stat_ptr)],
             "stat_free",
-        ).map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+        )?;
 
         Ok(alloca.into())
     }
@@ -1694,9 +1612,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let content_ptr = self.extract_raw_str_ptr(&args[1])?;
 
-        let append_fn = self.module.get_function("mimi_append_file")
-            .ok_or_else(|| "mimi_append_file not declared".to_string())?;
-        let ret = self.builder.build_call(
+        let append_fn = self.get_runtime_fn("mimi_append_file")?;
+        let ret = self.build_call(
             append_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(path_ptr),
@@ -1725,9 +1642,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let key_ptr = self.extract_raw_str_ptr(&args[0])?;
         let val_ptr = self.extract_raw_str_ptr(&args[1])?;
 
-        let set_fn = self.module.get_function("mimi_set_env")
-            .ok_or_else(|| "mimi_set_env not declared".to_string())?;
-        let ret = self.builder.build_call(
+        let set_fn = self.get_runtime_fn("mimi_set_env")?;
+        let ret = self.build_call(
             set_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(key_ptr),
@@ -1793,9 +1709,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
                 }
                 BasicMetadataValueEnum::IntValue(iv) => {
-                    let to_i64_fn = self.module.get_function("mimi_to_string_i64")
-                        .ok_or_else(|| "mimi_to_string_i64 not declared".to_string())?;
-                    let str_result = self.builder.build_call(
+                    let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
+                    let str_result = self.build_call(
                         to_i64_fn,
                         &[BasicMetadataValueEnum::IntValue(*iv)],
                         "to_str_i64",
@@ -1806,9 +1721,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     call_args.push(BasicMetadataValueEnum::PointerValue(str_result));
                 }
                 BasicMetadataValueEnum::FloatValue(fv) => {
-                    let to_f64_fn = self.module.get_function("mimi_to_string_f64")
-                        .ok_or_else(|| "mimi_to_string_f64 not declared".to_string())?;
-                    let str_result = self.builder.build_call(
+                    let to_f64_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                    let str_result = self.build_call(
                         to_f64_fn,
                         &[BasicMetadataValueEnum::FloatValue(*fv)],
                         "to_str_f64",
@@ -1829,9 +1743,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 i8_ptr.const_null(),
             ));
         }
-        let format_fn = self.module.get_function("mimi_str_format")
-            .ok_or_else(|| "mimi_str_format not declared".to_string())?;
-        let result = self.builder.build_call(
+        let format_fn = self.get_runtime_fn("mimi_str_format")?;
+        let result = self.build_call(
             format_fn,
             &call_args,
             "format_call",
@@ -1852,9 +1765,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err(CompileError::TypeMismatch("read_file_partial: max_bytes must be i64".into())),
         };
-        let func = self.module.get_function("mimi_read_file_partial")
-            .ok_or_else(|| "mimi_read_file_partial not declared".to_string())?;
-        let raw_ptr = self.builder.build_call(
+        let func = self.get_runtime_fn("mimi_read_file_partial")?;
+        let raw_ptr = self.build_call(
             func,
             &[
                 BasicMetadataValueEnum::PointerValue(path_ptr),
@@ -1873,9 +1785,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err(CompileError::WrongArgCount("read_file_bytes expects 1 argument".to_string()));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let func = self.module.get_function("mimi_read_file_bytes")
-            .ok_or_else(|| "mimi_read_file_bytes not declared".to_string())?;
-        let raw_ptr = self.builder.build_call(
+        let func = self.get_runtime_fn("mimi_read_file_bytes")?;
+        let raw_ptr = self.build_call(
             func,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             "read_file_bytes_call",
@@ -1892,9 +1803,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let data_ptr = self.extract_raw_str_ptr(&args[1])?;
-        let func = self.module.get_function("mimi_write_file_bytes")
-            .ok_or_else(|| "mimi_write_file_bytes not declared".to_string())?;
-        let result = self.builder.build_call(
+        let func = self.get_runtime_fn("mimi_write_file_bytes")?;
+        let result = self.build_call(
             func,
             &[
                 BasicMetadataValueEnum::PointerValue(path_ptr),
@@ -1920,9 +1830,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err(CompileError::WrongArgCount("read_lines_json expects 1 argument".to_string()));
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let func = self.module.get_function("mimi_read_lines_json")
-            .ok_or_else(|| "mimi_read_lines_json not declared".to_string())?;
-        let raw_ptr = self.builder.build_call(
+        let func = self.get_runtime_fn("mimi_read_lines_json")?;
+        let raw_ptr = self.build_call(
             func,
             &[BasicMetadataValueEnum::PointerValue(path_ptr)],
             "read_lines_json_call",
@@ -1938,9 +1847,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err(CompileError::WrongArgCount("exec_pipe expects 1 argument".to_string()));
         }
         let cmd_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let func = self.module.get_function("mimi_exec_pipe")
-            .ok_or_else(|| "mimi_exec_pipe not declared".to_string())?;
-        let raw_ptr = self.builder.build_call(
+        let func = self.get_runtime_fn("mimi_exec_pipe")?;
+        let raw_ptr = self.build_call(
             func,
             &[BasicMetadataValueEnum::PointerValue(cmd_ptr)],
             "exec_pipe_call",
