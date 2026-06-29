@@ -1,0 +1,9 @@
+# Generated build artifacts
+libxmath.so
+libmimi_runtime_shim.so
+c_main
+rust_main
+xmath*.so
+mimi_ffi.h
+bindings/
+runtime_shim/target/
