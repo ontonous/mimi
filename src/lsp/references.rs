@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ast::Item;
+use crate::ast::{Item, Pattern, Stmt};
 use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
@@ -67,6 +67,55 @@ impl LspServer {
                         }));
                     }
                     _ => {}
+                }
+            }
+            // v0.28.11: variable goto-definition: scan function bodies
+            // for `let name = ...` and function parameters.
+            for item in &file.items {
+                if let Item::Func(f) = item {
+                    // Check function parameters
+                    if f.params.iter().any(|p| p.name == word) {
+                        // Parameter definition is at the function signature
+                        let def_line = f.pos.0.saturating_sub(1);
+                        let param_offset = f
+                            .params
+                            .iter()
+                            .take_while(|p| p.name != word)
+                            .map(|p| p.name.len() + 2) // "name, " per param
+                            .sum::<usize>();
+                        return Some(serde_json::json!({
+                            "uri": uri,
+                            "range": {
+                                "start": { "line": def_line, "character": f.pos.1 + param_offset },
+                                "end": { "line": def_line, "character": f.pos.1 + param_offset + word.len() }
+                            }
+                        }));
+                    }
+                    // Check let bindings: find `let name =` or `let name:` via
+                    // text scan (fast, avoids deep AST traversal)
+                    for stmt in f.body.iter() {
+                        if let Stmt::Let {
+                            pat: Pattern::Variable(name),
+                            ..
+                        } = stmt
+                        {
+                            if name == word {
+                                // Find the let statement line
+                                let text_lines: Vec<&str> = text.lines().collect();
+                                let text_line = text_lines
+                                    .iter()
+                                    .position(|l| l.contains(&format!("let {}", name)))
+                                    .unwrap_or(0);
+                                return Some(serde_json::json!({
+                                    "uri": uri,
+                                    "range": {
+                                        "start": { "line": text_line, "character": 0 },
+                                        "end": { "line": text_line, "character": 4 + name.len() } // "let " + name
+                                    }
+                                }));
+                            }
+                        }
+                    }
                 }
             }
         }

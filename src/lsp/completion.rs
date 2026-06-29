@@ -1,11 +1,11 @@
 use serde_json::Value;
 
-use crate::ast::Item;
+use crate::ast::{Item, Stmt, Type};
 use crate::lsp::LspServer;
 
 impl LspServer {
     /// Determine completion context from cursor position
-    fn completion_context(text: &str, line: usize, character: usize) -> &'static str {
+    pub(crate) fn completion_context(text: &str, line: usize, character: usize) -> &'static str {
         let lines: Vec<&str> = text.lines().collect();
         let current_line = match lines.get(line) {
             Some(l) => l,
@@ -14,8 +14,14 @@ impl LspServer {
         let before_cursor: String = current_line.chars().take(character).collect();
         let trimmed = before_cursor.trim();
 
-        // After `.` — method completion
+        // After `.` — distinguish self. (actor/impl method completion)
+        // from obj. (record field + method completion). Both go to the
+        // same "dot" branch in compute_completion; the difference is
+        // whether the receiver is `self`.
         if trimmed.ends_with('.') {
+            if trimmed == "self." {
+                return "self_dot";
+            }
             return "dot";
         }
         // After `::` — qualified path completion
@@ -43,14 +49,42 @@ impl LspServer {
         "top"
     }
 
+    /// Extract the identifier immediately preceding the dot at the
+    /// cursor position (for `obj.` or `self.` completions). Returns
+    /// None if the context doesn't match.
+    fn extract_obj_ident_for_dot(text: &str, line: usize, character: usize) -> Option<String> {
+        let current_line = text.lines().nth(line)?;
+        let before_cursor: String = current_line.chars().take(character).collect();
+        // Trim trailing whitespace and a single `.`
+        let trimmed = before_cursor.trim_end();
+        if !trimmed.ends_with('.') {
+            return None;
+        }
+        let before_dot = trimmed[..trimmed.len() - 1].trim_end();
+        // The last identifier token (letters, digits, underscore, $)
+        let last = before_dot
+            .rsplit(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+            .next()?;
+        if last.is_empty() {
+            None
+        } else {
+            Some(last.to_string())
+        }
+    }
+
     pub fn compute_completion(&mut self, text: &str, line: usize, character: usize) -> Vec<Value> {
         // Load stdlib completions lazily on first completion request
         self.load_stdlib_completions();
         let mut items = Vec::new();
         let context = Self::completion_context(text, line, character);
 
+        // v0.28.11: For "dot" and "self_dot" contexts, also offer record
+        // fields when the object before the dot is a known typed local.
+        let obj_ident = Self::extract_obj_ident_for_dot(text, line, character);
+        let file = self.parse_with_recovery(text);
+
         match context {
-            "dot" => {
+            "dot" | "self_dot" => {
                 let methods = vec![
                     ("to_string", "to_string() -> string"),
                     ("len", "len() -> i64"),
@@ -80,7 +114,30 @@ impl LspServer {
                         "insertTextFormat": 2,
                     }));
                 }
-                if let Some(file) = self.parse_with_recovery(text) {
+                if let Some(ref file) = file {
+                    // v0.28.11: When the receiver before the dot is a
+                    // typed local, surface the record's fields as
+                    // CompletionItemKind::Field (5).
+                    if let Some(obj_name) = &obj_ident {
+                        if let Some(type_name) = Self::find_local_type_name(&file.items, obj_name) {
+                            for item in &file.items {
+                                if let Item::Type(td) = item {
+                                    if td.name == type_name {
+                                        if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                                            for f in fields {
+                                                items.push(serde_json::json!({
+                                                    "label": f.name,
+                                                    "kind": 5, // Field
+                                                    "detail": format!("field {}: {}", f.name, crate::core::fmt_type(&f.ty)),
+                                                    "insertText": f.name.clone(),
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for item in &file.items {
                         match item {
                             Item::Trait(t) => {
@@ -458,5 +515,39 @@ impl LspServer {
         items.extend(self.stdlib_completions_raw.iter().cloned());
 
         items
+    }
+
+    /// v0.28.11: Find the declared type name of a local variable in
+    /// any function body in `items`. Scans all `let name: T = ...`
+    /// bindings. Returns the type name (or None) — does not perform
+    /// full type inference, only matches explicit annotations.
+    fn find_local_type_name(items: &[Item], target: &str) -> Option<String> {
+        // Special case: `self` refers to the enclosing actor/impl type.
+        if target == "self" {
+            for item in items {
+                match item {
+                    Item::Actor(a) => return Some(a.name.clone()),
+                    Item::Impl(imp) => return Some(imp.type_name.clone()),
+                    _ => {}
+                }
+            }
+        }
+        for item in items {
+            if let Item::Func(f) = item {
+                for stmt in &f.body {
+                    if let Stmt::Let {
+                        pat: crate::ast::Pattern::Variable(name),
+                        ty: Some(Type::Name(type_name, _)),
+                        ..
+                    } = stmt
+                    {
+                        if name == target {
+                            return Some(type_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
