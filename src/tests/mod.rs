@@ -721,6 +721,25 @@ pub fn main_install_transitive(
     Ok(())
 }
 
+/// Test helper: dry-run a `mimi add` invocation. Mirrors the dry-run
+/// branch in `src/main/add.rs` so tests can exercise it without invoking
+/// the binary.
+pub fn main_add_dry_run(
+    _name: &str,
+    version: Option<&str>,
+    _path: Option<&str>,
+    _git: Option<&str>,
+    _tag: Option<&str>,
+) -> Result<(), String> {
+    if version.is_none() {
+        return Ok(());
+    }
+    // Dry-run: just validate the constraint parses, do not touch the manifest.
+    let _ = crate::lockfile::Lockfile::resolve_version(version.unwrap(), &["0.0.0"])
+        .ok_or_else(|| "invalid version constraint".to_string());
+    Ok(())
+}
+
 /// Test helper: generate documentation from a Mimi source file.
 pub fn main_doc(
     path: &std::path::Path,

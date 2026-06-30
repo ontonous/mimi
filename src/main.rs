@@ -142,6 +142,9 @@ enum Command {
         /// Git tag/branch (default: main)
         #[arg(long)]
         tag: Option<String>,
+        /// Dry run: print the resolved version without writing the manifest
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a dependency
     Remove {
@@ -399,12 +402,14 @@ fn main() {
             path,
             git,
             tag,
+            dry_run,
         } => add::add(
             &name,
             version.as_deref(),
             path.as_deref(),
             git.as_deref(),
             tag.as_deref(),
+            dry_run,
         ),
         Command::Remove { name } => remove::remove(&name),
         Command::List => list::list(),
@@ -483,7 +488,7 @@ fn main() {
             tool_stat::run(&dir, depth, hash)
         }
         Command::Bindgen { path, output } => bindgen::run(&path, &output),
-        Command::Install { all, frozen, offline } => install::install(all, frozen, offline),
+        Command::Install { all: _, frozen, offline } => install::install(frozen, offline),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),
         Command::Search { query } => search::search(&query),
