@@ -664,6 +664,24 @@ impl LspServer {
                 {
                     return Some(h);
                 }
+
+                // 3. Return value hover: if cursor is on the function body's
+                // last expression (implicit return value), show the return type.
+                if let Some(ret_ty) = &f.ret {
+                    if Self::word_in_last_expr(&f.body, word) {
+                        let detail = format!(
+                            "**returns** `{}` (from `{}`)",
+                            Self::type_display(ret_ty),
+                            f.name
+                        );
+                        return Some(serde_json::json!({
+                            "contents": {
+                                "kind": "markdown",
+                                "value": detail
+                            }
+                        }));
+                    }
+                }
             }
         }
         None
@@ -914,6 +932,41 @@ impl LspServer {
             Expr::Ident(name) => Some(name.clone()),
             Expr::Field(obj, _) => Self::strip_field_chain(obj),
             _ => None,
+        }
+    }
+
+    /// Check whether `word` appears anywhere in the block's last
+    /// expression (implicit return). Used to trigger return-type hover.
+    fn word_in_last_expr(block: &[Stmt], word: &str) -> bool {
+        let last = match block.last() {
+            Some(Stmt::Expr(e)) | Some(Stmt::Return(Some(e))) => e,
+            _ => return false,
+        };
+        Self::expr_contains_word(last, word)
+    }
+
+    /// Recursively checks whether `word` appears in an expression as an
+    /// Ident, a substring of a Literal display, or a Call callee name.
+    fn expr_contains_word(e: &Expr, w: &str) -> bool {
+        match e {
+            Expr::Ident(name) => name == w,
+            Expr::Literal(lit) => format!("{:?}", lit).contains(w),
+            Expr::Field(obj, name) => name == w || Self::expr_contains_word(obj, w),
+            Expr::Index(obj, idx) => {
+                Self::expr_contains_word(obj, w) || Self::expr_contains_word(idx, w)
+            }
+            Expr::Call(callee, args) => {
+                Self::expr_contains_word(callee, w)
+                    || args.iter().any(|a| Self::expr_contains_word(a, w))
+            }
+            Expr::Binary(_, l, r) => {
+                Self::expr_contains_word(l, w) || Self::expr_contains_word(r, w)
+            }
+            Expr::Unary(_, inner) => Self::expr_contains_word(inner, w),
+            Expr::Tuple(elems) | Expr::List(elems) => {
+                elems.iter().any(|e| Self::expr_contains_word(e, w))
+            }
+            _ => false,
         }
     }
 }

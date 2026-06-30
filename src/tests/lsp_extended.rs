@@ -1646,4 +1646,88 @@ fn lsp_definition_let_variable() {
     );
 }
 
+// ===================== v0.28.11: 返回值 Hover =====================
+
+#[test]
+fn lsp_hover_return_value_shows_ret_type() {
+    // Hover on the last expression (implicit return) should show the
+    // function's return type. Hover on a function call `fib(5)` in the
+    // return expression — `fib` is an Ident, not a param/let name.
+    let server = LspServer::new();
+    let text = "func main() -> i32 { 2 * fib(5) }";
+    // Cursor on `fib` at col 26 (inside body's last expression)
+    let result = server.compute_hover(text, 0, 26);
+    assert!(result.is_some(), "should hover on return value expression");
+    let contents = result
+        .unwrap()
+        .get("contents")
+        .and_then(|c| c.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        contents.contains("returns") && contents.contains("i32"),
+        "should show return type 'i32', got: {}",
+        contents
+    );
+}
+
+// ===================== v0.28.11: Scope-aware Rename =====================
+
+#[test]
+fn lsp_rename_scope_aware_local_variable() {
+    // Rename on a let-bound variable should rename all occurrences.
+    let server = LspServer::new();
+    let text = "func main() -> i32 {\n    let x: i32 = 42\n    println(x)\n    0\n}";
+    // Cursor on `x` at line 2, col 12
+    let result = server.compute_rename(text, 2, 12, "file:///test.mimi", "y");
+    assert!(result.is_some(), "local variable rename should succeed");
+    let resp = result.unwrap();
+    let entries = resp["changes"]["file:///test.mimi"]
+        .as_array()
+        .expect("rename changes");
+    // Should rename both the let-binding and the usage on line 3
+    assert!(
+        entries.len() >= 2,
+        "should rename at least 2 occurrences (let + use), got: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn lsp_rename_scope_aware_skips_global() {
+    // Rename on a function name (global symbol) should be rejected to
+    // prevent false-positive rename of local variables with the same name.
+    let server = LspServer::new();
+    let text = "func foo() -> i32 { 0 }\nfunc main() -> i32 { foo() }";
+    // Cursor on `foo` at line 0, col 5
+    let result = server.compute_rename(text, 0, 5, "file:///test.mimi", "bar");
+    assert!(
+        result.is_none(),
+        "global function rename should be rejected to avoid false positives"
+    );
+}
+
+#[test]
+fn lsp_rename_scope_aware_parameter() {
+    // Rename on a function parameter should rename all occurrences within
+    // the function body, but NOT affect other functions with parameters
+    // of the same name.
+    let server = LspServer::new();
+    let text = "func add(x: i32, y: i32) -> i32 { x + y }";
+    // Cursor on `x` at col 10 (parameter)
+    let result = server.compute_rename(text, 0, 10, "file:///test.mimi", "a");
+    assert!(result.is_some(), "parameter rename should succeed");
+    let resp = result.unwrap();
+    let entries = resp["changes"]["file:///test.mimi"]
+        .as_array()
+        .expect("rename changes");
+    // Should rename both the parameter declaration and usage: `x: i32` → `a: i32`, `x + y` → `a + y`
+    assert!(
+        entries.len() >= 2,
+        "parameter should rename decl + usage, got: {:?}",
+        entries
+    );
+}
+
 // ===================== End Regression Tests =====================

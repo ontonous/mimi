@@ -291,7 +291,10 @@ impl LspServer {
         references
     }
 
-    /// Rename all occurrences of the symbol at the given position
+    /// Rename all occurrences of the symbol at the given position.
+    /// v0.28.11: scope-aware — only renames local variables (let bindings
+    /// and function parameters), avoiding false matches on global symbols
+    /// with the same name.
     pub fn compute_rename(
         &self,
         text: &str,
@@ -302,6 +305,39 @@ impl LspServer {
     ) -> Option<Value> {
         let word = self.get_word_at(text, line, character);
         if word.is_empty() || word == new_name {
+            return None;
+        }
+
+        // v0.28.11: Check whether the word at cursor is a local variable
+        // (let binding or function parameter).  Only local variables get
+        // renamed; global symbols (func/type/module names) are skipped to
+        // avoid false positives.
+        let is_local = if let Some(file) = self.parse_with_recovery(text) {
+            let mut found = false;
+            for item in &file.items {
+                if let Item::Func(f) = item {
+                    if f.params.iter().any(|p| p.name == word) {
+                        found = true;
+                    }
+                    for stmt in &f.body {
+                        if let Stmt::Let {
+                            pat: Pattern::Variable(ref vname),
+                            ..
+                        } = stmt
+                        {
+                            if vname.as_str() == word {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        } else {
+            false
+        };
+
+        if !is_local {
             return None;
         }
 

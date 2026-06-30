@@ -265,14 +265,32 @@ impl LspServer {
 
             // Read JSON body
             let mut body = vec![0u8; len];
+
+            // Consume the \r\n separator between the Content-Length header
+            // line and the JSON body.  read_line includes the trailing \n
+            // but the protocol spec requires \r\n before the body.  The
+            // \r\n after the header line is the separator — consume both
+            // bytes so read_exact starts at the actual JSON body.
+            {
+                let mut sep = [0u8; 2];
+                if reader.read(&mut sep).unwrap_or(0) < 2 {
+                    // If the separator is just a single \n (some clients),
+                    // the first byte consumed is the \n.  A second read
+                    // would be the next header — bail out and let the loop
+                    // re-read the header.
+                    return Err("short separator".to_string());
+                }
+            }
+
             reader
                 .read_exact(&mut body)
                 .map_err(|e| format!("read error: {}", e))?;
             let body = String::from_utf8(body).map_err(|e| format!("utf8 error: {}", e))?;
 
-            // Skip empty line after body — use the same locked reader to avoid protocol desync
-            let mut newline = [0u8; 1];
-            let _ = reader.read(&mut newline);
+            // Trailing empty line after body is consumed by the header-read loop
+            // below: `read_line` will return it as an empty line that doesn't
+            // start with "Content-Length:", so the loop continues to the
+            // actual Content-Length header of the next message.
 
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
