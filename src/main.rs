@@ -56,7 +56,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-    #[command(name = "mimi", version = "0.28.12-dev", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.28.12-dev", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
@@ -488,7 +488,11 @@ fn main() {
             tool_stat::run(&dir, depth, hash)
         }
         Command::Bindgen { path, output } => bindgen::run(&path, &output),
-        Command::Install { all: _, frozen, offline } => install::install(frozen, offline),
+        Command::Install {
+            all: _,
+            frozen,
+            offline,
+        } => install::install(frozen, offline),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),
         Command::Search { query } => search::search(&query),

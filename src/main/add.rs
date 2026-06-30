@@ -16,8 +16,8 @@ pub(crate) fn add(
 
     // Dry-run: report what would be written, then exit without touching the manifest.
     if dry_run {
-        let kind = if git.is_some() {
-            format!("git+{}@{}", git.unwrap(), tag.unwrap_or("main"))
+        let kind = if let Some(g) = git {
+            format!("git+{}@{}", g, tag.unwrap_or("main"))
         } else if let Some(p) = path {
             format!("path:{}", p)
         } else {
@@ -50,9 +50,7 @@ pub(crate) fn add(
                 .collect();
             let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
             let constraint = version.unwrap_or("*");
-            if let Some(picked) =
-                lockfile::Lockfile::resolve_version(constraint, &version_refs)
-            {
+            if let Some(picked) = lockfile::Lockfile::resolve_version(constraint, &version_refs) {
                 let mut lock =
                     lockfile::Lockfile::load(&dir)?.unwrap_or_else(lockfile::Lockfile::new);
                 lock.add_package(name, &picked, Some("registry"), None);
@@ -63,10 +61,7 @@ pub(crate) fn add(
                         name, constraint, picked
                     );
                 } else {
-                    println!(
-                        "✓ Added dependency '{}' (resolved v{})",
-                        name, picked
-                    );
+                    println!("✓ Added dependency '{}' (resolved v{})", name, picked);
                 }
                 manifest.save(&dir)?;
                 return Ok(());

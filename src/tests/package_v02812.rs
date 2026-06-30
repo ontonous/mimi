@@ -53,10 +53,7 @@ fn add_writes_versioned_registry_dep() {
 
 #[test]
 fn add_writes_path_dep_without_version() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_add_path_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_add_path_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut m = Manifest::new("app");
     m.add_dependency("local-lib", None, Some("../local-lib"), None, None);
@@ -74,10 +71,7 @@ fn add_writes_path_dep_without_version() {
 
 #[test]
 fn add_writes_git_dep_with_tag() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_add_git_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_add_git_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut m = Manifest::new("app");
     m.add_dependency(
@@ -103,10 +97,7 @@ fn add_writes_git_dep_with_tag() {
 
 #[test]
 fn add_replaces_existing_dep() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_add_replace_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_add_replace_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut m = Manifest::new("app");
     m.add_dependency("foo", Some("^1.0"), None, None, None);
@@ -125,10 +116,7 @@ fn add_replaces_existing_dep() {
 
 #[test]
 fn remove_drops_dep_and_lockfile_entry() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_remove_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_remove_{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("mkdir");
 
     let mut m = Manifest::new("app");
@@ -141,9 +129,7 @@ fn remove_drops_dep_and_lockfile_entry() {
     lock.add_package("bar", "2.0.0", Some("registry"), None);
     lock.save(&root).expect("lock save");
 
-    let mut loaded = Manifest::load(&root)
-        .expect("load")
-        .expect("present");
+    let mut loaded = Manifest::load(&root).expect("load").expect("present");
     assert!(loaded.remove_dependency("foo"));
     loaded.save(&root).expect("save after remove");
 
@@ -194,10 +180,8 @@ entry = "main.mimi"
 /// `mimi install` semantics: re-running should be a no-op if lockfile + deps are present.
 #[test]
 fn install_is_idempotent_second_run_noop() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_install_idem_{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("mimi_v02812_install_idem_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -218,13 +202,11 @@ fn install_is_idempotent_second_run_noop() {
     assert!(lock_after_first.get_package("leaf").is_some());
     let checksum_first = lock_after_first
         .get_package("leaf")
-        .and_then(|e| e.checksum.clone());
-    let checksum_first = if checksum_first.is_some() {
-        checksum_first.unwrap()
-    } else {
-        let dst = project.join(".mimi").join("deps").join("leaf");
-        pkg_registry::compute_dir_checksum(&dst).expect("cs")
-    };
+        .and_then(|e| e.checksum.clone())
+        .unwrap_or_else(|| {
+            let dst = project.join(".mimi").join("deps").join("leaf");
+            pkg_registry::compute_dir_checksum(&dst).expect("cs")
+        });
 
     // Second install: should be idempotent.
     main_install_transitive(&project, &reg).expect("second install ok");
@@ -232,10 +214,10 @@ fn install_is_idempotent_second_run_noop() {
         .expect("load")
         .expect("present");
     let entry2 = lock_after_second.get_package("leaf").expect("leaf present");
-    let checksum_second = entry2
-        .checksum
-        .clone()
-        .unwrap_or_else(|| pkg_registry::compute_dir_checksum(&project.join(".mimi").join("deps").join("leaf")).expect("cs"));
+    let checksum_second = entry2.checksum.clone().unwrap_or_else(|| {
+        pkg_registry::compute_dir_checksum(&project.join(".mimi").join("deps").join("leaf"))
+            .expect("cs")
+    });
     assert_eq!(checksum_first, checksum_second, "checksum must be stable");
     assert_eq!(entry2.version, "1.0.0");
 
@@ -246,10 +228,7 @@ fn install_is_idempotent_second_run_noop() {
 
 #[test]
 fn tree_lists_direct_and_transitive_deps() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_tree_walk_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_tree_walk_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -268,8 +247,11 @@ entry = "main.mimi"
 name = "leaf"
 version = "^1.0"
 "#;
-    std::fs::write(reg.join("middle").join("1.0.0").join("mimi.toml"), middle_manifest)
-        .expect("write middle manifest");
+    std::fs::write(
+        reg.join("middle").join("1.0.0").join("mimi.toml"),
+        middle_manifest,
+    )
+    .expect("write middle manifest");
 
     let mut m = Manifest::new("app");
     m.add_dependency("middle", Some("^1.0"), None, None, None);
@@ -280,8 +262,14 @@ version = "^1.0"
 
     // Verify the installed dep dir layout
     let deps_dir = project.join(".mimi").join("deps");
-    assert!(deps_dir.join("middle").join("mimi.toml").exists(), "middle installed");
-    assert!(deps_dir.join("leaf").join("mimi.toml").exists(), "leaf installed (transitive)");
+    assert!(
+        deps_dir.join("middle").join("mimi.toml").exists(),
+        "middle installed"
+    );
+    assert!(
+        deps_dir.join("leaf").join("mimi.toml").exists(),
+        "leaf installed (transitive)"
+    );
 
     // Lockfile should have both
     let lock = crate::lockfile::Lockfile::load(&project)
@@ -351,10 +339,7 @@ fn lockfile_entry_round_trip_preserves_checksum() {
         Some("git+https://example.com/foo.git"),
         Some("abc123def456"),
     );
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_lockfile_rt_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_lockfile_rt_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     lf.save(&dir).expect("save");
     let loaded = crate::lockfile::Lockfile::load(&dir)
@@ -383,9 +368,36 @@ fn lockfile_replaces_existing_entry() {
 #[test]
 fn dependency_supports_all_source_kinds() {
     let cases = vec![
-        ("registry", Dependency { name: "r".into(), version: Some("^1".into()), path: None, git: None, tag: None }),
-        ("path",     Dependency { name: "p".into(), version: None, path: Some("./p".into()), git: None, tag: None }),
-        ("git",      Dependency { name: "g".into(), version: None, path: None, git: Some("https://x/g".into()), tag: Some("main".into()) }),
+        (
+            "registry",
+            Dependency {
+                name: "r".into(),
+                version: Some("^1".into()),
+                path: None,
+                git: None,
+                tag: None,
+            },
+        ),
+        (
+            "path",
+            Dependency {
+                name: "p".into(),
+                version: None,
+                path: Some("./p".into()),
+                git: None,
+                tag: None,
+            },
+        ),
+        (
+            "git",
+            Dependency {
+                name: "g".into(),
+                version: None,
+                path: None,
+                git: Some("https://x/g".into()),
+                tag: Some("main".into()),
+            },
+        ),
     ];
     let mut m = Manifest::new("app");
     for (_, d) in cases {
@@ -408,10 +420,7 @@ fn dependency_supports_all_source_kinds() {
 
 #[test]
 fn path_dependency_copies_to_deps_dir() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_path_dep_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_path_dep_{}", std::process::id()));
     let lib = root.join("my-lib");
     let project = root.join("project");
     std::fs::create_dir_all(&lib).expect("lib");
@@ -451,10 +460,7 @@ entry = "main.mimi"
 
 #[test]
 fn install_breaks_cycles_in_transitive_graph() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_cycle_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_cycle_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -481,8 +487,16 @@ entry = "main.mimi"
 name = "pkg-a"
 version = "^1.0"
 "#;
-    std::fs::write(reg.join("pkg-a").join("1.0.0").join("mimi.toml"), a_with_dep).expect("write a");
-    std::fs::write(reg.join("pkg-b").join("1.0.0").join("mimi.toml"), b_with_dep).expect("write b");
+    std::fs::write(
+        reg.join("pkg-a").join("1.0.0").join("mimi.toml"),
+        a_with_dep,
+    )
+    .expect("write a");
+    std::fs::write(
+        reg.join("pkg-b").join("1.0.0").join("mimi.toml"),
+        b_with_dep,
+    )
+    .expect("write b");
 
     let mut m = Manifest::new("app");
     m.add_dependency("pkg-a", Some("^1.0"), None, None, None);
@@ -490,7 +504,11 @@ version = "^1.0"
     std::fs::write(project.join("main.mimi"), "func main() {}").expect("write main");
 
     let result = main_install_transitive(&project, &reg);
-    assert!(result.is_ok(), "cycle should be broken by visited set: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "cycle should be broken by visited set: {:?}",
+        result.err()
+    );
 
     let lock = crate::lockfile::Lockfile::load(&project)
         .expect("load")
@@ -505,10 +523,7 @@ version = "^1.0"
 
 #[test]
 fn install_dedups_diamond_transitive() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_diamond_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_diamond_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -535,11 +550,27 @@ name = "dep-d"
 version = "^1.0"
 "#;
     std::fs::create_dir_all(reg.join("dep-b").join("1.0.0")).expect("b dir");
-    std::fs::write(reg.join("dep-b").join("1.0.0").join("mimi.toml"), b_manifest).expect("b");
-    std::fs::write(reg.join("dep-b").join("1.0.0").join("main.mimi"), "func depb() {}").expect("b main");
+    std::fs::write(
+        reg.join("dep-b").join("1.0.0").join("mimi.toml"),
+        b_manifest,
+    )
+    .expect("b");
+    std::fs::write(
+        reg.join("dep-b").join("1.0.0").join("main.mimi"),
+        "func depb() {}",
+    )
+    .expect("b main");
     std::fs::create_dir_all(reg.join("dep-c").join("2.0.0")).expect("c dir");
-    std::fs::write(reg.join("dep-c").join("2.0.0").join("mimi.toml"), c_manifest).expect("c");
-    std::fs::write(reg.join("dep-c").join("2.0.0").join("main.mimi"), "func depc() {}").expect("c main");
+    std::fs::write(
+        reg.join("dep-c").join("2.0.0").join("mimi.toml"),
+        c_manifest,
+    )
+    .expect("c");
+    std::fs::write(
+        reg.join("dep-c").join("2.0.0").join("main.mimi"),
+        "func depc() {}",
+    )
+    .expect("c main");
 
     let mut m = Manifest::new("app");
     m.add_dependency("dep-b", Some("^1.0"), None, None, None);
@@ -556,8 +587,10 @@ version = "^1.0"
     assert_eq!(d_count, 1, "diamond dep-d should be deduped in lockfile");
     let mut names: Vec<String> = lock.package.iter().map(|p| p.name.clone()).collect();
     names.sort();
-    let expected: HashSet<String> =
-        ["dep-b", "dep-c", "dep-d"].iter().map(|s| s.to_string()).collect();
+    let expected: HashSet<String> = ["dep-b", "dep-c", "dep-d"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let got: HashSet<String> = names.iter().cloned().collect();
     assert_eq!(got, expected);
 
@@ -587,10 +620,7 @@ fn lockfile_replaces_version_on_resolver_pick() {
 
 #[test]
 fn install_with_no_dependencies_is_noop() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_noop_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_noop_{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("mkdir");
     let m = Manifest::new("app");
     m.save(&root).expect("save");
@@ -611,10 +641,7 @@ fn install_with_no_dependencies_is_noop() {
 
 #[test]
 fn install_dry_run_does_not_touch_disk() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_dryrun_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_dryrun_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -634,7 +661,10 @@ fn install_dry_run_does_not_touch_disk() {
     assert_eq!(direct_deps[0].version.as_deref(), Some("^1.0"));
 
     // No install was actually run, so .mimi/deps and mimi.lock should not exist.
-    assert!(!project.join(".mimi").exists(), "dry-run must not create .mimi");
+    assert!(
+        !project.join(".mimi").exists(),
+        "dry-run must not create .mimi"
+    );
     assert!(
         crate::lockfile::Lockfile::load(&project)
             .expect("load")
@@ -649,7 +679,8 @@ fn install_dry_run_does_not_touch_disk() {
 
 /// Helper that mimics the install flow's frozen check.
 fn install_frozen(project: &Path) -> Result<(), String> {
-    let lock = crate::lockfile::Lockfile::load(project)?.ok_or_else(|| "no lockfile".to_string())?;
+    let lock =
+        crate::lockfile::Lockfile::load(project)?.ok_or_else(|| "no lockfile".to_string())?;
     let manifest = Manifest::load(project)?.ok_or_else(|| "no manifest".to_string())?;
     let deps = manifest.dependencies.unwrap_or_default();
     for dep in &deps {
@@ -667,10 +698,7 @@ fn install_frozen(project: &Path) -> Result<(), String> {
 
 #[test]
 fn install_frozen_passes_when_lockfile_and_cache_match() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_frozen_ok_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_frozen_ok_{}", std::process::id()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("proj");
 
@@ -696,10 +724,7 @@ fn install_frozen_passes_when_lockfile_and_cache_match() {
 
 #[test]
 fn install_frozen_fails_when_cache_missing() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_frozen_fail_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_frozen_fail_{}", std::process::id()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("proj");
 
@@ -715,7 +740,11 @@ fn install_frozen_fails_when_cache_missing() {
     let res = install_frozen(&project);
     assert!(res.is_err(), "frozen must fail when cache missing");
     let err = res.err().unwrap();
-    assert!(err.contains("missing") || err.contains("frozen"), "got: {}", err);
+    assert!(
+        err.contains("missing") || err.contains("frozen"),
+        "got: {}",
+        err
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -726,10 +755,8 @@ fn install_frozen_fails_when_cache_missing() {
 fn tree_handles_dep_not_yet_installed() {
     // When lockfile has a dep but .mimi/deps is empty, tree should still
     // show it from the manifest + lockfile.
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_tree_pending_{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("mimi_v02812_tree_pending_{}", std::process::id()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("proj");
 
@@ -769,10 +796,7 @@ fn install_unconstrained_picks_highest_in_registry() {
 
 #[test]
 fn remove_cleans_lockfile_and_cache_dir() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_remove_full_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_remove_full_{}", std::process::id()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("proj");
 
@@ -883,17 +907,18 @@ fn remove_idempotent_when_dep_missing_everywhere() {
 
 #[test]
 fn add_dry_run_does_not_modify_manifest() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_add_dryrun_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_add_dryrun_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let m = Manifest::new("app");
     m.save(&dir).expect("save");
 
     // Simulate: `mimi add foo@^1.0 --dry-run`
     let result = super::main_add_dry_run("foo", Some("^1.0"), None, None, None);
-    assert!(result.is_ok(), "dry-run should not error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "dry-run should not error: {:?}",
+        result.err()
+    );
 
     // Manifest must be unchanged.
     let loaded = Manifest::load(&dir).expect("load").expect("present");
@@ -927,10 +952,7 @@ fn add_dry_run_with_path_does_not_modify_manifest() {
 fn add_resolves_version_when_registry_present() {
     // When the registry has the package, add should pick a concrete version
     // and pre-populate the lockfile.
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_add_resolve_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_add_resolve_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -973,10 +995,7 @@ fn add_with_version_replaces_existing_lockfile_entry() {
 
 #[test]
 fn full_round_trip_manifest_install_lockfile() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_roundtrip_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_roundtrip_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
