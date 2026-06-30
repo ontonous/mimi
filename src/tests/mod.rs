@@ -72,6 +72,7 @@ pub(crate) mod manifest;
 pub(crate) mod mms_integration;
 pub(crate) mod net;
 pub(crate) mod package_management;
+pub(crate) mod package_v02812;
 pub(crate) mod property;
 pub(crate) mod transitive_deps;
 pub(crate) mod type_system_verification;
@@ -664,32 +665,49 @@ pub fn main_install_transitive(
 
         let dst = deps_dir.join(&dep.name);
 
-        // resolve_single_dep for registry-only (custom registry path)
-        // Reuse the function but override registry with the test reg dir
-        let pkg_dir = reg.join(&dep.name);
-        if !pkg_dir.exists() {
-            return Err(format!("package '{}' not found in registry", dep.name));
+        // Path dependency: copy from local source path. No version resolver.
+        if let Some(src_path) = &dep.path {
+            let src = std::path::PathBuf::from(src_path);
+            if !src.exists() {
+                return Err(format!(
+                    "path dependency '{}' not found at {}",
+                    dep.name, src_path
+                ));
+            }
+            if dst.exists() {
+                std::fs::remove_dir_all(&dst).ok();
+            }
+            crate::pkg_registry::copy_dir_recursive(&src, &dst)
+                .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+            lock.add_package(&dep.name, "*", Some(&format!("path:{}", src_path)), None);
+        } else {
+            // resolve_single_dep for registry-only (custom registry path)
+            // Reuse the function but override registry with the test reg dir
+            let pkg_dir = reg.join(&dep.name);
+            if !pkg_dir.exists() {
+                return Err(format!("package '{}' not found in registry", dep.name));
+            }
+
+            let version = dep.version.as_deref().unwrap_or("*");
+            let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
+                .map_err(|e| format!("failed to read registry: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .collect();
+            let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
+            let resolved_ver = crate::lockfile::Lockfile::resolve_version(version, &version_refs)
+                .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
+
+            let src = pkg_dir.join(&resolved_ver);
+            if dst.exists() {
+                std::fs::remove_dir_all(&dst).ok();
+            }
+            crate::pkg_registry::copy_dir_recursive(&src, &dst)
+                .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+
+            lock.add_package(&dep.name, &resolved_ver, Some("registry"), None);
         }
-
-        let version = dep.version.as_deref().unwrap_or("*");
-        let versions: Vec<String> = std::fs::read_dir(&pkg_dir)
-            .map_err(|e| format!("failed to read registry: {}", e))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .collect();
-        let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
-        let resolved_ver = crate::lockfile::Lockfile::resolve_version(version, &version_refs)
-            .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
-
-        let src = pkg_dir.join(&resolved_ver);
-        if dst.exists() {
-            std::fs::remove_dir_all(&dst).ok();
-        }
-        crate::pkg_registry::copy_dir_recursive(&src, &dst)
-            .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
-
-        lock.add_package(&dep.name, &resolved_ver, Some("registry"), None);
 
         let sub_deps = crate::pkg_resolve::read_transitive_deps(&dst, &visited);
         for sub_dep in sub_deps {
