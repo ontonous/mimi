@@ -765,6 +765,120 @@ fn install_unconstrained_picks_highest_in_registry() {
     assert!(available.contains(&v.as_str()));
 }
 
+// ===================== L1: remove cleans lockfile + cache =====================
+
+#[test]
+fn remove_cleans_lockfile_and_cache_dir() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_v02812_remove_full_{}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).expect("proj");
+
+    // Set up manifest with 2 deps
+    let mut m = Manifest::new("app");
+    m.add_dependency("foo", Some("^1.0"), None, None, None);
+    m.add_dependency("bar", Some("^2.0"), None, None, None);
+    m.save(&project).expect("save");
+
+    // Set up lockfile with 2 entries
+    let mut lf = crate::lockfile::Lockfile::new();
+    lf.add_package("foo", "1.0.0", Some("registry"), None);
+    lf.add_package("bar", "2.0.0", Some("registry"), None);
+    lf.save(&project).expect("lock save");
+
+    // Set up on-disk cache for both
+    let cache = project.join(".mimi").join("deps");
+    std::fs::create_dir_all(cache.join("foo")).expect("mkdir foo");
+    std::fs::create_dir_all(cache.join("bar")).expect("mkdir bar");
+    std::fs::write(cache.join("foo").join("marker.txt"), "x").expect("write foo");
+    std::fs::write(cache.join("bar").join("marker.txt"), "y").expect("write bar");
+
+    // Simulate mimi remove foo
+    let mut loaded_m = Manifest::load(&project).expect("load").expect("present");
+    assert!(loaded_m.remove_dependency("foo"));
+    loaded_m.save(&project).expect("save");
+
+    let mut loaded_l = crate::lockfile::Lockfile::load(&project)
+        .expect("load")
+        .expect("present");
+    assert!(loaded_l.remove_package("foo"));
+    loaded_l.save(&project).expect("save");
+
+    let dst = cache.join("foo");
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst).expect("rm foo");
+    }
+
+    // Verify
+    let after_m = Manifest::load(&project).expect("load").expect("present");
+    let deps = after_m.dependencies.as_ref().expect("deps");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].name, "bar");
+
+    let after_l = crate::lockfile::Lockfile::load(&project)
+        .expect("load")
+        .expect("present");
+    assert!(after_l.get_package("foo").is_none());
+    assert!(after_l.get_package("bar").is_some());
+
+    assert!(!cache.join("foo").exists(), "foo cache dir must be removed");
+    assert!(cache.join("bar").exists(), "bar cache dir must remain");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn remove_transitive_dep_not_in_manifest_still_cleans_lockfile() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_v02812_remove_transitive_{}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).expect("proj");
+
+    // Manifest does NOT list 'leaf' (it's transitive).
+    let mut m = Manifest::new("app");
+    m.add_dependency("middle", Some("^1.0"), None, None, None);
+    m.save(&project).expect("save");
+
+    // Lockfile has both
+    let mut lf = crate::lockfile::Lockfile::new();
+    lf.add_package("middle", "1.0.0", Some("registry"), None);
+    lf.add_package("leaf", "1.0.0", Some("registry"), None);
+    lf.save(&project).expect("save");
+
+    // Remove 'leaf' — should clean lockfile but not manifest.
+    let mut loaded_l = crate::lockfile::Lockfile::load(&project)
+        .expect("load")
+        .expect("present");
+    assert!(loaded_l.remove_package("leaf"));
+    loaded_l.save(&project).expect("save");
+
+    let after_m = Manifest::load(&project).expect("load").expect("present");
+    let deps = after_m.dependencies.as_ref().expect("deps");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].name, "middle");
+
+    let after_l = crate::lockfile::Lockfile::load(&project)
+        .expect("load")
+        .expect("present");
+    assert!(after_l.get_package("leaf").is_none());
+    assert!(after_l.get_package("middle").is_some());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn remove_idempotent_when_dep_missing_everywhere() {
+    let mut m = Manifest::new("app");
+    assert!(!m.remove_dependency("nope"));
+    let mut lf = crate::lockfile::Lockfile::new();
+    assert!(!lf.remove_package("nope"));
+    // No panic, no error.
+}
+
 // ===================== L1: add --dry-run =====================
 
 #[test]
