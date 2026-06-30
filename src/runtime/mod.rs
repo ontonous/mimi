@@ -2482,7 +2482,7 @@ pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::
             let s = String::from_utf8_lossy(&body).into_owned();
             alloc_c_string(&s)
         }
-        None => std::ptr::null_mut(),
+        None => alloc_c_string(""),
     }
 }
 
@@ -2515,7 +2515,7 @@ pub extern "C" fn mimi_http_post(
             let s = String::from_utf8_lossy(&body).into_owned();
             alloc_c_string(&s)
         }
-        None => std::ptr::null_mut(),
+        None => alloc_c_string(""),
     }
 }
 
