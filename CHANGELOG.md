@@ -1,6 +1,59 @@
 # Changelog
 
-## [Unreleased] — v0.28.12
+## [Unreleased] — v0.28.13
+
+### Added
+
+- **Standard library 扩展 (`std/mymath.mimi`)**:
+  - 三角函数：`sin`、`cos`、`tan`、`asin`、`acos`、`atan`（基于 libc libm）
+  - 双曲函数：`sinh`、`cosh`、`tanh`
+  - 对数与指数：`ln`、`log2`、`log10`、`exp`、`exp2`
+  - 概率分布采样：`random_normal()`（Box-Muller）、`random_uniform(a, b)`、
+    `random_exponential(lambda)`、`random_bernoulli(p)`、`random_int_range(lo, hi)`
+  - 数值工具：`cbrt`、`hypot3(x,y,z)`、通用 `pow_int(base, exp)`
+- **`std/array.mimi`** (新模块):
+  - `array_new(len, default)`、`array_get`、`array_set`、`array_len`
+  - `array_fill(arr, value)`、`array_slice(arr, start, end)`
+  - `array_rotate_left/right(arr, n)`、`array_binary_search(arr, target)`
+  - `array_reverse`、`array_sum`、`array_min`、`array_max`
+  - `array_equals`、`array_contains`、`array_index_of`
+- **`std/iter.mimi`** (新模块):
+  - `iter_range(start, end)` → 整数序列
+  - `iter_zip(list_a, list_b)` → `[(a0,b0), (a1,b1), ...]` 字符串对
+  - `iter_enumerate(list)` → `[(0, x0), (1, x1), ...]`
+  - `iter_take(list, n)`、`iter_drop(list, n)`、`iter_take_while`
+  - `iter_chain(a, b)`、`iter_repeat(value, n)`、`iter_reversed`
+  - `iter_count(list, pred_string)` 通过现有 filter 实现
+- **Codegen 优化骨架**:
+  - 小函数内联启发式（指令计数 < 20）— 编译时 inline 决策
+  - GVN 预备结构（pure function CSE 缓存：`fn_calls` 哈希表）
+  - 触发条件：callee 在 call site 无副作用且参数全为 SSA 值
+- **List growth factor 优化** (codegen `compile_push`):
+  - 不再每次 push 都 realloc，改为倍增（capacity 2x）
+  - 在 MimiList struct 中追加 `cap` 字段，记录当前分配的 capacity
+  - runtime helper `mimi_list_grow_if_needed` 处理 `cap == len` 时的容量增长
+- **stdlib API 文档自动生成**:
+  - `python3 scripts/gen_stdlib_docs.py` 同步覆盖新增的
+    `std/array.mimi` / `std/iter.mimi` 和 `std/mymath.mimi` 新增函数
+
+### Changed
+
+- `MimiList` struct layout 增加 `cap: i64` 字段（runtime ABI 变更，配套
+  `mimi_list_grow_if_needed` 旧→新结构迁移已包含）
+- codegen `compile_push` 改为 capacity 增长模式（向后兼容，runtime helper 处理
+  legacy `cap == 0` 列表）
+
+### Tests
+
+- 新增 `src/tests/stdlib_v02813.rs`，45 个 L1 测试覆盖：
+  - `std/mymath.mimi` 新增三角/对数/分布函数的双后端行为
+  - `std/array.mimi` 全函数的构造、访问、算法
+  - `std/iter.mimi` range/zip/enumerate/take/drop 等组合子的双后端等价性
+  - 数值精度边界：log(0)=−∞ 处理、exp(700) overflow、sin/cos 在边界值
+  - List growth factor 基准：N=10K 次 push 的 codegen 时长与指令数
+  - Inline 启发式回归：已知小函数被 inline 的 case 不回归
+
+## [v0.28.12] - 2026-07-01
 
 ### Added
 
