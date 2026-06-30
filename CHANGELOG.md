@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] — v0.28.12
+
+### Planned
+- `mimi add`/`install`/`tree`/`remove` 工作流加固：lockfile 一致性、幂等 install、`--dry-run`/`--offline` 标志
+- registry 协议草案 (`docs/registry-protocol.md`)
+- 包管理器测试覆盖（target +20 新测试）
+
 ## [v0.28.11] — 2026-06-30
 
 ### Added
