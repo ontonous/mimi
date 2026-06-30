@@ -1,6 +1,52 @@
 # Changelog
 
-## [Unreleased] — v0.28.10-dev
+## [Unreleased] — v0.28.11-dev
+
+### Added
+
+- **Hover 增强：变量、参数、record 字段**:
+  - `src/lsp/hover.rs` 新增 `hover_local` 辅助函数，扫描 `Item::Func` 的函数参数与函数体内的
+    `Stmt::Let` 绑定，返回变量/参数的类型声明。
+  - 新增 `hover_in_block` + `scan_stmt_for_field` + `resolve_field_hover` 递归 AST 遍历，
+    对 `obj.field` 访问解析 obj 的 let-声明类型，从 `Item::Type` 定义中查找字段类型。
+  - 新增 3 个 L1 测试：`lsp_hover_let_with_explicit_type`（变量）、
+    `lsp_hover_func_parameter`（参数）、`lsp_hover_record_field`（字段）。
+- **Completion 增强：record 字段补全、`self_dot` 上下文**:
+  - `src/lsp/completion.rs` "dot" 分支新增 record 字段补全：识别 obj 前的局部变量类型，
+    在 `Item::Type::Record` 中查找字段并输出 `CompletionItemKind::Field` (5) 条目。
+  - 新增 `find_local_type_name` 查找全局函数的 let 绑定类型；特殊处理 `self` → 返回 actor/impl 名。
+  - 新增 `extract_obj_ident_for_dot` 用于提取 dot 前的标识符。
+  - `completion_context` 新增 `"self_dot"` 上下文检测（`trimmed == "self."`）。
+  - 新增 2 个 L1 测试：`lsp_completion_record_fields`（`p.name`/`p.age` 字段补全）、
+    `lsp_completion_self_dot_context_detection`（`self.` 上下文）。
+- **Goto Definition 增强：变量 & 参数跳转**:
+  - `src/lsp/references.rs` `compute_definition` 新增函数参数与 `Stmt::Let` 变量定义跳转。
+  - 支持跳转到函数参数的声明位置（函数签名行）和 let 绑定的声明行。
+  - 新增 1 个 L1 测试：`lsp_definition_let_variable`（跳转到 let 行）。
+- **LSP 端到端测试**:
+  - 新增 `lsp_e2e_full_session` 测试，通过 `handle_message` 模拟 8 步完整会话：
+    初始化 → didOpen → hover → 定义 → 补全 → didChange → hover(后) → shutdown。
+- **结构化诊断验证**:
+  - 新增 `lsp_diagnostic_has_code_and_source` 测试，确认类型错误诊断包含 `code` 和 `source` 字段。
+
+### Changed
+
+- `completion_context` 改为 `pub(crate)` 以支持测试中直接调用。
+- `compute_hover` 新增局部绑定扫描路径，在顶层符号查找之前运行，对同一文件的 parse 结果进行类型感知搜索。
+- `compute_rename` 改为 scope-aware：只重命名 let 绑定和函数参数变量，拒绝全局符号。
+- LSP 协议修复：`Content-Length` header 与 JSON body 之间的 `\r\n` 分隔符在 `read_exact` 前被消耗。
+
+### Fixed
+
+- **返回值 Hover**：新增 `word_in_last_expr` + `expr_contains_word`，光标在函数体末尾表达式（隐式返回值）上时显示返回类型。
+- **Scope-aware Rename**：`compute_rename` 不再对全局函数/类型/模块执行纯字符串匹配重命名；通过解析 AST 收集参数和 let 绑定名称，仅对局部符号执行重命名。
+- **LSP protocol separator bug**：`Content-Length: N\r\n\r\n{body}` 中 `read_line` 读取 header 到 `\n` 后还剩 `\r\n`；原代码在 body 读取后吃 1 字节（吃掉了下一条消息的第一个字符）。修复后在 body 读取前吃 2 字节 `\r\n`。
+- **LSP e2e 增强**：创建 `src/tests/lsp_e2e.rs`，7 个端到端测试涵盖完整生命周期、hover、completion、rename、perf (<200ms)。
+- **手动验证脚本**：`scripts/verify-lsp.py` 通过 subprocess 启动 `mimi lsp` 并发送 Content-Length 格式消息，验证 5 项功能。
+
+### Security
+
+## [v0.28.10] — 2026-06-30
 
 ### Added
 

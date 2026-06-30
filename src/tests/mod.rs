@@ -95,6 +95,7 @@ pub(crate) mod dual_backend;
 
 // === Benchmark modules ===
 pub(crate) mod benchmarks;
+pub(crate) mod lsp_e2e;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;

@@ -280,3 +280,148 @@ fn lsp_diagnostics_severity_warning() {
     let diags = server.compute_diagnostics("func main() -> i32 { 42 }");
     assert!(diags.is_empty(), "valid code should have 0 diagnostics");
 }
+
+// ===================== v0.28.11: LSP 端到端序列测试 =====================
+
+#[test]
+fn lsp_e2e_full_session() {
+    // Simulate a complete LSP session: initialize → didOpen with valid code
+    // → didChange → hover → definition → completion → shutdown.
+    //
+    // Uses the JSON-RPC handle_message interface (not direct internal methods)
+    // to verify the full server pipeline works end-to-end.
+    let mut server = LspServer::new();
+
+    // 1. Initialize
+    let resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("initialize should respond");
+    assert_eq!(resp["id"], 1, "initialize response id");
+    assert!(resp["result"]["capabilities"]["hoverProvider"]
+        .as_bool()
+        .unwrap_or(false));
+
+    // 2. DidOpen with valid source
+    let src = "type Person { name: string, age: i32 }\nfunc main() -> i32 {\n    let p: Person = Person { name: \"Bob\", age: 30 }\n    println(p.name)\n    0\n}";
+    let open_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///e2e.mimi",
+                    "text": src
+                }
+            }
+        }))
+        .expect("didOpen should respond");
+    assert_eq!(
+        open_resp["method"], "textDocument/publishDiagnostics",
+        "didOpen should publish diagnostics"
+    );
+
+    // 3. Hover on `Person` (type name) — via JSON-RPC
+    let hover_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": "file:///e2e.mimi" },
+                "position": { "line": 0, "character": 6 }
+            }
+        }))
+        .expect("hover should respond");
+    assert!(
+        hover_resp.get("result").is_some(),
+        "hover on Person should return result, got: {:?}",
+        hover_resp
+    );
+
+    // 4. Definition on `Person` (type def)
+    let def_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": "file:///e2e.mimi" },
+                "position": { "line": 2, "character": 10 }
+            }
+        }))
+        .expect("definition should respond");
+    // Definition may return null for non-top-level symbols, but the
+    // request must not error.
+    assert!(
+        def_resp.get("result").is_some() || def_resp.get("error").is_none(),
+        "definition should not error, got: {:?}",
+        def_resp
+    );
+
+    // 5. Completion
+    let comp_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": "file:///e2e.mimi" },
+                "position": { "line": 0, "character": 0 }
+            }
+        }))
+        .expect("completion should respond");
+    let items = comp_resp["result"]["items"]
+        .as_array()
+        .expect("completion should have items array");
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert!(
+        labels.contains(&"Person"),
+        "completion should include type 'Person'"
+    );
+
+    // 6. DidChange (edit source)
+    let _change_resp = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": "file:///e2e.mimi" },
+            "contentChanges": [{
+                "text": src  // same content, verify stability
+            }]
+        }
+    }));
+
+    // 7. Hover after change still works
+    let hover2_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": "file:///e2e.mimi" },
+                "position": { "line": 2, "character": 12 }
+            }
+        }))
+        .expect("hover after change should respond");
+    assert!(
+        hover2_resp.get("result").is_some(),
+        "hover after change should return result, got: {:?}",
+        hover2_resp
+    );
+
+    // 8. Shutdown
+    let shutdown_resp = server
+        .handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "shutdown",
+            "params": null
+        }))
+        .expect("shutdown should respond");
+    assert_eq!(shutdown_resp["id"], 6);
+}

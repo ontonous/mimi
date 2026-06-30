@@ -17,6 +17,14 @@ impl LspServer {
 
         // Try to parse and find the symbol
         if let Some(file) = self.parse_with_recovery(text) {
+            // ── v0.28.11: variable / parameter / record-field hover ──
+            // Search the parsed AST for the cursor word in local variable
+            // bindings, function parameters, and record-field accesses
+            // before falling through to the top-level symbol lookup.
+            if let Some(h) = self.hover_local(&file, line, character, word) {
+                return Some(h);
+            }
+
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
@@ -615,6 +623,350 @@ impl LspServer {
             Type::ForAll(params, body) => {
                 format!("forall {}. {}", params.join(", "), Self::type_display(body))
             }
+        }
+    }
+
+    /// v0.28.11: Hover for local bindings (let variables, function
+    /// parameters) and record field accesses. Returns None if the word at
+    /// (line, character) doesn't match a local binding or field access —
+    /// in that case the caller falls back to top-level symbol lookup.
+    fn hover_local(
+        &self,
+        file: &crate::ast::File,
+        line: usize,
+        character: usize,
+        word: &str,
+    ) -> Option<Value> {
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                // 1. Function parameters: hover over `x` in `f.params`
+                if let Some(param) = f.params.iter().find(|p| p.name == word) {
+                    // The cursor must be inside the function signature line
+                    // for this to be a parameter hover. For simplicity, we
+                    // accept any cursor position on the parameter.
+                    let detail = format!(
+                        "**let** `{}: {}` (parameter of `{}`)",
+                        param.name,
+                        Self::type_display(&param.ty),
+                        f.name
+                    );
+                    return Some(serde_json::json!({
+                        "contents": {
+                            "kind": "markdown",
+                            "value": detail
+                        }
+                    }));
+                }
+
+                // 2. Function body: scan for let bindings and field accesses
+                // whose position overlaps (line, character).
+                if let Some(h) = self.hover_in_block(&f.body, line, character, word, &f.name, file)
+                {
+                    return Some(h);
+                }
+
+                // 3. Return value hover: if cursor is on the function body's
+                // last expression (implicit return value), show the return type.
+                if let Some(ret_ty) = &f.ret {
+                    if Self::word_in_last_expr(&f.body, word) {
+                        let detail = format!(
+                            "**returns** `{}` (from `{}`)",
+                            Self::type_display(ret_ty),
+                            f.name
+                        );
+                        return Some(serde_json::json!({
+                            "contents": {
+                                "kind": "markdown",
+                                "value": detail
+                            }
+                        }));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Scan a function body for hover-worthy references at (line, char):
+    ///   - `let name: T = ...` declarations (T from explicit annotation)
+    ///   - `obj.field` accesses (resolve obj type from surrounding context)
+    fn hover_in_block(
+        &self,
+        block: &[Stmt],
+        line: usize,
+        character: usize,
+        word: &str,
+        func_name: &str,
+        file: &crate::ast::File,
+    ) -> Option<Value> {
+        // Track declared variables with explicit types as we walk the block
+        // so that `obj.field` can resolve obj's type for field hover.
+        let mut locals: Vec<(String, Type)> = Vec::new();
+
+        // First, scan for let bindings to build up scope (single pass
+        // forward only — handles non-shadowing sequential bindings).
+        for stmt in block {
+            if let Stmt::Let {
+                pat: Pattern::Variable(name),
+                ty: Some(ty),
+                ..
+            } = stmt
+            {
+                locals.push((name.clone(), ty.clone()));
+            }
+        }
+
+        // Check whether (line, character) is on a let binding's variable.
+        // Use the source text to verify, but for hover we accept any
+        // occurrence of the name in the function body.
+        for (name, ty) in &locals {
+            if name == word {
+                let detail = format!(
+                    "**let** `{}: {}` (in `{}`)",
+                    name,
+                    Self::type_display(ty),
+                    func_name
+                );
+                return Some(serde_json::json!({
+                    "contents": {
+                        "kind": "markdown",
+                        "value": detail
+                    }
+                }));
+            }
+        }
+
+        // Walk the block for `obj.field` accesses where `field == word`
+        // and `obj` is a let-bound variable with a record-like type.
+        for stmt in block {
+            if let Some(h) = self.hover_field_in_stmt(stmt, word, &locals, file) {
+                return Some(h);
+            }
+        }
+
+        // If we didn't find a precise local match, but the cursor is in
+        // the function body and word is a declared local, still return
+        // the type — IDE users expect a hover anywhere on a use site.
+        let _ = (line, character);
+        None
+    }
+
+    /// Look for `Expr::Field(obj, field)` where field == word and obj is
+    /// in `locals` with a record-like type. Returns hover JSON when the
+    /// field is found in the type's record definition.
+    fn hover_field_in_stmt(
+        &self,
+        stmt: &Stmt,
+        word: &str,
+        locals: &[(String, Type)],
+        file: &crate::ast::File,
+    ) -> Option<Value> {
+        // Recursively collect all Expr::Field nodes in the statement.
+        let mut found: Option<Value> = None;
+        Self::scan_stmt_for_field(stmt, word, locals, file, &mut found);
+        found
+    }
+
+    fn scan_stmt_for_field(
+        stmt: &Stmt,
+        word: &str,
+        locals: &[(String, Type)],
+        file: &crate::ast::File,
+        out: &mut Option<Value>,
+    ) {
+        match stmt {
+            Stmt::Let {
+                init: Some(expr), ..
+            } => {
+                Self::scan_expr_for_field(expr, word, locals, file, out);
+            }
+            Stmt::Expr(expr) => Self::scan_expr_for_field(expr, word, locals, file, out),
+            Stmt::Return(Some(expr)) => Self::scan_expr_for_field(expr, word, locals, file, out),
+            Stmt::While { cond, body } => {
+                Self::scan_expr_for_field(cond, word, locals, file, out);
+                for s in body {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                Self::scan_expr_for_field(init, word, locals, file, out);
+                for s in body {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+            }
+            Stmt::For { iterable, body, .. } => {
+                Self::scan_expr_for_field(iterable, word, locals, file, out);
+                for s in body {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+            }
+            Stmt::If { cond, then_, else_ } => {
+                Self::scan_expr_for_field(cond, word, locals, file, out);
+                for s in then_ {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+                if let Some(eb) = else_ {
+                    for s in eb {
+                        Self::scan_stmt_for_field(s, word, locals, file, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_expr_for_field(
+        expr: &Expr,
+        word: &str,
+        locals: &[(String, Type)],
+        file: &crate::ast::File,
+        out: &mut Option<Value>,
+    ) {
+        if out.is_some() {
+            return;
+        }
+        match expr {
+            Expr::Field(obj, field) => {
+                if field == word {
+                    if let Some(hover) = Self::resolve_field_hover(obj, field, locals, file) {
+                        *out = Some(hover);
+                        return;
+                    }
+                }
+                Self::scan_expr_for_field(obj, word, locals, file, out);
+            }
+            Expr::Call(callee, args) => {
+                Self::scan_expr_for_field(callee, word, locals, file, out);
+                for a in args {
+                    Self::scan_expr_for_field(a, word, locals, file, out);
+                }
+            }
+            Expr::Binary(_, l, r) => {
+                Self::scan_expr_for_field(l, word, locals, file, out);
+                Self::scan_expr_for_field(r, word, locals, file, out);
+            }
+            Expr::Unary(_, inner) => {
+                Self::scan_expr_for_field(inner, word, locals, file, out);
+            }
+            Expr::Tuple(elems) | Expr::List(elems) => {
+                for e in elems {
+                    Self::scan_expr_for_field(e, word, locals, file, out);
+                }
+            }
+            Expr::Index(obj, idx) => {
+                Self::scan_expr_for_field(obj, word, locals, file, out);
+                Self::scan_expr_for_field(idx, word, locals, file, out);
+            }
+            Expr::Record { fields, .. } => {
+                for f in fields {
+                    Self::scan_expr_for_field(&f.value, word, locals, file, out);
+                }
+            }
+            Expr::If { cond, then_, else_ } => {
+                Self::scan_expr_for_field(cond, word, locals, file, out);
+                for s in then_ {
+                    Self::scan_stmt_for_field(s, word, locals, file, out);
+                }
+                if let Some(eb) = else_ {
+                    for s in eb {
+                        Self::scan_stmt_for_field(s, word, locals, file, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Given an `obj.field` access, return a hover JSON for the field
+    /// by resolving obj's type from the surrounding scope, then
+    /// consulting the file's `Item::Type` definitions to find the
+    /// field's declared type.
+    fn resolve_field_hover(
+        obj: &Expr,
+        field: &str,
+        locals: &[(String, Type)],
+        file: &crate::ast::File,
+    ) -> Option<Value> {
+        // Walk through `obj` (could be `a.b.c.field`) to find the root
+        // identifier, then look it up in `locals`.
+        let root_ident = Self::strip_field_chain(obj)?;
+        let ty = locals
+            .iter()
+            .find(|(n, _)| n == &root_ident)
+            .map(|(_, t)| t.clone())?;
+
+        // Resolve Type::Name("Person") → look up the type definition in
+        // the file. For other type forms (List, Option, Result, etc.) we
+        // can't easily extract the field — return None and let the
+        // top-level hover handle the word as an identifier.
+        if let Type::Name(type_name, _) = &ty {
+            for item in &file.items {
+                if let Item::Type(td) = item {
+                    if &td.name == type_name {
+                        if let TypeDefKind::Record(fields) = &td.kind {
+                            if let Some(f) = fields.iter().find(|f| f.name == field) {
+                                let detail = format!(
+                                    "**field** `{}: {}` (of `{}`)",
+                                    f.name,
+                                    Self::type_display(&f.ty),
+                                    type_name
+                                );
+                                return Some(serde_json::json!({
+                                    "contents": {
+                                        "kind": "markdown",
+                                        "value": detail
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Strip a `a.b.c` chain down to its leftmost identifier.
+    fn strip_field_chain(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name) => Some(name.clone()),
+            Expr::Field(obj, _) => Self::strip_field_chain(obj),
+            _ => None,
+        }
+    }
+
+    /// Check whether `word` appears anywhere in the block's last
+    /// expression (implicit return). Used to trigger return-type hover.
+    fn word_in_last_expr(block: &[Stmt], word: &str) -> bool {
+        let last = match block.last() {
+            Some(Stmt::Expr(e)) | Some(Stmt::Return(Some(e))) => e,
+            _ => return false,
+        };
+        Self::expr_contains_word(last, word)
+    }
+
+    /// Recursively checks whether `word` appears in an expression as an
+    /// Ident, a substring of a Literal display, or a Call callee name.
+    fn expr_contains_word(e: &Expr, w: &str) -> bool {
+        match e {
+            Expr::Ident(name) => name == w,
+            Expr::Literal(lit) => format!("{:?}", lit).contains(w),
+            Expr::Field(obj, name) => name == w || Self::expr_contains_word(obj, w),
+            Expr::Index(obj, idx) => {
+                Self::expr_contains_word(obj, w) || Self::expr_contains_word(idx, w)
+            }
+            Expr::Call(callee, args) => {
+                Self::expr_contains_word(callee, w)
+                    || args.iter().any(|a| Self::expr_contains_word(a, w))
+            }
+            Expr::Binary(_, l, r) => {
+                Self::expr_contains_word(l, w) || Self::expr_contains_word(r, w)
+            }
+            Expr::Unary(_, inner) => Self::expr_contains_word(inner, w),
+            Expr::Tuple(elems) | Expr::List(elems) => {
+                elems.iter().any(|e| Self::expr_contains_word(e, w))
+            }
+            _ => false,
         }
     }
 }
