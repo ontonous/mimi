@@ -74,8 +74,9 @@ pub(crate) mod net;
 pub(crate) mod package_management;
 pub(crate) mod package_v02812;
 pub(crate) mod package_v02812_extra;
-pub(crate) mod stdlib_v02813;
 pub(crate) mod property;
+pub(crate) mod stdlib_v02813;
+pub(crate) mod stdlib_v02813_list_growth;
 pub(crate) mod transitive_deps;
 pub(crate) mod type_system_verification;
 

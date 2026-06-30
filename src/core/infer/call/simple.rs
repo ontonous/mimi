@@ -81,9 +81,8 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("f64".into(), vec![]);
             }
-            "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
-            | "sinh" | "cosh" | "tanh"
-            | "ln" | "log2" | "log10" | "exp" | "exp2" | "cbrt" => {
+            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "ln"
+            | "log2" | "log10" | "exp" | "exp2" | "cbrt" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -128,10 +127,7 @@ impl<'a> Checker<'a> {
             }
             "atan2" => {
                 if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "atan2 expects 2 arguments",
-                    );
+                    self.emit_code(crate::diagnostic::codes::E0242, "atan2 expects 2 arguments");
                 } else {
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);

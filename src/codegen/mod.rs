@@ -601,11 +601,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// the function name and the SSA names of its arguments. Used as
     /// the key in `cse_cache`.
     #[allow(dead_code)]
-    pub(crate) fn cse_fingerprint(
-        &self,
-        func_name: &str,
-        args: &[BasicValueEnum<'ctx>],
-    ) -> String {
+    pub(crate) fn cse_fingerprint(&self, func_name: &str, args: &[BasicValueEnum<'ctx>]) -> String {
         let mut parts: Vec<String> = Vec::with_capacity(args.len() + 1);
         parts.push(func_name.to_string());
         for (i, a) in args.iter().enumerate() {
@@ -614,7 +610,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             // robust fingerprint, the value's instruction opcode could
             // be added, but index alone suffices for v0.28.13's
             // scaffolding.
-            parts.push(format!("arg{}:v{}", i, a.get_type().print_to_string().to_string_lossy()));
+            parts.push(format!(
+                "arg{}:v{}",
+                i,
+                a.get_type().print_to_string().to_string_lossy()
+            ));
         }
         parts.join("|")
     }
@@ -673,7 +673,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         func: inkwell::values::FunctionValue<'ctx>,
     ) -> u32 {
-        if func.get_name().to_str().map(|s| s.is_empty()).unwrap_or(true) {
+        if func
+            .get_name()
+            .to_str()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
             return 0;
         }
         // External (declaration only) functions: count = 1 (the call itself)

@@ -1273,10 +1273,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut has_calls = false;
             for bb in function.get_basic_blocks() {
                 for inst in bb.get_instructions() {
-                    if matches!(
-                        inst.get_opcode(),
-                        inkwell::values::InstructionOpcode::Call
-                    ) {
+                    if matches!(inst.get_opcode(), inkwell::values::InstructionOpcode::Call) {
                         has_calls = true;
                     }
                 }

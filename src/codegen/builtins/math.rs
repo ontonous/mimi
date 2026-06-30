@@ -278,10 +278,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Helper: get-or-declare a unary f64 -> f64 libc function.
-    fn get_or_declare_unary_f64(
-        &self,
-        fn_name: &str,
-    ) -> inkwell::values::FunctionValue<'ctx> {
+    fn get_or_declare_unary_f64(&self, fn_name: &str) -> inkwell::values::FunctionValue<'ctx> {
         self.module.get_function(fn_name).unwrap_or_else(|| {
             let f64_ty = self.context.f64_type();
             let ty = f64_ty.fn_type(
@@ -294,10 +291,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Helper: get-or-declare a binary f64,f64 -> f64 libc function.
-    fn get_or_declare_binary_f64(
-        &self,
-        fn_name: &str,
-    ) -> inkwell::values::FunctionValue<'ctx> {
+    fn get_or_declare_binary_f64(&self, fn_name: &str) -> inkwell::values::FunctionValue<'ctx> {
         self.module.get_function(fn_name).unwrap_or_else(|| {
             let f64_ty = self.context.f64_type();
             let ty = f64_ty.fn_type(
@@ -368,9 +362,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(ln_fn, &[BasicMetadataValueEnum::FloatValue(x)], "log_x")
             .map_err(|e| format!("log error: {}", e))?;
-        let ln_x = self
-            .expect_basic_value(&ln_call, "log")?
-            .into_float_value();
+        let ln_x = self.expect_basic_value(&ln_call, "log")?.into_float_value();
         if args.len() == 1 {
             return Ok(BasicValueEnum::FloatValue(ln_x));
         }

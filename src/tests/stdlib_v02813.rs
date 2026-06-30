@@ -66,28 +66,48 @@ fn stdlib_v02813_tan_zero() {
 fn stdlib_v02813_asin_inverse() {
     let src = "func main() -> f64 { asin(0.5) }";
     // asin(0.5) = pi/6
-    assert_float_approx(run_source(src), std::f64::consts::PI / 6.0, 1e-10, "asin(0.5)");
+    assert_float_approx(
+        run_source(src),
+        std::f64::consts::PI / 6.0,
+        1e-10,
+        "asin(0.5)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_acos_inverse() {
     let src = "func main() -> f64 { acos(0.5) }";
     // acos(0.5) = pi/3
-    assert_float_approx(run_source(src), std::f64::consts::PI / 3.0, 1e-10, "acos(0.5)");
+    assert_float_approx(
+        run_source(src),
+        std::f64::consts::PI / 3.0,
+        1e-10,
+        "acos(0.5)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_atan_inverse() {
     let src = "func main() -> f64 { atan(1.0) }";
     // atan(1) = pi/4
-    assert_float_approx(run_source(src), std::f64::consts::PI / 4.0, 1e-10, "atan(1)");
+    assert_float_approx(
+        run_source(src),
+        std::f64::consts::PI / 4.0,
+        1e-10,
+        "atan(1)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_atan2() {
     let src = "func main() -> f64 { atan2(1.0, 1.0) }";
     // atan2(1,1) = pi/4
-    assert_float_approx(run_source(src), std::f64::consts::PI / 4.0, 1e-10, "atan2(1,1)");
+    assert_float_approx(
+        run_source(src),
+        std::f64::consts::PI / 4.0,
+        1e-10,
+        "atan2(1,1)",
+    );
 }
 
 #[test]
@@ -414,7 +434,12 @@ fn stdlib_v02813_asin_codegen() {
     let out = compile_and_run(src).expect("compile_and_run asin(0.5)");
     let v: f64 = out.trim().parse().unwrap();
     let expected = 0.5_f64.asin();
-    assert!((v - expected).abs() < 1e-3, "got {}, expected {}", v, expected);
+    assert!(
+        (v - expected).abs() < 1e-3,
+        "got {}, expected {}",
+        v,
+        expected
+    );
 }
 
 #[test]
@@ -607,7 +632,10 @@ fn stdlib_v02813_array_contains() {
     let src = r#"
         func main() -> bool { array_contains(["a", "b", "c"], "b") }
     "#;
-    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -615,7 +643,10 @@ fn stdlib_v02813_array_equals_true() {
     let src = r#"
         func main() -> bool { array_equals(["a", "b"], ["a", "b"]) }
     "#;
-    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -892,16 +923,12 @@ fn compile_and_inspect(src: &str) -> (CodeGenerator<'static>, Vec<String>) {
     // We use 'static context via Box::leak.
     let context = Box::leak(Box::new(inkwell::context::Context::create()));
     let mut codegen = CodeGenerator::new(context, "v02813_inline_test");
-    let tokens = lexer::Lexer::new(src)
-        .tokenize()
-        .expect("lexer failed");
+    let tokens = lexer::Lexer::new(src).tokenize().expect("lexer failed");
     let mut file = parser::Parser::new(tokens)
         .parse_file()
         .expect("parser failed");
     crate::contracts::map_rule_contracts(&mut file);
-    codegen
-        .compile_file(&file)
-        .expect("codegen failed");
+    codegen.compile_file(&file).expect("codegen failed");
     let names: Vec<String> = codegen.inline_candidates.iter().cloned().collect();
     (codegen, names)
 }
