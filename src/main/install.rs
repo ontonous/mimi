@@ -1,7 +1,11 @@
 use mimi::{lockfile, manifest, pkg_registry, pkg_resolve};
 use std::collections::HashSet;
 
-pub(crate) fn install(_all: bool) -> Result<(), String> {
+/// Install all dependencies declared in `mimi.toml`.
+///
+/// `frozen` — if true, refuse to update the lockfile (CI mode).
+/// `offline` — if true, only use cached `.mimi/deps`; skip network/git/registry fetches.
+pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
     let (dir, manifest) = match manifest::Manifest::find(&cwd)? {
         Some((d, m)) => (d, m),
@@ -9,10 +13,8 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
     };
 
     let conflicts = manifest.check_conflicts();
-    if !conflicts.is_empty() {
-        for c in &conflicts {
-            eprintln!("warning: {}", c);
-        }
+    for c in &conflicts {
+        eprintln!("warning: {}", c);
     }
 
     let direct_deps = match &manifest.dependencies {
@@ -31,6 +33,7 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: Vec<manifest::Dependency> = direct_deps;
     let mut installed = 0;
+    let mut skipped = 0;
 
     while let Some(dep) = queue.pop() {
         if !visited.insert(dep.name.clone()) {
@@ -38,6 +41,63 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
         }
 
         let dst = deps_dir.join(&dep.name);
+
+        // Idempotency: if lockfile already has this dep and the on-disk
+        // checksum matches, skip re-resolution.
+        if let Some(entry) = lock.get_package(&dep.name).cloned() {
+            if pkg_resolve::checksum_matches(&dst, entry.checksum.as_deref()) {
+                println!("  = {} ({})", dep.name, entry.version);
+                skipped += 1;
+                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                for sub_dep in sub_deps {
+                    queue.push(sub_dep);
+                }
+                continue;
+            }
+        }
+
+        // Offline: only allow already-cached deps. Otherwise error out.
+        if offline {
+            if !dst.exists() {
+                return Err(format!(
+                    "offline: '{}' not in cache; run 'mimi install' once with network",
+                    dep.name
+                ));
+            }
+            // Use the version that was previously resolved (if known)
+            if let Some(entry) = lock.get_package(&dep.name) {
+                println!("  = {} ({}, cached)", dep.name, entry.version);
+                skipped += 1;
+                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                for sub_dep in sub_deps {
+                    queue.push(sub_dep);
+                }
+                continue;
+            }
+            return Err(format!(
+                "offline: '{}' not in lockfile and not in cache",
+                dep.name
+            ));
+        }
+
+        // Frozen: do not fetch, do not update lockfile. Refuse if missing.
+        if frozen {
+            if let Some(entry) = lock.get_package(&dep.name) {
+                if dst.exists() {
+                    println!("  = {} ({}, frozen)", dep.name, entry.version);
+                    skipped += 1;
+                    let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                    for sub_dep in sub_deps {
+                        queue.push(sub_dep);
+                    }
+                    continue;
+                }
+            }
+            return Err(format!(
+                "frozen: '{}' missing from cache; cannot update",
+                dep.name
+            ));
+        }
 
         let resolved = pkg_resolve::resolve_single_dep(&dep, &dst, &reg)?;
         println!("  ✓ {} (v{})", resolved.name, resolved.version);
@@ -57,6 +117,10 @@ pub(crate) fn install(_all: bool) -> Result<(), String> {
     }
 
     lock.save(&dir)?;
-    println!("Installed {} package(s).", installed);
+    if installed == 0 {
+        println!("All {} package(s) up to date.", skipped);
+    } else {
+        println!("Installed {} package(s) ({} cached).", installed, skipped);
+    }
     Ok(())
 }

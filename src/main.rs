@@ -319,9 +319,15 @@ enum Command {
     Stats { path: Option<PathBuf> },
     /// Install dependencies from mimi.toml
     Install {
-        /// Install all dependencies (default)
+        /// Install all dependencies (default; reserved for future per-target filters)
         #[arg(long)]
         all: bool,
+        /// Frozen mode: do not update lockfile, fail if any dep is missing from cache
+        #[arg(long)]
+        frozen: bool,
+        /// Offline mode: only use cached `.mimi/deps`; never fetch from network or git
+        #[arg(long)]
+        offline: bool,
     },
     /// Update dependencies to latest compatible versions
     Update,
@@ -477,7 +483,7 @@ fn main() {
             tool_stat::run(&dir, depth, hash)
         }
         Command::Bindgen { path, output } => bindgen::run(&path, &output),
-        Command::Install { all } => install::install(all),
+        Command::Install { all, frozen, offline } => install::install(all, frozen, offline),
         Command::Update => update::update(),
         Command::Publish { name, version } => publish::publish(name.as_deref(), version.as_deref()),
         Command::Search { query } => search::search(&query),
