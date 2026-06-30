@@ -65,6 +65,7 @@ pub(crate) mod ffi_interp_e2e;
 pub(crate) mod ffi_passport_types;
 pub(crate) mod ffi_safety;
 pub(crate) mod ffi_verification;
+pub(crate) mod fmt_edge_cases;
 pub(crate) mod loader;
 pub(crate) mod lsp;
 pub(crate) mod lsp_extended;

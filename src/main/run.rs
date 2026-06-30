@@ -66,7 +66,21 @@ fn run_once(
         ));
     }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    if !parse_errors.is_empty() {
+        let use_color = colors_enabled();
+        let src_ref = Some(source.as_str());
+        let filename = &path.display().to_string();
+        for e in &parse_errors {
+            let formatted = format_diagnostic(&e.to_diagnostic(), src_ref, filename);
+            if use_color {
+                eprint!("{}", formatted);
+            } else {
+                eprint!("{}", strip_ansi(&formatted));
+            }
+        }
+        return Err(format!("{} parse error(s) found", parse_errors.len()));
+    }
 
     // Load imports if any
     let mut merged_file = if !file.imports.is_empty() {
@@ -138,6 +152,12 @@ fn run_once(
     }
 }
 
+fn debounce_mtime(path: &Path, last: SystemTime) -> Option<SystemTime> {
+    // Wait 150ms then re-check: debounces rapid save events
+    std::thread::sleep(Duration::from_millis(150));
+    get_mtime(path).ok().filter(|&m| m != last)
+}
+
 fn run_watch(
     path: &Path,
     verify_contracts: bool,
@@ -149,29 +169,35 @@ fn run_watch(
     println!("Watching {} for changes...", path.display());
     let mut last_modified = get_mtime(path)?;
     // Run once first
-    let _ = run_once(
+    if let Err(e) = run_once(
         path,
         verify_contracts,
         verify_ffi,
         allocator,
         strict,
         extra_args,
-    );
+    ) {
+        eprintln!("{}", e);
+    }
     loop {
         std::thread::sleep(Duration::from_millis(500));
         match get_mtime(path) {
             Ok(mtime) if mtime != last_modified => {
-                last_modified = mtime;
+                // Debounce: wait briefly and re-check for stable mtime
+                let stable = debounce_mtime(path, last_modified).unwrap_or(mtime);
+                last_modified = stable;
                 println!("\n--- file changed, re-running ---");
                 print!("\x1B[2J\x1B[H");
-                let _ = run_once(
+                if let Err(e) = run_once(
                     path,
                     verify_contracts,
                     verify_ffi,
                     allocator,
                     strict,
                     extra_args,
-                );
+                ) {
+                    eprintln!("{}", e);
+                }
             }
             Err(e) => {
                 eprintln!("watch error: {}", e);

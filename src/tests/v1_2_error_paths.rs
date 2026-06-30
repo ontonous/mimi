@@ -412,3 +412,31 @@ func main() -> i32 {
         result.err()
     );
 }
+
+// ─── Multi-position diagnostics (WithLabels) ────────────────────────────
+
+#[test]
+fn error_path_multi_position_diagnostics() {
+    use crate::error::CompileError;
+    use crate::span::Span;
+
+    // Create an error with a primary span and secondary labels
+    let err = CompileError::UndefinedVar("x".into());
+    let labels = vec![
+        ("defined here".into(), Span::single(3, 5)),
+        ("also used here".into(), Span::single(5, 10)),
+    ];
+    let labeled = err.with_labels(Span::single(2, 1), labels);
+
+    let diag = labeled.to_diagnostic();
+    assert_eq!(diag.span.start_line, 2);
+    assert_eq!(diag.notes.len(), 2);
+    assert_eq!(diag.notes[0].message, "defined here");
+    assert_eq!(diag.notes[0].span.start_line, 3);
+    assert_eq!(diag.notes[1].message, "also used here");
+    assert_eq!(diag.notes[1].span.start_line, 5);
+    assert!(
+        diag.code.is_some(),
+        "multi-position diagnostic should carry an error code"
+    );
+}

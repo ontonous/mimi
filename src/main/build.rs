@@ -78,7 +78,21 @@ pub(crate) fn build(
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    if !parse_errors.is_empty() {
+        let use_color = colors_enabled();
+        let src_ref = Some(source.as_str());
+        let filename = &path.display().to_string();
+        for e in &parse_errors {
+            let formatted = format_diagnostic(&e.to_diagnostic(), src_ref, filename);
+            if use_color {
+                eprint!("{}", formatted);
+            } else {
+                eprint!("{}", strip_ansi(&formatted));
+            }
+        }
+        return Err(format!("{} parse error(s) found", parse_errors.len()));
+    }
 
     // Load all imports and merge into single file
     let mut merged_file = if !file.imports.is_empty() {

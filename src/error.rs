@@ -113,6 +113,15 @@ pub enum CompileError {
         error: Box<CompileError>,
         span: Span,
     },
+    /// Error with primary span and secondary labels (rustc-style multi-position diagnostics).
+    /// Primary span is the main error location; labels are supplementary locations
+    /// with their own messages (e.g., "previous definition here").
+    #[error("{error}")]
+    WithLabels {
+        error: Box<CompileError>,
+        span: Span,
+        labels: Vec<(String, Span)>,
+    },
 }
 
 impl CompileError {
@@ -153,6 +162,7 @@ impl CompileError {
             Self::Io(_) => E0750,
             Self::Generic(_) => E0700,
             Self::WithSpan { error, .. } => error.code(),
+            Self::WithLabels { error, .. } => error.code(),
         }
     }
 
@@ -164,12 +174,33 @@ impl CompileError {
         }
     }
 
+    /// Attach a source span with secondary labels (multi-position diagnostic).
+    pub fn with_labels(self, span: Span, labels: Vec<(String, Span)>) -> Self {
+        Self::WithLabels {
+            error: Box::new(self),
+            span,
+            labels,
+        }
+    }
+
     /// Convert to a Diagnostic with error code and message.
     /// Errors that carry a span will use it; otherwise a sentinel span is used.
+    /// Labels attached via WithLabels are emitted as notes with their own spans.
     pub fn to_diagnostic(&self) -> Diagnostic {
         let code = self.code();
         match self {
             Self::WithSpan { error, span } => error.to_diagnostic().with_span(*span),
+            Self::WithLabels {
+                error,
+                span,
+                labels,
+            } => {
+                let mut diag = error.to_diagnostic().with_span(*span);
+                for (msg, label_span) in labels {
+                    diag = diag.with_note(msg, *label_span);
+                }
+                diag
+            }
             _ => Diagnostic::error_code(code, self.to_string(), Span::single(0, 0)),
         }
     }

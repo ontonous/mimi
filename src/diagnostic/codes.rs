@@ -122,6 +122,11 @@ pub const W002: &str = "W002"; // locked fragment ($/$$) with no implementation 
 pub const W003: &str = "W003"; // `...` placeholder residual in .mimi files
 pub const W004: &str = "W004"; // function naming convention (snake_case)
 pub const W005: &str = "W005"; // shared variable written by multiple parallel steps in parasteps
+pub const W006: &str = "W006"; // unused variable
+pub const W007: &str = "W007"; // redundant parentheses
+pub const W008: &str = "W008"; // `== true` / `== false` anti-pattern
+pub const W009: &str = "W009"; // recursion depth hint
+pub const W010: &str = "W010"; // unused import
 
 /// Warning codes (E06xx) — kept for backward compatibility
 pub const E0600: &str = "E0600"; // variable shadows outer variable
@@ -350,6 +355,11 @@ pub fn describe(code: &str) -> &'static str {
         W003 => "`...` placeholder residual in .mimi files",
         W004 => "function naming convention (snake_case)",
         W005 => "shared variable written by multiple parallel steps in parasteps",
+        W006 => "unused variable",
+        W007 => "redundant parentheses",
+        W008 => "`== true` / `== false` anti-pattern",
+        W009 => "recursion depth hint",
+        W010 => "unused import",
 
         _ => "unknown error",
     }

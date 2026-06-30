@@ -151,7 +151,7 @@ pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename
                     } else {
                         line_text.len().saturating_sub(start_col)
                     };
-                    let indicator = "~".repeat(indicator_width.max(1));
+                    let indicator = "-".repeat(indicator_width.max(1));
                     out.push_str(&format!(
                         " {}{: >width$}{} | {}{}{} {}{}\n",
                         colors::DIM,
