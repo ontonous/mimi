@@ -33,8 +33,16 @@
 
 - `completion_context` 改为 `pub(crate)` 以支持测试中直接调用。
 - `compute_hover` 新增局部绑定扫描路径，在顶层符号查找之前运行，对同一文件的 parse 结果进行类型感知搜索。
+- `compute_rename` 改为 scope-aware：只重命名 let 绑定和函数参数变量，拒绝全局符号。
+- LSP 协议修复：`Content-Length` header 与 JSON body 之间的 `\r\n` 分隔符在 `read_exact` 前被消耗。
 
 ### Fixed
+
+- **返回值 Hover**：新增 `word_in_last_expr` + `expr_contains_word`，光标在函数体末尾表达式（隐式返回值）上时显示返回类型。
+- **Scope-aware Rename**：`compute_rename` 不再对全局函数/类型/模块执行纯字符串匹配重命名；通过解析 AST 收集参数和 let 绑定名称，仅对局部符号执行重命名。
+- **LSP protocol separator bug**：`Content-Length: N\r\n\r\n{body}` 中 `read_line` 读取 header 到 `\n` 后还剩 `\r\n`；原代码在 body 读取后吃 1 字节（吃掉了下一条消息的第一个字符）。修复后在 body 读取前吃 2 字节 `\r\n`。
+- **LSP e2e 增强**：创建 `src/tests/lsp_e2e.rs`，7 个端到端测试涵盖完整生命周期、hover、completion、rename、perf (<200ms)。
+- **手动验证脚本**：`scripts/verify-lsp.py` 通过 subprocess 启动 `mimi lsp` 并发送 Content-Length 格式消息，验证 5 项功能。
 
 ### Security
 
