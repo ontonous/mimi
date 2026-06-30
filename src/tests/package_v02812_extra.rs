@@ -17,10 +17,7 @@ use std::time::Instant;
 
 #[test]
 fn manifest_rejects_invalid_toml() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_bad_toml_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_bad_toml_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join("mimi.toml"), "this is not valid toml {{{{").expect("write");
     let result = Manifest::load(&dir);
@@ -30,10 +27,7 @@ fn manifest_rejects_invalid_toml() {
 
 #[test]
 fn manifest_rejects_missing_package_section() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_no_pkg_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_no_pkg_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(
         dir.join("mimi.toml"),
@@ -51,10 +45,7 @@ url = "https://example.com"
 
 #[test]
 fn lockfile_rejects_invalid_toml() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_bad_lock_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_bad_lock_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join("mimi.lock"), "==not valid toml==").expect("write");
     let result = crate::lockfile::Lockfile::load(&dir);
@@ -106,15 +97,16 @@ fn resolver_handles_very_long_version_string() {
     }
     let available = vec![v.as_str(), "1.0.0"];
     let result = crate::lockfile::Lockfile::resolve_version(&v, &available);
-    assert_eq!(result.as_deref(), Some(v.as_str()), "long version must still match exactly");
+    assert_eq!(
+        result.as_deref(),
+        Some(v.as_str()),
+        "long version must still match exactly"
+    );
 }
 
 #[test]
 fn manifest_rejects_duplicate_dependencies_field() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_dup_field_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_dup_field_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     // Two [[dependencies]] blocks is valid TOML; ensure we load both.
     std::fs::write(
@@ -140,10 +132,7 @@ version = "2"
 
 #[test]
 fn manifest_rejects_unparseable_version_string() {
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_bad_ver_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_bad_ver_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(
         dir.join("mimi.toml"),
@@ -169,10 +158,7 @@ version = ""
 fn dep_name_supports_unicode() {
     let mut m = Manifest::new("app");
     m.add_dependency("中文-lib", Some("^1.0"), None, None, None);
-    let dir = std::env::temp_dir().join(format!(
-        "mimi_v02812_unicode_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mimi_v02812_unicode_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     m.save(&dir).expect("save");
     let loaded = Manifest::load(&dir).expect("load").expect("present");
@@ -341,7 +327,10 @@ fn checksum_handles_empty_directory() {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h = pkg_registry::compute_dir_checksum(&dir).expect("empty cs");
     // FNV-1a of empty input is the offset basis: cbf29ce484222325 -> "cbf29ce484222325"
-    assert_eq!(h, "cbf29ce484222325", "empty dir hash must be FNV-1a offset basis");
+    assert_eq!(
+        h, "cbf29ce484222325",
+        "empty dir hash must be FNV-1a offset basis"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -392,10 +381,7 @@ fn copy_dir_recursive_preserves_files() {
 
 #[test]
 fn install_fails_cleanly_when_registry_missing() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_noreg_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_noreg_{}", std::process::id()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("proj");
     // Note: NO registry directory created
@@ -409,17 +395,18 @@ fn install_fails_cleanly_when_registry_missing() {
     let result = main_install_transitive(&project, &reg);
     assert!(result.is_err(), "missing package must error");
     let err = result.err().unwrap();
-    assert!(err.contains("not found") || err.contains("missing"), "got: {}", err);
+    assert!(
+        err.contains("not found") || err.contains("missing"),
+        "got: {}",
+        err
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
 fn install_fails_when_no_matching_version() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_nover_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_nover_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -428,7 +415,11 @@ fn install_fails_when_no_matching_version() {
     // Registry has 1.0.0 but app wants ^2.0
     let pkg = reg.join("foo").join("1.0.0");
     std::fs::create_dir_all(&pkg).expect("pkg");
-    std::fs::write(pkg.join("mimi.toml"), "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n").expect("w");
+    std::fs::write(
+        pkg.join("mimi.toml"),
+        "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n",
+    )
+    .expect("w");
     std::fs::write(pkg.join("main.mimi"), "func foo() {}").expect("w");
 
     let mut m = Manifest::new("app");
@@ -439,17 +430,19 @@ fn install_fails_when_no_matching_version() {
     let result = main_install_transitive(&project, &reg);
     assert!(result.is_err(), "no matching version must error");
     let err = result.err().unwrap();
-    assert!(err.contains("no matching") || err.contains("^2.0"), "got: {}", err);
+    assert!(
+        err.contains("no matching") || err.contains("^2.0"),
+        "got: {}",
+        err
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
 fn install_recovers_from_corrupt_lockfile() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_corrupt_lock_{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("mimi_v02812_corrupt_lock_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -458,7 +451,11 @@ fn install_recovers_from_corrupt_lockfile() {
     // Write a valid package
     let pkg = reg.join("foo").join("1.0.0");
     std::fs::create_dir_all(&pkg).expect("pkg");
-    std::fs::write(pkg.join("mimi.toml"), "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n").expect("w");
+    std::fs::write(
+        pkg.join("mimi.toml"),
+        "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n",
+    )
+    .expect("w");
     std::fs::write(pkg.join("main.mimi"), "func foo() {}").expect("w");
 
     // Write a CORRUPT lockfile
@@ -492,10 +489,7 @@ fn install_recovers_from_corrupt_lockfile() {
 #[test]
 fn install_handles_dep_dir_pre_existing_with_extra_files() {
     // Simulates a stale .mimi/deps/foo/ from a prior install.
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_stale_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_stale_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -503,7 +497,11 @@ fn install_handles_dep_dir_pre_existing_with_extra_files() {
 
     let pkg = reg.join("foo").join("1.0.0");
     std::fs::create_dir_all(&pkg).expect("pkg");
-    std::fs::write(pkg.join("mimi.toml"), "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n").expect("w");
+    std::fs::write(
+        pkg.join("mimi.toml"),
+        "[package]\nname=\"foo\"\nversion=\"1.0.0\"\n",
+    )
+    .expect("w");
     std::fs::write(pkg.join("main.mimi"), "func foo() {}").expect("w");
 
     let mut m = Manifest::new("app");
@@ -517,11 +515,21 @@ fn install_handles_dep_dir_pre_existing_with_extra_files() {
     std::fs::write(dst.join("stale.txt"), "leftover").expect("stale");
 
     let result = main_install_transitive(&project, &reg);
-    assert!(result.is_ok(), "stale dir should be cleaned and replaced: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "stale dir should be cleaned and replaced: {:?}",
+        result.err()
+    );
     // After install, the stale file should be gone (the install helper
     // removes the dst before copying).
-    assert!(!dst.join("stale.txt").exists(), "stale file should be removed");
-    assert!(dst.join("mimi.toml").exists(), "fresh mimi.toml should be there");
+    assert!(
+        !dst.join("stale.txt").exists(),
+        "stale file should be removed"
+    );
+    assert!(
+        dst.join("mimi.toml").exists(),
+        "fresh mimi.toml should be there"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -530,10 +538,7 @@ fn install_handles_dep_dir_pre_existing_with_extra_files() {
 
 #[test]
 fn install_50_deps_under_time_bound() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_perf_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_perf_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -578,10 +583,7 @@ fn install_50_deps_under_time_bound() {
 
 #[test]
 fn install_idempotent_50_deps_second_run_is_fast() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_perf2_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_perf2_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -626,10 +628,7 @@ fn install_idempotent_50_deps_second_run_is_fast() {
 
 #[test]
 fn add_then_install_then_tree_preserves_version_chain() {
-    let root = std::env::temp_dir().join(format!(
-        "mimi_v02812_chain_{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("mimi_v02812_chain_{}", std::process::id()));
     let reg = root.join("registry");
     let project = root.join("project");
     std::fs::create_dir_all(&reg).expect("reg");
@@ -639,7 +638,11 @@ fn add_then_install_then_tree_preserves_version_chain() {
     let leaf_toml = "[package]\nname=\"leaf\"\nversion=\"1.0.0\"\n";
     std::fs::create_dir_all(reg.join("leaf").join("1.0.0")).expect("leaf");
     std::fs::write(reg.join("leaf").join("1.0.0").join("mimi.toml"), leaf_toml).expect("w");
-    std::fs::write(reg.join("leaf").join("1.0.0").join("main.mimi"), "func leaf() {}").expect("w");
+    std::fs::write(
+        reg.join("leaf").join("1.0.0").join("main.mimi"),
+        "func leaf() {}",
+    )
+    .expect("w");
 
     let mid_toml = r#"[package]
 name = "mid"
@@ -651,7 +654,11 @@ version = "^1.0"
 "#;
     std::fs::create_dir_all(reg.join("mid").join("1.0.0")).expect("mid");
     std::fs::write(reg.join("mid").join("1.0.0").join("mimi.toml"), mid_toml).expect("w");
-    std::fs::write(reg.join("mid").join("1.0.0").join("main.mimi"), "func mid() {}").expect("w");
+    std::fs::write(
+        reg.join("mid").join("1.0.0").join("main.mimi"),
+        "func mid() {}",
+    )
+    .expect("w");
 
     // Step 1: mimi add mid@^1.0
     let mut m = Manifest::new("app");
@@ -672,8 +679,18 @@ version = "^1.0"
     assert_eq!(lock.get_package("leaf").unwrap().version, "1.0.0");
 
     // Step 4: mimi tree (verify deps on disk)
-    assert!(project.join(".mimi").join("deps").join("mid").join("mimi.toml").exists());
-    assert!(project.join(".mimi").join("deps").join("leaf").join("mimi.toml").exists());
+    assert!(project
+        .join(".mimi")
+        .join("deps")
+        .join("mid")
+        .join("mimi.toml")
+        .exists());
+    assert!(project
+        .join(".mimi")
+        .join("deps")
+        .join("leaf")
+        .join("mimi.toml")
+        .exists());
 
     // Step 5: mimi remove mid
     let mut loaded = Manifest::load(&project).expect("load").expect("present");
@@ -695,7 +712,10 @@ version = "^1.0"
     let after_l = crate::lockfile::Lockfile::load(&project)
         .expect("load")
         .expect("present");
-    assert!(after_l.package.is_empty(), "lockfile should be empty after full remove");
+    assert!(
+        after_l.package.is_empty(),
+        "lockfile should be empty after full remove"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -728,7 +748,9 @@ fn update_via_lockfile_replacement_preserves_unchanged_deps() {
 
 #[test]
 fn registry_resolves_across_multiple_version_segments() {
-    let available = ["0.1.0", "0.2.0", "1.0.0", "1.0.5", "1.1.0", "1.2.3", "2.0.0", "2.1.0"];
+    let available = [
+        "0.1.0", "0.2.0", "1.0.0", "1.0.5", "1.1.0", "1.2.3", "2.0.0", "2.1.0",
+    ];
     assert_eq!(
         crate::lockfile::Lockfile::resolve_version("^0", &available).as_deref(),
         Some("0.2.0")
