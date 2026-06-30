@@ -1259,6 +1259,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_implicit_return(ret_type, last_val, &func.name, &vars)?;
             }
         }
+
+        // v0.28.13 — Inline heuristic: small functions become candidates.
+        // If the function's instruction count is below the threshold, it
+        // is registered as an inline candidate. Pure functions (no calls,
+        // no FFI, no side-effecting builtins) are also marked pure so
+        // they are eligible for CSE.
+        let inst_count = self.count_instructions_in_function(function);
+        if inst_count > 0 && inst_count <= Self::INLINE_INSTRUCTION_THRESHOLD {
+            self.register_inline_candidate(func.name.clone());
+            // Heuristic: pure if no external calls in the body.
+            // (Full purity analysis is left for v0.28.14.)
+            let mut has_calls = false;
+            for bb in function.get_basic_blocks() {
+                for inst in bb.get_instructions() {
+                    if matches!(
+                        inst.get_opcode(),
+                        inkwell::values::InstructionOpcode::Call
+                    ) {
+                        has_calls = true;
+                    }
+                }
+            }
+            if !has_calls {
+                self.mark_pure(func.name.clone());
+            }
+        }
+
         Ok(())
     }
 
