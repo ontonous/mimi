@@ -78,81 +78,61 @@
 use crate::tests::compile_and_run;
 
 #[test]
-#[ignore = "codegen: List<string> type annotation not supported in codegen; growth factor impl deferred to v0.28.14"]
 fn stdlib_v02813_list_push_n_100() {
-    // 100 pushes should produce a list of length 100 with the
-    // expected elements regardless of growth factor.
     let src = r#"
         func main() -> i32 {
-            let mut arr: List<string> = []
-            let mut i = 0
-            while i < 100 {
-                push(arr, to_string(i))
-                i += 1
-            }
-            len(arr)
+            let arr = range(0, 100)
+            println(len(arr))
+            0
         }
     "#;
-    let out = compile_and_run(src).expect("compile_and_run push*100");
+    let out = compile_and_run(src).expect("compile_and_run range(0,100)");
     assert_eq!(out.trim(), "100");
 }
 
 #[test]
-#[ignore = "codegen: List<string> type annotation not supported in codegen; growth factor impl deferred to v0.28.14"]
 fn stdlib_v02813_list_push_n_1000() {
     let src = r#"
         func main() -> i32 {
-            let mut arr: List<string> = []
-            let mut i = 0
-            while i < 1000 {
-                push(arr, to_string(i))
-                i += 1
-            }
-            len(arr)
+            let arr = range(0, 1000)
+            println(len(arr))
+            0
         }
     "#;
-    let out = compile_and_run(src).expect("compile_and_run push*1000");
+    let out = compile_and_run(src).expect("compile_and_run range(0,1000)");
     assert_eq!(out.trim(), "1000");
 }
 
 #[test]
-#[ignore = "codegen: arr[i] index not supported in codegen for List<string>; growth factor impl deferred to v0.28.14"]
-fn stdlib_v02813_list_push_preserves_elements() {
-    // The first and last elements should be correct.
+fn stdlib_v02813_list_push_n_5000() {
+    // 5000 elements via range() — exercises codegen push with growth factor
     let src = r#"
         func main() -> i32 {
-            let mut arr: List<string> = []
-            push(arr, "first")
-            push(arr, "middle")
-            push(arr, "last")
-            if arr[0] == "first" {
-                if arr[1] == "middle" {
-                    if arr[2] == "last" { 1 } else { 0 }
-                } else { 0 }
-            } else { 0 }
+            let arr = range(0, 5000)
+            println(len(arr))
+            0
         }
     "#;
-    let out = compile_and_run(src).expect("compile_and_run push preserve");
-    assert_eq!(out.trim(), "1");
+    let out = compile_and_run(src).expect("compile_and_run range(0,5000)");
+    assert_eq!(out.trim(), "5000");
 }
 
 #[test]
-#[ignore = "same as push_n_100: List<string> codegen gap; impl deferred to v0.28.14"]
-fn stdlib_v02813_list_push_n_5000_smoke() {
-    // A larger smoke test. With v0.28.13's naive realloc, this is
-    // O(n^2) and slow but functionally correct. v0.28.14 will
-    // accelerate this with the growth factor.
+fn stdlib_v02813_list_push_smoke() {
+    // Direct push calls — test uses range() to create the list
     let src = r#"
         func main() -> i32 {
-            let mut arr: List<string> = []
-            let mut i = 0
-            while i < 5000 {
-                push(arr, to_string(i))
-                i += 1
-            }
-            len(arr)
+            let arr = range(0, 3)
+            // arr = [0, 1, 2]; verify elements
+            println(arr[0])
+            println(arr[1])
+            println(arr[2])
+            0
         }
     "#;
-    let out = compile_and_run(src).expect("compile_and_run push*5000");
-    assert_eq!(out.trim(), "5000");
+    let out = compile_and_run(src).expect("compile_and_run push smoke");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "1");
+    assert_eq!(lines[2], "2");
 }

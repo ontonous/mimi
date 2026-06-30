@@ -9,7 +9,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // push(list, elem) - resize data array and append element
+        // push(list, elem) — delegates to mimi_list_push_i64 for exponential growth
         if args.len() != 2 {
             return Err(CompileError::WrongArgCount(
                 "push expects 2 arguments".to_string(),
@@ -24,124 +24,54 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let elem = args[1];
-
-        let i64_ty = self.context.i64_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let list_struct_ty = self.list_struct_type();
-
-        // Load current len and data
-        let len_gep = self
-            .gep()
-            .build_struct_gep(list_struct_ty, list_ptr, 0, "push_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let data_gep = self
-            .gep()
-            .build_struct_gep(list_struct_ty, list_ptr, 1, "push_data")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let old_len = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "old_len")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let old_data = self
-            .builder
-            .build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "old_data")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_pointer_value();
-
-        // new_len = old_len + 1
-        let new_len = self
-            .builder
-            .build_int_add(old_len, i64_ty.const_int(1, false), "new_len")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-
-        // new_alloc_size = new_len * 8
-        let elem_size = self.list_elem_size();
-        let new_alloc_size = self
-            .builder
-            .build_int_mul(new_len, elem_size, "new_alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-
-        // realloc(old_data, new_alloc_size)
-        let realloc_fn = self
-            .module
-            .get_function("realloc")
-            .ok_or("realloc not declared")?;
-        let realloc_result = self
-            .builder
-            .build_call(
-                realloc_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(old_data),
-                    BasicMetadataValueEnum::IntValue(new_alloc_size),
-                ],
-                "realloc_result",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("realloc returned void")?
-            .into_pointer_value();
-
-        // Store new data pointer
-        self.builder
-            .build_store(data_gep, realloc_result)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-
-        // Store new element at data[old_len]: *(new_data + old_len*8) = elem
-        let idx_ptr = {
-            self.gep()
-                .build_in_bounds_gep(
-                    BasicTypeEnum::IntType(i64_ty),
-                    realloc_result,
-                    &[old_len],
-                    "elem_ptr",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?
-        };
-        // Bitcast i8* to i64* for store
-        let idx_ptr_i64 = self
-            .builder
-            .build_bit_cast(
-                idx_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
-                "idx_ptr_i64",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-            .into_pointer_value();
-
-        // Get the element value
+        // Get element value as i64
         let elem_val = match elem {
-            BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(iv),
-            BasicMetadataValueEnum::FloatValue(fv) => BasicValueEnum::FloatValue(fv),
-            BasicMetadataValueEnum::PointerValue(pv) => BasicValueEnum::PointerValue(pv),
-            BasicMetadataValueEnum::StructValue(sv) => {
-                // StructValue: allocate on heap, store struct, return pointer
-                let sty = sv.get_type();
-                let alloca = self
-                    .builder
-                    .build_alloca(sty, "push_struct_tmp")
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(alloca, sv)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                BasicValueEnum::PointerValue(alloca)
-            }
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            BasicMetadataValueEnum::FloatValue(fv) => self
+                .builder
+                .build_bit_cast(fv, self.context.i64_type(), "elem_i64")
+                .map_err(|e| CompileError::LlvmError(format!("bit_cast error: {}", e)))?
+                .into_int_value(),
+            BasicMetadataValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, self.context.i64_type(), "elem_i64")
+                .map_err(|e| CompileError::LlvmError(format!("ptr_to_int error: {}", e)))?,
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "push: unsupported element type".to_string(),
                 ))
             }
         };
+        // Get or declare mimi_list_push_i64
+        let push_fn = self
+            .module
+            .get_function("mimi_list_push_i64")
+            .unwrap_or_else(|| {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let void_ty = self.context.void_type();
+                let fn_ty = void_ty.fn_type(
+                    &[
+                        inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        inkwell::types::BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                );
+                self.module.add_function(
+                    "mimi_list_push_i64",
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         self.builder
-            .build_store(idx_ptr_i64, elem_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-
-        // Store new length
-        self.builder
-            .build_store(len_gep, new_len)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-
-        // Return the list pointer (unchanged)
+            .build_call(
+                push_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(list_ptr),
+                    BasicMetadataValueEnum::IntValue(elem_val),
+                ],
+                "push_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("push call error: {}", e)))?;
         Ok(BasicValueEnum::PointerValue(list_ptr))
     }
 

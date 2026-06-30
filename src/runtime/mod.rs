@@ -108,6 +108,7 @@ mod libc {
         pub fn freeaddrinfo(res: *mut addrinfo);
         pub fn signal(signum: i32, handler: usize) -> usize;
         pub fn malloc(size: usize) -> *mut c_void;
+        pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
         pub fn free(ptr: *mut c_void);
     }
 }
@@ -155,6 +156,86 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
     ptr as *mut std::ffi::c_char
 }
 
+/// v0.28.13: Allocate a MimiList data array with hidden capacity header at data[-8].
+/// The header uses bit 63 as a magic marker: `(i64::MIN | cap)`.
+/// Returns the data pointer (header is at data[-8]). Null on failure.
+fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
+    if cap <= 0 {
+        return std::ptr::null_mut();
+    }
+    let sz = 8 + (cap as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    let alloc = unsafe { libc::malloc(sz) as *mut i64 };
+    if alloc.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *alloc = i64::MIN | cap;
+    }
+    unsafe { alloc.add(1) as *mut *mut std::ffi::c_char }
+}
+
+/// v0.28.13: Reallocate a MimiList data array, preserving the hidden capacity header.
+fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut std::ffi::c_char {
+    if new_cap <= 0 {
+        return std::ptr::null_mut();
+    }
+    let sz = 8 + (new_cap as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    if old.is_null() {
+        return alloc_list_data(new_cap);
+    }
+    let base = unsafe { (old as *mut i64).offset(-1) };
+    let nb = unsafe { libc::realloc(base as *mut std::ffi::c_void, sz) as *mut i64 };
+    if nb.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *nb = i64::MIN | new_cap;
+    }
+    unsafe { nb.add(1) as *mut *mut std::ffi::c_char }
+}
+
+/// v0.28.13: Read the hidden capacity from data[-8]. Returns 0 if no header.
+fn list_cap(data: *mut *mut std::ffi::c_char) -> i64 {
+    if data.is_null() {
+        return 0;
+    }
+    let hdr = unsafe { *(data as *mut i64).offset(-1) };
+    if hdr < 0 {
+        hdr & 0x7FFF_FFFF_FFFF_FFFF
+    } else {
+        0
+    }
+}
+
+/// v0.28.13: Push an i64 element into a MimiList with exponential capacity growth.
+/// Uses hidden header (alloc_list_data/realloc_list_data) for O(1) amortized push.
+/// Modifies list in place (data and len are updated).
+#[no_mangle]
+pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
+    if list.is_null() {
+        return;
+    }
+    let lst = unsafe { &mut *list };
+    let len = lst.len;
+    let cap = list_cap(lst.data);
+    if len + 1 > cap {
+        let nc = if cap <= 0 { 4 } else { cap * 2 };
+        let nd = realloc_list_data(lst.data, nc);
+        if nd.is_null() {
+            return;
+        }
+        lst.data = nd;
+        unsafe {
+            *(nd as *mut i64).add(len as usize) = element;
+        }
+    } else {
+        unsafe {
+            *(lst.data as *mut i64).add(len as usize) = element;
+        }
+    }
+    lst.len = len + 1;
+}
+
 /// S15/S22: Free a C string allocated by alloc_c_string.
 /// Safe to call with null pointer (no-op).
 #[no_mangle]
@@ -169,26 +250,42 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
 /// S22: Free a MimiList and optionally its C string elements.
 /// FFI-2: Only frees data if `owns_data` is true (Rust-allocated).
 /// C-allocated data (owns_data=false) is skipped to avoid wrong-allocator heap corruption.
+///
+/// v0.28.13: Detects the hidden capacity header (negative value at data[-8]).
+/// If present, frees the allocation base at data-8. Otherwise original behavior.
 #[no_mangle]
 pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     if list.is_null() {
         return;
     }
     unsafe {
-        let list = &*list;
-        // FFI-2: Only free data if we own it. C may pass lists where data points
-        // into C-allocated memory (e.g., from str_split results), which must NOT be
-        // freed by libc::free if a different allocator was used.
-        if list.owns_data && free_elements && !list.data.is_null() {
-            for i in 0..list.len as usize {
-                let elem = *list.data.add(i);
-                if !elem.is_null() {
-                    libc::free(elem as *mut std::ffi::c_void);
+        let lst = &*list;
+        if lst.owns_data && !lst.data.is_null() {
+            let cap = list_cap(lst.data);
+            if cap > 0 {
+                if free_elements {
+                    for i in 0..lst.len as usize {
+                        let e = *lst.data.add(i);
+                        if !e.is_null() {
+                            libc::free(e as *mut std::ffi::c_void);
+                        }
+                    }
                 }
+                let base = (lst.data as *mut i64).offset(-1) as *mut std::ffi::c_void;
+                libc::free(base);
+            } else {
+                if free_elements {
+                    for i in 0..lst.len as usize {
+                        let e = *lst.data.add(i);
+                        if !e.is_null() {
+                            libc::free(e as *mut std::ffi::c_void);
+                        }
+                    }
+                }
+                libc::free(lst.data as *mut std::ffi::c_void);
             }
-            libc::free(list.data as *mut std::ffi::c_void);
         }
-        libc::free(list as *const MimiList as *mut std::ffi::c_void);
+        libc::free(list as *mut std::ffi::c_void);
     }
 }
 
