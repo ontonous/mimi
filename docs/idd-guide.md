@@ -112,6 +112,7 @@
 | v0.28.5 set_env | L1 先行 → interp → codegen → 1 测试通过 | ✅ |
 | v0.28.10 sort_str codegen | L1 先行 → runtime helper → codegen 集成 → 4 测试通过 | ✅ |
 | v0.28.10 Set/sort/from_json/const 缺口清零 | 5 大差距全部关闭，L1 测试覆盖 | ✅ |
+| v0.28.12 package manager | L1 先行（22 测试）→ 增量强化（13 测试）→ registry 协议文档 | ✅ |
 
 ---
 

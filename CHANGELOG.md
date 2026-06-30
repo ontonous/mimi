@@ -2,10 +2,35 @@
 
 ## [Unreleased] — v0.28.12
 
-### Planned
-- `mimi add`/`install`/`tree`/`remove` 工作流加固：lockfile 一致性、幂等 install、`--dry-run`/`--offline` 标志
-- registry 协议草案 (`docs/registry-protocol.md`)
-- 包管理器测试覆盖（target +20 新测试）
+### Added
+
+- **`mimi add` 加固**:
+  - 新增 `--dry-run` 标志，打印将添加的依赖而不写入 `mimi.toml`
+  - 添加 registry 依赖时，自动解析具体版本并预填充 `mimi.lock`，使后续
+    `mimi install` 对该包为 no-op
+- **`mimi install` 幂等性 + 离线支持**:
+  - 默认行为：lockfile checksum 匹配时跳过重装，打印 `= name (version)`
+  - 新增 `--frozen` 标志：CI 模式，拒绝更新 lockfile、缺少缓存时报错
+  - 新增 `--offline` 标志：仅用本地缓存 `.mimi/deps`，禁止 git/网络/registry 拉取
+  - 输出更清晰：区分 "Installed N (M cached)" 与 "All M up to date"
+- **`mimi remove` 三处清理**:
+  - 之前只清理 `mimi.toml`；现在同时清理 `mimi.lock` 和 `.mimi/deps/<name>/`
+  - 对仅在 lockfile 出现的传递依赖也安全（幂等）
+- **registry 协议草案** (`docs/registry-protocol.md`):
+  - 4 个端点：`/v1/packages/{name}`、`/v1/packages/{name}/{version}`、
+    `/v1/tarballs/{name}/{version}.tar.gz`、`/v1/search?q=`
+  - 版本约束语法、依赖源优先级、lockfile 格式、本地缓存模型、错误码
+
+### Tests
+
+- 新增 `src/tests/package_v02812.rs`，35 个 L1 测试覆盖：
+  - `mimi add`：registry/path/git 依赖写入、重复替换、dry-run、版本解析
+  - `mimi install`：幂等性、cycle 打破、diamond 去重、frozen/offline 失败模式
+  - `mimi tree`：传递依赖遍历、未安装时的 lockfile 读取
+  - `mimi remove`：manifest + lockfile + cache 三处清理、传递依赖清理、幂等
+  - registry 约束解析：caret / tilde / 范围 / 精确 / 通配 / 不匹配
+- 扩展 `tests/mod.rs` 中的 `main_install_transitive` helper，支持 path 依赖
+- 新增 `main_add_dry_run` test helper
 
 ## [v0.28.11] — 2026-06-30
 
