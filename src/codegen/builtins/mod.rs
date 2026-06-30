@@ -1317,6 +1317,10 @@ pub fn is_builtin(name: &str) -> bool {
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
+        // v0.28.13 trigonometric and exponential
+        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+        | "sinh" | "cosh" | "tanh"
+        | "ln" | "log" | "log2" | "log10" | "exp" | "exp2" | "cbrt"
         | "str_parse_int" | "str_parse_float" | "to_int" | "to_float"
         | "str_index_of" | "str_repeat" | "str_trim"
         | "str_to_upper" | "str_to_lower" | "str_substring"
@@ -1379,6 +1383,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             "getenv",
             "args",
             "from_int",
+            // v0.28.13 math
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "sinh",
+            "cosh",
+            "tanh",
+            "ln",
+            "log",
+            "log2",
+            "log10",
+            "exp",
+            "exp2",
+            "cbrt",
         ];
         if self.no_std && libc_builtins.contains(&name) {
             self.require_std(name)?;
@@ -1445,6 +1467,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             "pow" => self.compile_pow(args),
             "random" => self.compile_random(args),
             "pi" => self.compile_pi(args),
+            // v0.28.13 trigonometric and exponential
+            "sin" => self.compile_math_unary(args, "sin"),
+            "cos" => self.compile_math_unary(args, "cos"),
+            "tan" => self.compile_math_unary(args, "tan"),
+            "asin" => self.compile_math_unary(args, "asin"),
+            "acos" => self.compile_math_unary(args, "acos"),
+            "atan" => self.compile_math_unary(args, "atan"),
+            "atan2" => self.compile_math_binary(args, "atan2"),
+            "sinh" => self.compile_math_unary(args, "sinh"),
+            "cosh" => self.compile_math_unary(args, "cosh"),
+            "tanh" => self.compile_math_unary(args, "tanh"),
+            "ln" => self.compile_math_unary(args, "log"),
+            "log" => self.compile_math_log(args),
+            "log2" => self.compile_math_unary(args, "log2"),
+            "log10" => self.compile_math_unary(args, "log10"),
+            "exp" => self.compile_math_unary(args, "exp"),
+            "exp2" => self.compile_math_unary(args, "exp2"),
+            "cbrt" => self.compile_math_unary(args, "cbrt"),
             "now" | "timestamp" => self.compile_now(args),
             "now_ms" | "timestamp_ms" => self.compile_now_ms(args),
             "sleep" => self.compile_sleep(args),

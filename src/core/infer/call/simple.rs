@@ -81,6 +81,69 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("f64".into(), vec![]);
             }
+            "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+            | "sinh" | "cosh" | "tanh"
+            | "ln" | "log2" | "log10" | "exp" | "exp2" | "cbrt" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 1 argument", name),
+                    );
+                } else {
+                    let t = self.infer_expr(&args[0], scopes);
+                    if !is_numeric(&t) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects a numeric argument", name),
+                        );
+                    }
+                }
+                return Type::Name("f64".into(), vec![]);
+            }
+            "log" => {
+                if args.is_empty() || args.len() > 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "log expects 1 or 2 arguments",
+                    );
+                } else {
+                    let t1 = self.infer_expr(&args[0], scopes);
+                    if !is_numeric(&t1) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "log expects a numeric first argument",
+                        );
+                    }
+                    if args.len() == 2 {
+                        let t2 = self.infer_expr(&args[1], scopes);
+                        if !is_numeric(&t2) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "log expects a numeric base argument",
+                            );
+                        }
+                    }
+                }
+                return Type::Name("f64".into(), vec![]);
+            }
+            "atan2" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "atan2 expects 2 arguments",
+                    );
+                } else {
+                    let t1 = self.infer_expr(&args[0], scopes);
+                    let t2 = self.infer_expr(&args[1], scopes);
+                    if !is_numeric(&t1) || !is_numeric(&t2) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "atan2 expects numeric arguments",
+                        );
+                    }
+                }
+                return Type::Name("f64".into(), vec![]);
+            }
             "len" => {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "len expects 1 argument");

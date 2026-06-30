@@ -251,4 +251,145 @@ impl<'ctx> CodeGenerator<'ctx> {
             .const_float(std::f64::consts::PI)
             .into())
     }
+
+    // === v0.28.13 trigonometric and exponential builtins ===
+    //
+    // Most are thin wrappers around libc libm functions. The runtime is
+    // linked via cc, so the symbol is available at link time.
+
+    /// Helper: ensure a value is f64, converting i64 if needed.
+    fn coerce_to_f64(
+        &self,
+        v: BasicMetadataValueEnum<'ctx>,
+        name: &str,
+    ) -> MimiResult<inkwell::values::FloatValue<'ctx>> {
+        let f64_ty = self.context.f64_type();
+        match v {
+            BasicMetadataValueEnum::FloatValue(fv) => Ok(fv),
+            BasicMetadataValueEnum::IntValue(iv) => self
+                .builder
+                .build_signed_int_to_float(iv, f64_ty, &format!("{}_f64", name))
+                .map_err(|e| CompileError::LlvmError(format!("int_to_float error: {}", e))),
+            _ => Err(CompileError::TypeMismatch(format!(
+                "{} requires a numeric argument",
+                name
+            ))),
+        }
+    }
+
+    /// Helper: get-or-declare a unary f64 -> f64 libc function.
+    fn get_or_declare_unary_f64(
+        &self,
+        fn_name: &str,
+    ) -> inkwell::values::FunctionValue<'ctx> {
+        self.module.get_function(fn_name).unwrap_or_else(|| {
+            let f64_ty = self.context.f64_type();
+            let ty = f64_ty.fn_type(
+                &[inkwell::types::BasicMetadataTypeEnum::FloatType(f64_ty)],
+                false,
+            );
+            self.module
+                .add_function(fn_name, ty, Some(inkwell::module::Linkage::External))
+        })
+    }
+
+    /// Helper: get-or-declare a binary f64,f64 -> f64 libc function.
+    fn get_or_declare_binary_f64(
+        &self,
+        fn_name: &str,
+    ) -> inkwell::values::FunctionValue<'ctx> {
+        self.module.get_function(fn_name).unwrap_or_else(|| {
+            let f64_ty = self.context.f64_type();
+            let ty = f64_ty.fn_type(
+                &[
+                    inkwell::types::BasicMetadataTypeEnum::FloatType(f64_ty),
+                    inkwell::types::BasicMetadataTypeEnum::FloatType(f64_ty),
+                ],
+                false,
+            );
+            self.module
+                .add_function(fn_name, ty, Some(inkwell::module::Linkage::External))
+        })
+    }
+
+    pub(super) fn compile_math_unary(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        fn_name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err(format!("{} expects 1 argument", fn_name).into());
+        }
+        let arg = self.coerce_to_f64(args[0], fn_name)?;
+        let f = self.get_or_declare_unary_f64(fn_name);
+        let call = self
+            .builder
+            .build_call(f, &[BasicMetadataValueEnum::FloatValue(arg)], "math_call")
+            .map_err(|e| format!("{} error: {}", fn_name, e))?;
+        self.expect_basic_value(&call, fn_name)
+    }
+
+    pub(super) fn compile_math_binary(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        fn_name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(format!("{} expects 2 arguments", fn_name).into());
+        }
+        let a = self.coerce_to_f64(args[0], fn_name)?;
+        let b = self.coerce_to_f64(args[1], fn_name)?;
+        let f = self.get_or_declare_binary_f64(fn_name);
+        let call = self
+            .builder
+            .build_call(
+                f,
+                &[
+                    BasicMetadataValueEnum::FloatValue(a),
+                    BasicMetadataValueEnum::FloatValue(b),
+                ],
+                "math_call",
+            )
+            .map_err(|e| format!("{} error: {}", fn_name, e))?;
+        self.expect_basic_value(&call, fn_name)
+    }
+
+    /// log(x) = natural log; log(x, base) = base-N logarithm (log(x)/log(base)).
+    pub(super) fn compile_math_log(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.is_empty() || args.len() > 2 {
+            return Err("log expects 1 or 2 arguments".into());
+        }
+        let x = self.coerce_to_f64(args[0], "log")?;
+        let ln_fn = self.get_or_declare_unary_f64("log");
+        let ln_call = self
+            .builder
+            .build_call(ln_fn, &[BasicMetadataValueEnum::FloatValue(x)], "log_x")
+            .map_err(|e| format!("log error: {}", e))?;
+        let ln_x = self
+            .expect_basic_value(&ln_call, "log")?
+            .into_float_value();
+        if args.len() == 1 {
+            return Ok(BasicValueEnum::FloatValue(ln_x));
+        }
+        let base = self.coerce_to_f64(args[1], "log")?;
+        let ln_base_call = self
+            .builder
+            .build_call(
+                ln_fn,
+                &[BasicMetadataValueEnum::FloatValue(base)],
+                "log_base",
+            )
+            .map_err(|e| format!("log error: {}", e))?;
+        let ln_base = self
+            .expect_basic_value(&ln_base_call, "log")?
+            .into_float_value();
+        let result = self
+            .builder
+            .build_float_div(ln_x, ln_base, "log_result")
+            .map_err(|e| format!("log div error: {}", e))?;
+        Ok(BasicValueEnum::FloatValue(result))
+    }
 }

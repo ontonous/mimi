@@ -115,4 +115,204 @@ impl<'a> Interpreter<'a> {
     pub(crate) fn builtin_pi(&self, _args: Vec<Value>) -> Result<Value, InterpError> {
         Ok(Value::Float(std::f64::consts::PI))
     }
+
+    // === v0.28.13 trigonometric and exponential ===
+
+    pub(crate) fn builtin_sin(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("sin expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.sin())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).sin())),
+            _ => Err(InterpError::new("sin expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_cos(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("cos expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.cos())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).cos())),
+            _ => Err(InterpError::new("cos expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_tan(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("tan expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.tan())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).tan())),
+            _ => Err(InterpError::new("tan expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_asin(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("asin expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.asin())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).asin())),
+            _ => Err(InterpError::new("asin expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_acos(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("acos expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.acos())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).acos())),
+            _ => Err(InterpError::new("acos expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_atan(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("atan expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.atan())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).atan())),
+            _ => Err(InterpError::new("atan expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_atan2(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("atan2 expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Float(y), Value::Float(x)) => Ok(Value::Float(y.atan2(*x))),
+            (Value::Int(y), Value::Int(x)) => Ok(Value::Float((*y as f64).atan2(*x as f64))),
+            _ => Err(InterpError::new("atan2 expects two numbers")),
+        }
+    }
+
+    pub(crate) fn builtin_sinh(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("sinh expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.sinh())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).sinh())),
+            _ => Err(InterpError::new("sinh expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_cosh(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("cosh expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.cosh())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).cosh())),
+            _ => Err(InterpError::new("cosh expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_tanh(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("tanh expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.tanh())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).tanh())),
+            _ => Err(InterpError::new("tanh expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_ln(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("ln expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.ln())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).ln())),
+            _ => Err(InterpError::new("ln expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_log2(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("log2 expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.log2())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).log2())),
+            _ => Err(InterpError::new("log2 expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_log10(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("log10 expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.log10())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).log10())),
+            _ => Err(InterpError::new("log10 expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_log(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        // log(x) = natural log; log(x, base) = base-N logarithm
+        if args.is_empty() || args.len() > 2 {
+            return Err(InterpError::new("log expects 1 or 2 arguments"));
+        }
+        let x = match &args[0] {
+            Value::Float(v) => *v,
+            Value::Int(v) => *v as f64,
+            _ => return Err(InterpError::new("log expects a number")),
+        };
+        if args.len() == 1 {
+            Ok(Value::Float(x.ln()))
+        } else {
+            let base = match &args[1] {
+                Value::Float(v) => *v,
+                Value::Int(v) => *v as f64,
+                _ => return Err(InterpError::new("log base must be a number")),
+            };
+            Ok(Value::Float(x.ln() / base.ln()))
+        }
+    }
+
+    pub(crate) fn builtin_exp(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("exp expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.exp())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).exp())),
+            _ => Err(InterpError::new("exp expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_exp2(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("exp2 expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.exp2())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).exp2())),
+            _ => Err(InterpError::new("exp2 expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_cbrt(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("cbrt expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Float(v.cbrt())),
+            Value::Int(v) => Ok(Value::Float((*v as f64).cbrt())),
+            _ => Err(InterpError::new("cbrt expects a number")),
+        }
+    }
 }

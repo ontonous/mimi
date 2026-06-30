@@ -445,3 +445,102 @@ pub func hypot(a: f64, b: f64) -> f64 {
     sqrt(a * a + b * b)
 }
 
+// ---- v0.28.13 trigonometric functions (libc libm) ----
+
+// Note: these free functions in std::mymath wrap the runtime builtins
+// (sin/cos/tan/...) but use distinct names to avoid the resolver's
+// "user function shadows builtin" rule. Users can call either the
+// builtin directly (`sin(x)`) or the stdlib wrapper (`my_sin(x)`).
+// The wrapper exists so stdlib can be self-documenting and so the
+// public API matches conventions of other math libraries.
+
+// my_sin: Returns the sine of x (radians).
+pub func my_sin(x: f64) -> f64 { sin(x) }
+
+// my_cos: Returns the cosine of x (radians).
+pub func my_cos(x: f64) -> f64 { cos(x) }
+
+// my_tan: Returns the tangent of x (radians).
+pub func my_tan(x: f64) -> f64 { tan(x) }
+
+// my_asin: Returns the arcsine of x in [-1, 1], result in [-π/2, π/2].
+pub func my_asin(x: f64) -> f64 { asin(x) }
+
+// my_acos: Returns the arccosine of x in [-1, 1], result in [0, π].
+pub func my_acos(x: f64) -> f64 { acos(x) }
+
+// my_atan: Returns the arctangent of x, result in [-π/2, π/2].
+pub func my_atan(x: f64) -> f64 { atan(x) }
+
+// my_atan2: Two-argument arctangent: angle of (y, x) in radians.
+pub func my_atan2(y: f64, x: f64) -> f64 { atan2(y, x) }
+
+// my_sinh: Hyperbolic sine.
+pub func my_sinh(x: f64) -> f64 { sinh(x) }
+
+// my_cosh: Hyperbolic cosine.
+pub func my_cosh(x: f64) -> f64 { cosh(x) }
+
+// my_tanh: Hyperbolic tangent.
+pub func my_tanh(x: f64) -> f64 { tanh(x) }
+
+// ---- v0.28.13 logarithms and exponentials ----
+
+// my_ln: Natural logarithm (base e). Returns NaN for x < 0, -∞ for x = 0.
+pub func my_ln(x: f64) -> f64 { ln(x) }
+
+// my_log: Base-N logarithm: log(x, base).
+pub func my_log(x: f64, base: f64) -> f64 { log(x, base) }
+
+// my_log2: Binary logarithm (base 2).
+pub func my_log2(x: f64) -> f64 { log2(x) }
+
+// my_log10: Common logarithm (base 10).
+pub func my_log10(x: f64) -> f64 { log10(x) }
+
+// my_exp: Returns e^x.
+pub func my_exp(x: f64) -> f64 { exp(x) }
+
+// my_exp2: Returns 2^x.
+pub func my_exp2(x: f64) -> f64 { exp2(x) }
+
+// my_cbrt: Returns the real cube root of x.
+pub func my_cbrt(x: f64) -> f64 { cbrt(x) }
+
+// ---- v0.28.13 probability distributions ----
+
+// random_normal: Standard normal sample using Box-Muller transform.
+// Returns N(0, 1).
+pub func random_normal() -> f64 {
+    let u1 = random()
+    let u2 = random()
+    // Avoid log(0) by clamping u1 away from zero.
+    let safe_u1 = if u1 < 1.0e-12 { 1.0e-12 } else { u1 }
+    sqrt(-2.0 * ln(safe_u1)) * cos(2.0 * pi() * u2)
+}
+
+// random_uniform: Uniform sample in [lo, hi).
+pub func random_uniform(lo: f64, hi: f64) -> f64 {
+    lo + (hi - lo) * random()
+}
+
+// random_exponential: Sample from Exp(λ) (rate parameter λ > 0).
+// Returns -ln(1 - u) / λ, with u uniform in [0, 1).
+pub func random_exponential(lambda: f64) -> f64 {
+    let u = random()
+    let safe_u = if u < 1.0e-12 { 1.0e-12 } else { u }
+    -ln(1.0 - safe_u) / lambda
+}
+
+// random_bernoulli: Returns true with probability p, false otherwise.
+pub func random_bernoulli(p: f64) -> bool {
+    random() < p
+}
+
+// random_int_range: Returns an integer in [lo, hi) (uniform).
+pub func random_int_range(lo: i32, hi: i32) -> i32 {
+    let span = hi - lo
+    if span <= 0 { return lo }
+    random_int(lo, hi)
+}
+
