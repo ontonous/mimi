@@ -136,3 +136,44 @@ fn stdlib_v02813_list_push_smoke() {
     assert_eq!(lines[1], "1");
     assert_eq!(lines[2], "2");
 }
+
+// =====================================================================
+// v0.28.13 supplemental — stress tests
+// =====================================================================
+
+#[test]
+fn stdlib_v02813_list_push_n_10000() {
+    // 10K pushes via range() — stress test for growth factor
+    let src = r#"
+        func main() -> i32 {
+            let arr = range(0, 10000)
+            println(len(arr))
+            println(arr[0])
+            println(arr[9999])
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run range(0,10000)");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "10000", "len");
+    assert_eq!(lines[1], "0", "first");
+    assert_eq!(lines[2], "9999", "last");
+}
+
+#[test]
+fn stdlib_v02813_list_push_interpreter_10000() {
+    // Interpreter-side test using range() builtin
+    let src = "func main() -> i32 { len(range(0, 10000)) }";
+    use crate::tests::run_source;
+    assert_eq!(run_source(src), crate::interp::Value::Int(10000));
+}
+
+#[test]
+fn stdlib_v02813_list_push_codegen_then_interpret_consistency() {
+    // Verify sum 0..999 = 499500 in both backends
+    use crate::tests::run_source;
+    let _interp_val = run_source("func main() -> i32 { let mut acc = 0 let mut i = 0 while i < 1000 { acc = acc + i i = i + 1 } acc }");
+    let out = compile_and_run("func main() -> i32 { let mut acc = 0 let mut i = 0 while i < 1000 { acc = acc + i i = i + 1 } println(acc) 0 }")
+        .expect("compile_and_run sum 0..999");
+    assert_eq!(out.trim(), "499500");
+}

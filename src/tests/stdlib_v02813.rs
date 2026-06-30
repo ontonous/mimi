@@ -1049,3 +1049,240 @@ fn stdlib_v02813_count_instructions_in_function_zero_for_undefined() {
     let func = codegen.module.get_function("nonexistent_function");
     assert!(func.is_none());
 }
+
+// =====================================================================
+// v0.28.13 supplemental — codegen tests for std/array.mimi helpers
+// =====================================================================
+//
+// These test the array functions via codegen (compile_and_run) using
+// i32-based inline wrappers. String-based operations are tested via
+// run_with_stdlib (interpreter) above.
+
+#[test]
+fn stdlib_v02813_array_slice_codegen() {
+    let src = r#"
+        func my_slice(arr: List<i32>, s: i32, e: i32) -> List<i32> {
+            let n = len(arr)
+            let mut out: List<i32> = []
+            let mut i = s
+            while i < e {
+                push(out, arr[i])
+                i += 1
+            }
+            out
+        }
+        func main() -> i32 {
+            let arr = range(0, 5)
+            let sliced = my_slice(arr, 1, 4)
+            println(len(sliced))
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run array_slice");
+    assert_eq!(out.trim(), "3");
+}
+
+#[test]
+fn stdlib_v02813_iter_range_codegen() {
+    let src = r#"
+        func my_range(start: i32, end: i32) -> List<i32> {
+            let mut out: List<i32> = []
+            let mut i = start
+            while i < end {
+                push(out, i)
+                i += 1
+            }
+            out
+        }
+        func main() -> i32 {
+            let r = my_range(3, 7)
+            println(len(r))
+            println(r[0])
+            println(r[3])
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run range");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "4", "len");
+    assert_eq!(lines[1], "3", "first");
+    assert_eq!(lines[2], "6", "last");
+}
+
+#[test]
+fn stdlib_v02813_iter_drop_codegen() {
+    let src = r#"
+        func my_drop(arr: List<i32>, n: i32) -> List<i32> {
+            let total = len(arr)
+            let mut out: List<i32> = []
+            let mut i = n
+            while i < total {
+                push(out, arr[i])
+                i += 1
+            }
+            out
+        }
+        func main() -> i32 {
+            let arr = range(0, 4)
+            let d = my_drop(arr, 2)
+            println(len(d))
+            println(d[0])
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run drop");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "2", "len");
+    assert_eq!(lines[1], "2", "first");
+}
+
+#[test]
+fn stdlib_v02813_array_binary_search_codegen() {
+    let src = r#"
+        func my_bin_search(arr: List<i32>, target: i32) -> i32 {
+            let mut lo = 0
+            let mut hi = len(arr) - 1
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                if arr[mid] == target { return mid }
+                if arr[mid] < target { lo = mid + 1 } else { hi = mid - 1 }
+            }
+            -1
+        }
+        func main() -> i32 {
+            println(my_bin_search(range(0, 10), 5))
+            println(my_bin_search(range(0, 10), 99))
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run binary_search");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "5", "found");
+    assert_eq!(lines[1], "-1", "not found");
+}
+
+#[test]
+fn stdlib_v02813_array_reverse_codegen() {
+    let src = r#"
+        func my_reverse(arr: List<i32>) -> List<i32> {
+            let n = len(arr)
+            let mut out: List<i32> = []
+            let mut i = n - 1
+            while i >= 0 {
+                push(out, arr[i])
+                i -= 1
+            }
+            out
+        }
+        func main() -> i32 {
+            let arr = range(0, 4)
+            let rev = my_reverse(arr)
+            println(len(rev))
+            println(rev[0])
+            println(rev[3])
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run reverse");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "4", "len");
+    assert_eq!(lines[1], "3", "first");
+    assert_eq!(lines[2], "0", "last");
+}
+
+#[test]
+fn stdlib_v02813_array_and_iter_combined() {
+    // Fill an array, then enumerate it — with i32 elements
+    let src = r#"
+        func my_fill(arr: List<i32>, value: i32) -> List<i32> {
+            let n = len(arr)
+            let mut out: List<i32> = []
+            let mut i = 0
+            while i < n {
+                push(out, value)
+                i += 1
+            }
+            out
+        }
+        func main() -> i32 {
+            let arr = range(0, 4)
+            let filled = my_fill(arr, 99)
+            println(len(filled))
+            println(filled[0])
+            println(filled[3])
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("compile_and_run combined");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "4", "len");
+    assert_eq!(lines[1], "99", "first");
+    assert_eq!(lines[2], "99", "last");
+}
+
+// =====================================================================
+// v0.28.13 supplemental — math edge cases
+// =====================================================================
+
+#[test]
+fn stdlib_v02813_sin_neg_half_pi() {
+    let src = "func main() -> f64 { sin(-pi() / 2.0) }";
+    assert_float_approx(run_source(src), -1.0, 1e-10, "sin(-pi/2)");
+}
+
+#[test]
+fn stdlib_v02813_cos_pi() {
+    let src = "func main() -> f64 { cos(pi()) }";
+    assert_float_approx(run_source(src), -1.0, 1e-10, "cos(pi)");
+}
+
+#[test]
+fn stdlib_v02813_exp_large() {
+    let src = "func main() -> f64 { exp(10.0) }";
+    let result = run_source(src);
+    if let interp::Value::Float(f) = result {
+        let expected = 10.0_f64.exp();
+        assert!((f - expected).abs() / expected < 1e-9, "got {}", f);
+    } else {
+        panic!("expected float");
+    }
+}
+
+#[test]
+fn stdlib_v02813_ln_lt_one() {
+    let src = "func main() -> f64 { ln(0.5) }";
+    let result = run_source(src);
+    if let interp::Value::Float(f) = result {
+        assert!(f < 0.0, "ln(0.5) should be negative, got {}", f);
+    } else {
+        panic!("expected float");
+    }
+}
+
+#[test]
+fn stdlib_v02813_log10_negative() {
+    let src = "func main() -> bool { ln(-1.0) != ln(-1.0) }";
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
+fn stdlib_v02813_atan2_codegen() {
+    let src = "func main() -> i32 { println(atan2(1.0, 0.0)); 0 }";
+    let out = compile_and_run(src).expect("compile_and_run atan2(1,0)");
+    let v: f64 = out.trim().parse().unwrap();
+    let expected = std::f64::consts::PI / 2.0;
+    assert!(
+        (v - expected).abs() < 1e-3,
+        "got {}, expected {}",
+        v,
+        expected
+    );
+}
+
+#[test]
+fn stdlib_v02813_cbrt_codegen() {
+    let src = "func main() -> i32 { println(cbrt(27.0)); 0 }";
+    let out = compile_and_run(src).expect("compile_and_run cbrt(27)");
+    let v: f64 = out.trim().parse().unwrap();
+    assert!((v - 3.0).abs() < 1e-3, "got {}", v);
+}

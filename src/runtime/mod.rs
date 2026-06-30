@@ -236,6 +236,73 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     lst.len = len + 1;
 }
 
+/// v0.28.13: Grow the data array of a MimiList if needed (exponential growth).
+/// Returns the (possibly new) data pointer. The caller is responsible for
+/// storing the element at `data[len]` and incrementing `list.len`.
+/// This variant works for any element type (not just i64).
+#[no_mangle]
+pub extern "C" fn mimi_list_push_grow(
+    list: *mut MimiList,
+    additional: i64,
+) -> *mut *mut std::ffi::c_char {
+    if list.is_null() || additional <= 0 {
+        return std::ptr::null_mut();
+    }
+    let lst = unsafe { &mut *list };
+    let len = lst.len;
+    let old_data = lst.data;
+    let cap = list_cap(old_data);
+    let needed = len + additional;
+    if needed > cap {
+        let new_cap = if cap <= 0 {
+            if needed < 4 {
+                4
+            } else {
+                needed
+            }
+        } else {
+            let mut nc = cap;
+            while nc < needed {
+                nc *= 2;
+            }
+            nc
+        };
+        // Allocate new buffer with header
+        let new_data = alloc_list_data(new_cap);
+        if new_data.is_null() {
+            return std::ptr::null_mut();
+        }
+        // Copy existing elements from old buffer (which may lack a header)
+        if !old_data.is_null() && len > 0 {
+            let copy_size = (len as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    old_data as *const u8,
+                    new_data as *mut u8,
+                    copy_size,
+                );
+            }
+        }
+        // Free old data if it has a header; otherwise free directly
+        if cap > 0 {
+            // Has header: free allocation base (data - 8)
+            let base = unsafe { (old_data as *mut i64).offset(-1) as *mut std::ffi::c_void };
+            unsafe {
+                libc::free(base);
+            }
+        } else if !old_data.is_null() {
+            // No header (literal): free data directly
+            unsafe {
+                libc::free(old_data as *mut std::ffi::c_void);
+            }
+        }
+        lst.data = new_data;
+        new_data
+    } else {
+        old_data
+    }
+}
+
 /// S15/S22: Free a C string allocated by alloc_c_string.
 /// Safe to call with null pointer (no-op).
 #[no_mangle]
