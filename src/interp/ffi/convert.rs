@@ -387,13 +387,17 @@ impl<'a> Interpreter<'a> {
                     Ok(Value::String(String::new()))
                 } else {
                     // Read the C string (Mimi takes ownership, must free)
+                    // SAFETY: The StringOwned contract requires the C function to return
+                    // a valid, null-terminated string that Mimi will free. catch_unwind
+                    // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
                     let s = c_str.to_string_lossy().into_owned();
-                    // Free the C-allocated string
+                    // SAFETY: result is a non-null pointer returned under the StringOwned
+                    // contract; Mimi takes ownership and must free it with libc::free.
                     unsafe { libc::free(result as *mut libc::c_void); }
                     Ok(Value::String(s))
                 }
@@ -402,6 +406,9 @@ impl<'a> Interpreter<'a> {
                 if result == 0 {
                     Ok(Value::Unit)
                 } else {
+                    // SAFETY: The Json contract requires the C function to return a
+                    // valid, null-terminated string that Mimi will free. catch_unwind
+                    // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         unsafe { std::ffi::CStr::from_ptr(result as *const i8) }
                     })).map_err(|_| format!(
@@ -410,7 +417,8 @@ impl<'a> Interpreter<'a> {
                     let json_str = c_str.to_string_lossy();
                     let json_val: serde_json::Value = serde_json::from_str(&json_str)
                         .map_err(|e| format!("FFI: failed to parse JSON return value: {}", e))?;
-                    // Free the C-allocated string
+                    // SAFETY: result is a non-null pointer returned under the Json
+                    // contract; Mimi takes ownership and must free it with libc::free.
                     unsafe { libc::free(result as *mut libc::c_void); }
                     Ok(self.json_to_value(&json_val))
                 }

@@ -225,6 +225,9 @@ unsafe fn callback_trampoline_inner(
         *result = i64::MIN;
         // FFI-BUG-2: Free C-allocated string pointers before returning,
         // otherwise the memory leaks on every cross-thread callback.
+        // SAFETY: arg_free_mask marks args that were transferred from C as
+        // owned strings. Each non-null pointer was produced by CString::into_raw
+        // on the other side of the FFI boundary and must be freed with libc::free.
         for (i, &should_free) in arg_free_mask.iter().enumerate() {
             if should_free && i < nargs {
                 let arg_ptr = *args.add(i);
@@ -238,6 +241,10 @@ unsafe fn callback_trampoline_inner(
         // active_guard dropped here — decrements count
         return;
     }
+    // SAFETY: interp_ptr was just read from FFI_CALLBACK_CTX, which stores a
+    // pointer to the Interpreter driving the synchronous FFI call. The pointer
+    // remains valid because that Interpreter is still alive on the original stack
+    // frame for the duration of this callback.
     let interp = unsafe { &mut *interp_ptr };
     let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
     // Restore the interp pointer after the callback completes
@@ -282,6 +289,9 @@ unsafe fn callback_trampoline_inner(
     // active_guard dropped here — decrements count
 
     // F6: Free C-allocated string pointers that Mimi takes ownership of.
+    // SAFETY: arg_free_mask marks args that were transferred from C as owned
+    // strings. Each non-null pointer was produced by CString::into_raw on the
+    // other side of the FFI boundary and must be freed with libc::free.
     for (i, &should_free) in arg_free_mask.iter().enumerate() {
         if should_free && i < nargs {
             let arg_ptr = *args.add(i);

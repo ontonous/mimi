@@ -106,10 +106,14 @@ impl<'a> Interpreter<'a> {
             // Capturing side reads errno via std::io::Error::last_os_error().
             if contract.check_errno {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
+                // SAFETY: __errno_location returns a valid thread-local pointer
+                // to the current errno variable on Linux/Android.
                 unsafe {
                     *libc::__errno_location() = 0;
                 }
                 #[cfg(target_os = "macos")]
+                // SAFETY: __error returns a valid thread-local pointer to the
+                // current errno variable on macOS.
                 unsafe {
                     *libc::__error() = 0;
                 }
@@ -203,6 +207,9 @@ impl<'a> Interpreter<'a> {
                         // the buffer alive for the synchronous C call.
                         let data_ptr = buffer.as_ptr() as *mut std::ffi::c_void;
                         // Create Arg pointing to the first byte of buffer data.
+                        // SAFETY: data_ptr points to the first byte of a live buffer
+                        // stored in struct_buffers, which outlives the C call.
+                        // ffi_arg only borrows the address for argument setup.
                         let arg = unsafe { ffi_arg(&*data_ptr) };
                         struct_buffers.push(buffer);
                         ffi_args.push(arg);
@@ -225,6 +232,9 @@ impl<'a> Interpreter<'a> {
 
             let lib = &self.loaded_libs[lib_idx].1;
             // Get the function pointer as a raw address for libffi
+            // SAFETY: lib is a live Library, and func_name is a valid symbol name
+            // in that library. The returned Symbol borrows from lib, which remains
+            // alive for the duration of this block.
             let raw_fn: libloading::Symbol<*mut std::ffi::c_void> = unsafe {
                 lib.get(func_name.as_bytes())
                     .map_err(|e| format!("failed to find symbol '{}': {}", func_name, e))?
@@ -722,7 +732,7 @@ mod callback_leak_tests {
     #[test]
     fn test_trampoline_frees_null_safe() {
         // Verify libc::free(NULL) is safe (no crash).
-        // NULL free is a no-op in C.
+        // SAFETY: The C standard guarantees free(NULL) is a no-op.
         unsafe { libc::free(std::ptr::null_mut()) };
     }
 }

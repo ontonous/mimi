@@ -240,17 +240,20 @@ pub enum Value {
 }
 
 /// Wrapper around Arc<Mutex<Value>> for LocalShared.
-/// 4. `check_expr_parasteps_safe` also descends into Expr::Lambda bodies.
-/// 5. Uses Arc<Mutex<Value>> — Arc uses atomic refcount, Mutex synchronizes access.
-///    Both are unconditionally Send + Sync, so this struct is genuinely safe.
+/// The Mutex serializes access to the wrapped Value; the Arc allows sharing
+/// within a single thread (Mimi's type-checker rejects local_shared in
+/// parallel blocks via E0305). The type is nevertheless Send + Sync because
+/// Arc<Mutex<Value>> is thread-safe when Value is Send + Sync.
 #[derive(Debug, Clone)]
 pub struct LocalSharedInner(pub Arc<Mutex<Value>>);
 
-// SAFETY: LocalSharedInner uses Arc<Mutex<Value>>, both unconditionally Send + Sync.
-/// The inner Mutex serializes access so even if multiple threads hold
-/// LocalSharedInner references, data access is mutually exclusive.
-/// Mimi's type-checker additionally enforces E0305 rejection of
-/// local_shared in parallel blocks; this impl is sound independently.
+// SAFETY: LocalSharedInner is a transparent wrapper around Arc<Mutex<Value>>.
+// Arc<Mutex<Value>> is Send + Sync because Value is Send + Sync (all variants
+// use thread-safe ownership: Arc/RwLock/Mutex/String/Vec/HashMap/etc.; raw
+// pointers live behind Arc<CBufferInner>). The Mutex serializes all access to
+// the wrapped Value, so sharing across threads is data-race free. Mimi's
+// type-checker additionally rejects local_shared in parallel blocks (E0305),
+// but the impl remains sound on its own.
 unsafe impl Send for LocalSharedInner {}
 unsafe impl Sync for LocalSharedInner {}
 
@@ -277,10 +280,11 @@ impl LocalSharedInner {
 #[derive(Debug, Clone)]
 pub struct WeakLocalInner(pub ArcWeak<Mutex<Value>>);
 
-// SAFETY: WeakLocalInner wraps ArcWeak<Mutex<Value>> — ArcWeak is Send + Sync
-// (atomic ref-counting), and Mutex is Send + Sync. The paired LocalShared
-// restriction (single-threaded E0305 rejection) ensures the upgraded
-// value is only accessed from the original thread.
+// SAFETY: WeakLocalInner wraps ArcWeak<Mutex<Value>>. ArcWeak is Send + Sync
+// when its target (Mutex<Value>) is Send + Sync, which holds because Value is
+// Send + Sync. Upgrading yields a LocalSharedInner that shares the same
+// Mutex-protected Value. The type-checker restricts local_shared/weak_local to
+// single-threaded use, but the trait impls are sound independently.
 unsafe impl Send for WeakLocalInner {}
 unsafe impl Sync for WeakLocalInner {}
 
@@ -304,13 +308,15 @@ pub struct CBufferInner {
     pub size: usize,
 }
 
-// SAFETY: CBufferInner owns a heap-allocated buffer via raw pointer; ownership is exclusive
-// (implemented via Arc, so the buffer is only accessed through safe methods that validate
-// the pointer before reading/writing). The underlying memory is always properly aligned
-// and sized according to the CBuffer creation path.
+// SAFETY: CBufferInner is Send because it uniquely owns a heap-allocated buffer
+// (ptr/size) obtained from libc::malloc/calloc and freed exactly once in Drop.
+// Moving the value across threads does not alias or split ownership of the
+// buffer; only the final Drop frees it.
 unsafe impl Send for CBufferInner {}
-// SAFETY: Same reasoning as Send — exclusive ownership per Arc instance guarantees that
-// concurrent reads do not race with writes. Arc<RwLock<CBufferInner>> is used externally.
+// SAFETY: CBufferInner is Sync because its fields are a raw pointer and a usize,
+// both of which are Sync. Shared references (e.g. through Arc<CBufferInner>)
+// only read ptr/size or run Drop once; actual buffer access is synchronized by
+// the FFI contract / runtime.
 unsafe impl Sync for CBufferInner {}
 
 impl Drop for CBufferInner {
@@ -361,7 +367,14 @@ pub struct ActorHandle {
     pub id: usize,
 }
 
+// SAFETY: ActorHandle is Send because all fields are Send: Arc<RwLock<ActorInstance>>
+// is Send when ActorInstance is Send+Sync (it holds only String/HashMap/Vec/Value);
+// mpsc::Sender<ActorMailboxMsg> is Send because ActorMailboxMsg (Vec<Value>, String,
+// Sender<Result<Value, InterpError>>) is Send; usize is Send.
 unsafe impl Send for ActorHandle {}
+// SAFETY: ActorHandle is Sync because all fields are Sync: Arc<RwLock<ActorInstance>>
+// is Sync when ActorInstance is Send+Sync; mpsc::Sender<T> is Sync when T: Send;
+// ActorMailboxMsg is Send because Value and InterpError are Send+Sync; usize is Sync.
 unsafe impl Sync for ActorHandle {}
 
 impl Clone for ActorHandle {

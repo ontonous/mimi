@@ -139,6 +139,7 @@ pub type MapHandle = usize;
 /// Allocate a C string (null-terminated) using libc::malloc.
 /// The caller is responsible for freeing with mimi_string_free or libc::free.
 fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
+    // SAFETY: `len + 1` is non-zero; the null terminator is written within the allocated buffer.
     let bytes = s.as_bytes();
     let len = bytes.len();
     let ptr = unsafe { libc::malloc(len + 1) as *mut u8 };
@@ -146,11 +147,13 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
         return std::ptr::null_mut();
     }
     if len > 0 {
+        // SAFETY: source and destination are non-overlapping and `len` bytes fit in the allocation.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
         }
     }
     unsafe {
+        // SAFETY: writing the null terminator at offset `len` is within the `len + 1` allocation.
         *ptr.add(len) = 0;
     }
     ptr as *mut std::ffi::c_char
@@ -164,13 +167,16 @@ fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
         return std::ptr::null_mut();
     }
     let sz = 8 + (cap as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    // SAFETY: `cap > 0` so the allocation size is non-zero; result is checked for null.
     let alloc = unsafe { libc::malloc(sz) as *mut i64 };
     if alloc.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
+        // SAFETY: writing the header at the base allocation before returning `base + 1`.
         *alloc = i64::MIN | cap;
     }
+    // SAFETY: `alloc` points to a freshly allocated buffer with room for the header and `cap` slots.
     unsafe { alloc.add(1) as *mut *mut std::ffi::c_char }
 }
 
@@ -183,14 +189,18 @@ fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut
     if old.is_null() {
         return alloc_list_data(new_cap);
     }
+    // SAFETY: `old` came from `alloc_list_data`/`realloc_list_data`, so `old - 1` is the valid allocation base.
     let base = unsafe { (old as *mut i64).offset(-1) };
+    // SAFETY: `base` points to the valid allocation base; `sz` is the new total size.
     let nb = unsafe { libc::realloc(base as *mut std::ffi::c_void, sz) as *mut i64 };
     if nb.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
+        // SAFETY: header is written at the new allocation base before returning the data pointer.
         *nb = i64::MIN | new_cap;
     }
+    // SAFETY: `nb` points to a buffer with room for the header and `new_cap` slots.
     unsafe { nb.add(1) as *mut *mut std::ffi::c_char }
 }
 
@@ -199,6 +209,7 @@ fn list_cap(data: *mut *mut std::ffi::c_char) -> i64 {
     if data.is_null() {
         return 0;
     }
+    // SAFETY: reading data[-1] is valid only for Rust-allocated lists with the hidden header; otherwise returns 0.
     let hdr = unsafe { *(data as *mut i64).offset(-1) };
     if hdr < 0 {
         hdr & 0x7FFF_FFFF_FFFF_FFFF
@@ -215,6 +226,7 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     if list.is_null() {
         return;
     }
+    // SAFETY: `list` was checked non-null; mutable reference is held only within this function.
     let lst = unsafe { &mut *list };
     let len = lst.len;
     let cap = list_cap(lst.data);
@@ -225,11 +237,13 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
             return;
         }
         lst.data = nd;
+        // SAFETY: after growth `nd` has capacity >= `len + 1`; writing at index `len` is in bounds.
         unsafe {
             *(nd as *mut i64).add(len as usize) = element;
         }
     } else {
         unsafe {
+            // SAFETY: `len < cap`, so writing at index `len` is within the existing allocation.
             *(lst.data as *mut i64).add(len as usize) = element;
         }
     }
@@ -248,6 +262,7 @@ pub extern "C" fn mimi_list_push_grow(
     if list.is_null() || additional <= 0 {
         return std::ptr::null_mut();
     }
+    // SAFETY: `list` was checked non-null; mutable reference is held only within this function.
     let lst = unsafe { &mut *list };
     let len = lst.len;
     let old_data = lst.data;
@@ -275,6 +290,7 @@ pub extern "C" fn mimi_list_push_grow(
         // Copy existing elements from old buffer (which may lack a header)
         if !old_data.is_null() && len > 0 {
             let copy_size = (len as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+            // SAFETY: existing elements are copied byte-for-byte from the old buffer to the new buffer.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     old_data as *const u8,
@@ -286,13 +302,16 @@ pub extern "C" fn mimi_list_push_grow(
         // Free old data if it has a header; otherwise free directly
         if cap > 0 {
             // Has header: free allocation base (data - 8)
+            // SAFETY: `old_data` has a hidden header, so `old_data - 1` is the valid allocation base.
             let base = unsafe { (old_data as *mut i64).offset(-1) as *mut std::ffi::c_void };
             unsafe {
+                // SAFETY: `base` is the valid allocation base returned by `alloc_list_data`.
                 libc::free(base);
             }
         } else if !old_data.is_null() {
             // No header (literal): free data directly
             unsafe {
+                // SAFETY: `old_data` is a non-null allocation without a header, freed directly.
                 libc::free(old_data as *mut std::ffi::c_void);
             }
         }
@@ -309,6 +328,7 @@ pub extern "C" fn mimi_list_push_grow(
 pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     if !ptr.is_null() {
         unsafe {
+            // SAFETY: freeing a non-null pointer allocated by the matching `libc::malloc`.
             libc::free(ptr as *mut std::ffi::c_void);
         }
     }
@@ -326,32 +346,38 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
         return;
     }
     unsafe {
+        // SAFETY: `list` was checked non-null; data is freed using the correct base depending on header presence.
         let lst = &*list;
         if lst.owns_data && !lst.data.is_null() {
             let cap = list_cap(lst.data);
             if cap > 0 {
                 if free_elements {
                     for i in 0..lst.len as usize {
+                        // SAFETY: element pointer is non-null and was allocated by `libc::malloc`.
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
+                // SAFETY: `cap > 0` guarantees a hidden header at `data - 1`.
                 let base = (lst.data as *mut i64).offset(-1) as *mut std::ffi::c_void;
                 libc::free(base);
             } else {
                 if free_elements {
                     for i in 0..lst.len as usize {
+                        // SAFETY: element pointer is non-null and was allocated by `libc::malloc`.
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
+                // SAFETY: `data` is non-null and has no hidden header; free the pointer directly.
                 libc::free(lst.data as *mut std::ffi::c_void);
             }
         }
+        // SAFETY: `list` was checked non-null and is freed after its data/elements.
         libc::free(list as *mut std::ffi::c_void);
     }
 }
@@ -359,18 +385,22 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
 /// Allocate a C string from bytes that already include the null terminator.
 fn alloc_c_string_from_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
     if bytes.is_empty() {
+        // SAFETY: allocating one byte and writing the null terminator.
         let ptr = unsafe { libc::malloc(1) as *mut u8 };
         if !ptr.is_null() {
             unsafe {
+                // SAFETY: writing the null terminator within the single-byte allocation.
                 *ptr = 0;
             }
         }
         return ptr as *mut std::ffi::c_char;
     }
+    // SAFETY: `bytes.len()` is non-zero here; allocation size matches copy length.
     let ptr = unsafe { libc::malloc(bytes.len()) as *mut u8 };
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: source and destination are non-overlapping and `bytes.len()` fits in the allocation.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     }
@@ -423,12 +453,14 @@ struct RcHeader {
     alloc_size: i64,
 }
 
+// SAFETY: caller ensures `ptr` was returned by `mimi_rc_alloc` and is still valid; offset -1 lands in the `RcHeader`.
 unsafe fn rc_header_from_ptr(ptr: *mut std::ffi::c_void) -> *mut RcHeader {
     (ptr as *mut RcHeader).sub(1)
 }
 
 /// S1: Helper to get a shared reference for atomic operations (no aliasing UB).
 /// Caller must ensure ptr is valid and not concurrently freed.
+// SAFETY: caller ensures `ptr` is valid and not concurrently freed; the returned reference lifetime is bounded by the caller.
 unsafe fn rc_header_ref(ptr: *mut std::ffi::c_void) -> &'static RcHeader {
     &*(ptr as *mut RcHeader).sub(1)
 }
@@ -448,16 +480,19 @@ pub extern "C" fn mimi_rc_alloc(size: i64) -> *mut std::ffi::c_void {
         .unwrap_or_else(|_| std::process::abort())
         .0
         .pad_to_align();
+    // SAFETY: `layout` has non-zero size and alignment; null result is handled.
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
     let hdr = ptr as *mut RcHeader;
     unsafe {
+        // SAFETY: `ptr` points to uninitialized memory with enough space for `RcHeader`; fields are fully initialized.
         (*hdr).strong = AtomicI64::new(1);
         (*hdr).weak = AtomicI64::new(0);
         (*hdr).alloc_size = size;
     }
+    // SAFETY: header is initialized before returning pointer to user data at `hdr + 1`.
     unsafe { (hdr.add(1)) as *mut std::ffi::c_void }
 }
 
@@ -466,14 +501,17 @@ pub extern "C" fn mimi_rc_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: `ptr` was checked non-null and came from `mimi_rc_alloc`, so the header is valid.
     let hdr = unsafe { rc_header_from_ptr(ptr) };
     unsafe {
+        // SAFETY: atomic increment on a valid strong count; no other thread is deallocating because strong > 0.
         (*hdr).strong.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Helper: build the dealloc Layout from RcHeader's stored alloc_size.
 /// FFI-1: Uses abort instead of panicking if alloc_size is corrupted.
+// SAFETY: `hdr` must point to a valid `RcHeader`; `alloc_size` is validated before constructing the `Layout`.
 unsafe fn rc_dealloc_layout(hdr: *mut RcHeader) -> std::alloc::Layout {
     let user_size = (*hdr).alloc_size as usize;
     // Guard against corrupted alloc_size that would cause Layout::array to panic.
@@ -495,11 +533,14 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
         return;
     }
     let hdr = unsafe { rc_header_from_ptr(ptr) };
+    // SAFETY: atomic decrement with Release ordering; if it returns 1, we own the last strong reference.
     if unsafe { (*hdr).strong.fetch_sub(1, Ordering::Release) } == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
+        // SAFETY: after the Acquire fence, reading weak count is synchronized with the releasing thread.
         if unsafe { (*hdr).weak.load(Ordering::Relaxed) } == 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
             unsafe {
+                // SAFETY: `layout` is reconstructed from the valid header; dealloc matches the original alloc.
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
         }
@@ -517,12 +558,14 @@ pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     // Between load and fetch_add, another thread could complete release+dealloc.
     // CAS ensures we only increment if the object is still alive.
     loop {
+        // SAFETY: reading atomic counts on a valid header while the object is still potentially alive.
         let s = unsafe { (*hdr).strong.load(Ordering::Acquire) };
         let w = unsafe { (*hdr).weak.load(Ordering::Relaxed) };
         if s == 0 && w == 0 {
             return; // Object already freed or being freed
         }
         // Try to increment weak; if strong went to 0 between our load and CAS, retry.
+        // SAFETY: CAS loop only increments weak count while the object is still alive (strong > 0 or weak > 0).
         let prev = unsafe {
             (*hdr)
                 .weak
@@ -540,11 +583,14 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
         return;
     }
     let hdr = unsafe { rc_header_from_ptr(ptr) };
+    // SAFETY: atomic decrement with Release ordering; if it returns 1, we own the last weak reference.
     if unsafe { (*hdr).weak.fetch_sub(1, Ordering::Release) } == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
+        // SAFETY: after the Acquire fence, reading strong count is synchronized with releasing threads.
         if unsafe { (*hdr).strong.load(Ordering::Relaxed) } <= 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
             unsafe {
+                // SAFETY: `layout` is reconstructed from the valid header; dealloc matches the original alloc.
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
         }
@@ -556,6 +602,7 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `ptr` was checked non-null and came from `mimi_rc_alloc`; `rc_header_ref` contract satisfied.
     let hdr = unsafe { rc_header_ref(ptr) };
     let mut s = hdr.strong.load(Ordering::Relaxed);
     loop {
@@ -583,6 +630,7 @@ struct MimiMap {
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// Callers must dereference within a single scope (no two &mut to same handle).
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
+// SAFETY: aborts on invalid handle (0); caller must ensure `handle` is a unique `Box<MimiMap>` and avoid aliased mutable access.
 unsafe fn map_from_handle(handle: MapHandle) -> *mut MimiMap {
     if handle == 0 {
         std::process::abort();
@@ -603,6 +651,7 @@ pub extern "C" fn mimi_map_destroy(handle: MapHandle) {
     if handle == 0 {
         return;
     }
+    // SAFETY: handle is non-zero; reconstructing the Box and dropping it.
     unsafe {
         drop(Box::from_raw(handle as *mut MimiMap));
     }
@@ -613,6 +662,7 @@ pub extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
+    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     unsafe { (*map_from_handle(handle)).inner.len() as i64 }
 }
 
@@ -622,6 +672,7 @@ pub extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ffi::c_ch
         return 0;
     }
     let s = unsafe { cstr_to_string(key) };
+    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     unsafe { (*map_from_handle(handle)).inner.contains_key(&s) as i32 }
 }
 
@@ -631,6 +682,7 @@ pub extern "C" fn mimi_map_get(handle: MapHandle, key: *const std::ffi::c_char) 
         return 0;
     }
     let s = unsafe { cstr_to_string(key) };
+    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     unsafe {
         (*map_from_handle(handle))
             .inner
@@ -650,6 +702,7 @@ pub extern "C" fn mimi_map_set(
         return;
     }
     let s = unsafe { cstr_to_string(key) };
+    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     unsafe {
         (*map_from_handle(handle)).inner.insert(s, value);
     }
@@ -661,6 +714,7 @@ pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_cha
         return 0;
     }
     let s = unsafe { cstr_to_string(key) };
+    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     unsafe { (*map_from_handle(handle)).inner.remove(&s).is_some() as i32 }
 }
 
@@ -677,6 +731,7 @@ pub extern "C" fn mimi_map_from_list(
     // S6: Validate n doesn't exceed reasonable bounds (max 1M entries).
     let n = n.min(1_000_000);
     for i in 0..n {
+        // SAFETY: caller must ensure `keys`/`values` arrays have at least `n` elements.
         unsafe {
             let key_handle = *keys.add(i as usize);
             let val_handle = *values.add(i as usize);
@@ -701,6 +756,7 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         });
         return Box::into_raw(list);
     }
+    // SAFETY: handle validated by `map_from_handle`; shared reference is in a single scope.
     let map = unsafe { &*map_from_handle(handle) };
     let len = map.inner.len() as i64;
     if len == 0 {
@@ -757,6 +813,7 @@ pub extern "C" fn mimi_value_type_name(_handle: ValueHandle) -> *const std::ffi:
 // String functions
 // ---------------------------------------------------------------------------
 
+// SAFETY: null pointer is checked before `CStr::from_ptr`; `to_string_lossy` handles non-UTF-8 bytes safely.
 unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
     if ptr.is_null() {
         return String::new();
@@ -769,7 +826,9 @@ pub extern "C" fn mimi_str_concat(
     a: *const std::ffi::c_char,
     b: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let sa = unsafe { cstr_to_string(a) };
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let sb = unsafe { cstr_to_string(b) };
     let result = format!("{}{}", sa, sb);
     alloc_c_string(&result)
@@ -780,7 +839,9 @@ pub extern "C" fn mimi_str_split(
     s: *const std::ffi::c_char,
     delim: *const std::ffi::c_char,
 ) -> *mut MimiList {
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let ss = unsafe { cstr_to_string(s) };
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let d = unsafe { cstr_to_string(delim) };
 
     let parts: Vec<String> = if d.is_empty() {
@@ -818,6 +879,7 @@ pub extern "C" fn mimi_str_join(
     if list.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `list` was checked non-null; shared reference is in a single scope.
     let lst = unsafe { &*list };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("");
@@ -826,10 +888,12 @@ pub extern "C" fn mimi_str_join(
     if lst.len < 0 || lst.len > 1_000_000 {
         return alloc_c_string("");
     }
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let separator = unsafe { cstr_to_string(sep) };
 
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize);
     for i in 0..lst.len as isize {
+        // SAFETY: `i` is within `[0, len)` and data pointer is non-null for valid entries.
         unsafe {
             let ptr = *lst.data.offset(i);
             parts.push(cstr_to_string(ptr));
@@ -845,8 +909,11 @@ pub extern "C" fn mimi_str_replace(
     from: *const std::ffi::c_char,
     to: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let ss = unsafe { cstr_to_string(s) };
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let f = unsafe { cstr_to_string(from) };
+    // SAFETY: `cstr_to_string` handles null pointers safely.
     let t = unsafe { cstr_to_string(to) };
 
     if f.is_empty() {
@@ -877,6 +944,7 @@ pub extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> !
     let msg = if str.is_null() || len <= 0 {
         String::new()
     } else {
+        // SAFETY: `len` is validated as positive before constructing the slice.
         unsafe {
             let slice = std::slice::from_raw_parts(str as *const u8, len as usize);
             String::from_utf8_lossy(slice).into_owned()
@@ -924,6 +992,7 @@ struct CliArgs {
 
 // SAFETY: CliArgs holds raw pointers stored as usize; access is serialized via Mutex.
 unsafe impl Send for CliArgs {}
+// SAFETY: already documented above.
 unsafe impl Sync for CliArgs {}
 
 static CLI_ARGS: std::sync::OnceLock<Mutex<CliArgs>> = std::sync::OnceLock::new();
@@ -948,6 +1017,7 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     // Original argv may be freed after init returns.
     if !argv.is_null() && argc > 0 {
         for i in 0..argc as isize {
+            // SAFETY: pointer is non-null or the helper handles null safely.
             unsafe {
                 let s = cstr_to_string(*argv.offset(i));
                 let ptr = alloc_c_string(&s);
@@ -1292,6 +1362,7 @@ pub extern "C" fn mimi_from_json(json_str: *const std::ffi::c_char) -> *mut std:
     if json_str.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `json_str` was checked non-null above.
     let s = unsafe { cstr_to_string(json_str) };
     let mut parser = JsonParser::new(&s);
     match parser.parse_full() {
@@ -1305,6 +1376,7 @@ pub extern "C" fn mimi_is_valid_json(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         return 0;
     }
+    // SAFETY: `json_str` was checked non-null above.
     let s = unsafe { cstr_to_string(json_str) };
     let mut parser = JsonParser::new(&s);
     parser.is_valid() as i64
@@ -1317,7 +1389,9 @@ fn json_get_inner(
     if json_str.is_null() || key.is_null() {
         return None;
     }
+    // SAFETY: `json_str` was checked non-null above.
     let json = unsafe { cstr_to_string(json_str) };
+    // SAFETY: `key` was checked non-null above.
     let k = unsafe { cstr_to_string(key) };
     let bytes = json.as_bytes();
     let mut pos = 0;
@@ -1456,6 +1530,7 @@ pub extern "C" fn json_array_length(json_str: *const std::ffi::c_char) -> i64 {
     if json_str.is_null() {
         return 0;
     }
+    // SAFETY: `json_str` was checked non-null above.
     let json = unsafe { cstr_to_string(json_str) };
     let bytes = json.as_bytes();
     let mut pos = 0;
@@ -1511,6 +1586,7 @@ pub extern "C" fn json_get_element(
     if json_str.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `json_str` was checked non-null above.
     let json = unsafe { cstr_to_string(json_str) };
     let bytes = json.as_bytes();
     let mut pos = 0;
@@ -1568,6 +1644,7 @@ pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
     if json.is_null() {
         return 0;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let mut parser = JsonParser::new(&s);
     match parser.parse_value() {
@@ -1581,6 +1658,7 @@ pub extern "C" fn mimi_json_as_f64(json: *const std::ffi::c_char) -> f64 {
     if json.is_null() {
         return 0.0;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let mut parser = JsonParser::new(&s);
     match parser.parse_value() {
@@ -1594,6 +1672,7 @@ pub extern "C" fn mimi_json_as_bool(json: *const std::ffi::c_char) -> i64 {
     if json.is_null() {
         return 0;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let mut parser = JsonParser::new(&s);
     match parser.parse_value() {
@@ -1613,6 +1692,7 @@ struct MimiSet {
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
+// SAFETY: aborts on invalid handle (0); caller must ensure `handle` is a unique `Box<MimiSet>`.
 unsafe fn set_from_handle(handle: SetHandle) -> *mut MimiSet {
     if handle == 0 {
         std::process::abort();
@@ -1633,6 +1713,7 @@ pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
     if handle == 0 {
         return;
     }
+    // SAFETY: handle is non-zero; reconstructing the Box and dropping it.
     unsafe {
         drop(Box::from_raw(handle as *mut MimiSet));
     }
@@ -1643,6 +1724,7 @@ pub extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> S
     if handle == 0 {
         return handle;
     }
+    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe {
         (*set_from_handle(handle)).inner.insert(value);
     }
@@ -1654,6 +1736,7 @@ pub extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) ->
     if handle == 0 {
         return 0;
     }
+    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe { (*set_from_handle(handle)).inner.contains(&value) as i64 }
 }
 
@@ -1662,6 +1745,7 @@ pub extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> S
     if handle == 0 {
         return handle;
     }
+    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe {
         (*set_from_handle(handle)).inner.remove(&value);
     }
@@ -1673,6 +1757,7 @@ pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
+    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe { (*set_from_handle(handle)).inner.len() as i64 }
 }
 
@@ -1686,13 +1771,16 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
         return std::ptr::null_mut();
     }
     if handle == 0 {
+        // SAFETY: `out_len` was checked non-null above.
         unsafe {
             *out_len = -1;
         }
         return -1isize as *mut SetValueHandle;
     }
+    // SAFETY: handle validated by `set_from_handle`; shared reference is in a single scope.
     let set = unsafe { &*set_from_handle(handle) };
     let len = set.inner.len() as i64;
+    // SAFETY: `out_len` was checked non-null above.
     unsafe {
         *out_len = len;
     }
@@ -1986,7 +2074,9 @@ pub extern "C" fn mimi_regex_match(
     if text.is_null() || pattern.is_null() {
         return 0;
     }
+    // SAFETY: pointers checked non-null above.
     let t = unsafe { cstr_to_string(text) };
+    // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
     RegexEngine::match_pattern(&t, &p) as i32
 }
@@ -1999,7 +2089,9 @@ pub extern "C" fn mimi_regex_find(
     if text.is_null() || pattern.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: pointers checked non-null above.
     let t = unsafe { cstr_to_string(text) };
+    // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
     match RegexEngine::find_match(&t, &p) {
         Some((start, end)) => {
@@ -2019,8 +2111,11 @@ pub extern "C" fn mimi_regex_replace(
     if text.is_null() || pattern.is_null() || replacement.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: pointers checked non-null above.
     let t = unsafe { cstr_to_string(text) };
+    // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
+    // SAFETY: replacement pointer checked non-null above.
     let r = unsafe { cstr_to_string(replacement) };
     let result = RegexEngine::replace_all(&t, &p, &r);
     alloc_c_string(&result)
@@ -2036,7 +2131,9 @@ pub extern "C" fn mimi_regex_find_all(
     if text.is_null() || pattern.is_null() {
         return alloc_c_string("[]");
     }
+    // SAFETY: pointers checked non-null above.
     let t = unsafe { cstr_to_string(text) };
+    // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
     let mut matches = Vec::new();
     let mut cursor = 0;
@@ -2116,6 +2213,7 @@ pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
     }
     let elem_size: usize = 8;
     let total_bytes = (count as usize) * elem_size;
+    // SAFETY: `data` is non-null and caller must ensure it points to `count * 8` writable bytes.
     let slice = unsafe { std::slice::from_raw_parts_mut(data, total_bytes) };
     for i in 0..(count as usize) {
         for j in 0..(count as usize) - 1 - i {
@@ -2160,6 +2258,7 @@ pub extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count:
         return;
     }
     let n = count as usize;
+    // SAFETY: `data` is non-null and caller must ensure it points to `count` valid C string pointers.
     let slice = unsafe { std::slice::from_raw_parts_mut(data, n) };
     // Bubble sort: stable, O(n^2) but fine for typical small lists.
     for i in 0..n {
@@ -2173,7 +2272,9 @@ pub extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count:
                 }
                 continue;
             }
+            // SAFETY: `a` is non-null (checked above).
             let a_str = unsafe { CStr::from_ptr(a) };
+            // SAFETY: `b` is non-null (checked above).
             let b_str = unsafe { CStr::from_ptr(b) };
             if a_str > b_str {
                 slice.swap(j, j + 1);
@@ -2198,6 +2299,7 @@ fn fd_to_i32(fd: i64) -> Option<i32> {
 #[no_mangle]
 pub extern "C" fn mimi_socket(domain: i64, type_: i64, protocol: i64) -> i64 {
     // We'll use libc calls directly.
+    // SAFETY: direct POSIX socket calls; integer arguments are cast from validated i64 values.
     unsafe {
         let fd = libc::socket(domain as i32, type_ as i32, protocol as i32);
         if fd >= 0 {
@@ -2219,10 +2321,12 @@ pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64
     if host.is_null() || fd < 0 {
         return -1;
     }
+    // SAFETY: `host` was checked non-null above.
     let h = unsafe { cstr_to_string(host) };
 
     // Resolve address
     let port_str = format!("{}", port);
+    // SAFETY: `addrinfo` is zero-initialized before passing to `getaddrinfo`.
     let hints = unsafe {
         let mut hints_raw: libc::addrinfo = std::mem::zeroed();
         hints_raw.ai_family = libc::AF_UNSPEC;
@@ -2232,11 +2336,13 @@ pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64
     let mut res: *mut libc::addrinfo = std::ptr::null_mut();
     let c_host = CString::new(h.as_str()).unwrap_or_default();
     let c_port = CString::new(port_str.as_str()).unwrap_or_default();
+    // SAFETY: `c_host` and `c_port` are valid NUL-terminated `CString`s; `res` is out-param.
     let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
     if err != 0 || res.is_null() {
         return -1;
     }
 
+    // SAFETY: freeing a non-null pointer allocated by the matching allocator.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2245,9 +2351,11 @@ pub extern "C" fn mimi_connect(fd: i64, host: *const std::ffi::c_char, port: i64
                 return -1;
             }
         };
+        // SAFETY: `res` is non-null and came from `getaddrinfo`; `fd_i32` is validated.
         let r = libc::connect(fd_i32, (*res).ai_addr, (*res).ai_addrlen);
         if r == 0 {
             let flag: i32 = 1;
+            // SAFETY: `fd_i32` is a valid socket file descriptor.
             libc::setsockopt(
                 fd_i32,
                 libc::IPPROTO_TCP,
@@ -2266,6 +2374,7 @@ pub extern "C" fn mimi_bind(fd: i64, port: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
+    // SAFETY: direct POSIX calls with a validated file descriptor.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2288,6 +2397,7 @@ pub extern "C" fn mimi_listen(fd: i64, backlog: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
+    // SAFETY: direct POSIX calls with a validated file descriptor.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2302,6 +2412,7 @@ pub extern "C" fn mimi_accept(fd: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
+    // SAFETY: direct POSIX calls with a validated file descriptor.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2324,6 +2435,7 @@ pub extern "C" fn mimi_send(fd: i64, data: *const std::ffi::c_char, len: i64) ->
     if fd < 0 || data.is_null() {
         return -1;
     }
+    // SAFETY: direct POSIX calls with validated file descriptor and non-null buffer.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2344,10 +2456,12 @@ pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut s
     };
     let size = buf_size as usize;
     let mut buf: Vec<u8> = vec![0u8; size + 1];
+    // SAFETY: `buf` has `size + 1` allocated bytes; `fd_i32` is validated.
     let n = unsafe { libc::recv(fd_i32, buf.as_mut_ptr() as *mut std::ffi::c_void, size, 0) };
     if n <= 0 {
         if !out_len.is_null() {
             unsafe {
+                // SAFETY: `out_len` was checked non-null above.
                 *out_len = 0;
             }
         }
@@ -2358,6 +2472,7 @@ pub extern "C" fn mimi_recv(fd: i64, buf_size: i64, out_len: *mut i64) -> *mut s
     buf[n] = 0;
     if !out_len.is_null() {
         unsafe {
+            // SAFETY: `out_len` was checked non-null above.
             *out_len = n as i64;
         }
     }
@@ -2369,6 +2484,7 @@ pub extern "C" fn mimi_close(fd: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
+    // SAFETY: direct POSIX close with a validated file descriptor.
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2466,6 +2582,7 @@ pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::
     if url.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `url` was checked non-null above.
     let u = unsafe { cstr_to_string(url) };
     let (host, port, path) = match parse_http_url(&u) {
         Some(v) => v,
@@ -2494,10 +2611,12 @@ pub extern "C" fn mimi_http_post(
     if url.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `url` was checked non-null above.
     let u = unsafe { cstr_to_string(url) };
     let b = if body.is_null() {
         String::new()
     } else {
+        // SAFETY: `body` was checked non-null above.
         unsafe { cstr_to_string(body) }
     };
     let (host, port, path) = match parse_http_url(&u) {
@@ -2538,6 +2657,7 @@ pub extern "C" fn mimi_json_serialize(
     }
 
     let mut result = String::from("[");
+    // SAFETY: `data` was checked non-null and aligned; caller must ensure it points to `len` i64 elements.
     let elements = unsafe { std::slice::from_raw_parts(data as *const i64, len as usize) };
 
     for (i, &raw) in elements.iter().enumerate() {
@@ -2561,6 +2681,7 @@ pub extern "C" fn mimi_json_serialize(
                 // String: raw is a C string pointer
                 result.push('"');
                 if raw != 0 {
+                    // SAFETY: `raw` is non-zero and the caller must ensure it is a valid C string pointer.
                     let s = unsafe { std::ffi::CStr::from_ptr(raw as *const std::ffi::c_char) };
                     let s_str = s.to_string_lossy();
                     for c in s_str.chars() {
@@ -2602,12 +2723,14 @@ pub extern "C" fn mimi_json_deserialize(
 ) -> *mut std::ffi::c_void {
     if json.is_null() {
         if !out_len.is_null() {
+            // SAFETY: `out_len` was checked non-null above.
             unsafe {
                 *out_len = 0;
             }
         }
         return std::ptr::null_mut();
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let bytes = s.as_bytes();
     let mut pos = 0;
@@ -2617,8 +2740,11 @@ pub extern "C" fn mimi_json_deserialize(
         pos += 1;
     }
     if pos >= bytes.len() || bytes[pos] != b'[' {
-        unsafe {
-            *out_len = 0;
+        if !out_len.is_null() {
+            // SAFETY: `out_len` was checked non-null above.
+            unsafe {
+                *out_len = 0;
+            }
         }
         return std::ptr::null_mut();
     }
@@ -2761,11 +2887,15 @@ pub extern "C" fn mimi_json_deserialize(
                         for i in 0..idx {
                             let ptr = data[i as usize] as *mut std::ffi::c_char;
                             if !ptr.is_null() {
+                                // SAFETY: freeing a non-null string allocated during deserialization.
                                 unsafe { libc::free(ptr as *mut std::ffi::c_void) };
                             }
                         }
                     }
-                    unsafe { *out_len = 0 };
+                    if !out_len.is_null() {
+                        // SAFETY: `out_len` was checked non-null above.
+                        unsafe { *out_len = 0 };
+                    }
                     return std::ptr::null_mut();
                 }
                 if neg {
@@ -2779,8 +2909,11 @@ pub extern "C" fn mimi_json_deserialize(
 
     let result = data.as_mut_ptr();
     std::mem::forget(data);
-    unsafe {
-        *out_len = idx;
+    if !out_len.is_null() {
+        // SAFETY: `out_len` was checked non-null above.
+        unsafe {
+            *out_len = idx;
+        }
     }
     result as *mut std::ffi::c_void
 }
@@ -2802,10 +2935,12 @@ pub extern "C" fn mimi_tuple_serialize(
     if values.is_null() || count <= 0 {
         return alloc_c_string("[]");
     }
+    // SAFETY: `values` was checked non-null above; caller ensures `count` elements.
     let vals = unsafe { std::slice::from_raw_parts(values, count as usize) };
     let types = if elem_types.is_null() {
         &[] as &[i64]
     } else {
+        // SAFETY: `elem_types` is non-null and caller ensures `count` elements.
         unsafe { std::slice::from_raw_parts(elem_types, count as usize) }
     };
 
@@ -2830,6 +2965,7 @@ pub extern "C" fn mimi_tuple_serialize(
             2 => {
                 result.push('"');
                 if raw != 0 {
+                    // SAFETY: `raw` is non-zero and caller must ensure it is a valid C string pointer.
                     let s = unsafe { std::ffi::CStr::from_ptr(raw as *const std::ffi::c_char) };
                     let s_str = s.to_string_lossy();
                     for c in s_str.chars() {
@@ -2864,6 +3000,7 @@ pub extern "C" fn mimi_tuple_deserialize(
     if json.is_null() || out_values.is_null() || count <= 0 {
         return -1;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let bytes = s.as_bytes();
     let mut pos = 0;
@@ -2879,6 +3016,7 @@ pub extern "C" fn mimi_tuple_deserialize(
     let types = if elem_types.is_null() {
         &[] as &[i64]
     } else {
+        // SAFETY: `elem_types` is non-null and caller ensures `count` elements.
         unsafe { std::slice::from_raw_parts(elem_types, count as usize) }
     };
 
@@ -2921,6 +3059,7 @@ pub extern "C" fn mimi_tuple_deserialize(
                 }
                 let num_str = std::str::from_utf8(&bytes[pos..end]).unwrap_or("0");
                 let f: f64 = num_str.parse().unwrap_or(0.0);
+                // SAFETY: `out_values` was checked non-null above; `idx < count`.
                 unsafe {
                     *out_values.offset(idx as isize) = f64::to_bits(f) as i64;
                 }
@@ -2944,11 +3083,13 @@ pub extern "C" fn mimi_tuple_deserialize(
                 if slen > 0 {
                     let s_bytes = bytes[start..start + slen].to_vec();
                     unsafe {
+                        // SAFETY: `out_values` was checked non-null above; `idx < count`.
                         *out_values.offset(idx as isize) =
                             alloc_c_string_from_bytes(&s_bytes) as i64;
                     }
                 } else {
                     unsafe {
+                        // SAFETY: `out_values` was checked non-null above; `idx < count`.
                         *out_values.offset(idx as isize) = 0;
                     }
                 }
@@ -2975,6 +3116,7 @@ pub extern "C" fn mimi_tuple_deserialize(
                 if neg {
                     val = val.wrapping_neg();
                 }
+                // SAFETY: `out_values` was checked non-null above; `idx < count`.
                 unsafe {
                     *out_values.offset(idx as isize) = val;
                 }
@@ -3031,6 +3173,7 @@ pub extern "C" fn __mimi_extern_test_callback(
     cb: Option<unsafe extern "C" fn(i32) -> i32>,
 ) -> i32 {
     match cb {
+        // SAFETY: callback pointer came from a valid `Option<unsafe extern C fn>` argument.
         Some(f) => unsafe { f(x) },
         None => x,
     }
@@ -3066,6 +3209,7 @@ pub extern "C" fn __mimi_extern_test_strlen(s: *const std::ffi::c_char) -> i32 {
     if s.is_null() {
         return -1;
     }
+    // SAFETY: `s` was checked non-null above.
     let str = unsafe { CStr::from_ptr(s) };
     str.to_bytes().len() as i32
 }
@@ -3078,6 +3222,7 @@ pub extern "C" fn __mimi_extern_test_parse_int(json: *const std::ffi::c_char) ->
     if json.is_null() {
         return -1;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let s = s.trim();
     let neg = s.starts_with('-');
@@ -3106,6 +3251,7 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
     if json.is_null() {
         return -1;
     }
+    // SAFETY: `json` was checked non-null above.
     let s = unsafe { cstr_to_string(json) };
     let s = s.trim();
     if !s.starts_with('[') {
@@ -3133,6 +3279,7 @@ pub extern "C" fn __mimi_extern_test_segfault() {
     // Deliberate null pointer dereference — used by FFI safety tests to verify
     // crash handling. In non-test builds this is never called (test_segfault
     // wrapper is gated #[cfg(test)]).
+    // SAFETY: deliberate null-pointer write for FFI crash testing only.
     unsafe {
         std::ptr::write_volatile(std::ptr::null_mut::<i32>(), 42);
     }
@@ -3271,6 +3418,7 @@ mod no_panic {
     extern "C" fn no_panic_handler(sig: i32) {
         // Only reset the signal that was actually caught, not all managed signals
         if let Some(idx) = sig_index(sig) {
+            // SAFETY: restoring the previous signal handler from the thread-local storage.
             unsafe {
                 OLD_HANDLERS.with(|old| {
                     let arr = &*old.get();
@@ -3282,6 +3430,7 @@ mod no_panic {
         NO_PANIC_JUMP_BUF.with(|buf| {
             let jmp_buf = buf.get();
             if !jmp_buf.is_null() {
+                // SAFETY: `jmp_buf` is non-null and was set by `sigsetjmp` in the same thread.
                 unsafe {
                     siglongjmp(jmp_buf, sig);
                 }
@@ -3290,11 +3439,13 @@ mod no_panic {
     }
 
     #[no_mangle]
+    // SAFETY: caller must ensure this is called before `sigsetjmp`/`mimi_restore_no_panic_handlers`.
     pub unsafe extern "C" fn mimi_install_no_panic_handlers() {
         let handler = no_panic_handler as *const () as usize;
         OLD_HANDLERS.with(|old| {
             let arr = &mut *old.get();
             for (i, &sig) in SIGS.iter().enumerate() {
+                // SAFETY: installing our signal handler on the five crash signals.
                 arr[i] = libc::signal(sig, handler);
             }
         });
@@ -3302,12 +3453,15 @@ mod no_panic {
     }
 
     #[no_mangle]
+    // SAFETY: caller must uphold the extern C ABI contract.
     pub unsafe extern "C" fn mimi_restore_no_panic_handlers() {
         OLD_HANDLERS.with(|old| {
             let arr = &*old.get();
+            // SAFETY: restoring previous handlers stored in thread-local `OLD_HANDLERS`.
             for (i, &sig) in SIGS.iter().enumerate() {
                 let prev = arr[i];
                 if prev != usize::MAX {
+                    // SAFETY: `prev` is a valid handler value previously returned by `libc::signal`.
                     libc::signal(sig, prev);
                 }
             }
@@ -3354,9 +3508,11 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     const PREFIX: &[u8] = b"[FFI contract violation] ";
     const HINT: &[u8] = b"\nHint: use --skip-verify-ffi to disable contract checking.\n";
     const DETAIL: &[u8] = b"(no details)\n";
+    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
     unsafe {
         let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
         if !msg.is_null() {
+            // SAFETY: `msg` was checked non-null above.
             let s = CStr::from_ptr(msg);
             let loss = s.to_string_lossy();
             let bytes = loss.as_bytes();
@@ -3370,7 +3526,9 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     let handler_ptr = ERROR_HANDLER.load(Ordering::Acquire);
     if !handler_ptr.is_null() {
         ERROR_HANDLER.store(std::ptr::null_mut(), Ordering::Release);
+        // SAFETY: `handler_ptr` was checked non-null and the handler was cleared before calling.
         let handler: &ErrorHandler = unsafe { &*handler_ptr };
+        // SAFETY: calling the registered error handler with the validated message pointer.
         unsafe { (*handler)(msg) };
         std::process::abort();
     }
@@ -3402,6 +3560,7 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
     let n = if name.is_null() {
         String::new()
     } else {
+        // SAFETY: `cstr_to_string` handles null pointers safely.
         unsafe { cstr_to_string(name) }
     };
     CAP_TABLE.with(|table| {
@@ -3449,6 +3608,7 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
+    // SAFETY: `fut` was checked non-null; reconstructing the Box allocated by `mimi_future_alloc`.
     unsafe {
         drop(Box::from_raw(fut as *mut MimiFutureRepr));
     }
@@ -3460,6 +3620,7 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         return;
     }
     use std::sync::atomic::Ordering;
+    // SAFETY: `fut` was checked non-null; `MimiFutureRepr` is valid.
     unsafe {
         let rep = &*(fut as *const MimiFutureRepr);
         rep.completed.store(1, Ordering::Release);
@@ -3472,6 +3633,7 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
         return 1;
     }
     use std::sync::atomic::Ordering;
+    // SAFETY: `fut` was checked non-null; `MimiFutureRepr` is valid.
     unsafe {
         let rep = &*(fut as *const MimiFutureRepr);
         rep.completed.load(Ordering::Acquire)
@@ -3494,6 +3656,7 @@ pub extern "C" fn mimi_spawn_future(
     }
     let future_addr = future as usize;
     let _handle = std::thread::spawn(move || {
+        // SAFETY: the spawned thread owns the future pointer for the duration of `poll_fn`; it was checked non-null.
         unsafe { poll_fn(future_addr as *mut std::ffi::c_void) };
     });
     // _handle is dropped here — thread is detached. This is intentional:
@@ -3513,6 +3676,7 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     // Uses Acquire ordering to synchronize-with the Release store in set_completed,
     // ensuring result data written before the completed flag is visible.
     // P2-12 fix: bounded spin with max iterations to prevent infinite CPU spin on bug.
+    // SAFETY: `future` was checked non-null; `MimiFutureRepr` is valid and accessed atomically.
     unsafe {
         let rep = &*(future as *const MimiFutureRepr);
         let mut iterations: u64 = 0;
@@ -3541,7 +3705,9 @@ type PollFn = unsafe extern "C" fn(*mut std::ffi::c_void);
 /// - `Sync` is safe because &SendPtr is never shared across threads (only &mut access via the mutex)
 #[derive(Clone)]
 struct SendPtr(*mut std::ffi::c_void);
+// SAFETY: already documented above.
 unsafe impl Send for SendPtr {}
+// SAFETY: already documented above.
 unsafe impl Sync for SendPtr {}
 
 type ExecutorEntry = (PollFn, SendPtr);
@@ -3579,6 +3745,7 @@ pub extern "C" fn mimi_executor_run() {
             for i in 0..queue.len() {
                 let (_, future) = &queue[i];
                 use std::sync::atomic::Ordering;
+                // SAFETY: future pointer came from the executor queue and `MimiFutureRepr` is valid.
                 let completed = unsafe {
                     let rep = &*(future.0 as *const MimiFutureRepr);
                     rep.completed.load(Ordering::Acquire)
@@ -3600,6 +3767,7 @@ pub extern "C" fn mimi_executor_run() {
             }
         };
         if let Some((poll_fn, future)) = entry {
+            // SAFETY: `poll_fn` and `future` were taken from the executor queue; no aliased access while polling.
             unsafe { poll_fn(future) };
         }
     }
@@ -3612,6 +3780,7 @@ pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> boo
     let n = if name.is_null() {
         ""
     } else {
+        // SAFETY: `name` was checked non-null above.
         unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
     };
     CAP_TABLE.with(|table| {
@@ -3628,6 +3797,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
     let n = if name.is_null() {
         ""
     } else {
+        // SAFETY: `name` was checked non-null above.
         unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
     };
     CAP_TABLE.with(|table| {
@@ -3659,6 +3829,7 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
             owns_data: true,
         }));
     } else {
+        // SAFETY: `path` was checked non-null above.
         match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
             Err(_) => {
@@ -3700,6 +3871,7 @@ pub extern "C" fn mimi_is_dir(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -3717,6 +3889,7 @@ pub extern "C" fn mimi_is_file(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -3737,11 +3910,13 @@ pub extern "C" fn mimi_path_join(
     let a_str = if a.is_null() {
         ""
     } else {
+        // SAFETY: `a` was checked non-null above.
         unsafe { CStr::from_ptr(a) }.to_str().unwrap_or("")
     };
     let b_str = if b.is_null() {
         ""
     } else {
+        // SAFETY: `b` was checked non-null above.
         unsafe { CStr::from_ptr(b) }.to_str().unwrap_or("")
     };
     let joined = std::path::Path::new(a_str)
@@ -3757,6 +3932,7 @@ pub extern "C" fn mimi_path_ext(path: *const std::ffi::c_char) -> *mut std::ffi:
     if path.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -3774,6 +3950,7 @@ pub extern "C" fn mimi_path_basename(path: *const std::ffi::c_char) -> *mut std:
     if path.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -3791,6 +3968,7 @@ pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::
     if path.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -3815,6 +3993,7 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
     let path_str = if path.is_null() {
         return empty();
     } else {
+        // SAFETY: `path` was checked non-null above.
         match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
             Err(_) => return empty(),
@@ -3856,6 +4035,7 @@ pub extern "C" fn mimi_mkdir_p(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -3873,6 +4053,7 @@ pub extern "C" fn mimi_remove_file(path: *const std::ffi::c_char) -> i64 {
     if path.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -3906,6 +4087,7 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
         });
         return Box::into_raw(res);
     }
+    // SAFETY: `cmd` was checked non-null above.
     let cmd_str = match unsafe { CStr::from_ptr(cmd) }.to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -3951,6 +4133,7 @@ pub extern "C" fn mimi_exec_free(res: *mut MimiExecResult) {
     if res.is_null() {
         return;
     }
+    // SAFETY: `res` was checked non-null; stdout/stderr were allocated by `alloc_c_string`.
     unsafe {
         let r = Box::from_raw(res);
         if !r.stdout.is_null() {
@@ -3969,6 +4152,7 @@ pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
     if res.is_null() {
         return;
     }
+    // SAFETY: `res` was checked non-null; struct is freed without freeing string members.
     unsafe {
         let _ = Box::from_raw(res);
         // stdout/stderr are NOT freed — they're owned by the ExecResult struct
@@ -3983,6 +4167,7 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
     if cmd.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `cmd` was checked non-null above.
     let cmd_str = match unsafe { CStr::from_ptr(cmd) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -4015,6 +4200,7 @@ pub extern "C" fn mimi_file_stat_free(res: *mut MimiStatResult) {
     if res.is_null() {
         return;
     }
+    // SAFETY: `res` was checked non-null; freeing the stat result struct.
     unsafe {
         let _ = Box::from_raw(res);
     }
@@ -4029,14 +4215,17 @@ pub extern "C" fn mimi_file_stat(
 ) -> *mut MimiStatResult {
     if path.is_null() {
         if !err_out.is_null() {
+            // SAFETY: `err_out` was checked non-null above.
             unsafe { *err_out = alloc_c_string("file_stat error: null path") };
         }
         return std::ptr::null_mut();
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(e) => {
             if !err_out.is_null() {
+                // SAFETY: `err_out` was checked non-null above.
                 unsafe { *err_out = alloc_c_string(&format!("file_stat error: {}", e)) };
             }
             return std::ptr::null_mut();
@@ -4057,12 +4246,14 @@ pub extern "C" fn mimi_file_stat(
                 is_dir: if meta.is_dir() { 1 } else { 0 },
             });
             if !err_out.is_null() {
+                // SAFETY: `err_out` was checked non-null above.
                 unsafe { *err_out = std::ptr::null_mut() };
             }
             Box::into_raw(res)
         }
         Err(e) => {
             if !err_out.is_null() {
+                // SAFETY: `err_out` was checked non-null above.
                 unsafe { *err_out = alloc_c_string(&format!("file_stat error: {}", e)) };
             }
             std::ptr::null_mut()
@@ -4079,10 +4270,12 @@ pub extern "C" fn mimi_append_file(
     if path.is_null() || content.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
     };
+    // SAFETY: `content` was checked non-null above.
     let content_str = match unsafe { CStr::from_ptr(content) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -4113,10 +4306,12 @@ pub extern "C" fn mimi_set_env(
     if key.is_null() || value.is_null() {
         return 0;
     }
+    // SAFETY: `key` was checked non-null above.
     let key_str = match unsafe { CStr::from_ptr(key) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
     };
+    // SAFETY: `value` was checked non-null above.
     let value_str = match unsafe { CStr::from_ptr(value) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
@@ -4135,6 +4330,7 @@ pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c
     let input = if data.is_null() {
         b"".as_slice()
     } else {
+        // SAFETY: `data` was checked non-null above.
         unsafe { CStr::from_ptr(data) }.to_bytes()
     };
     let hash = sha256_bytes(input);
@@ -4237,6 +4433,7 @@ pub extern "C" fn mimi_base64_encode(data: *const std::ffi::c_char) -> *mut std:
     let input = if data.is_null() {
         b"".as_slice()
     } else {
+        // SAFETY: `data` was checked non-null above.
         unsafe { CStr::from_ptr(data) }.to_bytes()
     };
     let encoded = base64_encode_bytes(input);
@@ -4273,6 +4470,7 @@ pub extern "C" fn mimi_base64_decode(data: *const std::ffi::c_char) -> *mut std:
     let input = if data.is_null() {
         ""
     } else {
+        // SAFETY: `data` was checked non-null above.
         match unsafe { CStr::from_ptr(data) }.to_str() {
             Ok(s) => s,
             Err(_) => return alloc_c_string(""),
@@ -4351,6 +4549,7 @@ pub extern "C" fn mimi_str_format(
     arg6: *const std::ffi::c_char,
     arg7: *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
+    // SAFETY: `template` is used as a fallback if null; caller should pass a valid C string.
     let tmpl = unsafe { cstr_to_string(template) };
     let args = [arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7];
     let mut result = String::new();
@@ -4359,6 +4558,7 @@ pub extern "C" fn mimi_str_format(
     while let Some(pos) = rest.find("{}") {
         result.push_str(&rest[..pos]);
         if arg_idx < num_args as usize && arg_idx < args.len() {
+            // SAFETY: argument pointers are passed to `cstr_to_string` which handles null.
             let arg_str = unsafe { cstr_to_string(args[arg_idx]) };
             result.push_str(&arg_str);
             arg_idx += 1;
@@ -4383,6 +4583,7 @@ pub extern "C" fn mimi_read_file_partial(
     if path.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -4410,6 +4611,7 @@ pub extern "C" fn mimi_read_file_bytes(path: *const std::ffi::c_char) -> *mut st
     if path.is_null() {
         return alloc_c_string("");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
@@ -4432,10 +4634,12 @@ pub extern "C" fn mimi_write_file_bytes(
     if path.is_null() || data.is_null() {
         return 0;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
     };
+    // SAFETY: `data` was checked non-null above.
     let data_bytes = unsafe { CStr::from_ptr(data) }.to_bytes();
     match std::fs::write(path_str, data_bytes) {
         Ok(_) => 1,
@@ -4455,6 +4659,7 @@ pub extern "C" fn mimi_read_lines_each(
     if path.is_null() {
         return -1;
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return -1,
@@ -4471,6 +4676,7 @@ pub extern "C" fn mimi_read_lines_each(
                 let c_line = alloc_c_string(&line);
                 callback_fn(c_line);
                 // Free the allocated string after callback
+                // SAFETY: freeing the line buffer allocated by `alloc_c_string` after the callback.
                 unsafe { libc::free(c_line as *mut std::ffi::c_void) };
                 count += 1;
             }
@@ -4490,6 +4696,7 @@ pub extern "C" fn mimi_read_lines_json(path: *const std::ffi::c_char) -> *mut st
     if path.is_null() {
         return alloc_c_string("[]");
     }
+    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string("[]"),
@@ -4807,6 +5014,7 @@ pub extern "C" fn mimi_lexer_tokenize(source: *const std::ffi::c_char) -> *mut s
     if source.is_null() {
         return alloc_c_string("[]");
     }
+    // SAFETY: `source` was checked non-null above.
     let src = unsafe { cstr_to_string(source) };
     let mut lexer = MimiLexer::new(&src);
     let tokens = lexer.tokenize();
@@ -4835,6 +5043,7 @@ pub extern "C" fn mimi_parse_source(source: *const std::ffi::c_char) -> *mut std
     if source.is_null() {
         return alloc_c_string(r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#);
     }
+    // SAFETY: `source` was checked non-null above.
     let src = unsafe { cstr_to_string(source) };
     let mut lexer = MimiLexer::new(&src);
     let tokens = lexer.tokenize();

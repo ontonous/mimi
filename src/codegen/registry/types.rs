@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::types;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::BasicMetadataValueEnum;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -72,14 +72,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         false,
                     );
                     // Metadata type for constructor parameter
-                    let meta_payload_ty = match payload_ty {
-                        BasicTypeEnum::IntType(t) => BasicMetadataTypeEnum::IntType(t),
-                        BasicTypeEnum::FloatType(t) => BasicMetadataTypeEnum::FloatType(t),
-                        BasicTypeEnum::PointerType(t) => BasicMetadataTypeEnum::PointerType(t),
-                        BasicTypeEnum::StructType(t) => BasicMetadataTypeEnum::StructType(t),
-                        BasicTypeEnum::ArrayType(t) => BasicMetadataTypeEnum::ArrayType(t),
-                        _ => BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                    };
+                    let meta_payload_ty = types::basic_to_metadata(self.context, payload_ty);
                     for (ordinal, v) in sorted_variants.iter().enumerate() {
                         let ctor_name = format!("{}_{}", t.name, v.name);
                         if self.module.get_function(&ctor_name).is_none() {
