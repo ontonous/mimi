@@ -679,3 +679,189 @@ fn stdlib_v02813_array_len_of_literal() {
     "#;
     assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
 }
+
+// =====================================================================
+// v0.28.13 — std/iter.mimi (iterator combinators for List<string>)
+// =====================================================================
+
+#[test]
+fn stdlib_v02813_iter_range_count() {
+    let src = r#"
+        func main() -> i32 { len(iter_range(3, 7)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(4));
+}
+
+#[test]
+fn stdlib_v02813_iter_range_zero() {
+    let src = r#"
+        func main() -> i32 { len(iter_range(5, 5)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(0));
+}
+
+#[test]
+fn stdlib_v02813_iter_range_negative() {
+    let src = r#"
+        func main() -> i32 { len(iter_range(-2, 2)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(4));
+}
+
+#[test]
+fn stdlib_v02813_iter_range_first_value() {
+    let src = r#"
+        func main() -> string { iter_range(10, 13)[0] }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("10".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_zip_basic() {
+    let src = r#"
+        func main() -> string {
+            iter_zip(["a", "b", "c"], ["x", "y", "z"])[1]
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("b|y".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_zip_truncates() {
+    let src = r#"
+        func main() -> i32 { len(iter_zip(["a", "b", "c"], ["x", "y"])) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_iter_enumerate() {
+    let src = r#"
+        func main() -> string {
+            iter_enumerate(["a", "b", "c"])[2]
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("2|c".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_take() {
+    let src = r#"
+        func main() -> i32 { len(iter_take(["a", "b", "c", "d", "e"], 3)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_iter_take_more_than_len() {
+    let src = r#"
+        func main() -> i32 { len(iter_take(["a", "b"], 100)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_iter_drop() {
+    let src = r#"
+        func main() -> i32 { len(iter_drop(["a", "b", "c", "d"], 2)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_iter_take_while_basic() {
+    let src = r#"
+        func main() -> i32 {
+            len(iter_take_while(["a", "a", "a", "b", "a"], "a"))
+        }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_iter_chain() {
+    let src = r#"
+        func main() -> i32 { len(iter_chain(["a", "b"], ["c", "d", "e"])) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(5));
+}
+
+#[test]
+fn stdlib_v02813_iter_repeat() {
+    let src = r#"
+        func main() -> string { iter_repeat("x", 3)[2] }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("x".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_reversed() {
+    let src = r#"
+        func main() -> string { iter_reversed(["a", "b", "c"])[0] }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("c".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_count() {
+    let src = r#"
+        func main() -> i32 {
+            iter_count(["a", "b", "a", "c", "a"], "a")
+        }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_iter_unique() {
+    let src = r#"
+        func main() -> i32 {
+            len(iter_unique(["a", "b", "a", "c", "b", "d"]))
+        }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(4));
+}
+
+#[test]
+fn stdlib_v02813_iter_unique_preserves_order() {
+    let src = r#"
+        func main() -> string {
+            iter_unique(["c", "a", "b", "a", "c"])[2]
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("iter.mimi", src),
+        interp::Value::String("b".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_iter_drop_all() {
+    let src = r#"
+        func main() -> i32 { len(iter_drop(["a", "b", "c"], 5)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(0));
+}
+
+#[test]
+fn stdlib_v02813_iter_drop_zero() {
+    let src = r#"
+        func main() -> i32 { len(iter_drop(["a", "b", "c"], 0)) }
+    "#;
+    assert_eq!(run_with_stdlib("iter.mimi", src), interp::Value::Int(3));
+}

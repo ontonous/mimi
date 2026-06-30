@@ -1,0 +1,160 @@
+// Iter: Iterator-style combinators for List<string>.
+//
+// These helpers provide a small subset of iterator semantics
+// (range, zip, enumerate, take, drop, chain, repeat) on top of
+// Mimi's List<string>. They are intentionally eager: each
+// function returns a new List containing the result.
+
+// iter_range: Returns the integers in [start, end) as stringified values.
+// Example: iter_range(3, 7) -> ["3", "4", "5", "6"]
+pub func iter_range(start: i32, end: i32) -> List<string> {
+    let mut out: List<string> = []
+    let mut i = start
+    while i < end {
+        push(out, to_string(i))
+        i += 1
+    }
+    out
+}
+
+// iter_zip: Pairs the i-th element of a with the i-th element of b.
+// Result is a list of "a|b" strings, truncated to the shorter input.
+pub func iter_zip(a: List<string>, b: List<string>) -> List<string> {
+    let mut out: List<string> = []
+    let la = len(a)
+    let lb = len(b)
+    let n = if la < lb { la } else { lb }
+    let mut i = 0
+    while i < n {
+        let combined = a[i] + "|" + b[i]
+        push(out, combined)
+        i += 1
+    }
+    out
+}
+
+// iter_enumerate: Returns a list of "i|x" strings representing
+// (index, value) pairs. Example: iter_enumerate(["a", "b"]) -> ["0|a", "1|b"].
+pub func iter_enumerate(arr: List<string>) -> List<string> {
+    let mut out: List<string> = []
+    let n = len(arr)
+    let mut i = 0
+    while i < n {
+        let combined = to_string(i) + "|" + arr[i]
+        push(out, combined)
+        i += 1
+    }
+    out
+}
+
+// iter_take: Returns the first n elements (or all if n > len).
+pub func iter_take(arr: List<string>, n: i32) -> List<string> {
+    let total = len(arr)
+    let take = if n < total { n } else { total }
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < take {
+        push(out, arr[i])
+        i += 1
+    }
+    out
+}
+
+// iter_drop: Returns all elements after the first n.
+pub func iter_drop(arr: List<string>, n: i32) -> List<string> {
+    let total = len(arr)
+    if n <= 0 { return arr }
+    if n >= total { return [] }
+    let mut out: List<string> = []
+    let mut i = n
+    while i < total {
+        push(out, arr[i])
+        i += 1
+    }
+    out
+}
+
+// iter_take_while: Returns elements from the start while pred(value) is true.
+// `pred` is represented as a prefix string that is matched against each element:
+// if the element starts with pred, it is taken. (Mimi's lambda capture is
+// limited; this pragmatic version supports equality-based filtering.)
+pub func iter_take_while(arr: List<string>, pred_value: string) -> List<string> {
+    let mut out: List<string> = []
+    let n = len(arr)
+    let mut i = 0
+    let mut take = true
+    while i < n && take {
+        if arr[i] == pred_value {
+            push(out, arr[i])
+        } else {
+            take = false
+        }
+        i += 1
+    }
+    out
+}
+
+// iter_chain: Concatenates a and b.
+pub func iter_chain(a: List<string>, b: List<string>) -> List<string> {
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < len(a) { push(out, a[i]); i += 1 }
+    let mut j = 0
+    while j < len(b) { push(out, b[j]); j += 1 }
+    out
+}
+
+// iter_repeat: Returns a list with `value` repeated n times.
+pub func iter_repeat(value: string, n: i32) -> List<string> {
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < n {
+        push(out, value)
+        i += 1
+    }
+    out
+}
+
+// iter_reversed: Returns elements in reverse order.
+pub func iter_reversed(arr: List<string>) -> List<string> {
+    let n = len(arr)
+    let mut out: List<string> = []
+    let mut i = n - 1
+    while i >= 0 {
+        push(out, arr[i])
+        i -= 1
+    }
+    out
+}
+
+// iter_count: Returns the number of elements equal to value.
+pub func iter_count(arr: List<string>, value: string) -> i32 {
+    let mut count = 0
+    let n = len(arr)
+    let mut i = 0
+    while i < n {
+        if arr[i] == value { count += 1 }
+        i += 1
+    }
+    count
+}
+
+// iter_unique: Returns a new list with duplicates removed (first occurrence wins).
+pub func iter_unique(arr: List<string>) -> List<string> {
+    let mut out: List<string> = []
+    let n = len(arr)
+    let mut i = 0
+    while i < n {
+        let v = arr[i]
+        let mut found = false
+        let mut j = 0
+        let out_len = len(out)
+        while j < out_len {
+            if out[j] == v { found = true }
+            j += 1
+        }
+        if !found { push(out, v) }
+        i += 1
+    }
+    out
+}
