@@ -1,6 +1,19 @@
 # Changelog
 
-## [Unreleased] — v0.28.14
+## [Unreleased] — v0.28.15
+
+## [v0.28.14] - 2026-07-01
+
+### Added
+- **诊断与格式化增强**：
+  - 错误恢复继续解析，支持输出多条诊断。
+  - `MimiError` 支持 primary + secondary labels。
+  - Formatter 覆盖 `mms{}` / `rule{}` / `desc{}`、`use as`、命名参数、默认参数、`while let`。
+  - Lint 扩展：未使用变量/导入警告、冗余括号、`== true` 反模式、递归深度提示。
+  - `--watch` 模式修复：防抖与错误后恢复。
+
+### Tests
+- 新增 formatter 边界回归与 lint 规则测试。
 
 ## [v0.28.13] - 2026-07-01
 
