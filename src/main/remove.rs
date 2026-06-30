@@ -31,8 +31,7 @@ pub(crate) fn remove(name: &str) -> Result<(), String> {
     // Clean the on-disk cache.
     let dst = dir.join(".mimi").join("deps").join(name);
     if dst.exists() {
-        std::fs::remove_dir_all(&dst)
-            .map_err(|e| format!("failed to remove cached dep: {}", e))?;
+        std::fs::remove_dir_all(&dst).map_err(|e| format!("failed to remove cached dep: {}", e))?;
         println!("✓ Removed cached directory {}", dst.display());
         removed = true;
     }

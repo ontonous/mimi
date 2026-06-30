@@ -73,6 +73,7 @@ pub(crate) mod mms_integration;
 pub(crate) mod net;
 pub(crate) mod package_management;
 pub(crate) mod package_v02812;
+pub(crate) mod package_v02812_extra;
 pub(crate) mod property;
 pub(crate) mod transitive_deps;
 pub(crate) mod type_system_verification;
@@ -696,8 +697,9 @@ pub fn main_install_transitive(
                 .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
                 .collect();
             let version_refs: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
-            let resolved_ver = crate::lockfile::Lockfile::resolve_version(version, &version_refs)
-                .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
+            let resolved_ver =
+                crate::lockfile::Lockfile::resolve_version(version, &version_refs)
+                    .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
 
             let src = pkg_dir.join(&resolved_ver);
             if dst.exists() {
