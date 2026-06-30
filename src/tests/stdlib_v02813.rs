@@ -433,3 +433,249 @@ fn stdlib_v02813_atan2_quadrants() {
         panic!("expected float");
     }
 }
+
+// =====================================================================
+// v0.28.13 — std/array.mimi (fixed-size helpers built on List<string>)
+// =====================================================================
+
+use crate::tests::run_with_stdlib;
+
+#[test]
+fn stdlib_v02813_array_new_default_len() {
+    let src = r#"
+        func main() -> i32 { len(array_new(5, "x")) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(5));
+}
+
+#[test]
+fn stdlib_v02813_array_new_zero() {
+    let src = r#"
+        func main() -> i32 { len(array_new(0, "x")) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(0));
+}
+
+#[test]
+fn stdlib_v02813_array_get() {
+    let src = r#"
+        func main() -> string { array_get(array_new(3, "hi"), 1) }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("hi".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_get_out_of_bounds() {
+    let src = r#"
+        func main() -> string { array_get(array_new(3, "hi"), 10) }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_set() {
+    let src = r#"
+        func main() -> string {
+            let arr = array_new(3, "x")
+            array_get(array_set(arr, 1, "y"), 1)
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("y".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_fill() {
+    let src = r#"
+        func main() -> string {
+            let arr = array_new(3, "x")
+            array_get(array_fill(arr, "z"), 0)
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("z".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_slice() {
+    let src = r#"
+        func main() -> i32 { len(array_slice(array_new(5, "x"), 1, 4)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_array_slice_clamps() {
+    let src = r#"
+        func main() -> i32 { len(array_slice(array_new(3, "x"), -5, 100)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_array_reverse() {
+    let src = r#"
+        func main() -> string {
+            let arr = ["a", "b", "c", "d"]
+            array_get(array_reverse(arr), 0)
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("d".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_rotate_left_basic() {
+    // [a,b,c,d,e] rotate_left(2) = [c,d,e,a,b]
+    let src = r#"
+        func main() -> string {
+            let arr = ["a", "b", "c", "d", "e"]
+            array_get(array_rotate_left(arr, 2), 0)
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("c".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_rotate_right_basic() {
+    // [a,b,c,d,e] rotate_right(2) = [d,e,a,b,c]
+    let src = r#"
+        func main() -> string {
+            let arr = ["a", "b", "c", "d", "e"]
+            array_get(array_rotate_right(arr, 2), 0)
+        }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::String("d".to_string())
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_rotate_full() {
+    let src = r#"
+        func main() -> i32 { len(array_rotate_left(["a", "b", "c"], 6)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_array_binary_search_found() {
+    let src = r#"
+        func main() -> i32 {
+            array_binary_search(["a", "b", "c", "d", "e"], "c")
+        }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_array_binary_search_not_found() {
+    let src = r#"
+        func main() -> i32 {
+            array_binary_search(["a", "b", "c"], "z")
+        }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(-1));
+}
+
+#[test]
+fn stdlib_v02813_array_index_of() {
+    let src = r#"
+        func main() -> i32 { array_index_of(["a", "b", "a", "c"], "a") }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(0));
+}
+
+#[test]
+fn stdlib_v02813_array_contains() {
+    let src = r#"
+        func main() -> bool { array_contains(["a", "b", "c"], "b") }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Bool(true));
+}
+
+#[test]
+fn stdlib_v02813_array_equals_true() {
+    let src = r#"
+        func main() -> bool { array_equals(["a", "b"], ["a", "b"]) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Bool(true));
+}
+
+#[test]
+fn stdlib_v02813_array_equals_false_different_length() {
+    let src = r#"
+        func main() -> bool { array_equals(["a"], ["a", "b"]) }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::Bool(false)
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_equals_false_different_elements() {
+    let src = r#"
+        func main() -> bool { array_equals(["a", "b"], ["a", "c"]) }
+    "#;
+    assert_eq!(
+        run_with_stdlib("array.mimi", src),
+        interp::Value::Bool(false)
+    );
+}
+
+#[test]
+fn stdlib_v02813_array_concat() {
+    let src = r#"
+        func main() -> i32 { len(array_concat(["a", "b"], ["c", "d", "e"])) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(5));
+}
+
+#[test]
+fn stdlib_v02813_array_take() {
+    let src = r#"
+        func main() -> i32 { len(array_take(["a", "b", "c", "d"], 2)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_array_drop() {
+    let src = r#"
+        func main() -> i32 { len(array_drop(["a", "b", "c", "d"], 2)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(2));
+}
+
+#[test]
+fn stdlib_v02813_array_drop_zero() {
+    let src = r#"
+        func main() -> i32 { len(array_drop(["a", "b", "c"], 0)) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
+}
+
+#[test]
+fn stdlib_v02813_array_len_of_literal() {
+    let src = r#"
+        func main() -> i32 { array_len(["a", "b", "c"]) }
+    "#;
+    assert_eq!(run_with_stdlib("array.mimi", src), interp::Value::Int(3));
+}

@@ -276,6 +276,20 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
     interp.run().expect("src/tests/mod.rs:151 unwrap failed")
 }
 
+/// Concatenate a stdlib file (by name) with the test source and run.
+/// Used to test stdlib modules in isolation. The stdlib file's items
+/// (functions, traits) become available to the test source without
+/// requiring `use` statements.
+pub(crate) fn run_with_stdlib(stdlib_name: &str, src: &str) -> interp::Value {
+    use std::path::PathBuf;
+    let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
+    let stdlib_path = std_dir.join(stdlib_name);
+    let stdlib_src = std::fs::read_to_string(&stdlib_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", stdlib_path.display(), e));
+    let combined = format!("{}\n{}", stdlib_src, src);
+    run_source(&combined)
+}
+
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;
     let mut file = parser::Parser::new(tokens)

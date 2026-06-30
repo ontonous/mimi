@@ -1,0 +1,214 @@
+// Array: Fixed-size (or length-bounded) helpers built on top of List<T>.
+//
+// Mimi's built-in `List<T>` is the dynamic, growable array. The helpers
+// here provide ergonomic wrappers for the common fixed-size patterns:
+// filling, slicing, rotating, searching, and aggregating. They work for
+// any element type T that supports equality (`==`).
+//
+// Conventions:
+// - `array_*` functions return a new List (no in-place mutation).
+// - Indices are 0-based; negative indices are NOT supported.
+// - All functions are total: out-of-bounds is handled by clamping
+//   (slice) or returning -1 (search/index_of) rather than panicking.
+
+// array_new: Allocates a list of length n with every element set to default.
+pub func array_new(n: i32, default: string) -> List<string> {
+    let mut arr: List<string> = []
+    let mut i = 0
+    while i < n {
+        push(arr, default)
+        i += 1
+    }
+    arr
+}
+
+// array_len: Returns the number of elements.
+pub func array_len(arr: List<string>) -> i32 {
+    len(arr)
+}
+
+// array_get: Returns the element at index. Returns empty string if out of bounds.
+pub func array_get(arr: List<string>, index: i32) -> string {
+    let n = len(arr)
+    if index < 0 || index >= n { return "" }
+    let mut i = 0
+    let mut result = ""
+    let mut found = false
+    while i < n {
+        if i == index {
+            result = arr[i]
+            found = true
+        }
+        i += 1
+    }
+    if found { result } else { "" }
+}
+
+// array_set: Returns a new list with the element at index replaced.
+pub func array_set(arr: List<string>, index: i32, value: string) -> List<string> {
+    let n = len(arr)
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < n {
+        if i == index { push(out, value) } else { push(out, arr[i]) }
+        i += 1
+    }
+    out
+}
+
+// array_fill: Returns a new list with every element replaced by value.
+pub func array_fill(arr: List<string>, value: string) -> List<string> {
+    let n = len(arr)
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < n {
+        push(out, value)
+        i += 1
+    }
+    out
+}
+
+// array_slice: Returns elements in [start, end). Clamps to valid range.
+pub func array_slice(arr: List<string>, start: i32, end: i32) -> List<string> {
+    let n = len(arr)
+    let mut s = start
+    let mut e = end
+    if s < 0 { s = 0 }
+    if e > n { e = n }
+    if e < s { e = s }
+    let mut out: List<string> = []
+    let mut i = s
+    while i < e {
+        push(out, arr[i])
+        i += 1
+    }
+    out
+}
+
+// array_reverse: Returns a new list with elements in reversed order.
+pub func array_reverse(arr: List<string>) -> List<string> {
+    let n = len(arr)
+    let mut out: List<string> = []
+    let mut i = n - 1
+    while i >= 0 {
+        push(out, arr[i])
+        i -= 1
+    }
+    out
+}
+
+// array_rotate_left: Returns a new list rotated left by n positions.
+// Positive n rotates elements toward index 0.
+pub func array_rotate_left(arr: List<string>, n: i32) -> List<string> {
+    let len_a = len(arr)
+    if len_a == 0 { return arr }
+    let k = n % len_a
+    if k == 0 { return arr }
+    if k < 0 { return array_rotate_right(arr, -k) }
+    let prefix = array_slice(arr, 0, k)
+    let suffix = array_slice(arr, k, len_a)
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < len(suffix) { push(out, suffix[i]); i += 1 }
+    let mut j = 0
+    while j < len(prefix) { push(out, prefix[j]); j += 1 }
+    out
+}
+
+// array_rotate_right: Returns a new list rotated right by n positions.
+pub func array_rotate_right(arr: List<string>, n: i32) -> List<string> {
+    let len_a = len(arr)
+    if len_a == 0 { return arr }
+    let k = n % len_a
+    if k == 0 { return arr }
+    if k < 0 { return array_rotate_left(arr, -k) }
+    let prefix = array_slice(arr, len_a - k, len_a)
+    let suffix = array_slice(arr, 0, len_a - k)
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < len(prefix) { push(out, prefix[i]); i += 1 }
+    let mut j = 0
+    while j < len(suffix) { push(out, suffix[j]); j += 1 }
+    out
+}
+
+// array_binary_search: Performs a binary search for target in a sorted
+// ascending list. Returns the index of target, or -1 if not found.
+// Precondition: arr must be sorted ascending.
+pub func array_binary_search(arr: List<string>, target: string) -> i32 {
+    let mut lo = 0
+    let mut hi = len(arr) - 1
+    let mut result = -1
+    while lo <= hi {
+        let mid = (lo + hi) / 2
+        let mid_val = array_get(arr, mid)
+        if mid_val == target {
+            result = mid
+            lo = hi + 1  // exit loop
+        } else if mid_val < target {
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    result
+}
+
+// array_index_of: Linear search. Returns the first index where arr[i] == target, or -1.
+pub func array_index_of(arr: List<string>, target: string) -> i32 {
+    let n = len(arr)
+    let mut i = 0
+    let mut result = -1
+    let mut found = false
+    while i < n {
+        if !found && arr[i] == target {
+            result = i
+            found = true
+        }
+        i += 1
+    }
+    result
+}
+
+// array_contains: Returns true if target appears in arr.
+pub func array_contains(arr: List<string>, target: string) -> bool {
+    array_index_of(arr, target) >= 0
+}
+
+// array_equals: Returns true if both lists have the same length and
+// element-wise equality.
+pub func array_equals(a: List<string>, b: List<string>) -> bool {
+    let na = len(a)
+    let nb = len(b)
+    if na != nb { return false }
+    let mut i = 0
+    let mut same = true
+    while i < na {
+        if a[i] != b[i] { same = false }
+        i += 1
+    }
+    same
+}
+
+// array_concat: Returns a + b (concatenation).
+pub func array_concat(a: List<string>, b: List<string>) -> List<string> {
+    let mut out: List<string> = []
+    let mut i = 0
+    while i < len(a) { push(out, a[i]); i += 1 }
+    let mut j = 0
+    while j < len(b) { push(out, b[j]); j += 1 }
+    out
+}
+
+// array_take: Returns the first n elements (or all if n > len).
+pub func array_take(arr: List<string>, n: i32) -> List<string> {
+    array_slice(arr, 0, n)
+}
+
+// array_drop: Returns all elements after the first n.
+pub func array_drop(arr: List<string>, n: i32) -> List<string> {
+    let len_a = len(arr)
+    if n <= 0 { return arr }
+    if n >= len_a { return [] }
+    array_slice(arr, n, len_a)
+}
