@@ -29,8 +29,17 @@
   - `mimi tree`：传递依赖遍历、未安装时的 lockfile 读取
   - `mimi remove`：manifest + lockfile + cache 三处清理、传递依赖清理、幂等
   - registry 约束解析：caret / tilde / 范围 / 精确 / 通配 / 不匹配
+- 新增 `src/tests/package_v02812_extra.rs`，34 个 L1 + L2 收尾测试：
+  - L2 健全性：拒绝损坏的 TOML、垃圾版本约束、空约束、unicode/超长 version 字符串
+  - 边界情况：unicode 包名（`中文-lib`）、特殊字符、嵌套深路径、含空格的路径、50 个依赖
+  - 校验和确定性：FNV-1a 稳定、order-independent、嵌套目录、unicode 文件名、二进制文件
+  - 错误恢复：registry 缺失、无匹配版本、lockfile 损坏、stale cache 目录
+  - 性能基线：50 个依赖 install < 10s；二次 install < 10s
+  - 集成链路：add → install → tree → remove 全链路
 - 扩展 `tests/mod.rs` 中的 `main_install_transitive` helper，支持 path 依赖
 - 新增 `main_add_dry_run` test helper
+
+**总计 95 个包管理测试** (35 + 34 + 26 已有) 全部通过；clippy 干净；fmt 干净。
 
 ## [v0.28.11] — 2026-06-30
 
