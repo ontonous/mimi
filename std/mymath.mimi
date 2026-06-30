@@ -515,7 +515,7 @@ pub func random_normal() -> f64 {
     let u1 = random()
     let u2 = random()
     // Avoid log(0) by clamping u1 away from zero.
-    let safe_u1 = if u1 < 1.0e-12 { 1.0e-12 } else { u1 }
+    let safe_u1 = if u1 < 0.000000000001 { 0.000000000001 } else { u1 }
     sqrt(-2.0 * ln(safe_u1)) * cos(2.0 * pi() * u2)
 }
 
@@ -528,7 +528,7 @@ pub func random_uniform(lo: f64, hi: f64) -> f64 {
 // Returns -ln(1 - u) / λ, with u uniform in [0, 1).
 pub func random_exponential(lambda: f64) -> f64 {
     let u = random()
-    let safe_u = if u < 1.0e-12 { 1.0e-12 } else { u }
+    let safe_u = if u < 0.000000000001 { 0.000000000001 } else { u }
     -ln(1.0 - safe_u) / lambda
 }
 

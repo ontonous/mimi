@@ -9,9 +9,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // push(list, elem) — uses mimi_list_push_grow for exponential growth,
-        // then stores the element and increments len in the codegen.
-        // This handles all element types (i64, float, pointer, struct).
+        // push(list, elem) — realloc data array and append element.
+        // Uses simple realloc (no header/hidden capacity) for the data buffer.
         if args.len() != 2 {
             return Err(CompileError::WrongArgCount(
                 "push expects 2 arguments".to_string(),
@@ -26,62 +25,76 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let elem = args[1];
+
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_struct_ty = self.list_struct_type();
 
-        // Call mimi_list_push_grow(list, 1) to get the (possibly reallocated)
-        // data pointer, then store the element and increment len.
-        let grow_fn = self
-            .module
-            .get_function("mimi_list_push_grow")
-            .unwrap_or_else(|| {
-                let fn_ty = i8_ptr.fn_type(
-                    &[
-                        inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        inkwell::types::BasicMetadataTypeEnum::IntType(i64_ty),
-                    ],
-                    false,
-                );
-                self.module.add_function(
-                    "mimi_list_push_grow",
-                    fn_ty,
-                    Some(inkwell::module::Linkage::External),
-                )
-            });
-        let data_ptr = self
-            .builder
-            .build_call(
-                grow_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(list_ptr),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
-                ],
-                "push_grow",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("push_grow error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("push_grow returned void")?
-            .into_pointer_value();
-
-        // Load current len (before increment)
+        // Load current len and data
         let len_gep = self
             .gep()
             .build_struct_gep(list_struct_ty, list_ptr, 0, "push_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_struct_ty, list_ptr, 1, "push_data")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let old_len = self
             .builder
             .build_load(BasicTypeEnum::IntType(i64_ty), len_gep, "old_len")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
+        let old_data = self
+            .builder
+            .build_load(BasicTypeEnum::PointerType(i8_ptr), data_gep, "old_data")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_pointer_value();
 
-        // Bitcast returned data pointer to i8* for element GEP
-        let data = self
+        // new_len = old_len + 1
+        let new_len = self
+            .builder
+            .build_int_add(old_len, i64_ty.const_int(1, false), "new_len")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+
+        // new_alloc_size = new_len * 8 (each element is i64-sized slot — 8 bytes)
+        let sizeof_i64 = i64_ty.const_int(8, false);
+        let alloc_size = self
+            .builder
+            .build_int_mul(new_len, sizeof_i64, "alloc_size")
+            .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
+
+        // realloc the data array to accommodate the new element
+        let realloc_fn = self
+            .module
+            .get_function("realloc")
+            .ok_or_else(|| "realloc not declared".to_string())?;
+        let new_data = self
+            .builder
+            .build_call(
+                realloc_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(old_data),
+                    BasicMetadataValueEnum::IntValue(alloc_size),
+                ],
+                "realloc_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("realloc returned void")?
+            .into_pointer_value();
+
+        // Store new data pointer back to the list struct
+        self.builder
+            .build_store(data_gep, new_data)
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+
+        // Bitcast new_data to i8* for element GEP
+        let data_i8 = self
             .builder
             .build_bit_cast(
-                data_ptr,
+                new_data,
                 self.context.ptr_type(inkwell::AddressSpace::default()),
-                "data",
+                "data_i8",
             )
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
@@ -89,7 +102,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Store element at data[old_len]
         let idx_ptr = self
             .gep()
-            .build_in_bounds_gep(BasicTypeEnum::IntType(i64_ty), data, &[old_len], "elem_ptr")
+            .build_in_bounds_gep(
+                BasicTypeEnum::IntType(i64_ty),
+                data_i8,
+                &[old_len],
+                "elem_ptr",
+            )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let idx_ptr_i64 = self
             .builder
@@ -126,11 +144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(idx_ptr_i64, elem_val)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
-        // Increment len
-        let new_len = self
-            .builder
-            .build_int_add(old_len, i64_ty.const_int(1, false), "new_len")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        // Update len
         self.builder
             .build_store(len_gep, new_len)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
