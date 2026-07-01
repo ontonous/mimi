@@ -19,19 +19,12 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
                 Some(BasicTypeEnum::StructType(ctx.struct_type(&fields, false)))
             }
             "Result" if args.len() == 2 => {
-                let ok = mimi_type_to_llvm(ctx, &args[0])?;
-                let disc = BasicTypeEnum::IntType(ctx.bool_type());
-                let err = BasicTypeEnum::IntType(ctx.i64_type());
-                Some(BasicTypeEnum::StructType(
-                    ctx.struct_type(&[disc, ok, err], false),
-                ))
+                // Canonicalize to Type::Result so layout logic is single-source.
+                return mimi_type_to_llvm(ctx, &Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone())));
             }
             "Option" if args.len() == 1 => {
-                let inner = mimi_type_to_llvm(ctx, &args[0])?;
-                let disc = BasicTypeEnum::IntType(ctx.bool_type());
-                Some(BasicTypeEnum::StructType(
-                    ctx.struct_type(&[disc, inner], false),
-                ))
+                // Canonicalize to Type::Option so layout logic is single-source.
+                return mimi_type_to_llvm(ctx, &Type::Option(Box::new(args[0].clone())));
             }
             "List" => {
                 let i8_ptr = ctx.ptr_type(AddressSpace::default());
@@ -132,7 +125,8 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             }
         }
         Type::Option(inner) => {
-            // Option<T> represented as {i1, T} — discriminant + payload
+            // Option<T> represented as {i1, T} — discriminant + payload.
+            // `Type::Name("Option", [T])` canonicalizes to this arm.
             let inner_llvm = mimi_type_to_llvm(ctx, inner)?;
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             Some(BasicTypeEnum::StructType(
@@ -143,6 +137,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // Result<T, E> represented as {i1, T, i64} — discriminant + ok payload + err payload (as i64).
             // The error field uses i64 to keep the struct layout consistent across all E types.
             // Integer values are sign-extended from their native width; pointer values use ptrtoint.
+            // `Type::Name("Result", [T, E])` canonicalizes to this arm.
             let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());
