@@ -353,6 +353,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 if obj_type == "Result" || obj_type == "Option" {
                                     self.var_type_names.insert(name.clone(), obj_type);
                                 }
+                            } else if method_name == "upgrade" {
+                                self.track_weak_upgrade_type(name, obj);
                             }
                         } else if let Expr::Ident(func_name) = callee.as_ref() {
                             match func_name.as_str() {

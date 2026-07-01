@@ -8,7 +8,7 @@ use inkwell::values::{
 use std::collections::HashMap;
 
 /// Shared context for compiling a method call on an Option/Result-like value.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct VariantMethodCtx<'ctx> {
     function: FunctionValue<'ctx>,
     disc: IntValue<'ctx>,
@@ -17,6 +17,10 @@ struct VariantMethodCtx<'ctx> {
     pv: PointerValue<'ctx>,
     variant_sty: StructType<'ctx>,
     is_result: bool,
+    /// If the variant value is bound to a variable, its name. Used to detect
+    /// `weak.upgrade()` results whose payload is a pointer to the shared heap
+    /// even when the inner type is a primitive.
+    obj_name: Option<String>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -299,6 +303,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let payload = self.build_load(payload_ty, pay_gep, "payload")?;
 
+        let obj_name = if let Expr::Ident(name) = obj {
+            Some(name.clone())
+        } else {
+            None
+        };
         let ctx = VariantMethodCtx {
             function,
             disc,
@@ -307,6 +316,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pv,
             variant_sty,
             is_result,
+            obj_name,
         };
 
         match method {
@@ -379,7 +389,41 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unreachable()
             .map_err(|e| CompileError::LlvmError(format!("unreachable terminator: {}", e)))?;
         self.builder.position_at_end(ok_bb);
+
+        // Special case: `weak.upgrade()` returns an Option whose payload is a
+        // pointer to the shared heap, even when the inner type is a primitive.
+        // For primitive inner types, unwrap() must load the value through the
+        // pointer rather than returning the pointer itself.
+        if let Some(name) = &ctx.obj_name {
+            if self.upgrade_option_vars.contains(name.as_str()) {
+                if let Some(Type::Option(inner)) = self.var_types.get(name).cloned() {
+                    let loaded = self.load_upgrade_payload(ctx.payload, &inner)?;
+                    return Ok(loaded);
+                }
+            }
+        }
+
         Ok(ctx.payload)
+    }
+
+    /// Load the actual value from a `weak.upgrade()` payload pointer.
+    fn load_upgrade_payload(
+        &self,
+        payload: BasicValueEnum<'ctx>,
+        inner: &Type,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let ptr_val = payload.into_int_value();
+        let ptr = self
+            .builder
+            .build_int_to_ptr(
+                ptr_val,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "upgrade_payload_ptr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+        let llvm_ty = crate::codegen::types::mimi_type_to_llvm(self.context, inner)
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+        self.build_load(llvm_ty, ptr, "upgrade_payload_val")
     }
 
     /// Compiles `.unwrap_or(default)`.

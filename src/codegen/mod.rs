@@ -138,6 +138,10 @@ pub struct CodeGenerator<'ctx> {
     var_type_names: HashMap<String, String>,
     /// Type objects for variables (avoids string re-parsing for Arch-2).
     var_types: HashMap<String, Type>,
+    /// Variables whose value is the result of a `weak.upgrade()` call.
+    /// These Options hold a pointer payload even when the inner type is a
+    /// primitive, so `unwrap()` must load the value through the pointer.
+    upgrade_option_vars: std::collections::HashSet<String>,
     spawn_counter: u64,
     pub strict: bool,
     pub no_std: bool,
@@ -282,6 +286,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             func_defs: HashMap::new(),
             var_type_names: HashMap::new(),
             var_types: HashMap::new(),
+            upgrade_option_vars: std::collections::HashSet::new(),
             spawn_counter: 0,
             strict: false,
             no_std: false,
@@ -806,6 +811,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         None
     }
 
+    /// Track the result type of `weak_var.upgrade()` for a `let` binding.
+    /// `w.upgrade()` returns `Option<T>` where `T` is the inner type of the
+    /// weak reference. Updating `var_type_names`/`var_types` lets downstream
+    /// method dispatch (`is_none`, `unwrap`) find the Option implementation.
+    pub(super) fn track_weak_upgrade_type(&mut self, name: &str, obj: &Expr) {
+        if let Expr::Ident(obj_name) = obj {
+            if let Some(ty) = self.var_types.get(obj_name).cloned() {
+                let inner = match ty {
+                    Type::Weak(inner) | Type::WeakLocal(inner) => inner,
+                    _ => return,
+                };
+                let inner_name = crate::core::fmt_type(&inner);
+                self.var_type_names
+                    .insert(name.to_string(), format!("Option<{}>", inner_name));
+                self.var_types.insert(name.to_string(), Type::Option(inner));
+                self.upgrade_option_vars.insert(name.to_string());
+            }
+        }
+    }
+
     /// G10: Push a new scope level for heap allocations.
     /// Takes &self (not &mut self) because builtins use &self.
     pub(super) fn push_heap_scope(&self) {
@@ -1005,6 +1030,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         match kind {
+            crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared => {
+                // Shared reference copy: `shared q = p` where p is already shared.
+                // Share the same heap allocation and retain, rather than copying the value.
+                if let Expr::Ident(src_name) = init {
+                    if self.shared_var_names.contains(src_name.as_str()) {
+                        return self.compile_shared_ref_copy(name, src_name, vars);
+                    }
+                }
+            }
             crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
                 // Weak reference: init must be an existing shared variable.
                 if let Expr::Ident(src_name) = init {
@@ -1048,7 +1082,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "weak requires an existing shared variable as initialiser".to_string(),
                 ));
             }
-            _ => {}
         }
 
         let mut val = self.compile_expr(init, vars)?;

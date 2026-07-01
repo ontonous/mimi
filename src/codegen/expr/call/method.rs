@@ -183,6 +183,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("mimi_rc_upgrade returned void".to_string()))?
             .into_pointer_value();
+        // upgrade() returns Option<shared T>; if Some, it owns a strong reference.
+        // Register the pointer so it is released when the Option leaves scope.
+        // mimi_rc_release is a no-op for null, so unconditional registration is safe.
+        self.register_shared_var(upgraded);
         self.build_option_i64(upgraded, "upgrade_opt")
     }
 

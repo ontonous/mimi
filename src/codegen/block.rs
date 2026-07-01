@@ -205,7 +205,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // For simple Variable patterns, track type info
                     if let Pattern::Variable(name) = pat {
                         if let Some(Type::Name(tn, args)) = &ty {
-                            if tn == "List" && !args.is_empty() {
+                            if !args.is_empty() {
                                 if let Some(full) =
                                     self.get_full_type_name(ty.as_ref().expect("ty is Some"))
                                 {
@@ -251,14 +251,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     "map" | "and_then" | "map_err" | "ok_or"
                                 ) {
                                     let obj_type = self.infer_object_type(obj, vars);
-                                    if obj_type == "Result" || obj_type == "Option" {
-                                        self.var_type_names.insert(name.clone(), obj_type);
+                                    if obj_type.starts_with("Result") {
+                                        self.var_type_names
+                                            .insert(name.clone(), "Result".to_string());
+                                    } else if obj_type.starts_with("Option") {
+                                        self.var_type_names
+                                            .insert(name.clone(), "Option".to_string());
                                     }
                                 } else if matches!(method_name.as_str(), "insert" | "remove") {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type.starts_with("Set") || obj_type == "set" {
                                         self.var_type_names.insert(name.clone(), obj_type);
                                     }
+                                } else if method_name == "upgrade" {
+                                    self.track_weak_upgrade_type(name, obj);
                                 }
                             } else if let Expr::Ident(func_name) = callee.as_ref() {
                                 match func_name.as_str() {
