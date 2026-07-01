@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::codegen::types;
+use crate::codegen::call_try_basic_value;
 use std::collections::HashMap;
 
 use inkwell::types::BasicTypeEnum;
@@ -12,7 +13,36 @@ use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_actor(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
-        // Generate constructor function: ActorName(field1, field2, ...) -> Actor
+        // Register this actor type name for method-call dispatch routing.
+        self.actor_names.insert(actor.name.clone());
+
+        // Assign method IDs (used as method_id in dispatch + mimi_actor_call).
+        for (i, method) in actor.methods.iter().enumerate() {
+            let key = format!("{}::{}", actor.name, method.name);
+            self.actor_method_ids.insert(key, i as i32);
+        }
+
+        // 1. Generate constructor: ActorName(fields...) -> Actor struct
+        //    (kept for backwards compat; spawn is the primary entry point)
+        self.compile_actor_constructor(actor)?;
+
+        // 2. Compile all actor methods (unchanged: {Name}__{method}__method)
+        for method in &actor.methods {
+            self.compile_actor_method(actor, method)?;
+        }
+
+        // 3. Generate the dispatch function: {Name}__dispatch
+        self.compile_actor_dispatch(actor)?;
+
+        // 4. Generate spawn function: {Name}_spawn() -> i8* (actor handle)
+        self.compile_actor_spawn(actor)?;
+
+        Ok(())
+    }
+
+    /// Generate the constructor function: ActorName(field1, field2, ...) -> Actor struct.
+    /// This is the legacy constructor; real actors use _spawn().
+    fn compile_actor_constructor(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
         let mut param_types = Vec::new();
         for f in &actor.fields {
             let ty = types::mimi_type_to_llvm(self.context, &f.ty)
@@ -25,7 +55,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|t| types::basic_to_metadata(self.context, *t))
             .collect();
 
-        // Return type is a pointer to the actor struct
         let actor_ty = *self.type_llvm.get(&actor.name).ok_or_else(|| {
             CompileError::TypeNotFound(format!("actor type '{}' not found", actor.name))
         })?;
@@ -40,13 +69,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // Allocate actor struct
         let alloca = match actor_ty {
             BasicTypeEnum::StructType(sty) => self.build_alloca(sty, &actor.name)?,
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
-        // Store field values
         for (i, param) in function.get_params().iter().enumerate() {
             if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(&actor.name) {
                 let gep = self
@@ -57,45 +84,274 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Return the actor struct
         let ret_val = self.build_load(actor_ty, alloca, &actor.name)?;
         self.build_return(Some(&ret_val))?;
 
-        // Compile all actor methods
-        for method in &actor.methods {
-            self.compile_actor_method(actor, method)?;
+        Ok(())
+    }
+
+    /// Generate the dispatch function: {Name}__dispatch
+    ///
+    /// void dispatch(i32 method_id, i8* self_fields_ptr, i8* args_blob,
+    ///               i64 args_size, i8* result_blob, i64* result_size_out)
+    ///
+    /// This function is called on the actor's worker thread. It switches on
+    /// method_id, unpacks args from the blob, calls the method function, and
+    /// packs the return value into result_blob.
+    fn compile_actor_dispatch(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let void_ty = self.context.void_type();
+
+        let dispatch_name = format!("{}__dispatch", actor.name);
+        let i64_ptr = i64_ty.ptr_type(inkwell::AddressSpace::default());
+        let fn_type = void_ty.fn_type(
+            &[
+                inkwell::types::BasicMetadataTypeEnum::IntType(i32_ty),
+                inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicMetadataTypeEnum::IntType(i64_ty),
+                inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicMetadataTypeEnum::PointerType(i64_ptr),
+            ],
+            false,
+        );
+
+        let function = self.module.add_function(&dispatch_name, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        let method_id = function
+            .get_nth_param(0)
+            .ok_or_else(|| CompileError::LlvmError("dispatch: missing method_id param".to_string()))?
+            .into_int_value();
+        let self_fields_ptr = function
+            .get_nth_param(1)
+            .ok_or_else(|| CompileError::LlvmError("dispatch: missing self_fields_ptr param".to_string()))?
+            .into_pointer_value();
+        let args_blob = function
+            .get_nth_param(2)
+            .ok_or_else(|| CompileError::LlvmError("dispatch: missing args_blob param".to_string()))?
+            .into_pointer_value();
+        // args_size = param 3 (not used directly; args are unpacked by offset)
+        let result_blob = function
+            .get_nth_param(4)
+            .ok_or_else(|| CompileError::LlvmError("dispatch: missing result_blob param".to_string()))?
+            .into_pointer_value();
+        let result_size_out = function
+            .get_nth_param(5)
+            .ok_or_else(|| CompileError::LlvmError("dispatch: missing result_size_out param".to_string()))?
+            .into_pointer_value();
+
+        // Generate a switch on method_id.
+        let default_bb = self.context.append_basic_block(function, "dispatch_default");
+        let merge_bb = self.context.append_basic_block(function, "dispatch_end");
+
+        let mut switch_cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let mut case_bbs: Vec<(usize, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+        for (i, _method) in actor.methods.iter().enumerate() {
+            let case_bb = self.context.append_basic_block(
+                function,
+                &format!("dispatch_case_{}", i),
+            );
+            switch_cases.push((i32_ty.const_int(i as u64, false), case_bb));
+            case_bbs.push((i, case_bb));
         }
 
-        // Generate spawn wrapper function
-        self.compile_actor_spawn(actor)?;
+        self.builder
+            .build_switch(method_id, default_bb, &switch_cases)
+            .map_err(|e| CompileError::LlvmError(format!("switch error: {}", e)))?;
+
+        // Build each case.
+        for (i, case_bb) in case_bbs {
+            self.builder.position_at_end(case_bb);
+
+            let method = &actor.methods[i];
+            let mangled = format!("{}__{}__method", actor.name, method.name);
+            let method_fn = self
+                .module
+                .get_function(&mangled)
+                .ok_or_else(|| CompileError::LlvmError(format!("method fn {} not found", mangled)))?;
+
+            // Build args: self_fields_ptr (as the self pointer) + unpacked params.
+            let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+            call_args.push(self_fields_ptr.into());
+
+            // Unpack params from args_blob. Each param is 8 bytes (i64-aligned).
+            // For simplicity, all scalar params are stored as i64 in the blob.
+            // String/pointer params are stored as i8* (8 bytes).
+            let mut offset: u32 = 0;
+            for param in &method.params {
+                let param_ty = types::mimi_type_to_llvm(self.context, &param.ty)
+                    .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+                let gep = self
+                    .gep()
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        args_blob,
+                        &[i64_ty.const_int(offset as u64, false)],
+                        "arg_gep",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
+                let loaded = match param_ty {
+                    BasicTypeEnum::IntType(t) => {
+                        let cast_ptr = self
+                            .builder
+                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_cast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_pointer_value();
+                        self.build_load(t, cast_ptr, "arg_val")?
+                    }
+                    BasicTypeEnum::FloatType(t) => {
+                        let cast_ptr = self
+                            .builder
+                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_fcast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_pointer_value();
+                        self.build_load(t, cast_ptr, "arg_fval")?
+                    }
+                    BasicTypeEnum::PointerType(t) => {
+                        let cast_ptr = self
+                            .builder
+                            .build_bit_cast(gep, t, "arg_pcast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_pointer_value();
+                        self.build_load(t, cast_ptr, "arg_pval")?
+                    }
+                    BasicTypeEnum::StructType(t) => {
+                        let cast_ptr = self
+                            .builder
+                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_scast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_pointer_value();
+                        self.build_load(t, cast_ptr, "arg_sval")?
+                    }
+                    _ => {
+                        // Default: load as i64
+                        let cast_ptr = self
+                            .builder
+                            .build_bit_cast(gep, i64_ty.ptr_type(inkwell::AddressSpace::default()), "arg_icast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                            .into_pointer_value();
+                        self.build_load(i64_ty, cast_ptr, "arg_ival")?
+                    }
+                };
+                call_args.push(loaded.into());
+                offset += 8; // Each param occupies 8 bytes in the blob
+            }
+
+            let call = self.build_call(method_fn, &call_args, "dispatch_method_call")?;
+            let ret_val = call_try_basic_value(&call)
+                .unwrap_or(i64_ty.const_int(0, false).into());
+
+            // Pack return value into result_blob (first 8 bytes).
+            // For void methods, write 0.
+            let result_cast = self
+                .builder
+                .build_bit_cast(
+                    result_blob,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    "result_cast",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                .into_pointer_value();
+
+            // Store the return value (extended to i64 if needed).
+            let ret_as_i64 = match ret_val {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_z_extend(iv, i64_ty, "ret_zext")
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            .into()
+                    } else {
+                        iv.into()
+                    }
+                }
+                BasicValueEnum::FloatValue(fv) => {
+                    // Store float as bits in i64
+                    let as_i64 = self.builder
+                        .build_bit_cast(fv, i64_ty, "ret_f2i")
+                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
+                    as_i64
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    self.builder
+                        .build_ptr_to_int(pv, i64_ty, "ret_p2i")
+                        .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
+                        .into()
+                }
+                BasicValueEnum::StructValue(sv) => {
+                    // Store struct by copying into result_blob
+                    let sty = sv.get_type();
+                    let result_scast = self
+                        .builder
+                        .build_bit_cast(
+                            result_blob,
+                            sty.ptr_type(inkwell::AddressSpace::default()),
+                            "result_scast",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                        .into_pointer_value();
+                    self.build_store(result_scast, sv)?;
+                    // result_size = sizeof(struct)
+                    let struct_size = self.context.i64_type().const_int(
+                        sty.size_of()
+                            .map(|s| s.get_zero_extended_constant().unwrap_or(8))
+                            .unwrap_or(8),
+                        false,
+                    );
+                    self.build_store(result_size_out, struct_size)?;
+                    self.build_br(merge_bb)?;
+                    continue;
+                }
+                _ => i64_ty.const_int(0, false).into(),
+            };
+
+            self.build_store(result_cast, ret_as_i64)?;
+            // Write result size = 8 (one i64 slot).
+            self.build_store(result_size_out, i64_ty.const_int(8, false))?;
+
+            self.build_br(merge_bb)?;
+        }
+
+        // Default case: unknown method_id.
+        self.builder.position_at_end(default_bb);
+        self.build_store(result_size_out, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+
+        // Merge block.
+        self.builder.position_at_end(merge_bb);
+        self.build_return(None)?;
 
         Ok(())
     }
 
     fn compile_actor_spawn(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
-        // Generate {Name}_spawn() -> Actor struct
-        // This mirrors the constructor but evaluates field init expressions instead of taking params
         let actor_ty = *self.type_llvm.get(&actor.name).ok_or_else(|| {
             CompileError::TypeNotFound(format!("actor type '{}' not found", actor.name))
         })?;
 
-        let spawn_fn_type = match actor_ty {
-            BasicTypeEnum::StructType(sty) => sty.fn_type(&[], false),
-            _ => return Err(CompileError::ActorNotStruct(actor.name.to_string())),
-        };
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
 
+        // _spawn() -> i8* (actor handle)
+        let spawn_fn_type = i8_ptr.fn_type(&[], false);
         let spawn_name = format!("{}_spawn", actor.name);
         let function = self.module.add_function(&spawn_name, spawn_fn_type, None);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // Allocate actor struct
+        // Allocate actor struct on stack and initialize fields.
         let alloca = match actor_ty {
             BasicTypeEnum::StructType(sty) => self.build_alloca(sty, &actor.name)?,
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
-        // Store field values from init expressions (or default)
         let empty_vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         if let BasicTypeEnum::StructType(sty) = actor_ty {
             for (i, field) in actor.fields.iter().enumerate() {
@@ -106,7 +362,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let val = if let Some(init) = &field.init {
                     self.compile_expr(init, &empty_vars)?
                 } else {
-                    // Default value by type
                     let ty = types::mimi_type_to_llvm(self.context, &field.ty)
                         .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
                     match ty {
@@ -120,9 +375,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Return the actor struct
-        let ret_val = self.build_load(actor_ty, alloca, &actor.name)?;
-        self.build_return(Some(&ret_val))?;
+        // Get the struct size. If size_of() returns None (unnamed opaque type),
+        // fall back to a malloc-and-write allocation.
+        let struct_size_val = match actor_ty {
+            BasicTypeEnum::StructType(sty) => {
+                if let Some(s) = sty.size_of() {
+                    if let Some(const_size) = s.get_zero_extended_constant() {
+                        // Constant size — use stack alloca + bitcast.
+                        i64_ty.const_int(const_size, false)
+                    } else {
+                        // Non-constant size — load from sizeof value at runtime.
+                        self.builder
+                            .build_int_z_extend(s, i64_ty, "struct_size")
+                            .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
+                            .into()
+                    }
+                } else {
+                    // size_of() returned None — opaque type. Allocate via malloc.
+                    i64_ty.const_int(64, false) // safe default
+                }
+            }
+            _ => i64_ty.const_int(0, false),
+        };
+
+        // Get the dispatch function pointer.
+        let dispatch_name = format!("{}__dispatch", actor.name);
+        let dispatch_fn = self
+            .module
+            .get_function(&dispatch_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("dispatch fn {} not found", dispatch_name)))?;
+
+        // Call mimi_actor_spawn(fields_ptr, fields_size, dispatch_fn) -> i8*
+        let spawn_rt = self.get_runtime_fn("mimi_actor_spawn")?;
+        let fields_ptr = self
+            .builder
+            .build_bit_cast(alloca, i8_ptr, "fields_as_i8ptr")
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+
+        let handle = self.build_call(
+            spawn_rt,
+            &[
+                fields_ptr.into(),
+                struct_size_val.into(),
+                dispatch_fn.as_global_value().as_pointer_value().into(),
+            ],
+            "actor_handle",
+        )?;
+
+        let handle_val = call_try_basic_value(&handle)
+            .unwrap_or(i8_ptr.const_null().into());
+        self.build_return(Some(&handle_val))?;
 
         Ok(())
     }
@@ -566,5 +869,278 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_return(Some(&last_val))?;
         }
         Ok(())
+    }
+
+    /// v0.28.19: Compile an actor method call via the mailbox.
+    ///
+    /// This is called from `compile_method_call` when the object is an actor type.
+    /// It handles:
+    /// 1. Self-call detection (execute directly to avoid deadlock)
+    /// 2. Cross-actor call (send to mailbox via mimi_actor_call)
+    ///
+    /// Returns the method result value, or None if this wasn't an actor method call.
+    pub(in crate::codegen) fn try_compile_actor_mailbox_call(
+        &mut self,
+        obj: &Expr,
+        method_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let obj_type = self.infer_object_type(obj, vars);
+
+        // Check if this is an actor type.
+        if !self.actor_names.contains(&obj_type) {
+            return Ok(None);
+        }
+
+        // Look up the method ID.
+        let method_key = format!("{}::{}", obj_type, method_name);
+        let method_id = match self.actor_method_ids.get(&method_key) {
+            Some(&id) => id,
+            None => return Ok(None), // Not an actor method, fall through
+        };
+
+        // Get the actor handle value (i8*).
+        let handle_val = self.compile_expr(obj, vars)?;
+        let handle_ptr = if let BasicValueEnum::PointerValue(p) = handle_val {
+            p
+        } else {
+            // Not a pointer — fall back to direct call (legacy struct-by-value path)
+            return Ok(None);
+        };
+
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+
+        // Self-call detection: if mimi_actor_current_id() == mimi_actor_id(handle),
+        // execute the method directly (avoid mailbox deadlock).
+        let current_id_fn = self.get_runtime_fn("mimi_actor_current_id")?;
+        let actor_id_fn = self.get_runtime_fn("mimi_actor_id")?;
+
+        let current_id = self.build_call(current_id_fn, &[], "cur_actor_id")?;
+        let current_id = call_try_basic_value(&current_id).unwrap_or(i64_ty.const_int(0, false).into());
+        let actor_id = self.build_call(actor_id_fn, &[handle_ptr.into()], "handle_actor_id")?;
+        let actor_id = call_try_basic_value(&actor_id).unwrap_or(i64_ty.const_int(0, false).into());
+
+        let is_self_call = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                current_id.into_int_value(),
+                actor_id.into_int_value(),
+                "is_self_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("icmp error: {}", e)))?;
+
+        // Create blocks for self-call vs mailbox-call.
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for actor method call".to_string())
+        })?;
+        let self_call_bb = self.context.append_basic_block(function, "actor_self_call");
+        let mailbox_bb = self.context.append_basic_block(function, "actor_mailbox_call");
+        let merge_bb = self.context.append_basic_block(function, "actor_call_merge");
+
+        self.build_cond_br(is_self_call, self_call_bb, mailbox_bb)?;
+
+        // ── Self-call path: direct method invocation ──
+        self.builder.position_at_end(self_call_bb);
+
+        // For self-call, we need the self_fields_ptr. But the handle doesn't
+        // directly expose it. In the interpreter, the worker has the fields.
+        // In codegen, the dispatch function is called with self_fields_ptr on
+        // the worker thread. When a method calls another method on self,
+        // `self` is the fields pointer (not the handle).
+        //
+        // Actually, in actor method codegen, `self` is bound as a pointer to
+        // the fields struct. So `self.method()` inside an actor method would
+        // go through this path. But `self` is the fields pointer, not the
+        // handle. We need to handle this differently.
+        //
+        // For now: if the object is `self`, we can call the method directly
+        // using the self pointer we already have.
+        if let Expr::Ident(name) = obj {
+            if name == "self" {
+                // Direct call on self — call the method function directly.
+                let mangled = format!("{}__{}__method", obj_type, method_name);
+                if let Some(method_fn) = self.module.get_function(&mangled) {
+                    let self_ptr = vars
+                        .get("self")
+                        .map(|&(alloca, _)| alloca)
+                        .ok_or_else(|| {
+                            CompileError::LlvmError("self not found in vars for self-call".into())
+                        })?;
+                    // Load the self pointer from the alloca.
+                    let self_val = self.build_load(
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        self_ptr,
+                        "self_ptr_load",
+                    )?;
+
+                    let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![self_val.into()];
+                    for arg in args {
+                        call_args.push(self.compile_expr(arg, vars)?.into());
+                    }
+                    let call = self.build_call(method_fn, &call_args, "self_method_call")?;
+                    let result = call_try_basic_value(&call)
+                        .unwrap_or(i64_ty.const_int(0, false).into());
+
+                    // Branch to merge with result.
+                    let result_alloca = self.build_alloca(i64_ty, "self_call_result")?;
+                    self.build_store(result_alloca, result)?;
+                    self.build_br(merge_bb)?;
+
+                    // ── Mailbox path (unreachable for self, but needed for struct) ──
+                    self.builder.position_at_end(mailbox_bb);
+                    self.build_br(merge_bb)?;
+
+                    // ── Merge ──
+                    self.builder.position_at_end(merge_bb);
+                    let merged = self.build_load(i64_ty, result_alloca, "merged_result")?;
+                    return Ok(Some(merged));
+                }
+            }
+        }
+
+        // For non-self cross-actor calls, we still need the direct path for
+        // when current_id matches. But we can't easily get the fields ptr from
+        // the handle. So for self-calls on non-self objects, fall through to
+        // mailbox (which will work since the worker is different).
+        // Actually, a self-call means we're ON the worker thread for this actor.
+        // If the object is a different variable (not "self"), it could be
+        // another actor handle stored in a field. In that case, the current
+        // worker is for a different actor, so it's NOT a self-call.
+        //
+        // The only real self-call scenario is `self.method()` inside an actor
+        // method, which we handle above. So the self_call_bb for non-self
+        // objects is effectively unreachable — but we still need valid IR.
+        self.build_br(mailbox_bb)?;
+
+        // ── Mailbox path: send to mailbox and await reply ──
+        self.builder.position_at_end(mailbox_bb);
+
+        // Pack args into a blob.
+        let args_blob = self.build_alloca(
+            self.context.i8_type().array_type(256),
+            "actor_args_blob",
+        )?;
+
+        // Store each arg at offset i*8.
+        for (i, arg) in args.iter().enumerate() {
+            let val = self.compile_expr(arg, vars)?;
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let gep = self
+                .gep()
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    args_blob,
+                    &[offset],
+                    &format!("arg_gep_{}", i),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
+            // Extend int values to i64 for uniform blob storage.
+            let stored_val = match val {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                            .into()
+                    } else {
+                        iv.into()
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    self.builder
+                        .build_ptr_to_int(pv, i64_ty, &format!("arg_p2i_{}", i))
+                        .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
+                        .into()
+                }
+                BasicValueEnum::FloatValue(fv) => {
+                    self.builder
+                        .build_bit_cast(fv, i64_ty, &format!("arg_f2i_{}", i))
+                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                }
+                _ => i64_ty.const_int(0, false).into(),
+            };
+
+            let cast_ptr = self
+                .builder
+                .build_bit_cast(
+                    gep,
+                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    &format!("arg_cast_{}", i),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+                .into_pointer_value();
+            self.build_store(cast_ptr, stored_val)?;
+        }
+
+        let args_size = i64_ty.const_int((args.len() * 8) as u64, false);
+
+        // Allocate result blob.
+        let result_blob = self.build_alloca(
+            self.context.i8_type().array_type(256),
+            "actor_result_blob",
+        )?;
+
+        // Call mimi_actor_call(handle, method_id, args_ptr, args_size, result_ptr)
+        let call_fn = self.get_runtime_fn("mimi_actor_call")?;
+        let args_blob_i8ptr = self
+            .builder
+            .build_bit_cast(args_blob, i8_ptr, "args_blob_i8")
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+        let result_blob_i8ptr = self
+            .builder
+            .build_bit_cast(result_blob, i8_ptr, "result_blob_i8")
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+
+        let _call_result = self.build_call(
+            call_fn,
+            &[
+                handle_ptr.into(),
+                i32_ty.const_int(method_id as u64, false).into(),
+                args_blob_i8ptr.into(),
+                args_size.into(),
+                result_blob_i8ptr.into(),
+            ],
+            "actor_call_result",
+        )?;
+
+        // Load result from result_blob (first 8 bytes as i64).
+        let result_cast = self
+            .builder
+            .build_bit_cast(
+                result_blob,
+                i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                "result_cast",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
+            .into_pointer_value();
+        let result_val = self.build_load(i64_ty, result_cast, "method_result")?;
+
+        self.build_br(merge_bb)?;
+
+        // ── Merge ──
+        self.builder.position_at_end(merge_bb);
+
+        // For self-call path, we need a phi. But we already handled self-call
+        // above and returned. So here both paths merge with the mailbox result.
+        // Actually, the self-call path for non-self objects branches to mailbox.
+        // And for self objects, we already returned. So at this point, the
+        // self_call_bb has branched to mailbox_bb. The merge block has two
+        // predecessors: mailbox_bb (from the normal path) and... wait, no.
+        //
+        // Let me reconsider. For the non-self case:
+        //   self_call_bb → br mailbox_bb → br merge_bb
+        // So merge_bb has one predecessor: mailbox_bb. No phi needed.
+        //
+        // For the self case, we already returned above, so we don't reach here.
+        //
+        // The result is the mailbox result.
+        Ok(Some(result_val))
     }
 }

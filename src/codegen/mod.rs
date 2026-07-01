@@ -255,6 +255,15 @@ pub struct CodeGenerator<'ctx> {
     /// inlining and CSE. Populated during `compile_func` analysis pass.
     #[allow(dead_code)]
     pub(crate) pure_funcs: std::collections::HashSet<String>,
+
+    // ====================================================================
+    // v0.28.19 — Actor real concurrency
+    // ====================================================================
+    /// Names of actor types (for method-call dispatch routing).
+    actor_names: std::collections::HashSet<String>,
+    /// Maps "ActorName::method_name" → method index (i32), used as method_id
+    /// in the dispatch function and mimi_actor_call.
+    actor_method_ids: HashMap<String, i32>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -336,6 +345,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             cse_hits: 0,
             inline_count: 0,
             pure_funcs: std::collections::HashSet::new(),
+            // v0.28.19 actor concurrency
+            actor_names: std::collections::HashSet::new(),
+            actor_method_ids: HashMap::new(),
         }
     }
 

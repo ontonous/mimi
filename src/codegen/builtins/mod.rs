@@ -37,6 +37,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_process_advanced_file_operations(module, ctx, i8_ptr, i32, i64, void);
     register_binary_i_o_streaming_line_reading(module, ctx, i8_ptr, i32, i64, void);
     register_crypto_fns(module, ctx, i8_ptr, i32, i64, void);
+    register_actor_concurrency_rt(module, ctx, i8_ptr, i32, i64, void);
 }
 
 fn register_libc<'ctx>(
@@ -1693,4 +1694,67 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
         Ok(tag.into())
     }
+}
+
+/// Register runtime functions for v0.28.19 Actor real concurrency.
+///
+/// - `mimi_actor_spawn(fields_ptr: i8*, fields_size: i64, dispatch_fn: i8*) -> i8*`
+/// - `mimi_actor_id(handle: i8*) -> i64`
+/// - `mimi_actor_current_id() -> i64`
+/// - `mimi_actor_call(handle: i8*, method_id: i32, args_ptr: i8*, args_size: i64, result_ptr: i8*) -> i64`
+/// - `mimi_actor_drop(handle: i8*)`
+fn register_actor_concurrency_rt<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+    // mimi_actor_spawn(fields_ptr: i8*, fields_size: i64, dispatch_fn: i8*) -> i8*
+    module.add_function(
+        "mimi_actor_spawn",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_id(handle: i8*) -> i64
+    module.add_function(
+        "mimi_actor_id",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_current_id() -> i64
+    module.add_function(
+        "mimi_actor_current_id",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_call(handle: i8*, method_id: i32, args_ptr: i8*, args_size: i64, result_ptr: i8*) -> i64
+    module.add_function(
+        "mimi_actor_call",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_drop(handle: i8*)
+    module.add_function(
+        "mimi_actor_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }

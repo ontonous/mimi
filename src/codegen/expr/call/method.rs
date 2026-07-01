@@ -52,7 +52,16 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let actor_method = format!("{}__{}__method", obj_type, method_name);
 
-        // 1. Try actor method dispatch
+        // 1. Try actor mailbox method dispatch (v0.28.19)
+        //    This routes through mimi_actor_call for real concurrency.
+        //    Falls back to direct call for self-calls inside actor methods.
+        if self.actor_names.contains(&obj_type) {
+            if let Some(result) = self.try_compile_actor_mailbox_call(obj, method_name, args, vars)? {
+                return Ok(result);
+            }
+        }
+
+        // 1a. Fallback: direct actor method dispatch (legacy / self-call)
         if let Some(function) = self.module.get_function(&actor_method) {
             return self.compile_self_method_call(obj, args, vars, function, "method_call");
         }
