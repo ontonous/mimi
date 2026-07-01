@@ -2,6 +2,18 @@
 
 ## [Unreleased] — v0.28.16
 
+### Changed
+- **Codegen 清理**：
+  - 移除 `src/codegen/block.rs`、`scope.rs`、`registry/helpers.rs` 的模块级 `#![allow(...)]`，改为针对性允许。
+  - 删除 `scope.rs` 中未使用的 `is_cap_consumed` 方法。
+  - 统一 `basic_value_to_metadata_value` 与 `is_simple_reprc_record` 到 `src/codegen/types.rs`。
+  - 重构 `find_variant_ordinal` / `find_variant_owner`，共享 `find_variant_info` 内部辅助函数。
+- **关闭 cc-linker 工具链 `#[ignore]`**：取消 15 个 fuzz/property 测试的 `#[ignore]`，默认运行并在 cc 不可用时自动跳过。
+
+### Tests
+- 全量测试现在包含 fuzz/property，基线测试数进一步增加。
+- 剩余 4 个 `#[ignore]` 均为 Valgrind 测试（依赖外部 valgrind 安装）。
+
 ## [v0.28.15] - 2026-07-01
 
 ### Added
