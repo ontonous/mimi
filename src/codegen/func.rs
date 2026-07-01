@@ -1005,6 +1005,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.var_type_names.insert(name.clone(), fn_name.clone());
                             }
                         }
+
+                        // v0.28.15: Track heap-owned string variables so their
+                        // data is freed at scope exit. String literals live in
+                        // LLVM globals and must not be freed; identifiers refer
+                        // to variables that already have their own slot, so
+                        // copying them here is not a deep copy and must not be
+                        // freed again. For concat (`+`) and f-string results,
+                        // transfer ownership from the expression's raw pointer
+                        // registration into the variable slot.
+                        let is_string = self
+                            .var_type_names
+                            .get(name)
+                            .map(|t| t == "string")
+                            .unwrap_or(false);
+                        if is_string {
+                            let claims_expr_result = matches!(
+                                init,
+                                Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
+                            );
+                            if claims_expr_result {
+                                self.pop_last_heap_ptr();
+                                if let Some(&(alloca, BasicTypeEnum::StructType(st))) =
+                                    vars.get(name)
+                                {
+                                    if st.get_field_types().len() == 2 {
+                                        if let Ok(data_gep) = self.gep().build_struct_gep(
+                                            st,
+                                            alloca,
+                                            0,
+                                            &format!("{}_str_data_gep", name),
+                                        ) {
+                                            self.register_heap_gep(data_gep);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Stmt::Assign { target, value } => {

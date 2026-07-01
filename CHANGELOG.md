@@ -10,9 +10,15 @@
   - 重构 `find_variant_ordinal` / `find_variant_owner`，共享 `find_variant_info` 内部辅助函数。
 - **关闭 cc-linker 工具链 `#[ignore]`**：取消 15 个 fuzz/property 测试的 `#[ignore]`，默认运行并在 cc 不可用时自动跳过。
 
+### Fixed
+- **字符串拼接/插值内存泄漏**：codegen 中将 `+` 拼接与 f-string 的堆分配结果所有权转移到局部变量槽，使变量离开作用域时释放字符串数据；`e2e_valgrind_string_ops` 现在通过。
+- **LSP `exit` 通知不再调用 `process::exit(0)`**：改为设置 `should_exit` 标志，解决完整 `cargo test` 时测试进程被提前终止导致的 SIGSEGV/超时。
+
 ### Tests
 - 全量测试现在包含 fuzz/property，基线测试数进一步增加。
-- 剩余 4 个 `#[ignore]` 均为 Valgrind 测试（依赖外部 valgrind 安装）。
+- 安装 Valgrind 后，原 4 个显式 `#[ignore]` 的 Valgrind 测试（string_ops、list_ops、recursion、large_struct_return）全部通过并继续默认运行。
+- 新增 4 个 `#[ignore]`：shared/weak 生命周期测试暴露 pre-existing 泄漏与类型推断问题，推迟到 v0.28.16 修复。
+- Miri：解释器子集（`tests::basic_*`、`interpreter_features`）在 `cargo +nightly miri test` 下通过；FFI/codegen 测试因 Miri 不支持外部函数/子进程而跳过。
 
 ## [v0.28.15] - 2026-07-01
 

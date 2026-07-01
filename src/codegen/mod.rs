@@ -792,6 +792,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Remove and return the most recently registered raw heap pointer from
+    /// the current scope. Used to transfer ownership of a string expression
+    /// result into a local variable slot.
+    pub(super) fn pop_last_heap_ptr(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            while let Some(entry) = stack.pop() {
+                if let HeapEntry::Ptr(p) = entry {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
     /// G10: Push a new scope level for heap allocations.
     /// Takes &self (not &mut self) because builtins use &self.
     pub(super) fn push_heap_scope(&self) {
