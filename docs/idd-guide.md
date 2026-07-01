@@ -62,7 +62,7 @@
 | `exec(...)` Record 布局 | ✅ | ✅ | 已实现（ExecResult 字段偏移正确） |
 | `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持：内层自定义枚举负载的匹配可能失败（见 `e2e_net_fetch_failure`） |
 | 递归栈溢出保护 | ✅ | ✅ | 浅递归已支持；极深递归仍依赖宿主栈大小 |
-| Valgrind | ✅ | ✅ | 已安装；4 个基础 Valgrind 测试默认通过；4 个 shared/weak 测试因 pre-existing 生命周期/类型推断问题保留 #[ignore] |
+| Valgrind | ✅ | ✅ | 已安装；8 个 Valgrind 测试中 4 个基础测试默认通过，4 个 shared/weak 因 pre-existing 生命周期/类型推断问题保留 #[ignore] |
 | Miri | ✅ | ⬜ | 解释器子集通过（`tests::basic_*`、`interpreter_features`）；codegen/FFI 测试因 Miri 不支持外部函数/子进程，不纳入 Miri 回归 |
 | ASan | ✅ | ✅ | `e2e_asan_*` 已取消 #[ignore]，在可用工具链下通过 |
 | 网络 HTTP 失败 | ✅ | ✅ | `e2e_net_fetch_*` 已取消 #[ignore]，连接不可达端口时行为正确 |

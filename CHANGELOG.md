@@ -16,7 +16,7 @@
 
 ### Tests
 - 全量测试现在包含 fuzz/property，基线测试数进一步增加。
-- 安装 Valgrind 后，原 4 个显式 `#[ignore]` 的 Valgrind 测试（string_ops、list_ops、recursion、large_struct_return）全部通过并继续默认运行。
+- 安装 Valgrind 后，原 4 个显式 `#[ignore]` 的 Valgrind 测试（string_ops、list_ops、recursion、large_struct_return）全部通过并**解除 `#[ignore]`**，默认运行。
 - 新增 4 个 `#[ignore]`：shared/weak 生命周期测试暴露 pre-existing 泄漏与类型推断问题，推迟到 v0.28.16 修复。
 - Miri：解释器子集（`tests::basic_*`、`interpreter_features`）在 `cargo +nightly miri test` 下通过；FFI/codegen 测试因 Miri 不支持外部函数/子进程而跳过。
 
