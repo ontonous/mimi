@@ -1,6 +1,26 @@
 # Changelog
 
-## [Unreleased] — 0.28.18-dev
+## [Unreleased] — 0.28.19-dev
+
+### Added
+- **Runtime actor mailbox** (`src/runtime/mod.rs`)：新增 `MimiActorRepr` + `mimi_actor_spawn`、`mimi_actor_call`、`mimi_actor_drop`、`mimi_actor_id`、`mimi_actor_current_id` C ABI runtime API。每个 actor 实例拥有专用 worker 线程（`std::thread::Builder::new().name("mimi-actor-{id}")`）+ `mpsc::channel` mailbox；actor 字段存储在 heap-allocated blob 中，worker 独占访问。`CURRENT_ACTOR_ID` thread-local 实现自调用死锁避免。
+- **Codegen actor dispatch** (`src/codegen/actors.rs`)：新增 `{Name}__dispatch` 函数（按 method_id switch）+ `mimi_actor_spawn` 派生的 `{Name}_spawn` wrapper。`try_compile_actor_mailbox_call` 在 `compile_method_call` 中路由 actor 方法调用：自调用直接派发（无 mailbox 死锁），跨调用通过 `mimi_actor_call` 发送+等待。
+- **类型检查器对 actor 方法的 arity 处理** (`src/core/infer/call/method.rs`)：`obj.method(args)` 路径识别 actor 方法（通过 `Item::Actor` 查找），按 user-facing 显式参数 arity 校验（不再因隐式 self 参数拒绝合法调用），并对每个实参与 method 声明的 param 类型做 `same_type` 检查。
+- **Golden test 更新**：21 个 `codegen_golden` 测试的 golden IR 文件通过 `UPDATE_GOLDEN=1` 自动重生成（仅新增 `mimi_actor_*` runtime declare 块）。
+
+### Fixed
+- Codegen actor 不再返回 struct-by-value 的退化 path——`{Name}_spawn` 现在返回 `i8*`（actor 句柄），符合解释器行为。
+- Actor 字段大小在 `sty.size_of()` 返回 `None`（opaque type）时回退到 i64 zero-extension，避免 codegen 传入 0 字节字段 blob 导致 dispatch 越界。
+
+### Tests
+- `dual_actor_state_persistence_mailbox` (`src/tests/dual_backend.rs`)：验证 3 次 mailbox-mediated `add()` 后 `get()` 返回累计值（60）。
+- `dual_actor_two_independent_instances`：两个 actor 实例（`a` + `b`）状态独立，`a.add(10); a.add(5); b.add(100)` 后 `a.get()=15, b.get()=100`。
+- `dual_actor_method_with_return_value`：actor 方法返回值通过 mailbox reply channel 正确回传到 caller。
+- `dual_actor_stress_many_calls`：10 次连续 mailbox 跨线程调用无丢失。
+- `dual_actor_long_lived_state`：3 轮 add+get 序列验证 state 持久。
+- `dual_actor_1000_mailbox_calls`：1000 次 mailbox-mediated `increment()` 无死锁无丢失（v0.28.19 §12 L1 压力测试验收）。
+
+## [v0.28.18] - 2026-07-02
 
 ### Added
 - **复杂 `#[repr(C)]` record struct-by-value 返回（export wrapper）**：`src/codegen/func/export.rs::convert_internal_reprc_record_to_c` 现支持 heap-allocated C-layout 结构体指针返回（mixed types / >2 fields），C 调用方 `free(ptr)` 后回收。
