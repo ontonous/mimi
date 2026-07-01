@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased] — v0.28.15
+## [Unreleased] — v0.28.16
+
+## [v0.28.15] - 2026-07-01
 
 ### Added
 - **自举准备文档**: 新增 `docs/bootstrap-plan.md`，描述 v0.29 MimiSpec 自举步骤、依赖、回滚策略与验收标准。
