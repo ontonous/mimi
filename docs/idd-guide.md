@@ -62,8 +62,10 @@
 | `exec(...)` Record 布局 | ✅ | ✅ | 已实现（ExecResult 字段偏移正确） |
 | `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持：内层自定义枚举负载的匹配可能失败（见 `e2e_net_fetch_failure`） |
 | 递归栈溢出保护 | ✅ | ✅ | 浅递归已支持；极深递归仍依赖宿主栈大小 |
-| Valgrind / ASan / Miri | ⚠️ | ⚠️ | ASan 测试通过；Valgrind/Miri 依赖外部工具链 |
-| `#[ignore]` 工具链测试 | — | — | 需 cc/Valgrind/Miri/网络；保留 #[ignore] 并文档化 |
+| Valgrind / Miri | ⚠️ | ⚠️ | 需外部工具链；当前环境未安装，保留 #[ignore] |
+| ASan | ✅ | ✅ | `e2e_asan_*` 已取消 #[ignore]，在可用工具链下通过 |
+| 网络 HTTP 失败 | ✅ | ✅ | `e2e_net_fetch_*` 已取消 #[ignore]，连接不可达端口时行为正确 |
+| `#[ignore]` 工具链测试 | — | — | 剩余 19 个：Valgrind (4) + cc-linker fuzz/property (15) |
 
 ---
 
