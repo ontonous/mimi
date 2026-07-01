@@ -84,7 +84,6 @@ proptest! {
     /// Verify that if the type checker accepts an FFI program with contracts,
     /// the interpreter also does not crash when verifying those contracts.
     #[test]
-    #[ignore = "requires cc linker toolchain"]
     fn ffi_contract_typecheck_ok(src in arb_extern_call()) {
         // First pass: type checker must accept (no false negatives)
         if typecheck_ffi(&src).is_err() {
@@ -103,7 +102,6 @@ proptest! {
     /// Verify that if the type checker accepts a program and the interpreter
     /// runs it successfully, the codegen also compiles it without error.
     #[test]
-    #[ignore = "requires cc linker toolchain"]
     fn ffi_contract_codegen_not_crash(src in arb_extern_call()) {
         // Skip programs that fail type checking
         if typecheck_ffi(&src).is_err() {

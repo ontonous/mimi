@@ -151,7 +151,6 @@ func main() -> i32 {
 // ==============================
 
 #[test]
-#[ignore = "requires cc linker toolchain"]
 fn test_dual_path_arithmetic() {
     let stdout = compile_and_run(
         r#"
@@ -163,7 +162,6 @@ fn test_dual_path_arithmetic() {
 }
 
 #[test]
-#[ignore = "requires cc linker toolchain"]
 fn test_dual_path_conditional() {
     let stdout = compile_and_run(
         r#"
@@ -178,7 +176,6 @@ fn test_dual_path_conditional() {
 }
 
 #[test]
-#[ignore = "requires cc linker toolchain"]
 fn test_dual_path_loop_accumulate() {
     let stdout = compile_and_run(
         r#"
@@ -194,7 +191,6 @@ fn test_dual_path_loop_accumulate() {
 }
 
 #[test]
-#[ignore = "requires cc linker toolchain"]
 fn test_dual_path_recursive() {
     let stdout = compile_and_run(
         r#"
@@ -209,7 +205,6 @@ fn test_dual_path_recursive() {
 }
 
 #[test]
-#[ignore = "requires cc linker toolchain"]
 fn test_dual_path_match_literal() {
     let stdout = compile_and_run(
         r#"
