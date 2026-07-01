@@ -9,18 +9,24 @@
 ### Changed
 - **关闭剩余 `#[ignore]` 差距**:
   - 解除 `typecheck_recursive_func` 与 `typecheck_mutually_recursive_funcs` 的 `#[ignore]`；当前解释器可处理常规递归。
-  - 网络/Valgrind/Miri/Fuzz 工具链相关 `#[ignore]` 测试已在 `docs/idd-guide.md` 中明确文档化。
+  - 解除 `e2e_net_fetch_failure` / `e2e_net_fetch_post_failure` 的 `#[ignore]`；网络不可达端口的失败路径现在正确。
+  - 解除 `e2e_asan_list_ops` 的 `#[ignore]`；所有 `e2e_asan_*` 测试默认运行。
+  - 剩余 19 个 `#[ignore]` 均为外部工具链依赖（Valgrind 4 个 + cc-linker fuzz/property 15 个），已在 `docs/idd-guide.md` 中明确文档化。
 - **Unsafe 审计**: 全仓补充 ~270 条 `// SAFETY:` 注释，覆盖 `runtime`、`interp/ffi`、`interp/value` 等模块。
-- **Codegen 清理**: 移除 `src/codegen/registry/types.rs` 中重复的 `BasicMetadataTypeEnum` 转换。
+- **Codegen 清理**: 移除 `src/codegen/registry/types.rs` 中重复的 `BasicMetadataTypeEnum` 转换；规范化 `Result`/`Option` LLVM 布局到单一处理路径。
 - **诊断差距表更新**: `docs/idd-guide.md` 同步 `match on Result`、栈溢出保护、ASan/Valgrind/Miri 状态。
 
 ### Fixed
 - **Runtime HTTP 失败处理**: `mimi_http_get` / `mimi_http_post` 在请求失败时返回空字符串（原返回 null 指针导致 codegen 调用 `strlen` 时 SIGSEGV）。
 - **JSON 反序列化空指针**: `mimi_json_deserialize` 在 `out_len` 为空指针时不再写入，避免空指针解引用。
+- **`Result`/`Option` 函数返回布局**: codegen 现在将通用构造函数布局重新打包为声明的返回类型布局，覆盖隐式返回与 `if` 表达式分支；修复 `Ok(string)` 与 `Err(CustomEnum)` 返回后解构失败的问题。
+- **`Result`/`Option` match 解构**: 内建变体负载使用自然 LLVM 类型而非强制 `i64`，修复 `Ok(string)` 等复杂负载的匹配。
+- **`http_get`/`http_post` 返回值类型**: 返回 `StructValue` 而非 `PointerValue`，避免字符串被下游 builtin 误解释为原始指针。
 
 ### Tests
-- ASan 回归 `e2e_asan_list_ops` 通过。
-- 全量测试基线保持 2733 通过。
+- 新增回归测试：`e2e_result_fn_return_enum_match`、`e2e_result_if_expr_enum_match`、`e2e_result_ok_string_return_match`。
+- ASan 回归全部通过（5 个 `e2e_asan_*` 测试）。
+- 全量测试基线 2735+ 通过。
 
 ## [v0.28.14] - 2026-07-01
 
