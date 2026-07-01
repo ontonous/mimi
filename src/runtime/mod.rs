@@ -110,6 +110,7 @@ mod libc {
         pub fn malloc(size: usize) -> *mut c_void;
         pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
         pub fn free(ptr: *mut c_void);
+        pub fn atexit(func: extern "C" fn()) -> i32;
     }
 }
 
@@ -3640,12 +3641,29 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     }
 }
 
+/// Spawned thread handles retained so they can be joined before process exit.
+/// Joining detached threads avoids Valgrind "possibly lost" reports for the
+/// pthread stack allocation. The mutex protects the vector across threads.
+static SPAWN_HANDLES: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+static SPAWN_ATEXIT_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn mimi_join_spawned_threads_atexit() {
+    // SAFETY: called once from `atexit` after main returns; no other thread is
+    // accessing `SPAWN_HANDLES` at this point (all futures have completed).
+    if let Ok(mut handles) = SPAWN_HANDLES.lock() {
+        for handle in handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Spawn a future on a real thread (used by codegen `spawn expr`).
 /// The poll function is called on a new thread, which sets completed=1 when done.
 /// Returns the future pointer (same as input).
-/// Note: JoinHandle is intentionally dropped (detached thread). The future's
-/// completion is tracked via `mimi_future_set_completed`. Process exit while
-/// the thread is running will kill the thread abruptly.
+/// The returned `JoinHandle` is retained in `SPAWN_HANDLES` and joined at
+/// process exit so that the pthread stack is freed before Valgrind checks.
 #[no_mangle]
 pub extern "C" fn mimi_spawn_future(
     future: *mut std::ffi::c_void,
@@ -3655,12 +3673,26 @@ pub extern "C" fn mimi_spawn_future(
         return std::ptr::null_mut();
     }
     let future_addr = future as usize;
-    let _handle = std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         // SAFETY: the spawned thread owns the future pointer for the duration of `poll_fn`; it was checked non-null.
         unsafe { poll_fn(future_addr as *mut std::ffi::c_void) };
     });
-    // _handle is dropped here — thread is detached. This is intentional:
-    // completion is signaled via mimi_future_set_completed, not JoinHandle.
+    if let Ok(mut handles) = SPAWN_HANDLES.lock() {
+        handles.push(handle);
+    }
+    // Register an atexit handler once to join all spawned threads before exit.
+    if SPAWN_ATEXIT_REGISTERED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        // SAFETY: `mimi_join_spawned_threads_atexit` has C ABI and no parameters.
+        unsafe { libc::atexit(mimi_join_spawned_threads_atexit) };
+    }
     future
 }
 
