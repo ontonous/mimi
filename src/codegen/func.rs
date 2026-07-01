@@ -413,6 +413,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Transfer ownership of a string return value from local heap tracking to
     /// the caller. For string-typed returns this prevents `free_heap_allocs`
     /// from freeing the data that the caller will receive.
+    ///
+    /// CLOSE-GAP-5 (v0.28.19): if the returned data pointer isn't already a
+    /// heap allocation (e.g. literal `"hello"` keeps a `.rodata` pointer),
+    /// heap-copy it so the caller's `free_heap_allocs` can safely release it
+    /// via the struct's data pointer. For expressions that already own heap
+    /// allocations (concat, f-string, builtin raw returns) we pop the most
+    /// recent registration as before.
     fn claim_string_return_value(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -455,20 +462,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let _ = self.builder.build_store(data_gep, null_ptr);
                         }
                     }
-                    return Ok(loaded);
+                    // CLOSE-GAP-5: heap-copy the loaded struct so the caller
+                    // side has unambiguous ownership. The original data may be
+                    // a `.rodata` global (for `let s = "hi"; s`), in which case
+                    // without this copy the caller would `free()` a global
+                    // pointer.
+                    return self.heap_copy_string_value(loaded);
                 }
             }
         }
 
-        // For other string-producing expressions (concat, f-string, builtins
-        // returning raw pointers), the most recently registered raw heap pointer
-        // is the one that owns the returned data. Pop it so it is not freed by
-        // the scope cleanup below.
+        // For concat / fstring / builtin raw returns, the most-recent heap
+        // registration owns the returned data; pop it so free_heap_allocs
+        // doesn't release it before the caller sees it.
         let is_string_temp = match expr {
             Some(Expr::Binary(BinOp::Add, _, _)) => true,
             Some(Expr::Literal(Lit::FString(_))) => true,
             Some(Expr::Call(callee, _)) => {
-                // Builtin calls that return a raw string pointer are temporaries.
                 matches!(val, BasicValueEnum::PointerValue(_))
                     || matches!(
                         callee.as_ref(),
@@ -483,13 +493,130 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         match val {
             BasicValueEnum::PointerValue(pv) => {
-                // Raw pointer result (e.g. string literal or builtin that
-                // returns raw pointer). Wrap it into the Mimi string struct.
-                self.wrap_c_string(pv)
+                // Raw pointer result (string literal or builtin raw return).
+                // `heap_copy_string_value` handles the wrap (via strlen) +
+                // copy in one step.
+                self.heap_copy_string_value(pv.into())
             }
-            BasicValueEnum::StructValue(sv) => Ok(BasicValueEnum::StructValue(sv)),
+            BasicValueEnum::StructValue(sv) => {
+                // The struct's data pointer is referenced by the caller. If
+                // ownership was transferred (pop in the previous block), the
+                // data ptr is heap-owned by the result; the caller will free
+                // it. If we did not pop (e.g. literal, expr = None), the data
+                // ptr is a `.rodata` global — heap-copy it first.
+                if is_string_temp {
+                    Ok(BasicValueEnum::StructValue(sv))
+                } else {
+                    self.heap_copy_string_value(sv.into())
+                }
+            }
             _ => Ok(val),
         }
+    }
+
+    /// Heap-copy the data field of a Mimi `string` struct so the returned
+    /// value is always backed by a freshly-allocated buffer. The caller (and
+    /// only the caller) takes ownership. Non-string structs pass through.
+    ///
+    /// IMPORTANT: this does *not* register the freshly-allocated buffer on
+    /// the callee's heap_allocs stack — that would cause `free_heap_allocs`
+    /// to release the buffer before the return instruction completes. The
+    /// caller is expected to register the resulting struct's data pointer
+    /// (see `emit_function_call::track_string_return_lifetime`).
+    fn heap_copy_string_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let (data_pv, len_iv) = match val {
+            // A pointer-to-C-string (e.g. raw `i8*` from a literal, a string
+            // variable holding a raw pointer, or a builtin raw-pointer
+            // return). Compute the length via `strlen`, then build the
+            // struct.
+            BasicValueEnum::PointerValue(pv) => {
+                let strlen_fn = self.get_runtime_fn("strlen")?;
+                let length = self
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(pv)],
+                        "ret_str_strlen",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                    .into_int_value();
+                (pv, length)
+            }
+            BasicValueEnum::StructValue(sv) => {
+                let sty = sv.get_type();
+                let fields = sty.get_field_types();
+                let is_mimi_string_struct = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                if !is_mimi_string_struct {
+                    return Ok(sv.into());
+                }
+                let data_ptr = self.build_extract_value(sv.into(), 0, "ret_str_data")?;
+                let data_pv = match data_ptr {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    _ => return Ok(sv.into()),
+                };
+                let len_iv = match self.build_extract_value(sv.into(), 1, "ret_str_len")? {
+                    BasicValueEnum::IntValue(iv) => iv,
+                    _ => return Ok(sv.into()),
+                };
+                (data_pv, len_iv)
+            }
+            other => return Ok(other),
+        };
+        let i64_ty = self.context.i64_type();
+        // len + 1 for the trailing nul so callers may use the result as a C
+        // string.
+        let alloc_len = self
+            .builder
+            .build_int_add(len_iv, i64_ty.const_int(1, false), "ret_str_alloc_len")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        let malloc_fn = self.get_runtime_fn("malloc")?;
+        let heap_ptr = self
+            .build_call(
+                malloc_fn,
+                &[BasicMetadataValueEnum::IntValue(alloc_len)],
+                "ret_str_malloc",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("malloc returned void".into()))?
+            .into_pointer_value();
+        let memcpy_fn = self.get_runtime_fn("memcpy")?;
+        let _ = self.build_call(
+            memcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(heap_ptr),
+                BasicMetadataValueEnum::PointerValue(data_pv),
+                BasicMetadataValueEnum::IntValue(len_iv),
+            ],
+            "ret_str_memcpy",
+        )?;
+        // Write nul terminator at heap_ptr[len].
+        let i8_ty = self.context.i8_type();
+        let nul_pos = self.build_in_bounds_gep(i8_ty, heap_ptr, &[len_iv], "ret_str_nul_pos")?;
+        self.build_store(nul_pos, i8_ty.const_int(0, false))?;
+        // Build the canonical {i8*, i64} struct.
+        let sty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let new_sv = self
+            .builder
+            .build_insert_value(sty.get_undef(), heap_ptr, 0, "ret_str_new_data")
+            .map_err(|e| CompileError::LlvmError(format!("insert str data: {}", e)))?
+            .into_struct_value();
+        let new_sv = self
+            .builder
+            .build_insert_value(new_sv, len_iv, 1, "ret_str_new_len")
+            .map_err(|e| CompileError::LlvmError(format!("insert str len: {}", e)))?
+            .into_struct_value();
+        Ok(BasicValueEnum::StructValue(new_sv))
     }
 
     /// Emit a function return: check `ensures` contracts, clean up scopes, and

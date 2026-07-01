@@ -438,8 +438,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        Ok(call_try_basic_value(&call)
-            .unwrap_or(self.context.i64_type().const_int(0, false).into()))
+        let result = call_try_basic_value(&call)
+            .unwrap_or(self.context.i64_type().const_int(0, false).into());
+        // CLOSE-GAP-5: when the callee returns a heap-owned `string` struct,
+        // store it into a fresh alloca so the caller's `free_heap_allocs`
+        // can release the data at scope exit. The callee already ensures the
+        // data pointer is heap-owned (via `claim_string_return_value`), so
+        // the registered pointer is always safe to free.
+        self.track_string_return_lifetime(name, result)
+    }
+
+    /// If `result` is a Mimi string struct returned by a function call, stash
+    /// it into a fresh alloca so the heap-owned data pointer can be freed at
+    /// the caller's scope exit. Non-string or non-struct results pass through.
+    fn track_string_return_lifetime(
+        &self,
+        callee_name: &str,
+        result: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let ret_is_string = self
+            .func_defs
+            .get(callee_name)
+            .and_then(|fd| fd.ret.as_ref())
+            .map(|t| matches!(t, Type::Name(n, _) if n == "string"))
+            .unwrap_or(false);
+        if !ret_is_string {
+            return Ok(result);
+        }
+        let sv = match result {
+            BasicValueEnum::StructValue(sv) => sv,
+            other => return Ok(other),
+        };
+        let sty = sv.get_type();
+        let fields = sty.get_field_types();
+        let is_mimi_string_struct = fields.len() == 2
+            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+            && matches!(fields[1], BasicTypeEnum::IntType(_));
+        if !is_mimi_string_struct {
+            return Ok(sv.into());
+        }
+        // Allocate a slot for the struct, store into it, register the data
+        // GEP so the loader sees the latest value at free time. Return the
+        // loaded struct to the caller.
+        let slot = self.build_alloca(sty, "call_str_slot")?;
+        self.build_store(slot, sv)?;
+        if let Ok(data_gep) = self
+            .gep()
+            .build_struct_gep(sty, slot, 0, "call_str_data_gep")
+        {
+            self.register_heap_gep(data_gep);
+        }
+        let loaded = self.build_load(sty, slot, "call_str_load")?;
+        Ok(loaded.into_struct_value().into())
     }
 
     /// Build a call to a declared function and extract its basic value.
