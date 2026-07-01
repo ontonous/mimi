@@ -13,11 +13,17 @@
 ### Fixed
 - **字符串拼接/插值内存泄漏**：codegen 中将 `+` 拼接与 f-string 的堆分配结果所有权转移到局部变量槽，使变量离开作用域时释放字符串数据；`e2e_valgrind_string_ops` 现在通过。
 - **LSP `exit` 通知不再调用 `process::exit(0)`**：改为设置 `should_exit` 标志，解决完整 `cargo test` 时测试进程被提前终止导致的 SIGSEGV/超时。
+- **shared/weak 引用生命周期（4 个 Valgrind 测试）**：
+  - `e2e_valgrind_shared_write_through_copy`：修复通过 shared 拷贝变量 `q.x = val` 写入记录字段时 `infer_object_type` 误把变量名当类型名的问题；`compile_field_assign` 现在对 shared 变量从堆 alloca 加载指针后写字段。
+  - `e2e_valgrind_shared_weak_lifecycle`：`compile_weak_upgrade` 将 `mimi_rc_upgrade` 返回的强引用指针注册到作用域释放列表，避免 `upgrade()` 产生的额外强引用泄漏。
+  - `e2e_valgrind_weak_extended` / `e2e_valgrind_weak_lifecycle_nested`：新增 `track_weak_upgrade_type`，在 `let u = w.upgrade()` 的推断类型场景下记录 `Option<T>`，使 `is_none()` / `unwrap()` 能正确分派 Option 变体方法。
+- **`spawn` 线程栈泄漏**：`mimi_spawn_future` 现在保留 `JoinHandle` 并通过 `atexit` 在进程退出前统一 `join`，消除 Valgrind 对 detached 线程栈的 "possibly lost" 报告；`e2e_valgrind_spawn_multiple` 现在通过。
 
 ### Tests
 - 全量测试现在包含 fuzz/property，基线测试数进一步增加。
 - 安装 Valgrind 后，原 4 个显式 `#[ignore]` 的 Valgrind 测试（string_ops、list_ops、recursion、large_struct_return）全部通过并**解除 `#[ignore]`**，默认运行。
-- 新增 4 个 `#[ignore]`：shared/weak 生命周期测试暴露 pre-existing 泄漏与类型推断问题，推迟到 v0.28.16 修复。
+- 新增 4 个 shared/weak 生命周期回归测试，已全部通过并解除 `#[ignore]`；安装 Valgrind 后默认运行。
+- 全量 `cargo test` 通过：2737 个测试 + 1 个 doc-test，0 failed，0 ignored。
 - Miri：解释器子集（`tests::basic_*`、`interpreter_features`）在 `cargo +nightly miri test` 下通过；FFI/codegen 测试因 Miri 不支持外部函数/子进程而跳过。
 
 ## [v0.28.15] - 2026-07-01
