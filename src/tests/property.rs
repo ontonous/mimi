@@ -791,6 +791,7 @@ proptest! {
     /// Differential: interpreter and codegen must produce the same result.
     /// The generated program prints a computed value; both paths must agree.
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_interp_vs_codegen(src in arb_differential_program()) {
         // Run the interpreter to get the return value
         let interp_result = run_source(&src);

@@ -132,26 +132,31 @@ fn assert_program_ok(src: &str) {
 
 proptest! {
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_int(expr in arb_int_expr()) {
         assert_expr(&expr);
     }
 
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_if(expr in arb_if_expr()) {
         assert_expr(&expr);
     }
 
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_let((body, result) in arb_let_body()) {
         assert_body(&body, &result);
     }
 
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_closure((body, result) in arb_closure_body()) {
         assert_body(&body, &result);
     }
 
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_while((body, result) in arb_while_body()) {
         assert_body(&body, &result);
     }
@@ -159,6 +164,7 @@ proptest! {
     /// For recursive tests, use assert_program_ok since the function definition
     /// is top-level (not inside main's body).
     #[test]
+    #[ignore = "requires cc linker toolchain"]
     fn differential_recursive(src in arb_recursive_body().prop_map(|(s, _)| s)) {
         assert_program_ok(&src);
     }
