@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v0.28.16
+## [v0.28.16] - 2026-07-01
 
 ### Changed
 - **Codegen 清理**：
