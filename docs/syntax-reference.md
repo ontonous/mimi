@@ -670,7 +670,25 @@ vis     ::= "pub"
 attr    ::= "#" "[" Ident ( "(" attr_args ")" )? "]"
 ```
 
-### 7.1 函数定义
+### 7.1 `use` 导入语义
+
+- `use path;` 会加载对应的 `.mimi` 模块文件，并把该模块中 `pub` 导出的函数、类型、trait 实现**合并到当前作用域**。因此导入后可以直接使用模块中的 `pub` 名字，无需再加模块前缀。
+- 内建函数（如 `json_get_int`、`to_json`、`from_json`）始终全局可用，**不需要** `use`。
+- `use std::xxx` 加载 `std/xxx.mimi`。例如 `use std::json` 会引入 `get_int`、`get_bool` 等包装函数以及 `JsonExt` trait（为 `string` 提供 `.get_int(...)` 等方法）。
+
+示例：
+
+```mimi
+use std::json
+
+func main() -> i64 {
+    let data = "{\"count\":42}"
+    // get_int 由 use std::json 引入
+    get_int(data, "count")
+}
+```
+
+### 7.2 函数定义
 
 ```
 func_def ::= "func" ident generic_params?

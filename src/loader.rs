@@ -4,7 +4,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Get the path to the built-in standard library directory.
-/// Resolved relative to the mimi binary (../std/) or overridable via MIMI_STDLIB env var.
+///
+/// Resolution order:
+/// 1. `MIMI_STDLIB` environment variable.
+/// 2. Paths relative to the running binary (developer layout `../std/`,
+///    installed layout `../lib/mimi/std/`).
+/// 3. Walk up from the current working directory looking for a `std/`
+///    directory (handles running inside a project created by `mimi init`).
+/// 4. Compile-time fallback to `CARGO_MANIFEST_DIR/std` when this crate
+///    was built with Cargo.
 pub(crate) fn stdlib_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("MIMI_STDLIB") {
         let p = PathBuf::from(dir);
@@ -15,13 +23,11 @@ pub(crate) fn stdlib_dir() -> Option<PathBuf> {
     // Resolve relative to the binary: target/debug/mimi -> mimi/std/
     // or installed as /usr/bin/mimi -> /usr/lib/mimi/std/
     if let Ok(exe) = std::env::current_exe() {
-        // Try: <exe_dir>/../std/  (developer layout)
         if let Some(exe_dir) = exe.parent() {
             let dev = exe_dir.join("std");
             if dev.exists() {
                 return Some(dev);
             }
-            // Try: <exe_dir>/../lib/mimi/std/  (installed layout)
             let installed = exe_dir
                 .parent()
                 .map(|p| p.join("lib").join("mimi").join("std"));
@@ -32,19 +38,21 @@ pub(crate) fn stdlib_dir() -> Option<PathBuf> {
             }
         }
     }
-    // Fallback: relative to current directory's parent (project root during development)
+    // Walk up from the current directory until we find a `std/` directory.
     if let Ok(cwd) = std::env::current_dir() {
-        let fallback = cwd.join("std");
-        if fallback.exists() {
-            return Some(fallback);
-        }
-        // Check one level up (running from mimi/tests/)
-        let parent = cwd.parent().map(|p| p.join("std"));
-        if let Some(ref p) = parent {
-            if p.exists() {
-                return Some(p.clone());
+        let mut dir: Option<&Path> = Some(&cwd);
+        while let Some(d) = dir {
+            let candidate = d.join("std");
+            if candidate.exists() && candidate.is_dir() {
+                return Some(candidate);
             }
+            dir = d.parent();
         }
+    }
+    // Final fallback for builds that still have access to the source tree.
+    let compile_time = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
+    if compile_time.exists() {
+        return Some(compile_time);
     }
     None
 }

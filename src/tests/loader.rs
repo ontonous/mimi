@@ -316,3 +316,39 @@ func main() -> i32 {
     );
     cleanup(&dir);
 }
+
+
+#[test]
+fn loader_std_json_import_typechecks() {
+    // Regression for v0.28.17: `use std::json` must resolve the stdlib module,
+    // merge its public items, and pass type checking.
+    let dir = temp_dir("std_json");
+    let main_path = dir.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use std::json
+
+func main() -> i64 {
+    let data = "{\"count\":42}"
+    get_int(data, "count")
+}
+"#,
+    )
+    .expect("src/tests/loader.rs: std_json write failed");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("loading main with std::json import should succeed");
+    let merged = loader
+        .merge_all()
+        .expect("merging std::json import should succeed");
+    let result = crate::core::check(&merged);
+    assert!(
+        result.is_ok(),
+        "use std::json should typecheck: {:?}",
+        result.err()
+    );
+    cleanup(&dir);
+}

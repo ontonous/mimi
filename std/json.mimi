@@ -43,10 +43,10 @@ impl JsonExt for string {
     func get_element(index: i32) -> string { json_get_element(self, index) }
     func get_bool(key: string) -> Result<bool, string> {
         let v = json_get_string(self, key)
-        if v == "" { Result::Err("key not found") }
-        else if v == "true" { Result::Ok(true) }
-        else if v == "false" { Result::Ok(false) }
-        else { Result::Err("not a boolean") }
+        if v == "" { Err("key not found") }
+        else if v == "true" { Ok(true) }
+        else if v == "false" { Ok(false) }
+        else { Err("not a boolean") }
     }
     func get_float(key: string) -> f64 {
         let v = json_get_string(self, key)
@@ -70,16 +70,10 @@ impl JsonExt for string {
 }
 
 // Compatibility functions — keep original signatures.
-
-// to_json: Serializes a value to a JSON string.
-pub func to_json(value: Any) -> string {
-    to_json(value)
-}
-
-// from_json: Parses a JSON string into a Mimi value (string escape).
-pub func from_json(s: string) -> string {
-    from_json(s)
-}
+//
+// Note: `to_json` and `from_json` are built-in globals, so they are not
+// re-exported here; re-defining them would shadow the built-ins and cause
+// infinite recursion.
 
 // get_string: Gets a string field from a JSON object by key.
 pub func get_string(json: string, key: string) -> string {
@@ -97,13 +91,13 @@ pub func get_element(json: string, index: i32) -> string {
 }
 
 // get_bool: Gets a boolean field from a JSON object by key.
-// Returns Result::Ok(true/false) if key exists, Result::Err if key missing or not boolean.
+// Returns Ok(true/false) if key exists, Err if key missing or not boolean.
 pub func get_bool(json: string, key: string) -> Result<bool, string> {
     let v = json_get_string(json, key)
-    if v == "" { Result::Err("key not found") }
-    else if v == "true" { Result::Ok(true) }
-    else if v == "false" { Result::Ok(false) }
-    else { Result::Err("not a boolean") }
+    if v == "" { Err("key not found") }
+    else if v == "true" { Ok(true) }
+    else if v == "false" { Ok(false) }
+    else { Err("not a boolean") }
 }
 
 // get_float: Gets a float field from a JSON object by key.

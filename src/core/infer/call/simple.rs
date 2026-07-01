@@ -1134,10 +1134,10 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Result(
-                    Box::new(Type::Name("i32".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
+                return Type::Tuple(vec![
+                    Type::Name("bool".into(), vec![]),
+                    Type::Name("i32".into(), vec![]),
+                ]);
             }
             "str_parse_float" => {
                 if args.len() != 1 {
@@ -1148,10 +1148,10 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }
-                return Type::Result(
-                    Box::new(Type::Name("f64".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
+                return Type::Tuple(vec![
+                    Type::Name("bool".into(), vec![]),
+                    Type::Name("f64".into(), vec![]),
+                ]);
             }
             "eprintln" => {
                 for a in args {
