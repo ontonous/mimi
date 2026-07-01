@@ -10,6 +10,13 @@ fn can_codegen() -> bool {
         .is_ok()
 }
 
+fn can_valgrind() -> bool {
+    std::process::Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 // ====== Codegen: Deep Nesting ======
 
 #[test]
@@ -206,6 +213,91 @@ fn cg_string_len() {
     }
     let out = compile_and_run("func main() -> i32 { println(len(\"hello\")); 0 }").unwrap();
     assert_eq!(out.trim(), "5");
+}
+
+// String returns exercise ownership transfer at function boundaries.
+#[test]
+fn cg_string_return_literal() {
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"func greet() -> string { "hello" }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "hello");
+}
+
+#[test]
+fn cg_string_return_concat() {
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"func greet() -> string { "hello" + " " + "world" }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "hello world");
+}
+
+#[test]
+fn cg_string_return_variable() {
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"func greet() -> string { let s = "hello"; s }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "hello");
+}
+
+#[test]
+fn cg_string_return_builtin() {
+    if !can_codegen() {
+        return;
+    }
+    let out = compile_and_run(
+        r#"func greet() -> string { str_to_upper("hello") }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "HELLO");
+}
+
+#[test]
+#[ignore = "caller-side string temporary lifetime not yet unified (see AGENTS.md constraint 5)"]
+fn cg_string_return_concat_valgrind() {
+    if !can_codegen() {
+        return;
+    }
+    if !can_valgrind() {
+        return;
+    }
+    let out = compile_and_run_valgrind(
+        r#"func greet() -> string { "hello" + " " + "world" }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .expect("src/tests/codegen_boundary.rs:cg_string_return_concat_valgrind");
+    assert_eq!(out.trim(), "hello world");
+}
+
+#[test]
+fn cg_string_direct_concat_valgrind() {
+    if !can_codegen() {
+        return;
+    }
+    if !can_valgrind() {
+        return;
+    }
+    let out = compile_and_run_valgrind(
+        r#"func main() -> i32 { println("hello" + " world"); 0 }"#,
+    )
+    .expect("src/tests/codegen_boundary.rs:cg_string_direct_concat_valgrind");
+    assert_eq!(out.trim(), "hello world");
 }
 
 // ====== Codegen: Crypto ======

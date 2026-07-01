@@ -13,6 +13,7 @@
 ### Fixed
 - `std/json.mimi`：`Result::Ok`/`Result::Err` 改为 `Ok`/`Err`；`get_float` 正确消费 `str_parse_float` 返回的 `(bool, f64)` 元组。
 - `mimi check` / `mimi run` 在未加载 import 时 `use std::xxx` 失效的问题。
+- **字符串生命周期统一（部分）**：codegen 中 `+` 拼接直接使用时注册堆分配并在作用域退出时释放；字符串变量/字面量/`+`/f-string 返回值转移所有权，避免 callee 在 return 前释放。函数调用返回的字符串在 caller 直接使用时仍有泄漏，已标记为已知差距。
 
 ## [v0.28.16] - 2026-07-01
 

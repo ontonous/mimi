@@ -410,6 +410,80 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Transfer ownership of a string return value from local heap tracking to
+    /// the caller. For string-typed returns this prevents `free_heap_allocs`
+    /// from freeing the data that the caller will receive.
+    fn claim_string_return_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        ret_type: BasicTypeEnum<'ctx>,
+        expr: Option<&Expr>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let is_string_struct = match ret_type {
+            BasicTypeEnum::StructType(st) => {
+                let fields = st.get_field_types();
+                fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(_))
+            }
+            _ => false,
+        };
+        if !is_string_struct {
+            return Ok(val);
+        }
+
+        // Returning a string variable: load the struct value and null out the
+        // variable slot's data pointer so the slot is not freed before return.
+        if let Some(Expr::Ident(name)) = expr {
+            if self.var_type_names.get(name).map(|t| t == "string").unwrap_or(false) {
+                if let Some(&(alloca, ty)) = vars.get(name) {
+                    let loaded = self.build_load(ty, alloca, &format!("{}_ret", name))?;
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    if let BasicTypeEnum::StructType(st) = ty {
+                        if let Ok(data_gep) =
+                            self.gep().build_struct_gep(st, alloca, 0, &format!("{}_ret_null", name))
+                        {
+                            let _ = self.builder.build_store(data_gep, null_ptr);
+                        }
+                    }
+                    return Ok(loaded);
+                }
+            }
+        }
+
+        // For other string-producing expressions (concat, f-string, builtins
+        // returning raw pointers), the most recently registered raw heap pointer
+        // is the one that owns the returned data. Pop it so it is not freed by
+        // the scope cleanup below.
+        let is_string_temp = match expr {
+            Some(Expr::Binary(BinOp::Add, _, _)) => true,
+            Some(Expr::Literal(Lit::FString(_))) => true,
+            Some(Expr::Call(callee, _)) => {
+                // Builtin calls that return a raw string pointer are temporaries.
+                matches!(val, BasicValueEnum::PointerValue(_))
+                    || matches!(
+                        callee.as_ref(),
+                        Expr::Ident(name) if name.starts_with("str_") || name == "to_string"
+                    )
+            }
+            _ => false,
+        };
+        if is_string_temp {
+            let _ = self.pop_last_heap_ptr();
+        }
+
+        match val {
+            BasicValueEnum::PointerValue(pv) => {
+                // Raw pointer result (e.g. string literal or builtin that
+                // returns raw pointer). Wrap it into the Mimi string struct.
+                self.wrap_c_string(pv)
+            }
+            BasicValueEnum::StructValue(sv) => Ok(BasicValueEnum::StructValue(sv)),
+            _ => Ok(val),
+        }
+    }
+
     /// Emit a function return: check `ensures` contracts, clean up scopes, and
     /// build the LLVM return instruction. `val` of `None` means a bare `return;`.
     fn emit_return(
@@ -419,6 +493,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: Option<BasicValueEnum<'ctx>>,
         func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
+        expr: Option<&Expr>,
     ) -> MimiResult<()> {
         let ensures = self.ensures_stmts.clone();
         if !ensures.is_empty() {
@@ -437,6 +512,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
             }
         }
+        let val = val
+            .map(|v| self.claim_string_return_value(v, ret_type, expr, vars))
+            .transpose()?;
         self.pop_shared_scope()?;
         self.free_heap_allocs()?;
         self.pop_comp_scope();
@@ -674,11 +752,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(Some(expr)) => {
                     let val = self.compile_expr(expr, vars)?;
                     let val = self.adjust_int_val(val, ret_type)?;
-                    self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars)?;
+                    self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars, Some(expr))?;
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Return(None) => {
-                    self.emit_return(ret_type, ret_ty_ast, None, &func.name, vars)?;
+                    self.emit_return(ret_type, ret_ty_ast, None, &func.name, vars, None)?;
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Let {
@@ -1288,9 +1366,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         last_val: BasicValueEnum<'ctx>,
         func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
+        expr: Option<&Expr>,
     ) -> MimiResult<()> {
         // Check for unconsumed capabilities before returning
         self.check_unconsumed_caps()?;
+
+        // Transfer ownership of string return values before the heap cleanup below
+        // frees local temporaries.
+        let last_val = self.claim_string_return_value(last_val, ret_type, expr, vars)?;
 
         // Convert pointer-to-struct to struct value when return type expects a struct.
         // Must happen BEFORE free_heap_allocs to null out heap data pointers in the original struct,
@@ -1437,10 +1520,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
+        let last_expr = func.body.last().and_then(|s| match s {
+            Stmt::Expr(e) => Some(e),
+            _ => None,
+        });
         match self.compile_func_body(func, ret_type, &mut vars)? {
             ControlFlow::Break(()) => return Ok(()),
             ControlFlow::Continue(last_val) => {
-                self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars)?;
+                self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
             }
         }
 
@@ -1550,9 +1637,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
+        let last_expr = func.body.last().and_then(|s| match s {
+            Stmt::Expr(e) => Some(e),
+            _ => None,
+        });
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
-        self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars)?;
+        self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
         self.type_map = prev_type_map;
         Ok(())
     }

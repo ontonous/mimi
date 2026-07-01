@@ -327,7 +327,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(concat_fn, &[l.into(), r.into()], "str_concat")?
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("mimi_str_concat returned void".to_string()))?;
-        self.wrap_c_string(raw_result.into_pointer_value())
+        let raw_ptr = raw_result.into_pointer_value();
+        // Register the heap allocation so it is freed at scope exit when the
+        // result is used directly. `let` bindings transfer ownership by popping
+        // this entry and registering the variable slot instead.
+        self.register_heap_alloc(raw_ptr);
+        self.wrap_c_string(raw_ptr)
     }
 
     /// Equality and inequality (`==`, `!=`).
