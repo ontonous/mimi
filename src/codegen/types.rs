@@ -1,6 +1,7 @@
-use crate::ast::Type;
+use crate::ast::{Field, Type};
 use inkwell::context::Context;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::AddressSpace;
 
 pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
@@ -208,6 +209,36 @@ pub fn basic_to_metadata<'ctx>(
         BasicTypeEnum::VectorType(_t) => BasicMetadataTypeEnum::IntType(ctx.i64_type()),
         BasicTypeEnum::ScalableVectorType(_) => BasicMetadataTypeEnum::IntType(ctx.i64_type()),
     }
+}
+
+/// Convert a BasicValueEnum to its metadata value for calls.
+pub fn basic_value_to_metadata_value<'ctx>(
+    val: &BasicValueEnum<'ctx>,
+    i64_ty: inkwell::types::IntType<'ctx>,
+) -> BasicMetadataValueEnum<'ctx> {
+    match val {
+        BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+        BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+        BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+        BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+        BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+        BasicValueEnum::ScalableVectorValue(_) => {
+            BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false))
+        }
+    }
+}
+
+/// A `#[repr(C)]` record is "simple" if it fits in a single 64-bit integer
+/// under the System V AMD64 ABI: all fields are `i32` and there are at most
+/// two fields. Such records are passed/returned as a single `i64` in LLVM IR.
+pub fn is_simple_reprc_record(fields: &[Field]) -> bool {
+    if fields.len() > 2 {
+        return false;
+    }
+    fields
+        .iter()
+        .all(|f| matches!(&f.ty, Type::Name(n, _) if n == "i32"))
 }
 
 /// Map a Mimi Type to LLVM for extern FFI (C ABI). i32 maps to LLVM i32 (int32_t)

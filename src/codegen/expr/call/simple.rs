@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
@@ -95,7 +96,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         )?;
         let call_args: Vec<_> = compiled_args
             .iter()
-            .map(|arg| basic_value_to_metadata_value(arg, i64_ty))
+            .map(|arg| types::basic_value_to_metadata_value(arg, i64_ty))
             .collect();
         let call = self
             .builder
@@ -161,7 +162,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut metadata_args: Vec<_> = compiled_args
             .iter()
-            .map(|v| basic_value_to_metadata_value(v, self.context.i64_type()))
+            .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
 
         if name == "len" && args.len() == 1 {
@@ -193,7 +194,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         metadata_args = compiled_args
             .iter()
-            .map(|v| basic_value_to_metadata_value(v, self.context.i64_type()))
+            .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
 
         if self.extern_func_defs.contains_key(name) {
@@ -450,7 +451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let metadata_args: Vec<_> = compiled_args
             .iter()
-            .map(|v| basic_value_to_metadata_value(v, self.context.i64_type()))
+            .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
         let call = self.build_call(function, &metadata_args, name)?;
         Ok(call_try_basic_value(&call)
@@ -466,7 +467,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let compiled_args = self.compile_arg_values(args, vars)?;
         let metadata_args: Vec<_> = compiled_args
             .iter()
-            .map(|v| basic_value_to_metadata_value(v, self.context.i64_type()))
+            .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
 
         if let Some(function) = self.module.get_function(mangled) {
@@ -542,7 +543,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let param = wrapper_fn.get_nth_param((i + 1) as u32).ok_or_else(|| {
                 CompileError::LlvmError(format!("wrapper: param {} not found", i + 1))
             })?;
-            call_args.push(basic_value_to_metadata_value(
+            call_args.push(types::basic_value_to_metadata_value(
                 &param,
                 self.context.i64_type(),
             ));
@@ -584,24 +585,6 @@ fn basic_value_to_metadata_type<'ctx>(val: &BasicValueEnum<'ctx>) -> BasicMetada
         BasicValueEnum::VectorValue(vv) => BasicMetadataTypeEnum::VectorType(vv.get_type()),
         BasicValueEnum::ScalableVectorValue(_) => {
             BasicMetadataTypeEnum::IntType(iv_type_unavailable())
-        }
-    }
-}
-
-/// Convert a BasicValueEnum to its metadata value for calls.
-fn basic_value_to_metadata_value<'ctx>(
-    val: &BasicValueEnum<'ctx>,
-    i64_ty: inkwell::types::IntType<'ctx>,
-) -> BasicMetadataValueEnum<'ctx> {
-    match val {
-        BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
-        BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
-        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
-        BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
-        BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
-        BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
-        BasicValueEnum::ScalableVectorValue(_) => {
-            BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false))
         }
     }
 }

@@ -1,5 +1,3 @@
-#![allow(dead_code, deprecated)]
-
 use crate::ast::*;
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
@@ -174,16 +172,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(()) // Not a capability variable
-    }
-
-    /// Check if a variable is a consumed capability
-    pub(super) fn is_cap_consumed(&self, name: &str) -> bool {
-        for scope in self.cap_vars.iter().rev() {
-            if let Some((_, consumed)) = scope.get(name) {
-                return *consumed;
-            }
-        }
-        false
     }
 
     /// Check if a variable is a capability variable
