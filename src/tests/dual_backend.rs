@@ -3646,6 +3646,76 @@ fn dual_option_none_and_match() {
     );
 }
 
+#[test]
+fn dual_option_ok_or() {
+    if !can_link() {
+        return;
+    }
+    // Option.ok_or() returns Result<T, E>; the result variable must support
+    // is_ok()/is_err() without an explicit type annotation.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let some: Option<i32> = Some(42);
+            let none: Option<i32> = None;
+            let r1 = some.ok_or("missing");
+            let r2 = none.ok_or("missing");
+            println(r1.is_ok());
+            println(r1.is_err());
+            println(r2.is_ok());
+            println(r2.is_err());
+            0
+        }
+    "#,
+        "1\n0\n0\n1"
+    );
+}
+
+#[test]
+fn dual_result_map() {
+    if !can_link() {
+        return;
+    }
+    // Result.map() must work on inferred Result variables.
+    dual_assert!(
+        r#"
+        func double(x: i32) -> i32 { x * 2 }
+        func main() -> i32 {
+            let r: Result<i32, string> = Ok(21);
+            let mapped = r.map(double);
+            println(mapped.unwrap_or(0));
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_result_and_then() {
+    if !can_link() {
+        return;
+    }
+    // Result.and_then() must work on inferred Result variables.
+    dual_assert!(
+        r#"
+        func double_if_positive(x: i32) -> Result<i32, string> {
+            if x > 0 { Ok(x * 2) } else { Err("negative") }
+        }
+        func main() -> i32 {
+            let ok: Result<i32, string> = Ok(21);
+            let result = ok.and_then(double_if_positive);
+            println(result.unwrap_or(0));
+            let err: Result<i32, string> = Err("fail");
+            let result2 = err.and_then(double_if_positive);
+            println(result2.unwrap_or(0));
+            0
+        }
+    "#,
+        "42\n0"
+    );
+}
+
 // ─── 36. v0.22: List<List<T>> generic nesting ────────────────────
 
 #[test]
