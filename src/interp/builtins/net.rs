@@ -32,6 +32,7 @@ impl<'a> Interpreter<'a> {
         if fd >= 0 {
             // Set SO_REUSEADDR so bind works immediately after close (TIME_WAIT avoidance)
             let reuse: libc::c_int = 1;
+            // SAFETY: fd is valid and option value pointer/size are correct.
             unsafe {
                 libc::setsockopt(
                     fd,
@@ -70,6 +71,7 @@ impl<'a> Interpreter<'a> {
         // connect uses validated fd and the res pointer we receive from getaddrinfo.
         // freeaddrinfo frees memory allocated by getaddrinfo — safe as long as res is
         // non-null and was returned by getaddrinfo (both checked above).
+        // SAFETY: zeroed() is safe for POD C structs.
         let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
         hints.ai_family = libc::AF_UNSPEC;
         hints.ai_socktype = libc::SOCK_STREAM;
@@ -77,6 +79,7 @@ impl<'a> Interpreter<'a> {
         let c_port = std::ffi::CString::new(port_str)
             .map_err(|_| InterpError::new("connect: invalid port"))?;
         let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+        // SAFETY: input pointers come from valid CStrings; output is checked for null.
         let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
         if err != 0 || res.is_null() {
             return Err(InterpError::new(format!(
@@ -84,11 +87,14 @@ impl<'a> Interpreter<'a> {
                 host
             )));
         }
+        // SAFETY: fd/domain and addrinfo result are validated before use.
         let ret = unsafe { libc::connect(fd as i32, (*res).ai_addr, (*res).ai_addrlen) };
+        // SAFETY: res is non-null and was returned by getaddrinfo, so freeaddrinfo is safe.
         unsafe { libc::freeaddrinfo(res) };
         if ret == 0 {
             // Disable Nagle's algorithm for responsive small-message communication
             let nodelay: libc::c_int = 1;
+            // SAFETY: fd is valid and option value pointer/size are correct.
             unsafe {
                 libc::setsockopt(
                     fd as i32,
@@ -120,6 +126,7 @@ impl<'a> Interpreter<'a> {
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_port = (port as u16).to_be();
         addr.sin_addr.s_addr = libc::INADDR_ANY;
+        // SAFETY: fd is valid and sockaddr_in is initialized.
         let ret = unsafe {
             libc::bind(
                 fd as i32,
@@ -249,6 +256,7 @@ impl<'a> Interpreter<'a> {
         }
         let c_host = std::ffi::CString::new(host)
             .map_err(|e| InterpError::new(format!("http: invalid host: {}", e)))?;
+        // SAFETY: zeroed() is safe for POD C structs.
         let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
         hints.ai_family = libc::AF_UNSPEC;
         hints.ai_socktype = libc::SOCK_STREAM;
@@ -260,15 +268,19 @@ impl<'a> Interpreter<'a> {
         // for non-null. connect uses the first result. freeaddrinfo frees the list.
         let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
         if err != 0 || res.is_null() {
+            // SAFETY: fd/domain was validated by prior socket/connect calls.
             unsafe { libc::close(domain) };
             return Err(InterpError::new(format!(
                 "http: could not resolve host '{}'",
                 host
             )));
         }
+        // SAFETY: fd/domain and addrinfo result are validated before use.
         let ret = unsafe { libc::connect(domain, (*res).ai_addr, (*res).ai_addrlen) };
+        // SAFETY: res is non-null and was returned by getaddrinfo, so freeaddrinfo is safe.
         unsafe { libc::freeaddrinfo(res) };
         if ret < 0 {
+            // SAFETY: fd/domain was validated by prior socket/connect calls.
             unsafe { libc::close(domain) };
             return Err(InterpError::new(format!(
                 "http: connection refused to '{}:{}'",
@@ -293,7 +305,9 @@ impl<'a> Interpreter<'a> {
             )
         };
         let mut buf: Vec<u8> = vec![0u8; 65536];
+        // SAFETY: fd is valid and buf is a writable Vec of sufficient size.
         let n = unsafe { libc::recv(fd as i32, buf.as_mut_ptr() as *mut libc::c_void, 65536, 0) };
+        // SAFETY: fd/domain was validated by prior socket/connect calls.
         unsafe { libc::close(fd as i32) };
         if n <= 0 {
             return Err(InterpError::new("http: empty response"));

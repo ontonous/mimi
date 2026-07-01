@@ -3,13 +3,16 @@
 ## [Unreleased] — 0.28.17-dev
 
 ### Added
-- TBD
+- CLI 类型检查器统一：对 `weak<T>.upgrade()`、`shared` 标量拷贝 `.deref()`、`Option.ok_or()` / `Result.map()` / `Result.and_then()` 提供方法返回类型推断。
+- `mimi init <path>` 支持创建子目录项目；无名称时使用当前目录。
+- `mimi check` / `mimi run` 现在通过 `ModuleLoader` 加载并合并 `use std::xxx` 导入。
 
 ### Changed
-- TBD
+- 补齐 runtime、网络、FFI callback 路径中 59 个缺少 `// SAFETY:` 注释的 `unsafe` 块/函数，提升安全审计可读性。
 
 ### Fixed
-- TBD
+- `std/json.mimi`：`Result::Ok`/`Result::Err` 改为 `Ok`/`Err`；`get_float` 正确消费 `str_parse_float` 返回的 `(bool, f64)` 元组。
+- `mimi check` / `mimi run` 在未加载 import 时 `use std::xxx` 失效的问题。
 
 ## [v0.28.16] - 2026-07-01
 

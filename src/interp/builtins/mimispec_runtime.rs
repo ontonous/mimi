@@ -16,6 +16,7 @@ impl<'a> Interpreter<'a> {
                 if result_ptr.is_null() {
                     return Ok(Value::String("[]".to_string()));
                 }
+                // SAFETY: result_ptr is non-null and was allocated by the runtime as a C string.
                 let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
                     .to_string_lossy()
                     .into_owned();
@@ -45,6 +46,7 @@ impl<'a> Interpreter<'a> {
                 let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
                     .to_string_lossy()
                     .into_owned();
+                // SAFETY: result_ptr was allocated by the runtime and is no longer needed.
                 unsafe { libc::free(result_ptr as *mut libc::c_void) };
                 Ok(Value::String(result))
             }

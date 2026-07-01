@@ -127,6 +127,7 @@ pub fn callback_table_remove(id: i64) -> bool {
 /// # Safety
 /// `userdata` must be null or a valid pointer to a `i64` callback ID.
 /// The global callback table must contain a handle for `callback_id`.
+// SAFETY: caller must ensure userdata points to a valid i64 callback id; see # Safety.
 pub unsafe extern "C" fn callback_trampoline(
     callback_id: i64,
     arg1: i64,
@@ -150,6 +151,7 @@ pub unsafe extern "C" fn callback_trampoline(
 ///
 /// # Safety
 /// `a`, `b`, and `userdata` must be valid pointers. `userdata` must point to a valid `i64` callback ID.
+// SAFETY: caller must ensure all pointer arguments are valid; see # Safety.
 pub unsafe extern "C" fn qsort_trampoline(
     a: *const std::ffi::c_void,
     b: *const std::ffi::c_void,

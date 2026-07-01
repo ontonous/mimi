@@ -528,6 +528,7 @@ pub extern "C" fn mimi_value_new_float(f: f64) -> *mut Value {
 /// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
 /// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
 #[no_mangle]
+// SAFETY: ptr is null-checked inside the function; see # Safety docs.
 pub unsafe extern "C" fn mimi_value_as_int(ptr: *const Value) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -550,6 +551,7 @@ pub unsafe extern "C" fn mimi_value_as_int(ptr: *const Value) -> i64 {
 /// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
 /// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
 #[no_mangle]
+// SAFETY: ptr is null-checked inside the function; see # Safety docs.
 pub unsafe extern "C" fn mimi_value_as_bool(ptr: *const Value) -> bool {
     if ptr.is_null() {
         return false;
@@ -572,6 +574,7 @@ pub unsafe extern "C" fn mimi_value_as_bool(ptr: *const Value) -> bool {
 /// `ptr` must be null or a valid pointer to a heap-allocated `Value` obtained
 /// via `mimi_value_new_*` or `mimi_shared_get_ptr`.
 #[no_mangle]
+// SAFETY: ptr is null-checked inside the function; see # Safety docs.
 pub unsafe extern "C" fn mimi_value_as_float(ptr: *const Value) -> f64 {
     if ptr.is_null() {
         return 0.0;
@@ -595,6 +598,7 @@ pub unsafe extern "C" fn mimi_value_as_float(ptr: *const Value) -> f64 {
 /// `value_ptr` must be null or a valid pointer to a heap-allocated `Value`
 /// obtained via `mimi_value_new_*` or `mimi_string_from_raw`.
 #[no_mangle]
+// SAFETY: value_ptr is null-checked; ownership transfer is documented in # Safety.
 pub unsafe extern "C" fn mimi_shared_create(value_ptr: *mut Value) -> i64 {
     if value_ptr.is_null() {
         return 0;
@@ -630,6 +634,7 @@ pub unsafe extern "C" fn mimi_string_free_raw(c_str: *mut std::ffi::c_char) {
 /// `mimi_string` must be either null or a valid pointer to a heap-allocated `Value` previously
 /// obtained via `Box::into_raw` or `mimi_value_*` functions.
 #[no_mangle]
+// SAFETY: mimi_string is null-checked; see # Safety docs.
 pub unsafe extern "C" fn mimi_string_as_c_str(
     mimi_string: *const Value,
 ) -> *const std::ffi::c_char {
@@ -696,6 +701,7 @@ thread_local! {
 /// `mimi_string` must be either null or a valid pointer to a heap-allocated
 /// `Value` previously obtained via `Box::into_raw` or `mimi_value_*` functions.
 #[no_mangle]
+// SAFETY: mimi_string is null-checked; see # Safety docs.
 pub unsafe extern "C" fn mimi_string_len(mimi_string: *const Value) -> i64 {
     if mimi_string.is_null() {
         return -1;
@@ -729,6 +735,7 @@ pub extern "C" fn mimi_string_as_c_str_free_all() {
 /// `mimi_string` must be either null or a valid, exclusive pointer to a heap-allocated `Value`
 /// obtained via `Box::into_raw`. The caller transfers ownership of the string content.
 #[no_mangle]
+// SAFETY: mimi_string is null-checked; ownership transfer is documented in # Safety.
 pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut std::ffi::c_char {
     if mimi_string.is_null() {
         return std::ptr::null_mut();
@@ -766,6 +773,7 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
 /// `c_str` must be a non-null pointer previously obtained via `CString::into_raw()`. Ownership
 /// of the C string is transferred to this function; the caller must not use the pointer afterward.
 #[no_mangle]
+// SAFETY: c_str is null-checked; ownership transfer is documented in # Safety.
 pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *mut Value {
     if c_str.is_null() {
         return std::ptr::null_mut();
@@ -879,6 +887,7 @@ impl MimiThreadPool {
         //   and ownership is transferred to the receiving thread via the task queue.
         //   The arg is only dereferenced AFTER the task is dequeued and the trampoline
         //   runs on the worker thread, which has exclusive ownership at that point.
+        // SAFETY: ClosureData only contains Send-safe fields (raw code pointer + 'static callback id).
         unsafe impl Send for ClosureData {}
 
         extern "C" fn closure_trampoline(data_ptr: *mut u8) -> *mut u8 {
@@ -972,6 +981,7 @@ static MIMI_POOL: LazyLock<MimiThreadPool> = LazyLock::new(|| {
 /// - `arg` is valid for the duration of the task
 /// - The function pointed to by `fn_ptr` is safe to call from another thread
 #[no_mangle]
+// SAFETY: caller must uphold the contract documented in # Safety.
 pub unsafe extern "C" fn mimi_pool_submit(fn_ptr: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
     MIMI_POOL.submit_raw(fn_ptr, arg);
 }
@@ -1111,6 +1121,7 @@ mod tests {
         // Get a heap copy of the inner value.
         let ptr = mimi_shared_get_ptr(id);
         assert!(!ptr.is_null());
+        // SAFETY: ptr is a non-null pointer returned by mimi_shared_get_ptr for a valid shared value.
         unsafe {
             assert!(matches!(&*ptr, Value::Int(42)));
         }
@@ -1138,10 +1149,13 @@ mod tests {
         let value = Box::new(Value::String("hello".to_string()));
         let raw = Box::into_raw(value);
 
+        // SAFETY: raw is a freshly created valid Mimi string value.
         assert_eq!(unsafe { mimi_string_len(raw) }, 5);
 
+        // SAFETY: raw is a freshly created valid Mimi string value.
         let c_str = unsafe { mimi_string_as_c_str(raw) };
         assert!(!c_str.is_null());
+        // SAFETY: c_str is a non-null pointer returned by mimi_string_as_c_str on a valid string.
         unsafe {
             assert_eq!(std::ffi::CStr::from_ptr(c_str).to_str().unwrap(), "hello");
         }
@@ -1155,6 +1169,7 @@ mod tests {
         let value = Box::new(Value::String("bulk".to_string()));
         let raw = Box::into_raw(value);
 
+        // SAFETY: raw is a freshly created valid Mimi string value.
         let c_str = unsafe { mimi_string_as_c_str(raw) };
         assert!(!c_str.is_null());
 
@@ -1166,7 +1181,9 @@ mod tests {
 
     #[test]
     fn string_c_api_null_inputs() {
+        // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_string_len(std::ptr::null()) }, -1);
+        // SAFETY: null input is explicitly handled by the function.
         assert!(unsafe { mimi_string_as_c_str(std::ptr::null()) }.is_null());
         // Free on null / unknown pointer should be a no-op.
         mimi_string_as_c_str_free(std::ptr::null());
@@ -1177,23 +1194,32 @@ mod tests {
     #[test]
     fn value_c_api_constructors_and_accessors() {
         let int_val = mimi_value_new_int(42);
+        // SAFETY: int_val is a freshly created valid Mimi value.
         assert_eq!(unsafe { mimi_value_as_int(int_val) }, 42);
+        // SAFETY: int_val is a freshly created valid Mimi value.
         assert!(unsafe { mimi_value_as_bool(int_val) }); // non-zero int is truthy
         mimi_value_free(int_val);
 
         let bool_val = mimi_value_new_bool(true);
+        // SAFETY: bool_val is a freshly created valid Mimi value.
         assert!(unsafe { mimi_value_as_bool(bool_val) });
+        // SAFETY: bool_val is a freshly created valid Mimi value.
         assert_eq!(unsafe { mimi_value_as_int(bool_val) }, 1);
         mimi_value_free(bool_val);
 
         let float_val = mimi_value_new_float(2.5);
+        // SAFETY: float_val is a freshly created valid Mimi value.
         assert!((unsafe { mimi_value_as_float(float_val) } - 2.5).abs() < 0.001);
+        // SAFETY: float_val is a freshly created valid Mimi value.
         assert_eq!(unsafe { mimi_value_as_int(float_val) }, 2);
         mimi_value_free(float_val);
 
         // Null inputs are safe.
+        // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_value_as_int(std::ptr::null()) }, 0);
+        // SAFETY: null input is explicitly handled by the function.
         assert!(!unsafe { mimi_value_as_bool(std::ptr::null()) });
+        // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_value_as_float(std::ptr::null()) }, 0.0);
         mimi_value_free(std::ptr::null());
     }
@@ -1201,11 +1227,13 @@ mod tests {
     #[test]
     fn shared_c_api_create_from_value() {
         let value = mimi_value_new_int(123);
+        // SAFETY: value is a freshly allocated heap Value.
         let id = unsafe { mimi_shared_create(value) };
         assert!(id > 0);
 
         let ptr = mimi_shared_get_ptr(id);
         assert!(!ptr.is_null());
+        // SAFETY: ptr came from a valid shared value.
         assert_eq!(unsafe { mimi_value_as_int(ptr) }, 123);
         mimi_value_free(ptr);
 
@@ -1215,6 +1243,7 @@ mod tests {
 
     #[test]
     fn shared_c_api_create_null_is_safe() {
+        // SAFETY: null input is explicitly handled by the function.
         assert_eq!(unsafe { mimi_shared_create(std::ptr::null_mut()) }, 0);
     }
 }

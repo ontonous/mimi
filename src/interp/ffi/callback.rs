@@ -232,6 +232,7 @@ unsafe fn callback_trampoline_inner(
             if should_free && i < nargs {
                 let arg_ptr = *args.add(i);
                 if !arg_ptr.is_null() {
+                    // SAFETY: arg_ptr is a non-null C-allocated string transferred from C.
                     unsafe {
                         libc::free(arg_ptr as *mut libc::c_void);
                     }
@@ -245,6 +246,7 @@ unsafe fn callback_trampoline_inner(
     // pointer to the Interpreter driving the synchronous FFI call. The pointer
     // remains valid because that Interpreter is still alive on the original stack
     // frame for the duration of this callback.
+    // SAFETY: interp_ptr is the current thread's FFI_CALLBACK_CTX pointer, valid for this synchronous callback.
     let interp = unsafe { &mut *interp_ptr };
     let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
     // Restore the interp pointer after the callback completes
@@ -296,6 +298,7 @@ unsafe fn callback_trampoline_inner(
         if should_free && i < nargs {
             let arg_ptr = *args.add(i);
             if !arg_ptr.is_null() {
+                // SAFETY: arg_ptr is a non-null C-allocated string transferred from C.
                 unsafe {
                     libc::free(arg_ptr as *mut libc::c_void);
                 }
@@ -401,6 +404,7 @@ impl<'a> Interpreter<'a> {
                 // and Box::new(ffi_closure) drops the closure, so the reference
                 // never dangles.
                 let userdata_ptr = Box::into_raw(userdata);
+                // SAFETY: userdata_ptr came from Box::into_raw and is leaked intentionally for the libffi closure.
                 let cb_ref_static: &'static i64 = unsafe { &*userdata_ptr };
 
                 let ffi_closure = libffi::middle::Closure::new(
@@ -412,6 +416,7 @@ impl<'a> Interpreter<'a> {
                 let code_ptr_ref = ffi_closure.code_ptr();
                 // code_ptr_ref is &unsafe extern "C" fn() — a reference to the generated
                 // trampoline function pointer. We convert it to a raw i64 address.
+                // SAFETY: code_ptr_ref points to the libffi-generated trampoline; dereferencing yields the function pointer.
                 let fn_ptr_val: unsafe extern "C" fn() = *code_ptr_ref;
                 let fn_ptr = fn_ptr_val as usize as i64;
 
@@ -422,6 +427,7 @@ impl<'a> Interpreter<'a> {
                     // Box::from_raw reclaims ownership so the Box is dropped when
                     // FfiGuard drops (after the closure, ensuring the reference
                     // inside the closure is valid during Closure::drop).
+                    // SAFETY: reclaims the Box leaked above; valid as long as the closure owns it.
                     userdata: unsafe { Box::from_raw(userdata_ptr) },
                 });
 

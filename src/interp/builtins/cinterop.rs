@@ -44,7 +44,9 @@ impl<'a> Interpreter<'a> {
                     // First byte probe: this is best-effort — if the pointer is truly
                     // invalid (unmapped), the process WILL crash regardless of catch_unwind.
                     let ptr_raw = *ptr as *const u8;
+                    // SAFETY: pointer was validated non-null; probe is best-effort inside catch_unwind.
                     let _first_byte = unsafe { *ptr_raw };
+                    // SAFETY: pointer was validated non-null and probed before conversion.
                     let c_str = unsafe { std::ffi::CStr::from_ptr(*ptr as *const i8) };
                     Value::String(c_str.to_string_lossy().into_owned())
                 }));

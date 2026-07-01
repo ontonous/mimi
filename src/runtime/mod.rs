@@ -553,6 +553,7 @@ pub extern "C" fn mimi_rc_weak_retain(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: ptr was null-checked and originated from mimi_rc_alloc, so the header is valid.
     let hdr = unsafe { rc_header_from_ptr(ptr) };
     // S2: CAS loop to avoid TOCTOU race on weak count.
     // Old code: load strong, load weak, check both zero, then fetch_add.
@@ -1030,6 +1031,7 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
 
 #[no_mangle]
 pub extern "C" fn mimi_getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    // SAFETY: cstr_to_string safely handles null pointers.
     let n = unsafe { cstr_to_string(name) };
     match std::env::var(&n) {
         Ok(val) => alloc_c_string(&val),
@@ -3667,6 +3669,7 @@ extern "C" fn mimi_join_spawned_threads_atexit() {
 #[no_mangle]
 pub extern "C" fn mimi_spawn_future(
     future: *mut std::ffi::c_void,
+    // SAFETY: unsafe extern "C" function pointer used for C poll callbacks; see # Safety docs.
     poll_fn: unsafe extern "C" fn(*mut std::ffi::c_void),
 ) -> *mut std::ffi::c_void {
     if future.is_null() {
@@ -3751,6 +3754,7 @@ static EXECUTOR_QUEUE: std::sync::Mutex<Vec<ExecutorEntry>> = std::sync::Mutex::
 #[no_mangle]
 pub extern "C" fn mimi_executor_spawn(
     future: *mut std::ffi::c_void,
+    // SAFETY: unsafe extern "C" function pointer used for C poll callbacks; see # Safety docs.
     poll_fn: unsafe extern "C" fn(*mut std::ffi::c_void),
 ) {
     if future.is_null() {
