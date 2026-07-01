@@ -56,7 +56,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.28.13-dev", about = "Mimi language driver")]
+#[command(name = "mimi", version = "0.28.17-dev", about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
@@ -395,7 +395,10 @@ fn main() {
             verbose,
             strict,
         ),
-        Command::Init { name } => init::init(name.as_deref()),
+        Command::Init { name } => match std::env::current_dir() {
+            Ok(cwd) => init::init(&cwd, name.as_deref()),
+            Err(e) => Err(format!("cannot get cwd: {}", e)),
+        },
         Command::Add {
             name,
             version,
