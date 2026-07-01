@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -522,10 +521,11 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
         })),
         "exit" => {
             // LSP spec: exit notification means server should terminate.
-            // Flush buffers before exiting to ensure log output is written.
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stderr().flush();
-            std::process::exit(0)
+            // Set a flag so the real server run loop can exit cleanly.
+            // Do NOT call process::exit here: handle_message is also used
+            // directly in unit tests and would kill the test runner.
+            server.should_exit = true;
+            None
         }
         _ => None,
     }

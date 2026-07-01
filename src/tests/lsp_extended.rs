@@ -381,11 +381,12 @@ fn references_exclude_declaration() {
 // ===================== Phase D: Rename Tests =====================
 
 #[test]
-fn rename_function() {
+fn rename_function_parameter() {
     let server = LspServer::new();
     let text = "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 { add(1, 2) }";
-    let result = server.compute_rename(text, 0, 5, "file:///test.mimi", "sum");
-    assert!(result.is_some(), "should rename 'add' to 'sum'");
+    // Cursor on parameter `a` at line 0, col 9
+    let result = server.compute_rename(text, 0, 9, "file:///test.mimi", "x");
+    assert!(result.is_some(), "should rename parameter 'a' to 'x'");
     let edit = result.expect("src/tests/lsp_extended.rs:276 unwrap failed");
     let changes = edit
         .get("changes")
@@ -395,6 +396,8 @@ fn rename_function() {
         .expect("src/tests/lsp_extended.rs:278 unwrap failed")
         .as_array()
         .expect("src/tests/lsp_extended.rs:278 unwrap failed");
+    // Should rename the parameter declaration and its use inside add(),
+    // but not the unrelated parameter `b` or the call in main().
     assert!(file_changes.len() >= 2, "should have at least 2 changes");
 }
 

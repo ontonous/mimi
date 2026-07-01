@@ -59,6 +59,11 @@ pub struct LspServer {
     /// Flat list of all stdlib function completion items for "top" context
     stdlib_completions_raw: Vec<Value>,
     stdlib_loaded: bool,
+    /// Set by the LSP `exit` notification. The real server run loop checks
+    /// this flag after handling a message and terminates cleanly instead of
+    /// calling `process::exit`, which would kill the test runner when
+    /// `handle_message` is exercised directly in unit tests.
+    should_exit: bool,
 }
 
 impl Default for LspServer {
@@ -81,6 +86,7 @@ impl LspServer {
             stdlib_funcs: HashMap::new(),
             stdlib_completions_raw: Vec::new(),
             stdlib_loaded: false,
+            should_exit: false,
         }
     }
 
@@ -310,6 +316,9 @@ impl LspServer {
                             msg.get("method").and_then(|v| v.as_str())
                         );
                     }
+                }
+                if self.should_exit {
+                    return Ok(());
                 }
             }
         }
