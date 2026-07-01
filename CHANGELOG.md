@@ -18,6 +18,7 @@
   - `e2e_valgrind_shared_weak_lifecycle`：`compile_weak_upgrade` 将 `mimi_rc_upgrade` 返回的强引用指针注册到作用域释放列表，避免 `upgrade()` 产生的额外强引用泄漏。
   - `e2e_valgrind_weak_extended` / `e2e_valgrind_weak_lifecycle_nested`：新增 `track_weak_upgrade_type`，在 `let u = w.upgrade()` 的推断类型场景下记录 `Option<T>`，使 `is_none()` / `unwrap()` 能正确分派 Option 变体方法。
 - **`spawn` 线程栈泄漏**：`mimi_spawn_future` 现在保留 `JoinHandle` 并通过 `atexit` 在进程退出前统一 `join`，消除 Valgrind 对 detached 线程栈的 "possibly lost" 报告；`e2e_valgrind_spawn_multiple` 现在通过。
+- **FFI `mimi_string_as_c_str` 的 Miri UB**：修复 `CString` 指针在移入线程本地 Vec 后立即失效的问题，`cargo +nightly miri test ffi::runtime` 现在通过。
 
 ### Tests
 - 全量测试现在包含 fuzz/property，基线测试数进一步增加。
