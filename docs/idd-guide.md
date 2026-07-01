@@ -60,7 +60,10 @@
 | `sort_f64` / `sort_str` | ✅ | ✅ | 已实现（runtime `mimi_sort_f64_inplace` / `mimi_sort_str_inplace`） |
 | `const` 关键字 | ✅ | ✅ | 已实现（标量 + string + 函数调用） |
 | `exec(...)` Record 布局 | ✅ | ✅ | 已实现（ExecResult 字段偏移正确） |
-| `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持 |
+| `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持：内层自定义枚举负载的匹配可能失败（见 `e2e_net_fetch_failure`） |
+| 递归栈溢出保护 | ✅ | ✅ | 浅递归已支持；极深递归仍依赖宿主栈大小 |
+| Valgrind / ASan / Miri | ⚠️ | ⚠️ | ASan 测试通过；Valgrind/Miri 依赖外部工具链 |
+| `#[ignore]` 工具链测试 | — | — | 需 cc/Valgrind/Miri/网络；保留 #[ignore] 并文档化 |
 
 ---
 
@@ -87,9 +90,16 @@
 3.  cargo test "typecheck::"      # L2 类型系统健全性
 4.  cargo test ffi_               # FFI 契约等价性
 5.  cargo test codegen_e2e        # 代码生成 E2E
-6.  cargo test -- --ignored       # 已知差距
-7.  cargo clippy -- -D warnings   # 代码质量
+6.  cargo test e2e_asan -- --ignored  # L3 AddressSanitizer（如工具链可用）
+7.  cargo test -- --ignored       # 已知差距（必须编译；允许失败）
+8.  cargo clippy -- -D warnings   # 代码质量
+9.  cargo fmt -- --check          # 格式化
 ```
+
+注意：
+- Valgrind/Miri 测试需要外部工具链；在可用环境中单独运行。
+- 网络相关测试需要外部 HTTP 服务，保持 `#[ignore]`。
+- `cargo test -- --ignored` 允许失败，但所有被忽略测试必须能编译。
 
 ---
 

@@ -2,6 +2,26 @@
 
 ## [Unreleased] — v0.28.15
 
+### Added
+- **自举准备文档**: 新增 `docs/bootstrap-plan.md`，描述 v0.29 MimiSpec 自举步骤、依赖、回滚策略与验收标准。
+- **`libmimi` 公开 API 文档**: `src/lib.rs` 增加 crate-level 文档，说明模块稳定性承诺与 v0.29 bootstrap 接口。
+
+### Changed
+- **关闭剩余 `#[ignore]` 差距**:
+  - 解除 `typecheck_recursive_func` 与 `typecheck_mutually_recursive_funcs` 的 `#[ignore]`；当前解释器可处理常规递归。
+  - 网络/Valgrind/Miri/Fuzz 工具链相关 `#[ignore]` 测试已在 `docs/idd-guide.md` 中明确文档化。
+- **Unsafe 审计**: 全仓补充 ~270 条 `// SAFETY:` 注释，覆盖 `runtime`、`interp/ffi`、`interp/value` 等模块。
+- **Codegen 清理**: 移除 `src/codegen/registry/types.rs` 中重复的 `BasicMetadataTypeEnum` 转换。
+- **诊断差距表更新**: `docs/idd-guide.md` 同步 `match on Result`、栈溢出保护、ASan/Valgrind/Miri 状态。
+
+### Fixed
+- **Runtime HTTP 失败处理**: `mimi_http_get` / `mimi_http_post` 在请求失败时返回空字符串（原返回 null 指针导致 codegen 调用 `strlen` 时 SIGSEGV）。
+- **JSON 反序列化空指针**: `mimi_json_deserialize` 在 `out_len` 为空指针时不再写入，避免空指针解引用。
+
+### Tests
+- ASan 回归 `e2e_asan_list_ops` 通过。
+- 全量测试基线保持 2733 通过。
+
 ## [v0.28.14] - 2026-07-01
 
 ### Added
