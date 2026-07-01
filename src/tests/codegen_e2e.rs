@@ -2946,7 +2946,6 @@ fn e2e_asan_string_ops() {
 }
 
 #[test]
-#[ignore = "requires ASAN; run with: cargo test e2e_asan_list_ops -- --ignored"]
 fn e2e_asan_list_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
