@@ -107,8 +107,12 @@ pub(crate) fn check(
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = mimi::loader::ModuleLoader::new(base_dir);
-        loader.load_main(&path).map_err(|e| format!("failed to load imports: {}", e))?;
-        loader.merge_all().map_err(|e| format!("failed to merge imports: {}", e))?
+        loader
+            .load_main(&path)
+            .map_err(|e| format!("failed to load imports: {}", e))?;
+        loader
+            .merge_all()
+            .map_err(|e| format!("failed to merge imports: {}", e))?
     } else {
         file
     };

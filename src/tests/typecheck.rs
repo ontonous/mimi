@@ -1468,7 +1468,6 @@ func main() -> i32 {
     .expect("Tuple<T, U> elements should be substituted during instantiation");
 }
 
-
 // ─── v0.28.17: CLI type checker parity with interpreter/codegen ──────
 
 #[test]
@@ -1510,7 +1509,11 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_ok(), "Option.ok_or should typecheck: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Option.ok_or should typecheck: {:?}",
+        result
+    );
 }
 
 #[test]

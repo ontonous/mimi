@@ -1,0 +1,4 @@
+[package]
+name = "v02817_acceptance"
+version = "0.1.0"
+entry = "main.mimi"

@@ -293,10 +293,8 @@ fn cg_string_direct_concat_valgrind() {
     if !can_valgrind() {
         return;
     }
-    let out = compile_and_run_valgrind(
-        r#"func main() -> i32 { println("hello" + " world"); 0 }"#,
-    )
-    .expect("src/tests/codegen_boundary.rs:cg_string_direct_concat_valgrind");
+    let out = compile_and_run_valgrind(r#"func main() -> i32 { println("hello" + " world"); 0 }"#)
+        .expect("src/tests/codegen_boundary.rs:cg_string_direct_concat_valgrind");
     assert_eq!(out.trim(), "hello world");
 }
 

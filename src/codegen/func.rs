@@ -436,14 +436,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Returning a string variable: load the struct value and null out the
         // variable slot's data pointer so the slot is not freed before return.
         if let Some(Expr::Ident(name)) = expr {
-            if self.var_type_names.get(name).map(|t| t == "string").unwrap_or(false) {
+            if self
+                .var_type_names
+                .get(name)
+                .map(|t| t == "string")
+                .unwrap_or(false)
+            {
                 if let Some(&(alloca, ty)) = vars.get(name) {
                     let loaded = self.build_load(ty, alloca, &format!("{}_ret", name))?;
                     let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
                     if let BasicTypeEnum::StructType(st) = ty {
-                        if let Ok(data_gep) =
-                            self.gep().build_struct_gep(st, alloca, 0, &format!("{}_ret_null", name))
-                        {
+                        if let Ok(data_gep) = self.gep().build_struct_gep(
+                            st,
+                            alloca,
+                            0,
+                            &format!("{}_ret_null", name),
+                        ) {
                             let _ = self.builder.build_store(data_gep, null_ptr);
                         }
                     }
@@ -752,7 +760,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Return(Some(expr)) => {
                     let val = self.compile_expr(expr, vars)?;
                     let val = self.adjust_int_val(val, ret_type)?;
-                    self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars, Some(expr))?;
+                    self.emit_return(
+                        ret_type,
+                        ret_ty_ast,
+                        Some(val),
+                        &func.name,
+                        vars,
+                        Some(expr),
+                    )?;
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Return(None) => {
@@ -1527,7 +1542,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         match self.compile_func_body(func, ret_type, &mut vars)? {
             ControlFlow::Break(()) => return Ok(()),
             ControlFlow::Continue(last_val) => {
-                self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
+                self.emit_implicit_return(
+                    ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr,
+                )?;
             }
         }
 

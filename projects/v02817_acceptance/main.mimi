@@ -1,0 +1,17 @@
+func async_double(n: i32) -> i32 {
+    n * 2
+}
+
+func parse_json() -> i64 {
+    let raw = "{\"value\": 7}"
+    json_get_int(raw, "value")
+}
+
+func main() -> i32 {
+    let t = spawn async_double(5)
+    let a = await t
+    let j = parse_json() as i32
+    let l = len("hello")
+
+    a + j + l
+}

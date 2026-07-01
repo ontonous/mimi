@@ -317,7 +317,6 @@ func main() -> i32 {
     cleanup(&dir);
 }
 
-
 #[test]
 fn loader_std_json_import_typechecks() {
     // Regression for v0.28.17: `use std::json` must resolve the stdlib module,

@@ -48,7 +48,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("mimi_init_test_{}_{}", std::process::id(), nanos));
+        let dir =
+            std::env::temp_dir().join(format!("mimi_init_test_{}_{}", std::process::id(), nanos));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -59,9 +60,18 @@ mod tests {
         init(&base, Some("myapp")).expect("init should succeed");
 
         let project_dir = base.join("myapp");
-        assert!(project_dir.exists(), "project subdirectory should be created");
-        assert!(project_dir.join("mimi.toml").exists(), "mimi.toml should exist");
-        assert!(project_dir.join("main.mimi").exists(), "main.mimi should exist");
+        assert!(
+            project_dir.exists(),
+            "project subdirectory should be created"
+        );
+        assert!(
+            project_dir.join("mimi.toml").exists(),
+            "mimi.toml should exist"
+        );
+        assert!(
+            project_dir.join("main.mimi").exists(),
+            "main.mimi should exist"
+        );
 
         // Cleanup
         std::fs::remove_dir_all(&base).ok();
@@ -72,8 +82,14 @@ mod tests {
         let base = temp_dir();
         init(&base, None).expect("init should succeed");
 
-        assert!(base.join("mimi.toml").exists(), "mimi.toml should exist in base dir");
-        assert!(base.join("main.mimi").exists(), "main.mimi should exist in base dir");
+        assert!(
+            base.join("mimi.toml").exists(),
+            "mimi.toml should exist in base dir"
+        );
+        assert!(
+            base.join("main.mimi").exists(),
+            "main.mimi should exist in base dir"
+        );
 
         // Cleanup
         std::fs::remove_dir_all(&base).ok();
@@ -86,7 +102,10 @@ mod tests {
         std::fs::create_dir(&existing).unwrap();
 
         let result = init(&base, Some("exists"));
-        assert!(result.is_err(), "init should fail when target subdirectory exists");
+        assert!(
+            result.is_err(),
+            "init should fail when target subdirectory exists"
+        );
 
         // Cleanup
         std::fs::remove_dir_all(&base).ok();

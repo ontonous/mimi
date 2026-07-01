@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.28.17-dev
+## [v0.28.17] - 2026-07-01
 
 ### Added
 - CLI 类型检查器统一：对 `weak<T>.upgrade()`、`shared` 标量拷贝 `.deref()`、`Option.ok_or()` / `Result.map()` / `Result.and_then()` 提供方法返回类型推断。

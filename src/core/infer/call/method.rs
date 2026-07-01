@@ -226,10 +226,7 @@ impl<'a> Checker<'a> {
             // Codegen supports `.deref()` on `Option<shared T>` / `Option<local_shared T>`
             // (produced by `weak.upgrade()`), where deref extracts the shared payload.
             if method_name == "deref"
-                && matches!(
-                    inner.as_ref(),
-                    Type::Shared(_) | Type::LocalShared(_)
-                )
+                && matches!(inner.as_ref(), Type::Shared(_) | Type::LocalShared(_))
             {
                 match inner.as_ref() {
                     Type::Shared(i) | Type::LocalShared(i) => (**i).clone(),
@@ -322,11 +319,7 @@ impl<'a> Checker<'a> {
         Type::Name("unknown".into(), vec![])
     }
 
-    pub(in crate::core) fn check_shared_method(
-        &mut self,
-        method: &str,
-        inner: &Type,
-    ) -> Type {
+    pub(in crate::core) fn check_shared_method(&mut self, method: &str, inner: &Type) -> Type {
         match method {
             "clone" => Type::Shared(Box::new(inner.clone())),
             "deref" | "inner" => inner.clone(),
@@ -334,7 +327,11 @@ impl<'a> Checker<'a> {
                 self.errors.push(
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0221,
-                        format!("type 'shared {}' has no method '{}'", fmt_type(inner), method),
+                        format!(
+                            "type 'shared {}' has no method '{}'",
+                            fmt_type(inner),
+                            method
+                        ),
                         Span::single(self.current_line, self.current_col),
                     )
                     .with_help("shared values support clone, deref, inner"),
@@ -370,11 +367,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub(in crate::core) fn check_weak_method(
-        &mut self,
-        method: &str,
-        inner: &Type,
-    ) -> Type {
+    pub(in crate::core) fn check_weak_method(&mut self, method: &str, inner: &Type) -> Type {
         match method {
             "upgrade" => Type::Option(Box::new(Type::Shared(Box::new(inner.clone())))),
             _ => {
@@ -391,11 +384,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub(in crate::core) fn check_weak_local_method(
-        &mut self,
-        method: &str,
-        inner: &Type,
-    ) -> Type {
+    pub(in crate::core) fn check_weak_local_method(&mut self, method: &str, inner: &Type) -> Type {
         match method {
             "upgrade" => Type::Option(Box::new(Type::LocalShared(Box::new(inner.clone())))),
             _ => {
