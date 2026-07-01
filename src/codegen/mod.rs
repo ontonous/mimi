@@ -879,9 +879,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// G2: Find the ordinal index of an enum variant name across all registered types.
+    pub(super) fn find_variant_ordinal(&self, name: &str) -> Result<u64, CompileError> {
+        for td in self.type_defs.values() {
+            if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
+                let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+                sorted.sort_by_key(|v| &v.name);
+                for (i, v) in sorted.iter().enumerate() {
+                    if v.name == name {
+                        return Ok(i as u64);
+                    }
+                }
+            }
+        }
+        // Built-in Result/Option variants (not present in type_defs).
+        match name {
+            "Ok" | "Some" => return Ok(1),
+            "Err" | "None" => return Ok(0),
+            _ => {}
+        }
+        Err(CompileError::Generic(format!(
+            "enum variant '{}' not found in any registered enum type definition",
+            name
+        )))
+    }
+
     /// G2: Find the owning type name and ordinal of an enum variant name.
     /// Returns `None` if `name` is not a variant in any registered enum type.
-    fn find_variant_info(&self, name: &str) -> Option<(String, u64)> {
+    pub(super) fn find_variant_owner(&self, name: &str) -> Option<(String, u64)> {
         for td in self.type_defs.values() {
             if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
                 let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
@@ -894,28 +919,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         None
-    }
-
-    /// G2: Find the ordinal index of an enum variant name across all registered types.
-    pub(super) fn find_variant_ordinal(&self, name: &str) -> Result<u64, CompileError> {
-        if let Some((_, ordinal)) = self.find_variant_info(name) {
-            return Ok(ordinal);
-        }
-        // Built-in Result/Option variants (not present in type_defs).
-        match name {
-            "Ok" | "Some" => Ok(1),
-            "Err" | "None" => Ok(0),
-            _ => Err(CompileError::Generic(format!(
-                "enum variant '{}' not found in any registered enum type definition",
-                name
-            ))),
-        }
-    }
-
-    /// G2: Find the owning type name and ordinal of an enum variant name.
-    /// Returns `None` if `name` is not a variant in any registered enum type.
-    pub(super) fn find_variant_owner(&self, name: &str) -> Option<(String, u64)> {
-        self.find_variant_info(name)
     }
 
     /// Compute the size in bytes of an LLVM type using a portable layout.

@@ -10,6 +10,18 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, Poi
 use inkwell::ThreadLocalMode;
 use std::collections::HashMap;
 
+/// Check whether a #[repr(C)] record is "simple" enough for i64 packing.
+/// Simple = all fields are i32, at most 2 fields. This matches Rust's C ABI
+/// where e.g. {i32,i32} is coerced to i64 in LLVM IR.
+fn is_simple_reprc_record(fields: &[Field]) -> bool {
+    if fields.len() > 2 {
+        return false;
+    }
+    fields
+        .iter()
+        .all(|f| matches!(&f.ty, crate::ast::Type::Name(n, _) if n == "i32"))
+}
+
 /// LLVM types computed for an extern wrapper and its underlying C declaration.
 #[allow(dead_code)]
 struct ExternFnSignature<'ctx> {
@@ -493,7 +505,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::ast::Type::Name(n, _) if self.repr_c_record_names.contains(n.as_str()) => {
                     if let Some(td) = self.type_defs.get(n.as_str()) {
                         if let TypeDefKind::Record(ref fields) = td.kind {
-                            if types::is_simple_reprc_record(fields) {
+                            if is_simple_reprc_record(fields) {
                                 BasicMetadataTypeEnum::IntType(self.context.i64_type())
                             } else {
                                 BasicMetadataTypeEnum::PointerType(i8_ptr_ty)
@@ -1159,7 +1171,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(None);
         };
 
-        if types::is_simple_reprc_record(fields) {
+        if is_simple_reprc_record(fields) {
             return Ok(Some(self.emit_simple_reprc_arg(sv, n, fields, i)?));
         }
         Ok(Some(self.emit_complex_reprc_arg(sv, n, fields, i)?))

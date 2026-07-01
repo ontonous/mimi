@@ -1,3 +1,5 @@
+#![allow(dead_code, deprecated)]
+
 use crate::ast::Type;
 
 /// Map a Mimi Type to JSON serialization element type tag:

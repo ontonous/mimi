@@ -1,3 +1,5 @@
+#![allow(dead_code, deprecated, unreachable_patterns)]
+
 use crate::ast::*;
 use crate::codegen::call_try_basic_value;
 use crate::codegen::types;
@@ -516,10 +518,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
                 }
-                // Defensive wildcard: compile_block handles all current Stmt variants
-                // explicitly; this arm guards against future variants causing a
-                // non-exhaustive match error during development.
-                #[allow(unreachable_patterns)]
                 _ => {}
             }
         }
