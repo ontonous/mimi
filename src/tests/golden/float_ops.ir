@@ -251,6 +251,16 @@ declare ptr @mimi_lexer_tokenize(ptr)
 
 declare ptr @mimi_parse_source(ptr)
 
+declare ptr @mimi_actor_spawn(ptr, i64, ptr)
+
+declare i64 @mimi_actor_id(ptr)
+
+declare i64 @mimi_actor_current_id()
+
+declare i64 @mimi_actor_call(ptr, i32, ptr, i64, ptr)
+
+declare void @mimi_actor_drop(ptr)
+
 define double @main() {
 entry:
   %a = alloca double, align 8
