@@ -11,12 +11,14 @@
 ### Fixed
 - `let v = extern_fn(...)` 在 codegen 现在正确写入 `var_type_names`（从 `func_defs` 扩展到 `extern_func_defs`），使 `v.field` 访问不再撞上 \[E0707\] "cannot access field on type 'v'"。
 - `insertvalue` 链不再使用 `const_named_struct(&[vals])` 构造动态 struct value——改为基于 `zeroinitializer` + `build_insert_value` 的逐步构造，避免 `scalar-to-vector conversion failed`（动态值不可作为常量实参）。
+- **关闭 AGENTS.md 已知约束 #5（caller-side 字符串临时泄漏）**：`claim_string_return_value` 现在对 `string` 类型的返回值做归一化——若数据指针并非函数已经明确交出的 heap 所有权（literal、ident 等），统一 heap-copy 一份（含 nul terminator）；callee 不登记所有权，由 caller 端通过 `emit_function_call::track_string_return_lifetime` 把结果存入 fresh alloca 并登记其 data GEP，让 caller 侧 `free_heap_allocs` 在作用域退出时回收。这覆盖 `"hello"+" "+"world"`、`"hello"` 字面量返回、`let s = "hi"; s` 三类此前会泄漏 / 撞 free() 全局指针的场景。`cg_string_return_concat_valgrind` 不再需要 `#[ignore]`。
 
 ### Tests
 - `dual_ffi_struct_return_complex` (`src/tests/dual_backend.rs`)：dual-backend 测试复杂 struct return（`MixedStruct { id: i32, value: f64, flag: i32 }`）从 `test_make_mixed`。
 - `dual_ffi_struct_return_complex_simple` (`src/tests/dual_backend.rs`)：非 extern 路径回归——验证 struct return + 字段读写在 codegen 端工作。
 - `export_complex_reprc_record_build` (`src/tests/build_shared.rs`)：把 Mimi 源编译成 `.so`、单独 C caller 通过 `dlopen`-style 链接调用 `make_mixed`、读取 heap-allocated 指针字段并 `free`。
 - `interp_ffi_threaded_callback` (`src/tests/ffi_interp_e2e.rs`)：通过 `test_threaded_callback` 在 std::thread 工作线程上调用 callback，验证 `SendFilePtr` + 临时 Interpreter 路径。
+- `cg_string_return_concat_valgrind` (`src/tests/codegen_boundary.rs`)：从 `#[ignore]` 解除，验证 `func greet() -> string { "hello" + " " + "world" }; println(greet())` 在 Valgrind 零泄漏。L3 内存安全回归。
 
 ## [v0.28.17] - 2026-07-01
 

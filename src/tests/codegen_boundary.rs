@@ -269,7 +269,55 @@ fn cg_string_return_builtin() {
 }
 
 #[test]
-#[ignore = "caller-side string temporary lifetime not yet unified (see AGENTS.md constraint 5)"]
+fn cg_string_return_literal_valgrind() {
+    if !can_codegen() {
+        return;
+    }
+    if !can_valgrind() {
+        return;
+    }
+    let out = compile_and_run_valgrind(
+        r#"func greet() -> string { "hello" }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .expect("src/tests/codegen_boundary.rs:cg_string_return_literal_valgrind");
+    assert_eq!(out.trim(), "hello");
+}
+
+#[test]
+fn cg_string_return_variable_valgrind() {
+    if !can_codegen() {
+        return;
+    }
+    if !can_valgrind() {
+        return;
+    }
+    let out = compile_and_run_valgrind(
+        r#"func greet() -> string { let s = "hi"; s }
+        func main() -> i32 { println(greet()); 0 }"#,
+    )
+    .expect("src/tests/codegen_boundary.rs:cg_string_return_variable_valgrind");
+    assert_eq!(out.trim(), "hi");
+}
+
+#[test]
+fn cg_string_return_nested_valgrind() {
+    if !can_codegen() {
+        return;
+    }
+    if !can_valgrind() {
+        return;
+    }
+    let out = compile_and_run_valgrind(
+        r#"func inner() -> string { "world" }
+        func outer() -> string { "hello " + inner() }
+        func main() -> i32 { println(outer()); 0 }"#,
+    )
+    .expect("src/tests/codegen_boundary.rs:cg_string_return_nested_valgrind");
+    assert_eq!(out.trim(), "hello world");
+}
+
+#[test]
 fn cg_string_return_concat_valgrind() {
     if !can_codegen() {
         return;

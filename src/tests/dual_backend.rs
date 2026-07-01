@@ -1030,6 +1030,72 @@ fn dual_string_literal_let_return() {
     );
 }
 
+#[test]
+fn dual_string_concat_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func greet() -> string { "hello" + " " + "world" }
+        func main() -> i32 { println(greet()); 0 }
+    "#,
+        "hello world"
+    );
+}
+
+#[test]
+fn dual_string_let_call_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func greet() -> string { "hi" }
+        func main() -> i32 {
+            let s = greet()
+            println(s)
+            0
+        }
+    "#,
+        "hi"
+    );
+}
+
+#[test]
+fn dual_string_nested_call() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func inner() -> string { "world" }
+        func outer() -> string { "hello " + inner() }
+        func main() -> i32 { println(outer()); 0 }
+    "#,
+        "hello world"
+    );
+}
+
+#[test]
+fn dual_string_call_in_let_chain() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func greet() -> string { "abc" }
+        func main() -> i32 {
+            let s = greet()
+            let t = s + "def"
+            println(t)
+            0
+        }
+    "#,
+        "abcdef"
+    );
+}
+
 // ─── 15.  Arrays/Lists (4 tests) ─────────────────────────────
 
 #[test]

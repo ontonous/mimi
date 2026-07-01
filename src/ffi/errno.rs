@@ -449,6 +449,10 @@ impl Errno {
             133 => Self::EHWPOISON,
             _ => {
                 let name = unsafe {
+                    // SAFETY: `libc::strerror` is thread-unsafe in some libcs, but
+                    // `Errno::name` is only used for diagnostic formatting; the
+                    // returned `*c_char` is owned by the C library and stays valid
+                    // long enough to be copied into an owned `String`.
                     let c_str = libc::strerror(code);
                     if !c_str.is_null() {
                         std::ffi::CStr::from_ptr(c_str)

@@ -3407,6 +3407,9 @@ pub extern "C" fn test_threaded_callback(
     cb: Option<unsafe extern "C" fn(i32) -> i32>,
 ) -> i32 {
     let handle = std::thread::spawn(move || match cb {
+        // SAFETY: `f` is a user-supplied `unsafe extern "C" fn(i32) -> i32` whose
+        // soundness is the caller's responsibility; the closure captures `x` by
+        // value and `f` is invoked with that single argument.
         Some(f) => unsafe { f(x) },
         None => i64::MIN as i32,
     });
