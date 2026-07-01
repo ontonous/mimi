@@ -1467,3 +1467,129 @@ func main() -> i32 {
     )
     .expect("Tuple<T, U> elements should be substituted during instantiation");
 }
+
+
+// ─── v0.28.17: CLI type checker parity with interpreter/codegen ──────
+
+#[test]
+fn typecheck_weak_upgrade_and_deref_ok() {
+    // Reproduces the CLI gap where `weak.upgrade()` and `.deref()` were rejected.
+    let src = r#"
+func main() -> i32 {
+    shared x = 42;
+    weak w = x;
+    let upgraded = w.upgrade();
+    println(upgraded.deref());
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(
+        result.is_ok(),
+        "weak upgrade + deref should typecheck: {:?}",
+        result
+    );
+}
+
+#[test]
+fn typecheck_option_ok_or_ok() {
+    // Option.ok_or() must return Result<T, E> with E inferred from the argument.
+    let src = r#"
+func main() -> i32 {
+    let some: Option<i32> = Some(42);
+    let none: Option<i32> = None;
+    let r1 = some.ok_or("missing");
+    let r2 = none.ok_or("missing");
+    println(r1.is_ok());
+    println(r1.is_err());
+    println(r2.is_ok());
+    println(r2.is_err());
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_ok(), "Option.ok_or should typecheck: {:?}", result);
+}
+
+#[test]
+fn typecheck_result_map_ok() {
+    // Result.map() must work on inferred Result variables.
+    let src = r#"
+func double(x: i32) -> i32 { x * 2 }
+func main() -> i32 {
+    let r: Result<i32, string> = Ok(21);
+    let mapped = r.map(double);
+    println(mapped.unwrap_or(0));
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_ok(), "Result.map should typecheck: {:?}", result);
+}
+
+#[test]
+fn typecheck_result_and_then_ok() {
+    // Result.and_then() must work on inferred Result variables.
+    let src = r#"
+func double_if_positive(x: i32) -> Result<i32, string> {
+    if x > 0 { Ok(x * 2) } else { Err("negative") }
+}
+func main() -> i32 {
+    let ok: Result<i32, string> = Ok(21);
+    let result = ok.and_then(double_if_positive);
+    println(result.unwrap_or(0));
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(
+        result.is_ok(),
+        "Result.and_then should typecheck: {:?}",
+        result
+    );
+}
+
+#[test]
+fn typecheck_shared_clone_deref_and_assign_ok() {
+    // shared.clone(), .deref(), and *shared = value must all typecheck.
+    let src = r#"
+func main() -> i32 {
+    shared a = 5;
+    let b = a.clone();
+    *a = 42;
+    println(b.deref());
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(
+        result.is_ok(),
+        "shared clone/deref/assign should typecheck: {:?}",
+        result
+    );
+}
+
+#[test]
+fn typecheck_option_map_arg_mismatch_err() {
+    // L2: passing a function with the wrong argument type must be rejected.
+    let src = r#"
+func takes_string(s: string) -> string { s }
+func main() -> i32 {
+    let o: Option<i32> = Some(1);
+    let bad = o.map(takes_string);
+    0
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(
+        result.is_err(),
+        "Option.map with wrong function arg type should fail: {:?}",
+        result
+    );
+}

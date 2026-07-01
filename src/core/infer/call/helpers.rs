@@ -4,6 +4,20 @@ use crate::core::helpers::{fmt_type, is_int, same_type};
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
+    /// Infer the signature of a first-class function expression.
+    /// Returns `Some((params, ret))` for `func` / `extern func` values.
+    fn infer_callable_sig(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Option<(Vec<Type>, Type)> {
+        match self.infer_expr(expr, scopes) {
+            Type::Func(params, ret) => Some((params, *ret)),
+            Type::ExternFunc(params, ret) => Some((params, *ret)),
+            _ => None,
+        }
+    }
+
     pub(in crate::core) fn check_option_method(
         &mut self,
         method: &str,
@@ -40,13 +54,97 @@ impl<'a> Checker<'a> {
                 (*inner).clone()
             }
             "is_some" | "is_none" => Type::Name("bool".into(), vec![]),
-            "ok_or" => Type::Result(
-                Box::new((*inner).clone()),
-                Box::new(Type::Name("unknown".into(), vec![])),
-            ),
-            "map" => Type::Option(Box::new(Type::Name("unknown".into(), vec![]))),
-            "and_then" => Type::Name("unknown".into(), vec![]),
-            "map_err" => Type::Option(Box::new((*inner).clone())),
+            "ok_or" => {
+                let err_ty = args
+                    .first()
+                    .map(|arg| self.infer_expr(arg, scopes))
+                    .unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
+                Type::Result(Box::new((*inner).clone()), Box::new(err_ty))
+            }
+            "map" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "Option.map expects 1 argument",
+                    );
+                    return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                }
+                let (params, ret) = match self.infer_callable_sig(&args[0], scopes) {
+                    Some(sig) => sig,
+                    None => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "Option.map expects a function argument",
+                        );
+                        return Type::Option(Box::new(Type::Name("unknown".into(), vec![])));
+                    }
+                };
+                if let Some(first) = params.first() {
+                    if !same_type(first, inner) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Option.map function expects argument of type {}, found {}",
+                                fmt_type(inner),
+                                fmt_type(first)
+                            ),
+                        );
+                    }
+                }
+                Type::Option(Box::new(ret))
+            }
+            "and_then" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "Option.and_then expects 1 argument",
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                let (params, ret) = match self.infer_callable_sig(&args[0], scopes) {
+                    Some(sig) => sig,
+                    None => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "Option.and_then expects a function argument",
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                };
+                if let Some(first) = params.first() {
+                    if !same_type(first, inner) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Option.and_then function expects argument of type {}, found {}",
+                                fmt_type(inner),
+                                fmt_type(first)
+                            ),
+                        );
+                    }
+                }
+                match &ret {
+                    Type::Option(_) => ret,
+                    Type::Name(name, args) if name == "Option" && args.len() == 1 => {
+                        Type::Option(Box::new(args[0].clone()))
+                    }
+                    _ => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Option.and_then function must return Option<_>, found {}",
+                                fmt_type(&ret)
+                            ),
+                        );
+                        Type::Option(Box::new(Type::Name("unknown".into(), vec![])))
+                    }
+                }
+            }
+            "map_err" => {
+                // Option does not have map_err in Rust semantics; keep the legacy
+                // behaviour of returning Option<T> so existing code does not break.
+                Type::Option(Box::new((*inner).clone()))
+            }
             _ => {
                 // Unknown methods are handled by the caller via trait dispatch; this is a fallback
                 self.emit_code(
@@ -95,15 +193,136 @@ impl<'a> Checker<'a> {
                 (*ok_ty).clone()
             }
             "is_ok" | "is_err" => Type::Name("bool".into(), vec![]),
-            "map" => Type::Result(
-                Box::new(Type::Name("unknown".into(), vec![])),
-                Box::new((*err_ty).clone()),
-            ),
-            "and_then" => Type::Name("unknown".into(), vec![]),
-            "map_err" => Type::Result(
-                Box::new((*ok_ty).clone()),
-                Box::new(Type::Name("unknown".into(), vec![])),
-            ),
+            "ok_or" => {
+                // Result::ok_or is not a standard combinator; treat it as producing Option<T>.
+                Type::Option(Box::new((*ok_ty).clone()))
+            }
+            "map" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "Result.map expects 1 argument",
+                    );
+                    return Type::Result(
+                        Box::new(Type::Name("unknown".into(), vec![])),
+                        Box::new((*err_ty).clone()),
+                    );
+                }
+                let (params, ret) = match self.infer_callable_sig(&args[0], scopes) {
+                    Some(sig) => sig,
+                    None => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "Result.map expects a function argument",
+                        );
+                        return Type::Result(
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new((*err_ty).clone()),
+                        );
+                    }
+                };
+                if let Some(first) = params.first() {
+                    if !same_type(first, ok_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Result.map function expects argument of type {}, found {}",
+                                fmt_type(ok_ty),
+                                fmt_type(first)
+                            ),
+                        );
+                    }
+                }
+                Type::Result(Box::new(ret), Box::new((*err_ty).clone()))
+            }
+            "and_then" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "Result.and_then expects 1 argument",
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                let (params, ret) = match self.infer_callable_sig(&args[0], scopes) {
+                    Some(sig) => sig,
+                    None => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "Result.and_then expects a function argument",
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                };
+                if let Some(first) = params.first() {
+                    if !same_type(first, ok_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Result.and_then function expects argument of type {}, found {}",
+                                fmt_type(ok_ty),
+                                fmt_type(first)
+                            ),
+                        );
+                    }
+                }
+                match &ret {
+                    Type::Result(_, _) => ret,
+                    Type::Name(name, args) if name == "Result" && args.len() == 2 => {
+                        Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone()))
+                    }
+                    _ => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Result.and_then function must return Result<_, _>, found {}",
+                                fmt_type(&ret)
+                            ),
+                        );
+                        Type::Result(
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                            Box::new((*err_ty).clone()),
+                        )
+                    }
+                }
+            }
+            "map_err" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "Result.map_err expects 1 argument",
+                    );
+                    return Type::Result(
+                        Box::new((*ok_ty).clone()),
+                        Box::new(Type::Name("unknown".into(), vec![])),
+                    );
+                }
+                let (params, ret) = match self.infer_callable_sig(&args[0], scopes) {
+                    Some(sig) => sig,
+                    None => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "Result.map_err expects a function argument",
+                        );
+                        return Type::Result(
+                            Box::new((*ok_ty).clone()),
+                            Box::new(Type::Name("unknown".into(), vec![])),
+                        );
+                    }
+                };
+                if let Some(first) = params.first() {
+                    if !same_type(first, err_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "Result.map_err function expects argument of type {}, found {}",
+                                fmt_type(err_ty),
+                                fmt_type(first)
+                            ),
+                        );
+                    }
+                }
+                Type::Result(Box::new((*ok_ty).clone()), Box::new(ret))
+            }
             _ => {
                 // Unknown methods are handled by the caller via trait dispatch; this is a fallback
                 self.emit_code(

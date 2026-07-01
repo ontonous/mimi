@@ -962,7 +962,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     Expr::Unary(UnOp::Deref, inner) => {
-                        // *r = value: check that inner is &mut T
+                        // *r = value: check that inner is &mut T, shared T, or local_shared T
                         let inner_ty = self.infer_expr(inner, scopes);
                         match &inner_ty {
                             Type::RefMut(_, inner_inner) => {
@@ -971,6 +971,18 @@ impl<'a> Checker<'a> {
                                         crate::diagnostic::codes::E0233,
                                         format!(
                                             "cannot assign {} through &mut reference of type {}",
+                                            fmt_type(&value_ty),
+                                            fmt_type(&inner_ty)
+                                        ),
+                                    );
+                                }
+                            }
+                            Type::Shared(inner_inner) | Type::LocalShared(inner_inner) => {
+                                if !same_type(&value_ty, inner_inner) {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0233,
+                                        format!(
+                                            "cannot assign {} through shared reference of type {}",
                                             fmt_type(&value_ty),
                                             fmt_type(&inner_ty)
                                         ),
