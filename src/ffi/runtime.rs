@@ -642,10 +642,18 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
             Value::String(s) => {
                 match std::ffi::CString::new(s.as_str()) {
                     Ok(c_str) => {
-                        let ptr = c_str.as_ptr();
-                        // Register for cleanup — caller must call mimi_string_as_c_str_free
-                        PENDING_C_STRINGS.with(|pending| pending.borrow_mut().push(c_str));
-                        ptr
+                        // Register for cleanup first, then take the pointer from the
+                        // stored value. This avoids returning a pointer that is
+                        // immediately invalidated by moving the CString into the
+                        // thread-local vector (Stacked Borrows violation under Miri).
+                        // SAFETY: the CString is heap-allocated and its address is
+                        // stable while it remains in PENDING_C_STRINGS; callers must
+                        // not hold the pointer across further calls to this function.
+                        PENDING_C_STRINGS.with(|pending| {
+                            let mut pending = pending.borrow_mut();
+                            pending.push(c_str);
+                            pending.last().unwrap().as_ptr()
+                        })
                     }
                     Err(_) => {
                         // Interior null bytes: can't represent as C string.
