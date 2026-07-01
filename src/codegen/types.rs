@@ -20,11 +20,14 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             }
             "Result" if args.len() == 2 => {
                 // Canonicalize to Type::Result so layout logic is single-source.
-                return mimi_type_to_llvm(ctx, &Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone())));
+                mimi_type_to_llvm(
+                    ctx,
+                    &Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone())),
+                )
             }
             "Option" if args.len() == 1 => {
                 // Canonicalize to Type::Option so layout logic is single-source.
-                return mimi_type_to_llvm(ctx, &Type::Option(Box::new(args[0].clone())));
+                mimi_type_to_llvm(ctx, &Type::Option(Box::new(args[0].clone())))
             }
             "List" => {
                 let i8_ptr = ctx.ptr_type(AddressSpace::default());

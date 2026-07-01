@@ -429,12 +429,28 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Check if a variant's payload i64 was ptrtoint-encoded from a struct type,
     /// and if so, decode it back to the struct value.
+    ///
+    /// Built-in `Result`/`Option` variants (`Ok`, `Err`, `Some`) store their
+    /// payload directly in the variant struct layout, so the extracted value
+    /// already has the correct LLVM type. Only custom enum variants use the
+    /// compact `{i32 tag, i64 payload}` representation that may be
+    /// ptrtoint-encoded.
     fn decode_payload_struct(
         &self,
         variant_name: &str,
         payload_val: BasicValueEnum<'ctx>,
     ) -> Result<(BasicValueEnum<'ctx>, BasicTypeEnum<'ctx>), CompileError> {
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+
+        // Built-in Result/Option payloads are stored at their natural LLVM type
+        // (e.g. `{ptr, i64}` for `Result<string, E>`), not as a ptrtoint-encoded
+        // i64. Use the extracted value's type directly.
+        let is_builtin_result_or_option = matches!(variant_name, "Ok" | "Err" | "Some")
+            && self.find_variant_owner(variant_name).is_none();
+        if is_builtin_result_or_option {
+            return Ok((payload_val, payload_val.get_type()));
+        }
+
         let is_payload_struct = self
             .find_variant_owner(variant_name)
             .and_then(|(owner, _)| {

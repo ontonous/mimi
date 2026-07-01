@@ -443,7 +443,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(len_gep, str_len)
             .map_err(|e| format!("store error: {}", e))?;
-        Ok(str_alloca.into())
+        self.build_load(
+            BasicTypeEnum::StructType(string_ty),
+            str_alloca,
+            "http_get_str",
+        )
+        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))
     }
 
     pub(super) fn compile_http_post(
@@ -517,6 +522,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(len_gep, str_len)
             .map_err(|e| format!("store error: {}", e))?;
-        Ok(str_alloca.into())
+        self.build_load(
+            BasicTypeEnum::StructType(string_ty),
+            str_alloca,
+            "http_post_str",
+        )
+        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))
     }
 }

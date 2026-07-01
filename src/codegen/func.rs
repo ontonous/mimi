@@ -415,6 +415,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn emit_return(
         &mut self,
         ret_type: BasicTypeEnum<'ctx>,
+        ret_ty_ast: Option<&Type>,
         val: Option<BasicValueEnum<'ctx>>,
         func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
@@ -443,11 +444,143 @@ impl<'ctx> CodeGenerator<'ctx> {
         match val {
             Some(v) => {
                 let adjusted = self.adjust_int_val(v, ret_type)?;
+                let adjusted = self.coerce_variant_value(adjusted, ret_type, ret_ty_ast)?;
                 self.build_return(Some(&adjusted))?;
             }
             None => self.build_return(None)?,
         }
         Ok(())
+    }
+
+    /// Coerce a generic Result/Option constructor value to the declared return
+    /// type's concrete layout.
+    ///
+    /// `Ok`/`Err`/`Some`/`None` are currently compiled using the payload type that
+    /// the constructor sees at the call site. When such a value is returned from a
+    /// function whose declared return type has a different payload layout (e.g.
+    /// `Result<string, E>` where the string payload is represented as `{ptr, i64}`
+    /// but the constructor saw a raw `ptr`), the LLVM struct types no longer match
+    /// and the caller misinterprets the bytes. This helper repacks the
+    /// discriminant and payload into the target layout.
+    fn coerce_variant_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target_ty: BasicTypeEnum<'ctx>,
+        ret_ty_ast: Option<&Type>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let ast_ty = match ret_ty_ast {
+            Some(t) => t,
+            None => return Ok(val),
+        };
+        let is_result = matches!(ast_ty, Type::Result(_, _))
+            || matches!(ast_ty, Type::Name(n, args) if n == "Result" && args.len() == 2);
+        let is_option = matches!(ast_ty, Type::Option(_))
+            || matches!(ast_ty, Type::Name(n, args) if n == "Option" && args.len() == 1);
+        if !is_result && !is_option {
+            return Ok(val);
+        }
+
+        let target_st = match target_ty {
+            BasicTypeEnum::StructType(st) => st,
+            _ => return Ok(val),
+        };
+
+        // If the value is already a pointer (e.g. an alloca), try loading it as the
+        // target type. When the pointer already points to the target layout this is
+        // sufficient; generic allocas are handled by the StructValue path below.
+        let sv = match val {
+            BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => {
+                let loaded = self.build_load(target_ty, pv, "coerce_load")?;
+                match loaded {
+                    BasicValueEnum::StructValue(sv) => sv,
+                    _ => return Ok(val),
+                }
+            }
+            _ => return Ok(val),
+        };
+
+        let source_st = sv.get_type();
+        if source_st == target_st {
+            return Ok(val);
+        }
+
+        let source_fields = source_st.get_field_types();
+        let target_fields = target_st.get_field_types();
+        if source_fields.len() != target_fields.len() {
+            return Ok(val);
+        }
+
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(target_st), "variant_coerce")?;
+        for (i, tf) in target_fields.iter().enumerate() {
+            let gep = self
+                .gep()
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(target_st),
+                    alloca,
+                    i as u32,
+                    "coerce_gep",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("coerce gep: {}", e)))?;
+            if i == 0 {
+                let disc = self.build_extract_value(sv.into(), 0, "coerce_disc")?;
+                self.build_store(gep, disc)?;
+            } else if is_result && i == target_fields.len() - 1 {
+                let err = self.build_extract_value(
+                    sv.into(),
+                    (source_fields.len() - 1) as u32,
+                    "coerce_err",
+                )?;
+                let err = self.coerce_field_to_type(err, *tf)?;
+                self.build_store(gep, err)?;
+            } else {
+                let payload = self.build_extract_value(sv.into(), i as u32, "coerce_payload")?;
+                let payload = self.coerce_field_to_type(payload, *tf)?;
+                self.build_store(gep, payload)?;
+            }
+        }
+        self.build_load(BasicTypeEnum::StructType(target_st), alloca, "coerced")
+    }
+
+    /// Helper used by `coerce_variant_value` to convert a single source field into
+    /// the corresponding target field type.
+    fn coerce_field_to_type(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if val.get_type() == target {
+            return Ok(val);
+        }
+        match (val, target) {
+            // Wrap a raw C string pointer into the Mimi string struct {ptr, len}.
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st))
+                if Self::is_mimi_string_struct(st) =>
+            {
+                self.wrap_c_string(pv)
+            }
+            // Generic pad (i64 zero) -> structured payload: zero-initialize the target.
+            (BasicValueEnum::IntValue(_), BasicTypeEnum::StructType(st)) => {
+                Ok(BasicValueEnum::StructValue(st.const_zero()))
+            }
+            // Pointer -> integer (e.g. ptr err payload stored as i64).
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::IntType(it)) => {
+                Ok(self.build_ptr_to_int(pv, it, "coerce_ptr_to_int")?.into())
+            }
+            // Integer width conversion.
+            (BasicValueEnum::IntValue(_), BasicTypeEnum::IntType(_)) => {
+                self.adjust_int_val(val, target)
+            }
+            _ => Ok(val),
+        }
+    }
+
+    /// Returns true if `st` is the Mimi string struct `{ ptr, i64 }`.
+    fn is_mimi_string_struct(st: inkwell::types::StructType<'ctx>) -> bool {
+        let fields = st.get_field_types();
+        fields.len() == 2
+            && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+            && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
     }
 
     /// Bind all function parameters to stack allocas and track type metadata
@@ -516,6 +649,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<ControlFlow<(), BasicValueEnum<'ctx>>> {
+        let ret_ty_ast = func.ret.as_ref();
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
             BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
@@ -535,15 +669,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Expr(expr) => {
                     last_val = self.compile_expr(expr, vars)?;
                     last_val = self.adjust_int_val(last_val, ret_type)?;
+                    last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
                 }
                 Stmt::Return(Some(expr)) => {
                     let val = self.compile_expr(expr, vars)?;
                     let val = self.adjust_int_val(val, ret_type)?;
-                    self.emit_return(ret_type, Some(val), &func.name, vars)?;
+                    self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars)?;
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Return(None) => {
-                    self.emit_return(ret_type, None, &func.name, vars)?;
+                    self.emit_return(ret_type, ret_ty_ast, None, &func.name, vars)?;
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Let {
@@ -896,10 +1031,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     self.build_cond_br(cond_bool, then_bb, else_bb)?;
 
-                    // Then block
+                    // Then block: coerce the produced value to the function's declared
+                    // return layout before branching to the merge block.
                     self.builder.position_at_end(then_bb);
                     let mut then_vars = vars.clone();
                     let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+                    let then_val = self.coerce_variant_value(then_val, ret_type, ret_ty_ast)?;
                     let then_reaches = !self.block_has_terminator();
                     if then_reaches {
                         self.build_br(merge_bb)?;
@@ -913,6 +1050,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let else_val = if let Some(else_block) = else_ {
                         let mut else_vars = vars.clone();
                         let v = self.compile_block_last_val(else_block, &mut else_vars)?;
+                        let v = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                         let reaches = !self.block_has_terminator();
                         if reaches {
                             self.build_br(merge_bb)?;
@@ -930,7 +1068,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .then(|| self.builder.get_insert_block())
                         .flatten();
 
-                    // Continue at merge, produce phi with only blocks that reach merge
+                    // Continue at merge, produce phi with only blocks that reach merge.
                     self.builder.position_at_end(merge_bb);
                     if then_val.get_type() == else_val.get_type() {
                         let phi = self
@@ -1103,6 +1241,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn emit_implicit_return(
         &mut self,
         ret_type: BasicTypeEnum<'ctx>,
+        ret_ty_ast: Option<&Type>,
         last_val: BasicValueEnum<'ctx>,
         func_name: &str,
         vars: &HashMap<String, VarEntry<'ctx>>,
@@ -1143,6 +1282,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => last_val,
         };
+        let last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
 
         // Pop scopes (discard compensations on normal exit)
         self.release_all_shared()?;
@@ -1253,10 +1393,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.prepare_func_contracts(func, &vars)?;
         self.snapshot_old_values(&vars)?;
 
+        let ret_ty_ast = func.ret.as_ref();
         match self.compile_func_body(func, ret_type, &mut vars)? {
             ControlFlow::Break(()) => return Ok(()),
             ControlFlow::Continue(last_val) => {
-                self.emit_implicit_return(ret_type, last_val, &func.name, &vars)?;
+                self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars)?;
             }
         }
 
@@ -1365,9 +1506,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.prepare_func_contracts(func, &vars)?;
         self.snapshot_old_values(&vars)?;
 
+        let ret_ty_ast = func.ret.as_ref();
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
-        self.emit_implicit_return(ret_type, last_val, &func.name, &vars)?;
+        self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars)?;
         self.type_map = prev_type_map;
         Ok(())
     }

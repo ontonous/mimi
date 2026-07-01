@@ -2731,7 +2731,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "network — requires external HTTP server; run manually with -- --ignored"]
 fn e2e_net_fetch_failure() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -2781,7 +2780,6 @@ func main() -> i32 {
 }
 
 #[test]
-#[ignore = "network — requires external HTTP server; run manually with -- --ignored"]
 fn e2e_net_fetch_post_failure() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
@@ -3329,6 +3327,149 @@ fn e2e_result_map_err() {
     )
     .expect("src/tests/codegen_e2e.rs:2004 unwrap failed");
     assert_eq!(stdout.trim(), "1");
+}
+
+// Regression test for a codegen bug where returning `Result<string, CustomEnum>`
+// from a function and then matching on the error variant fell through to `_`
+// because the generic `Err` constructor layout did not match the declared
+// return type layout.
+#[test]
+fn e2e_result_fn_return_enum_match() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        type NetError {
+            SocketCreate
+            ConnectFailed
+            HttpGetFailed
+        }
+
+        func fetch() -> Result<string, NetError> {
+            Err(HttpGetFailed)
+        }
+
+        func main() -> i32 {
+            let r = fetch()
+            match r {
+                Ok(body) => { println("ok") }
+                Err(e) => {
+                    match e {
+                        HttpGetFailed => { println("HTTP request failed") }
+                        _ => { println("unknown error") }
+                    }
+                }
+            }
+            0
+        }
+    "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:2018 unwrap failed");
+    assert_eq!(stdout.trim(), "HTTP request failed");
+}
+
+// Regression test for a codegen bug where a `Result` value produced by an
+// if-expression had mismatched branch layouts (`Err` generic vs `Ok` payload),
+// causing enum matching on the returned error variant to fall through to `_`.
+#[test]
+fn e2e_result_if_expr_enum_match() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        type NetError {
+            SocketCreate
+            ConnectFailed
+            HttpGetFailed
+        }
+
+        func fetch() -> Result<string, NetError> {
+            let body = ""
+            if body == "" { Err(HttpGetFailed) }
+            else { Ok(body) }
+        }
+
+        func main() -> i32 {
+            let r = fetch()
+            match r {
+                Ok(body) => { println("ok") }
+                Err(e) => {
+                    match e {
+                        HttpGetFailed => { println("HTTP request failed") }
+                        _ => { println("unknown error") }
+                    }
+                }
+            }
+            0
+        }
+    "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:2050 unwrap failed");
+    assert_eq!(stdout.trim(), "HTTP request failed");
+}
+
+// Regression test for a codegen bug where returning `Ok(string)` from a
+// function corrupted the string payload during match destructuring. The match
+// arm bound the payload variable with the wrong LLVM type, causing the string
+// struct to be reinterpreted as an integer.
+#[test]
+fn e2e_result_ok_string_return_match() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        func fetch() -> Result<string, i64> {
+            Ok("hello")
+        }
+
+        func main() -> i32 {
+            let r = fetch()
+            match r {
+                Ok(body) => { println(body) }
+                Err(e) => { println("err") }
+            }
+            0
+        }
+    "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:2067 unwrap failed");
+    assert_eq!(stdout.trim(), "hello");
+}
+
+// Regression test for `Ok(string)` where the payload is a string variable
+// (not just a literal). This ensures the match arm binds the payload with the
+// correct LLVM struct type.
+#[test]
+fn e2e_result_ok_string_variable_match() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        func fetch() -> Result<string, i64> {
+            let body = "hello"
+            Ok(body)
+        }
+
+        func main() -> i32 {
+            let r = fetch()
+            match r {
+                Ok(body) => { println(body) }
+                Err(e) => { println("err") }
+            }
+            0
+        }
+    "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:2097 unwrap failed");
+    assert_eq!(stdout.trim(), "hello");
 }
 
 // ===================== Stdlib: datetime (interpreter) =====================
