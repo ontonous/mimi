@@ -6,7 +6,9 @@ use crate::codegen::{
 };
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FunctionType, StructType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, PointerValue,
+};
 use inkwell::ThreadLocalMode;
 use std::collections::HashMap;
 
@@ -18,6 +20,8 @@ struct ExternFnSignature<'ctx> {
     wrapper_ret_ty: BasicTypeEnum<'ctx>,
     wrapper_fn_type: FunctionType<'ctx>,
     extern_fn_type: FunctionType<'ctx>,
+    is_complex_reprc_ret: bool,
+    c_struct_ty: Option<StructType<'ctx>>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -416,7 +420,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Phase 4: Build wrapper args, converting Mimi types to C ABI.
-        let (wrapper_args, json_strings) = self.emit_arg_conversions(&ef, wrapper_fn, &sig)?;
+        let (mut wrapper_args, json_strings) = self.emit_arg_conversions(&ef, wrapper_fn, &sig)?;
+
+        // For complex repr(C) record returns, allocate an sret alloca and pass
+        // its pointer as the first argument. The extern function returns void
+        // and writes the result into this alloca.
+        let sret_alloca = if sig.is_complex_reprc_ret {
+            if let Some(c_struct_ty) = &sig.c_struct_ty {
+                let alloca = self.build_alloca(*c_struct_ty, &format!("{}_sret", ef.name))?;
+                wrapper_args.insert(0, BasicMetadataValueEnum::PointerValue(alloca));
+                Some(alloca)
+            } else {
+                return Err(CompileError::LlvmError(format!(
+                    "sret: no c_struct_ty for '{}'",
+                    ef.name
+                )));
+            }
+        } else {
+            None
+        };
 
         let call = self.build_call(extern_fn, &wrapper_args, "extern_call")?;
 
@@ -429,7 +451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Phase 6: Return
-        self.emit_extern_return(&ef, wrapper_fn, &call, &sig)?;
+        self.emit_extern_return(&ef, wrapper_fn, &call, &sig, sret_alloca)?;
 
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
@@ -468,7 +490,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     list_ptr_ty
                 }
-                _ => self.type_to_llvm_for_extern(&p.ty)?,
+                // For the wrapper function (called from internal Mimi code),
+                // use Mimi's internal types (i32 → i64, etc.) so the call site
+                // matches the wrapper signature without LLVM type mismatches.
+                _ => match &p.ty {
+                    crate::ast::Type::Name(n, _) if n == "i32" => {
+                        BasicTypeEnum::IntType(self.context.i64_type())
+                    }
+                    crate::ast::Type::Name(n, _) if n == "bool" => {
+                        BasicTypeEnum::IntType(self.context.i8_type())
+                    }
+                    _ => self.type_to_llvm_for_extern(&p.ty)?,
+                },
             };
             param_tys.push(types::basic_to_metadata(self.context, ty));
         }
@@ -533,34 +566,94 @@ impl<'ctx> CodeGenerator<'ctx> {
             None => BasicTypeEnum::IntType(self.context.i64_type()),
         };
 
-        let extern_ret_ty = match &ef.ret {
-            Some(ty) => {
-                if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
-                    // F7: Tuple return — C returns JSON string (i8*)
-                    || matches!(ty, crate::ast::Type::Tuple(_))
-                    // WORKAROUND: C functions return string as char* (i8*), but Mimi's
-                    // string type is {i8*, i64} (ptr + length).
-                    || matches!(ty, crate::ast::Type::Name(n, _) if n == "string")
-                {
-                    BasicTypeEnum::PointerType(i8_ptr_ty)
-                // repr(C) records are returned as i64 (packed) to match Rust's C ABI
-                } else if let crate::ast::Type::Name(n, _) = ty {
-                    if self.repr_c_record_names.contains(n.as_str()) {
-                        BasicTypeEnum::IntType(self.context.i64_type())
+        let is_complex_reprc_ret = ef.ret.as_ref().is_some_and(|ty| {
+            if let crate::ast::Type::Name(n, _) = ty {
+                self.repr_c_record_names.contains(n.as_str())
+                    && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                        matches!(&td.kind, TypeDefKind::Record(fields) if !types::is_simple_reprc_record(fields))
+                    })
+            } else {
+                false
+            }
+        });
+        let c_struct_ty = if is_complex_reprc_ret {
+            ef.ret.as_ref().and_then(|ty| {
+                if let crate::ast::Type::Name(n, _) = ty {
+                    self.type_defs.get(n.as_str()).and_then(|td| {
+                        if let TypeDefKind::Record(ref fields) = td.kind {
+                            self.c_layout_return_type(n, fields)
+                                .ok()
+                                .and_then(|t| match t {
+                                    BasicTypeEnum::StructType(s) => Some(s),
+                                    _ => None,
+                                })
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        // For complex repr(C) records, extern_ret_ty is not used (fn_type is
+        // built separately with void return type). Set a dummy value here.
+        let extern_ret_ty = if is_complex_reprc_ret {
+            BasicTypeEnum::IntType(self.context.i64_type())
+        } else {
+            match &ef.ret {
+                Some(ty) => {
+                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
+                        || matches!(ty, crate::ast::Type::Tuple(_))
+                        || matches!(ty, crate::ast::Type::Name(n, _) if n == "string")
+                    {
+                        BasicTypeEnum::PointerType(i8_ptr_ty)
+                    } else if let crate::ast::Type::Name(n, _) = ty {
+                        if self.repr_c_record_names.contains(n.as_str()) {
+                            if let Some(td) = self.type_defs.get(n.as_str()) {
+                                if let TypeDefKind::Record(ref fields) = td.kind {
+                                    if types::is_simple_reprc_record(fields) {
+                                        BasicTypeEnum::IntType(self.context.i64_type())
+                                    } else {
+                                        self.c_layout_return_type(n, fields)?
+                                    }
+                                } else {
+                                    BasicTypeEnum::IntType(self.context.i64_type())
+                                }
+                            } else {
+                                BasicTypeEnum::IntType(self.context.i64_type())
+                            }
+                        } else {
+                            self.type_to_llvm_for_extern(ty)?
+                        }
                     } else {
                         self.type_to_llvm_for_extern(ty)?
                     }
-                } else {
-                    self.type_to_llvm_for_extern(ty)?
                 }
+                None => BasicTypeEnum::IntType(self.context.i64_type()),
             }
-            None => BasicTypeEnum::IntType(self.context.i64_type()),
         };
+
+        // For complex repr(C) record returns, add an sret pointer parameter.
+        let i8_ptr_ty_sret = self.context.ptr_type(inkwell::AddressSpace::default());
+        let mut sret_param_tys = extern_param_tys.clone();
+        if is_complex_reprc_ret {
+            sret_param_tys.insert(0, BasicMetadataTypeEnum::PointerType(i8_ptr_ty_sret));
+        }
 
         let is_variadic = ef.variadic;
 
         let wrapper_fn_type = self.fn_type_for_ret(wrapper_ret_ty, &param_tys, is_variadic);
-        let extern_fn_type = self.fn_type_for_ret(extern_ret_ty, &extern_param_tys, is_variadic);
+        let extern_fn_type = if is_complex_reprc_ret {
+            self.context
+                .void_type()
+                .fn_type(&sret_param_tys, is_variadic)
+        } else {
+            self.fn_type_for_ret(extern_ret_ty, &sret_param_tys, is_variadic)
+        };
 
         Ok(ExternFnSignature {
             list_struct_sty,
@@ -568,6 +661,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             wrapper_ret_ty,
             wrapper_fn_type,
             extern_fn_type,
+            is_complex_reprc_ret,
+            c_struct_ty,
         })
     }
 
@@ -837,7 +932,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(arg) = self.emit_reprc_record_arg_conversion(param, &p.ty, i)? {
                         wrapper_args.push(arg);
                     } else {
-                        wrapper_args.push(match param {
+                        // If the Mimi internal type (e.g. i64 for i32) differs from the
+                        // extern C type (e.g. i32 for i32), truncate/extend as needed.
+                        let converted = if let crate::ast::Type::Name(n, _) = &p.ty {
+                            match n.as_str() {
+                                "i32" => {
+                                    if let BasicValueEnum::IntValue(iv) = param {
+                                        BasicValueEnum::IntValue(
+                                            self.builder
+                                                .build_int_truncate(
+                                                    iv,
+                                                    self.context.i32_type(),
+                                                    &format!("trunc_i64_i32_{}", i),
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "trunc error: {}",
+                                                        e
+                                                    ))
+                                                })?,
+                                        )
+                                    } else {
+                                        param
+                                    }
+                                }
+                                "bool" => {
+                                    if let BasicValueEnum::IntValue(iv) = param {
+                                        BasicValueEnum::IntValue(
+                                            self.builder
+                                                .build_int_truncate(
+                                                    iv,
+                                                    self.context.i8_type(),
+                                                    &format!("trunc_i64_i8_{}", i),
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "trunc error: {}",
+                                                        e
+                                                    ))
+                                                })?,
+                                        )
+                                    } else {
+                                        param
+                                    }
+                                }
+                                _ => param,
+                            }
+                        } else {
+                            param
+                        };
+                        wrapper_args.push(match converted {
                             BasicValueEnum::IntValue(v) => BasicMetadataValueEnum::IntValue(v),
                             BasicValueEnum::FloatValue(v) => BasicMetadataValueEnum::FloatValue(v),
                             BasicValueEnum::PointerValue(v) => {
@@ -1396,8 +1540,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         wrapper_fn: inkwell::values::FunctionValue<'ctx>,
         call: &CallSiteValue<'ctx>,
         sig: &ExternFnSignature<'ctx>,
+        sret_alloca: Option<inkwell::values::PointerValue<'ctx>>,
     ) -> MimiResult<()> {
         let _ = wrapper_fn;
+        // Check for complex repr(C) record return first.
+        if sig.is_complex_reprc_ret {
+            if let Some(crate::ast::Type::Name(n, _)) = &ef.ret {
+                let complex_fields: Vec<Field> = self
+                    .type_defs
+                    .get(n.as_str())
+                    .and_then(|td| {
+                        if let TypeDefKind::Record(ref fields) = td.kind {
+                            if !types::is_simple_reprc_record(fields) {
+                                return Some(fields.clone());
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or_default();
+                if !complex_fields.is_empty() {
+                    return self.emit_complex_reprc_return(call, n, &complex_fields, sret_alloca);
+                }
+            }
+        }
         let is_tuple_return = ef
             .ret
             .as_ref()
@@ -1427,6 +1592,103 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_return(None)?;
         }
         Ok(())
+    }
+
+    /// Handle complex repr(C) record return from an extern C function.
+    /// Converts the C-layout struct to Mimi's internal record representation.
+    fn emit_complex_reprc_return(
+        &mut self,
+        call: &CallSiteValue<'ctx>,
+        type_name: &str,
+        fields: &[Field],
+        sret_alloca: Option<inkwell::values::PointerValue<'ctx>>,
+    ) -> MimiResult<()> {
+        let c_sv = if let Some(sret) = sret_alloca {
+            // The extern function used sret: load the struct from the alloca.
+            let c_struct_ty = self
+                .c_layout_return_type(type_name, fields)
+                .map_err(|e| CompileError::LlvmError(format!("c_layout_return_type: {}", e)))?;
+            match c_struct_ty {
+                BasicTypeEnum::StructType(sty) => {
+                    let loaded = self
+                        .builder
+                        .build_load(sty, sret, &format!("{}_sret_load", type_name))
+                        .map_err(|e| CompileError::LlvmError(format!("sret load error: {}", e)))?;
+                    loaded.into_struct_value()
+                }
+                _ => {
+                    return Err(CompileError::LlvmError(format!(
+                        "c_layout_return_type for '{}' is not a struct",
+                        type_name
+                    )))
+                }
+            }
+        } else {
+            let ret = call_try_basic_value(call).ok_or_else(|| {
+                CompileError::LlvmError(
+                    "extern call for complex repr(C) return returned void".to_string(),
+                )
+            })?;
+            ret.into_struct_value()
+        };
+
+        let internal_sty = self
+            .type_llvm
+            .get(type_name)
+            .and_then(|t| match t {
+                BasicTypeEnum::StructType(s) => Some(*s),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "internal type for repr(C) record '{}' missing",
+                    type_name
+                ))
+            })?;
+
+        // Build the internal struct by inserting fields into an undef value.
+        let mut agg: inkwell::values::AggregateValueEnum<'ctx> =
+            internal_sty.const_named_struct(&[]).into();
+        for (fi, f) in fields.iter().enumerate() {
+            let c_field = self
+                .builder
+                .build_extract_value(c_sv, fi as u32, &format!("{}_{}_cfield", type_name, f.name))
+                .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
+            let internal_field = self.convert_c_field_to_internal(c_field, &f.ty)?;
+            agg = self
+                .builder
+                .build_insert_value(
+                    agg,
+                    internal_field,
+                    fi as u32,
+                    &format!("{}_{}", type_name, f.name),
+                )
+                .map_err(|e| CompileError::LlvmError(format!("insert error: {}", e)))?;
+        }
+        let result = agg.into_struct_value();
+        self.build_return(Some(&result.as_basic_value_enum()))?;
+        Ok(())
+    }
+
+    /// Build a C-layout LLVM struct type for a list of record fields (import direction).
+    fn c_layout_return_type(
+        &self,
+        _name: &str,
+        fields: &[Field],
+    ) -> MimiResult<BasicTypeEnum<'ctx>> {
+        let mut field_tys = Vec::new();
+        for f in fields {
+            let c_ty = types::mimi_type_to_llvm_extern(self.context, &f.ty).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "cannot map field type for return struct: {}",
+                    crate::core::fmt_type(&f.ty)
+                ))
+            })?;
+            field_tys.push(c_ty);
+        }
+        Ok(BasicTypeEnum::StructType(
+            self.context.struct_type(&field_tys, false),
+        ))
     }
 
     /// Deserialize a returned JSON string into a List/Record value.

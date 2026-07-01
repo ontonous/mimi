@@ -8,6 +8,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Wrapper around *const File that implements Send/Sync for use in a static.
+/// SAFETY: The File is leaked (Box::leak) and lives for the process lifetime,
+/// so accessing it from any thread is safe. Callers must not mutate through
+/// this pointer.
+#[derive(Copy, Clone)]
+struct SendFilePtr(*const File);
+unsafe impl Send for SendFilePtr {}
+unsafe impl Sync for SendFilePtr {}
+
 // F8: Thread-local context for synchronous callback invocation.
 // Set before each FFI call that involves callbacks, cleared after.
 // Maps callback_id -> (Mimi closure, ret_is_float, arg_free_mask).
@@ -50,6 +59,74 @@ static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<
 fn global_callback_store(
 ) -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>> {
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// GLOBAL: Stored program File for cross-thread/async callback evaluation.
+/// When the TLS interpreter context is null (callback invoked from a different
+/// thread or after the synchronous FFI call completed), we create a temporary
+/// Interpreter from this stored File and evaluate the closure.
+/// The File is leaked once (Box::leak) at first callback registration time
+/// and lives for the process lifetime.
+static CALLBACK_FILE: std::sync::OnceLock<Mutex<Option<SendFilePtr>>> = std::sync::OnceLock::new();
+
+fn callback_file() -> &'static Mutex<Option<SendFilePtr>> {
+    CALLBACK_FILE.get_or_init(|| Mutex::new(None))
+}
+
+/// Leak a clone of the program File into the global callback store.
+/// Called from value_to_ffi_callback to enable cross-thread evaluation.
+fn ensure_callback_file(file: &File) {
+    let mut store = callback_file().lock().expect("CALLBACK_FILE lock poisoned");
+    if store.is_some() {
+        return;
+    }
+    let leaked = Box::into_raw(Box::new(file.clone()));
+    *store = Some(SendFilePtr(leaked as *const File));
+}
+
+/// Evaluate a Mimi closure from a cross-thread callback context.
+/// Creates a temporary Interpreter from the globally stored program file,
+/// evaluates the closure, and returns the result as an i64.
+fn evaluate_cross_thread_callback(
+    closure: &Value,
+    args: Vec<Value>,
+    ret_is_float: bool,
+) -> Result<i64, String> {
+    let file_ptr = {
+        let store = callback_file().lock().expect("CALLBACK_FILE lock poisoned");
+        store.as_ref().map(|s| s.0).ok_or_else(|| {
+            "no program file registered for cross-thread callback evaluation".to_string()
+        })?
+    };
+    // SAFETY: The File was Box::leaked and is valid for 'static.
+    let file = unsafe { &*file_ptr };
+    let mut interp = Interpreter::new(file);
+    interp.verify_contracts = false;
+    interp.verify_ffi = false;
+    let result = interp
+        .apply_closure_ffi(closure, args)
+        .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
+    if ret_is_float {
+        match result {
+            Value::Float(f) => Ok(f.to_bits() as i64),
+            Value::Int(n) => Ok((n as f64).to_bits() as i64),
+            _ => Err(format!(
+                "cross-thread callback: expected float return, got {}",
+                result
+            )),
+        }
+    } else {
+        match result {
+            Value::Int(n) => Ok(n),
+            Value::Bool(b) => Ok(b as i64),
+            Value::Float(f) => Ok(f.to_bits() as i64),
+            Value::Unit => Ok(0),
+            _ => Err(format!(
+                "cross-thread callback: unsupported return type: {}",
+                result
+            )),
+        }
+    }
 }
 
 /// F3: C-ABI function to deregister an async callback and free its resources.
@@ -209,22 +286,23 @@ unsafe fn callback_trampoline_inner(
         interp_ptr_copy
     };
     if interp_ptr.is_null() {
-        // Cross-thread / async callback: the synchronous FFI call has completed
-        // and the interpreter context has been cleared. OR reentrancy attempt
-        // (nested FFI call during callback). Full async evaluation (dispatching
-        // to a worker thread or event loop) is not yet supported.
-        // Return i64::MIN as a distinct error sentinel so the C caller can
-        // detect that the callback could not be evaluated.
-        eprintln!(
-            "[mimi] WARNING: callback {} invoked without an interpreter context \
-             (cross-thread, async, or reentrant). Returning i64::MIN. \
-             Async/off-thread callback evaluation is not yet fully supported. \
-             Reentrant callback evaluation is not supported.",
-            callback_id,
-        );
-        *result = i64::MIN;
-        // FFI-BUG-2: Free C-allocated string pointers before returning,
-        // otherwise the memory leaks on every cross-thread callback.
+        // Cross-thread / async callback: the TLS interpreter context has been
+        // cleared. Try to evaluate using a temporary Interpreter from the
+        // globally stored program file. If that also fails, return i64::MIN.
+        let xt_result = evaluate_cross_thread_callback(&closure, mimi_args, ret_is_float);
+        match xt_result {
+            Ok(val) => {
+                *result = val;
+            }
+            Err(msg) => {
+                eprintln!(
+                    "[mimi] WARNING: cross-thread callback {} evaluation failed: {}. \
+                     Returning i64::MIN.",
+                    callback_id, msg,
+                );
+                *result = i64::MIN;
+            }
+        }
         // SAFETY: arg_free_mask marks args that were transferred from C as
         // owned strings. Each non-null pointer was produced by CString::into_raw
         // on the other side of the FFI boundary and must be freed with libc::free.
@@ -239,7 +317,6 @@ unsafe fn callback_trampoline_inner(
                 }
             }
         }
-        // active_guard dropped here — decrements count
         return;
     }
     // SAFETY: interp_ptr was just read from FFI_CALLBACK_CTX, which stores a
@@ -346,6 +423,8 @@ impl<'a> Interpreter<'a> {
         ffi_guards: &mut Vec<FfiGuard>,
         callback_ids: &mut Vec<i64>,
     ) -> Result<i64, Errno> {
+        // Ensure the program File is stored for cross-thread callback evaluation.
+        ensure_callback_file(self.file);
         match arg {
             Value::Closure { .. } => {
                 let closure = arg.clone();

@@ -2,6 +2,22 @@
 
 ## [Unreleased] — 0.28.18-dev
 
+### Added
+- **复杂 `#[repr(C)]` record struct-by-value 返回（export wrapper）**：`src/codegen/func/export.rs::convert_internal_reprc_record_to_c` 现支持 heap-allocated C-layout 结构体指针返回（mixed types / >2 fields），C 调用方 `free(ptr)` 后回收。
+- **复杂 `#[repr(C)]` record struct-by-value 返回（import direction）**：`src/codegen/registry/funcs.rs::emit_complex_reprc_return` 显式 sret 路径——分配 struct 类型 alloca、prepend 指针为第一参数、调用 extern 后从 alloca 加载；避开 x86-64 上 MEMORY-class 结构的 ABI lowering 不匹配。配套 `c_struct_ty`、`is_complex_reprc_ret` 字段在 `ExternFnSignature` 上。
+- **Wrapper 参数类型修正**：在 `build_extern_signature` 中，wrapper 签名使用 Mimi 内部类型（`i32 → i64`），不再导致 caller `i64` 实参与 wrapper `i32` 形参的 LLVM 类型不匹配 crash。`emit_arg_conversions` 新增 `i32`/`bool` 截断，恢复到 C ABI 期望宽度。
+- **跨线程 callback 真实求值（interpreter）**：`src/interp/ffi/callback.rs` 引入 `SendFilePtr`（`unsafe Send+Sync` 的裸指针包装）+ `CALLBACK_FILE` 全局 `OnceLock<Mutex<...>>`，`ensure_callback_file` 在首次 `value_to_ffi_callback` 时 `Box::into_raw` 泄漏 File；`evaluate_cross_thread_callback` 创建临时 `Interpreter` 从泄漏 File 评估闭包。覆盖裸指针在 `Mutex` 中 `Sync` 的 unsafe 标记。
+
+### Fixed
+- `let v = extern_fn(...)` 在 codegen 现在正确写入 `var_type_names`（从 `func_defs` 扩展到 `extern_func_defs`），使 `v.field` 访问不再撞上 \[E0707\] "cannot access field on type 'v'"。
+- `insertvalue` 链不再使用 `const_named_struct(&[vals])` 构造动态 struct value——改为基于 `zeroinitializer` + `build_insert_value` 的逐步构造，避免 `scalar-to-vector conversion failed`（动态值不可作为常量实参）。
+
+### Tests
+- `dual_ffi_struct_return_complex` (`src/tests/dual_backend.rs`)：dual-backend 测试复杂 struct return（`MixedStruct { id: i32, value: f64, flag: i32 }`）从 `test_make_mixed`。
+- `dual_ffi_struct_return_complex_simple` (`src/tests/dual_backend.rs`)：非 extern 路径回归——验证 struct return + 字段读写在 codegen 端工作。
+- `export_complex_reprc_record_build` (`src/tests/build_shared.rs`)：把 Mimi 源编译成 `.so`、单独 C caller 通过 `dlopen`-style 链接调用 `make_mixed`、读取 heap-allocated 指针字段并 `free`。
+- `interp_ffi_threaded_callback` (`src/tests/ffi_interp_e2e.rs`)：通过 `test_threaded_callback` 在 std::thread 工作线程上调用 callback，验证 `SendFilePtr` + 临时 Interpreter 路径。
+
 ## [v0.28.17] - 2026-07-01
 
 ### Added

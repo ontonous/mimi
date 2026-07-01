@@ -1001,6 +1001,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     _ => {}
                                                 }
                                             }
+                                        } else if let Some(crate::ast::Type::Name(tn, _)) = self
+                                            .extern_func_defs
+                                            .get(func_name)
+                                            .and_then(|ef| ef.ret.as_ref())
+                                        {
+                                            self.var_type_names.insert(name.clone(), tn.clone());
                                         }
                                         // G-41: Track return types for builtins that return List<string>
                                         match func_name.as_str() {

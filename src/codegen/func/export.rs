@@ -460,10 +460,141 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(packed.into())
         } else {
-            Err(CompileError::LlvmError(format!(
-                "export wrapper: complex repr(C) record return '{}' not implemented",
-                name
-            )))
+            // Complex records: return a heap-allocated C-layout struct pointer.
+            // The C caller receives an opaque pointer and must free it.
+            let sv = internal_val.into_struct_value();
+            let c_sty = self.c_layout_struct_type(&fields)?;
+
+            // Compute the struct size via LLVM TargetData or manual computation.
+            let struct_size = self.compute_c_struct_size(&fields)?;
+            let i64_ty = self.context.i64_type();
+            let size_val = i64_ty.const_int(struct_size as u64, false);
+
+            // Declare or get malloc function
+            let malloc_fn = self.get_or_declare_malloc()?;
+
+            let c_ptr = self
+                .build_call(
+                    malloc_fn,
+                    &[BasicMetadataValueEnum::IntValue(size_val)],
+                    &format!("malloc_cret_{}", name),
+                )?
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
+                .into_pointer_value();
+
+            let c_typed_ptr = self.build_pointer_cast(
+                c_ptr,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                &format!("{}_cret_ptr", name),
+            )?;
+
+            for (fi, f) in fields.iter().enumerate() {
+                let raw = self
+                    .builder
+                    .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", name, f.name))
+                    .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
+                let c_field_val = self.convert_internal_field_to_c(raw, &f.ty)?;
+                let gep = self
+                    .gep()
+                    .build_struct_gep(
+                        c_sty,
+                        c_typed_ptr,
+                        fi as u32,
+                        &format!("{}_{}_gep", name, f.name),
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                self.build_store(gep, c_field_val)?;
+            }
+
+            Ok(c_ptr.into())
+        }
+    }
+
+    /// Compute the total size in bytes of a C-layout struct with the given fields,
+    /// using standard C struct padding rules (natural alignment).
+    fn compute_c_struct_size(&self, fields: &[Field]) -> MimiResult<usize> {
+        let mut max_align = 1usize;
+        let mut offset = 0usize;
+        for f in fields {
+            let (size, align) = self.field_c_size_align(&f.ty)?;
+            max_align = max_align.max(align);
+            let aligned = (offset + align - 1) & !(align - 1);
+            offset = aligned + size;
+        }
+        let total = (offset + max_align - 1) & !(max_align - 1);
+        Ok(total)
+    }
+
+    /// Get the C ABI size and alignment of a field type.
+    fn field_c_size_align(&self, ty: &Type) -> MimiResult<(usize, usize)> {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => Ok((4, 4)),
+                "i64" => Ok((8, 8)),
+                "f64" => Ok((8, 8)),
+                "bool" => Ok((1, 1)),
+                _ => Err(CompileError::LlvmError(format!(
+                    "export wrapper: unknown field type '{}' for C struct size",
+                    name
+                ))),
+            },
+            _ => Err(CompileError::LlvmError(format!(
+                "export wrapper: unsupported field type for C struct size: {}",
+                crate::core::fmt_type(ty)
+            ))),
+        }
+    }
+
+    /// Get or declare the `malloc` function in the LLVM module.
+    fn get_or_declare_malloc(&self) -> MimiResult<inkwell::values::FunctionValue<'ctx>> {
+        if let Some(f) = self.module.get_function("malloc") {
+            return Ok(f);
+        }
+        let i64_ty = self.context.i64_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
+        let f = self
+            .module
+            .add_function("malloc", fn_ty, Some(inkwell::module::Linkage::External));
+        Ok(f)
+    }
+
+    /// Convert a Mimi internal field value to its C ABI representation.
+    /// This is the reverse of `convert_c_field_to_internal`.
+    fn convert_internal_field_to_c(
+        &mut self,
+        internal_val: BasicValueEnum<'ctx>,
+        ty: &Type,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        match ty {
+            Type::Name(name, _) => match name.as_str() {
+                "i32" => {
+                    let iv = internal_val.into_int_value();
+                    Ok(self
+                        .builder
+                        .build_int_truncate(iv, self.context.i32_type(), "field_i32_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                        .into())
+                }
+                "bool" => {
+                    let iv = internal_val.into_int_value();
+                    Ok(self
+                        .builder
+                        .build_int_truncate(iv, self.context.i8_type(), "field_bool_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                        .into())
+                }
+                "i64" | "f64" => Ok(internal_val),
+                _ => Err(CompileError::LlvmError(format!(
+                    "export wrapper: unsupported field type '{}'",
+                    name
+                ))),
+            },
+            _ => Err(CompileError::LlvmError(format!(
+                "export wrapper: unsupported field type '{}'",
+                crate::core::fmt_type(ty)
+            ))),
         }
     }
 
@@ -480,7 +611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Convert a single C-layout record field to its internal representation.
-    fn convert_c_field_to_internal(
+    pub(crate) fn convert_c_field_to_internal(
         &mut self,
         c_val: BasicValueEnum<'ctx>,
         ty: &Type,

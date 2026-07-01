@@ -3298,6 +3298,15 @@ pub extern "C" fn __mimi_extern_test_make_point(x: i32, y: i32) -> __mimi_TestPo
     __mimi_TestPoint { x, y }
 }
 
+#[no_mangle]
+pub extern "C" fn __mimi_extern_test_make_mixed(
+    id: i32,
+    value: f64,
+    flag: i32,
+) -> __mimi_MixedStruct {
+    __mimi_MixedStruct { id, value, flag }
+}
+
 // Interpreter FFI wrappers (plain names, without __mimi_extern_test_ prefix)
 // These MUST have the exact `extern "C"` ABI so the FFI test .so bindings work.
 
@@ -3347,6 +3356,11 @@ pub extern "C" fn test_make_point(x: i32, y: i32) -> __mimi_TestPoint {
 }
 
 #[no_mangle]
+pub extern "C" fn test_make_mixed(id: i32, value: f64, flag: i32) -> __mimi_MixedStruct {
+    __mimi_extern_test_make_mixed(id, value, flag)
+}
+
+#[no_mangle]
 pub extern "C" fn test_mixed_struct(s: __mimi_MixedStruct) -> f64 {
     __mimi_extern_test_mixed_struct(s)
 }
@@ -3369,6 +3383,34 @@ pub extern "C" fn test_greet(x: i32) -> *mut std::ffi::c_char {
 #[no_mangle]
 pub extern "C" fn test_callback(x: i32, cb: Option<unsafe extern "C" fn(i32) -> i32>) -> i32 {
     __mimi_extern_test_callback(x, cb)
+}
+
+// Cross-thread callback helper (v0.28.18).
+//
+// `test_callback` invokes the callback on the SAME thread as the caller.
+// To validate that the interpreter correctly evaluates callbacks invoked
+// from a DIFFERENT thread (where TLS interpreter context is absent), we
+// provide `test_threaded_callback` which spawns a worker thread to invoke
+// the callback, then joins and returns the result.
+//
+// This exercises v0.28.18 cross-thread callback infrastructure:
+//   - src/interp/ffi/callback.rs:SendFilePtr + CALLBACK_FILE store
+//   - ensure_callback_file() registration at FFI call setup
+//   - evaluate_cross_thread_callback() temporary Interpreter path
+//
+// The cross-thread path is interpreter-only because the codegen callback
+// trampoline does not yet implement cross-thread closure evaluation.
+
+#[no_mangle]
+pub extern "C" fn test_threaded_callback(
+    x: i32,
+    cb: Option<unsafe extern "C" fn(i32) -> i32>,
+) -> i32 {
+    let handle = std::thread::spawn(move || match cb {
+        Some(f) => unsafe { f(x) },
+        None => i64::MIN as i32,
+    });
+    handle.join().unwrap_or(i64::MIN as i32)
 }
 
 // ---------------------------------------------------------------------------

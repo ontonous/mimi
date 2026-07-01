@@ -169,6 +169,39 @@ fn interp_ffi_callback() {
     );
 }
 
+/// Cross-thread callback test: spawn a worker thread that invokes the
+/// callback. Exercises the v0.28.18 cross-thread callback infrastructure
+/// (SendFilePtr + CALLBACK_FILE store + evaluate_cross_thread_callback).
+#[test]
+fn interp_ffi_threaded_callback() {
+    if !can_cc() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let _guard = FfiEnvLock::lock();
+    let so_path =
+        build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:threaded unwrap failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let result = run_source_result(
+        r#"
+        extern "C" {
+            func test_threaded_callback(x: i32, cb: func(i32) -> i32) -> i32
+        }
+        func main() -> i32 {
+            let factor = 3
+            let cb = fn(n: i32) -> i32 { n * factor + 7 }
+            test_threaded_callback(5, cb)
+        }
+    "#,
+    );
+    std::env::remove_var("MIMI_FFI_LIB");
+    // Worker thread invokes cb(5) = 5 * 3 + 7 = 22
+    assert_eq!(
+        result.expect("src/tests/ffi_interp_e2e.rs:threaded unwrap failed"),
+        interp::Value::Int(22)
+    );
+}
+
 #[test]
 fn interp_ffi_parse_int_raw_string() {
     if !can_cc() {

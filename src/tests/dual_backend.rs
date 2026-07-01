@@ -3474,6 +3474,74 @@ fn dual_ffi_struct_multiple_fields() {
     );
 }
 
+#[test]
+fn dual_ffi_struct_return_complex() {
+    if !can_cc() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_link() {
+        eprintln!("SKIP: linker not available");
+        return;
+    }
+    let _guard = FfiEnvLock::lock();
+    let so_path = build_interp_ffi_so().expect("dual_ffi_struct_return_complex: build so failed");
+    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    let src = r#"
+        #[repr(C)]
+        type MixedStruct { id: i32, value: f64, flag: i32 }
+        extern "C" {
+            func test_make_mixed(id: i32, value: f64, flag: i32) -> MixedStruct
+        }
+        func main() -> i32 {
+            let p = test_make_mixed(10, 3.5, 1)
+            println(p.id)
+            println(p.value)
+            println(p.flag)
+            0
+        }
+    "#;
+    let _interp = run_source(src);
+    // Keep MIMI_FFI_LIB set; the codegen binary is statically linked and ignores it.
+    let codegen_stdout = compile_and_run(src);
+    std::env::remove_var("MIMI_FFI_LIB");
+    match codegen_stdout {
+        Ok(out) => {
+            let lines: Vec<&str> = out.trim().lines().collect();
+            assert_eq!(lines.first().copied(), Some("10"));
+            assert_eq!(lines.get(1).copied(), Some("3.500000"));
+            assert_eq!(lines.get(2).copied(), Some("1"));
+        }
+        Err(e) => {
+            eprintln!("COMPILE_AND_RUN ERROR: {}", e);
+            panic!("codegen failed: {}", e);
+        }
+    }
+}
+
+#[test]
+fn dual_ffi_struct_return_complex_simple() {
+    if !can_link() {
+        return;
+    }
+    // Compare interpreter and codegen on a simple struct-return extern call
+    let src = r#"
+        #[repr(C)]
+        type MixedStruct { id: i32, value: f64, flag: i32 }
+        func make_mixed(id: i32, value: f64, flag: i32) -> MixedStruct {
+            MixedStruct { id, value, flag }
+        }
+        func main() -> i32 {
+            let p = make_mixed(10, 3.5, 1)
+            println(p.id)
+            println(p.value)
+            println(p.flag)
+            0
+        }
+    "#;
+    dual_assert!(src, "10\n3.500000\n1");
+}
+
 // ─── 25. v0.20 — Async/Poll-based Future (5 tests) ────────────
 
 #[test]
