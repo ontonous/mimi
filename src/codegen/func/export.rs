@@ -21,18 +21,6 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
 use inkwell::AddressSpace;
 use std::collections::HashMap;
 
-/// A `#[repr(C)]` record is "simple" if it fits in a single 64-bit integer
-/// under the System V AMD64 ABI: all fields are `i32` and there are at most
-/// two fields. Such records are passed/returned as a single `i64` in LLVM IR.
-fn is_simple_reprc_record(fields: &[Field]) -> bool {
-    if fields.len() > 2 {
-        return false;
-    }
-    fields
-        .iter()
-        .all(|f| matches!(&f.ty, Type::Name(n, _) if n == "i32"))
-}
-
 impl<'ctx> CodeGenerator<'ctx> {
     /// Compile an exported `extern "C"` function by emitting a C-ABI wrapper
     /// around an already-compiled internal body function.
@@ -108,7 +96,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             vars.insert(param.name.clone(), (alloca, internal_ty));
             let loaded = self.build_load(internal_ty, alloca, &format!("{}_load", param.name))?;
-            body_args.push(basic_value_to_metadata_value(&loaded));
+            body_args.push(types::basic_value_to_metadata_value(
+                &loaded,
+                self.context.i64_type(),
+            ));
         }
 
         let body_ret = self
@@ -146,7 +137,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             CompileError::LlvmError(format!("unknown repr(C) record '{}'", name))
                         })?;
                         if let TypeDefKind::Record(fields) = &td.kind {
-                            if is_simple_reprc_record(fields) {
+                            if types::is_simple_reprc_record(fields) {
                                 Ok(BasicTypeEnum::IntType(self.context.i64_type()))
                             } else {
                                 Ok(BasicTypeEnum::PointerType(
@@ -343,7 +334,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 CompileError::LlvmError(format!("internal type for '{}' missing", name))
             })?;
 
-        if is_simple_reprc_record(&fields) {
+        if types::is_simple_reprc_record(&fields) {
             let packed = c_val.into_int_value();
             let i64_ty = self.context.i64_type();
             let i32_ty = self.context.i32_type();
@@ -428,7 +419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        if is_simple_reprc_record(&fields) {
+        if types::is_simple_reprc_record(&fields) {
             let sv = internal_val.into_struct_value();
             let i64_ty = self.context.i64_type();
             let i32_ty = self.context.i32_type();
@@ -654,7 +645,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
                     Ok(BasicMetadataValueEnum::IntValue(truncated))
                 }
-                "i64" | "f64" => Ok(basic_value_to_metadata_value(&internal_val)),
+                "i64" | "f64" => Ok(types::basic_value_to_metadata_value(
+                    &internal_val,
+                    self.context.i64_type(),
+                )),
                 _ => Err(CompileError::LlvmError(format!(
                     "callback arg type '{}' not supported",
                     name
@@ -722,18 +716,5 @@ fn fn_type_for_basic_type<'ctx>(
         _ => Err(CompileError::LlvmError(
             "unsupported function return type".into(),
         )),
-    }
-}
-
-/// Convert a BasicValueEnum to its metadata value for calls.
-fn basic_value_to_metadata_value<'ctx>(val: &BasicValueEnum<'ctx>) -> BasicMetadataValueEnum<'ctx> {
-    match val {
-        BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
-        BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
-        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
-        BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
-        BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
-        BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
-        BasicValueEnum::ScalableVectorValue(_) => unreachable!(),
     }
 }
