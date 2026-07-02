@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::{is_sketch, resolve_path};
 use mimi::ast::Item;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+
 use mimi::{interp, lexer, loader, parser};
 
 pub(crate) fn test(
@@ -94,6 +95,7 @@ pub(crate) fn test(
     let mut passed = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
+    let use_color = colors_enabled();
 
     for func_name in &test_funcs {
         let mut interp = interp::Interpreter::new(&merged_file);
@@ -104,14 +106,24 @@ pub(crate) fn test(
         };
         match interp.call_named(func_name, vec![]) {
             Ok(_) => {
-                println!("  \x1b[32m✓\x1b[0m {}", func_name);
+                if use_color {
+                    println!("  \x1b[32m✓\x1b[0m {}", func_name);
+                } else {
+                    println!("  ✓ {}", func_name);
+                }
                 passed += 1;
             }
             Err(e) => {
                 if verbose {
-                    println!("  \x1b[31m✗\x1b[0m {}\n    Error: {}", func_name, e);
-                } else {
+                    if use_color {
+                        println!("  \x1b[31m✗\x1b[0m {}\n    Error: {}", func_name, e);
+                    } else {
+                        println!("  ✗ {}\n    Error: {}", func_name, e);
+                    }
+                } else if use_color {
                     println!("  \x1b[31m✗\x1b[0m {}: {}", func_name, e);
+                } else {
+                    println!("  ✗ {}: {}", func_name, e);
                 }
                 failed += 1;
                 errors.push((func_name.clone(), e));
@@ -119,10 +131,14 @@ pub(crate) fn test(
         }
     }
 
-    println!(
-        "\n\x1b[1m{}\x1b[0m passed, \x1b[1m{}\x1b[0m failed",
-        passed, failed
-    );
+    if use_color {
+        println!(
+            "\n\x1b[1m{}\x1b[0m passed, \x1b[1m{}\x1b[0m failed",
+            passed, failed
+        );
+    } else {
+        println!("\n{} passed, {} failed", passed, failed);
+    }
     if failed > 0 {
         if verbose {
             println!("\nFailed tests:");

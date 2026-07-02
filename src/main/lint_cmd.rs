@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use mimi::diagnostic::Severity;
 use mimi::{lexer, lint, parser};
 
-pub(crate) fn lint_files(files: &[PathBuf]) -> Result<(), String> {
+pub(crate) fn lint_files(files: &[PathBuf], fail_on_warnings: bool) -> Result<(), String> {
     let linter = lint::Linter::new();
+    let mut has_errors = false;
     let mut has_warnings = false;
 
     if files.is_empty() {
@@ -29,13 +30,21 @@ pub(crate) fn lint_files(files: &[PathBuf]) -> Result<(), String> {
                 Severity::Help => "help",
             };
             eprintln!("{}: [{}] {}", path.display(), severity, diag.message);
-            has_warnings = true;
+            if diag.severity == Severity::Error {
+                has_errors = true;
+            } else if diag.severity == Severity::Warning {
+                has_warnings = true;
+            }
         }
     }
 
-    if has_warnings {
+    if has_errors || (fail_on_warnings && has_warnings) {
         std::process::exit(1);
     }
-    println!("no issues found");
+    if has_warnings {
+        println!("no errors found (warnings present; use --fail-on-warnings to exit non-zero)");
+    } else {
+        println!("no issues found");
+    }
     Ok(())
 }

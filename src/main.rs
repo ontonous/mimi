@@ -56,7 +56,7 @@ mod update;
 mod verify;
 
 #[derive(Parser, Debug)]
-#[command(name = "mimi", version = "0.28.17-dev", about = "Mimi language driver")]
+#[command(name = "mimi", version = env!("CARGO_PKG_VERSION"), about = "Mimi language driver")]
 struct Args {
     #[command(subcommand)]
     cmd: Command,
@@ -159,7 +159,8 @@ enum Command {
     Lsp,
     /// Format .mimi files
     Fmt {
-        /// File(s) to format; use - for stdin
+        /// File(s) to format; use - for stdin. If omitted, all .mimi files
+        /// under the current project or working directory are formatted.
         files: Vec<PathBuf>,
         /// Check mode: exit with non-zero if formatting changes needed
         #[arg(long)]
@@ -169,6 +170,9 @@ enum Command {
     Lint {
         /// File(s) to lint
         files: Vec<PathBuf>,
+        /// Treat warnings as errors (exit non-zero on warnings)
+        #[arg(long)]
+        fail_on_warnings: bool,
     },
     /// Verify contracts using Z3 SMT solver
     Verify {
@@ -419,7 +423,10 @@ fn main() {
         Command::Tree => tree::tree(),
         Command::Lsp => lsp_cmd::lsp(),
         Command::Fmt { files, check } => fmt_cmd::fmt_files(&files, check),
-        Command::Lint { files } => lint_cmd::lint_files(&files),
+        Command::Lint {
+            files,
+            fail_on_warnings,
+        } => lint_cmd::lint_files(&files, fail_on_warnings),
         Command::Verify {
             path,
             stats,
