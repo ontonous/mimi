@@ -379,6 +379,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Compile-time fold a literal-only quote! block.
     /// quote! { 42 } → returns i64(42), bypassing QuotedAst construction.
+    /// v0.28.21: extended to recursively fold literal-only arithmetic
+    /// and unary expressions (e.g. `quote! { 10 + 20 }` → 30).
     fn compile_quote_fold(&self, block: &Block) -> Option<BasicValueEnum<'ctx>> {
         match block.as_slice() {
             [Stmt::Expr(expr)] => self.compile_quote_fold_expr(expr),
@@ -466,6 +468,155 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Literal(lit) => self.compile_literal_const(lit),
             Expr::Block(block) => match block.as_slice() {
                 [Stmt::Expr(e)] => self.compile_quote_fold_expr(e),
+                _ => None,
+            },
+            Expr::Binary(op, l, r) => {
+                let lv = self.compile_quote_fold_expr(l)?;
+                let rv = self.compile_quote_fold_expr(r)?;
+                self.fold_const_binary(*op, lv, rv)
+            }
+            Expr::Unary(op, inner) => {
+                let v = self.compile_quote_fold_expr(inner)?;
+                self.fold_const_unary(*op, v)
+            }
+            _ => None,
+        }
+    }
+
+    /// v0.28.21 — Apply a binary op to two LLVM constant values at codegen
+    /// time. Returns `None` if the operator or types are unsupported.
+    fn fold_const_binary(
+        &self,
+        op: crate::ast::BinOp,
+        l: BasicValueEnum<'ctx>,
+        r: BasicValueEnum<'ctx>,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        use crate::ast::BinOp;
+        match (l, r) {
+            (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
+                let result = match op {
+                    BinOp::Add => self.context.i64_type().const_int(
+                        a.get_zero_extended_constant().unwrap_or(0)
+                            .wrapping_add(b.get_zero_extended_constant().unwrap_or(0)),
+                        false,
+                    ),
+                    BinOp::Sub => self.context.i64_type().const_int(
+                        a.get_zero_extended_constant().unwrap_or(0)
+                            .wrapping_sub(b.get_zero_extended_constant().unwrap_or(0)),
+                        false,
+                    ),
+                    BinOp::Mul => self.context.i64_type().const_int(
+                        a.get_zero_extended_constant().unwrap_or(0)
+                            .wrapping_mul(b.get_zero_extended_constant().unwrap_or(0)),
+                        false,
+                    ),
+                    BinOp::Div => {
+                        let rb = b.get_zero_extended_constant().unwrap_or(0);
+                        if rb == 0 {
+                            return None;
+                        }
+                        self.context.i64_type().const_int(
+                            a.get_zero_extended_constant().unwrap_or(0) / rb,
+                            false,
+                        )
+                    }
+                    BinOp::Mod => {
+                        let rb = b.get_zero_extended_constant().unwrap_or(0);
+                        if rb == 0 {
+                            return None;
+                        }
+                        self.context.i64_type().const_int(
+                            a.get_zero_extended_constant().unwrap_or(0) % rb,
+                            false,
+                        )
+                    }
+                    BinOp::EqCmp => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            == b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::NeCmp => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            != b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::Lt => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            < b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::Le => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            <= b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::Gt => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            > b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::Ge => self.context.bool_type().const_int(
+                        (a.get_zero_extended_constant().unwrap_or(0)
+                            >= b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                        false,
+                    ),
+                    BinOp::And | BinOp::BitAnd => self.context.bool_type().const_int(
+                        ((a.get_zero_extended_constant().unwrap_or(0) != 0)
+                            && (b.get_zero_extended_constant().unwrap_or(0) != 0))
+                            as u64,
+                        false,
+                    ),
+                    BinOp::Or | BinOp::BitOr => self.context.bool_type().const_int(
+                        ((a.get_zero_extended_constant().unwrap_or(0) != 0)
+                            || (b.get_zero_extended_constant().unwrap_or(0) != 0))
+                            as u64,
+                        false,
+                    ),
+                    _ => return None,
+                };
+                Some(BasicValueEnum::IntValue(result))
+            }
+            (BasicValueEnum::FloatValue(_), BasicValueEnum::FloatValue(_)) => {
+                // v0.28.21: float constant fold not yet supported (inkwell's
+                // get_constant() returns an opaque LLVMValueRef, not the
+                // raw f64). Float arithmetic in `quote! { ... }` still
+                // requires interpreter evaluation; covered by the
+                // fold_comptime_block path for `comptime { ... }`.
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// v0.28.21 — Apply a unary op to a constant value at codegen time.
+    fn fold_const_unary(
+        &self,
+        op: crate::ast::UnOp,
+        v: BasicValueEnum<'ctx>,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        use crate::ast::UnOp;
+        match op {
+            UnOp::Neg => match v {
+                BasicValueEnum::IntValue(iv) => {
+                    let n = iv.get_zero_extended_constant().unwrap_or(0);
+                    Some(BasicValueEnum::IntValue(
+                        self.context.i64_type().const_int((!n).wrapping_add(1), true),
+                    ))
+                }
+                BasicValueEnum::FloatValue(_) => {
+                    // Float constant fold not yet supported (see
+                    // fold_const_binary note).
+                    None
+                }
+                _ => None,
+            },
+            UnOp::Not => match v {
+                BasicValueEnum::IntValue(iv) => {
+                    let n = iv.get_zero_extended_constant().unwrap_or(0);
+                    Some(BasicValueEnum::IntValue(
+                        self.context.i64_type().const_int((n == 0) as u64, false),
+                    ))
+                }
                 _ => None,
             },
             _ => None,

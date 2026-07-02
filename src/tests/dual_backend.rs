@@ -6662,7 +6662,8 @@ fn dual_quote_literal_fold() {
         r#"
         func main() -> i32 {
             let v = ast_eval(quote! { 42 })
-            v
+            println(v)
+            0
         }
         "#,
         "42"
@@ -6678,7 +6679,9 @@ fn dual_quote_arith_fold() {
     dual_assert!(
         r#"
         func main() -> i32 {
-            ast_eval(quote! { 10 + 20 })
+            let v = ast_eval(quote! { 10 + 20 })
+            println(v)
+            0
         }
         "#,
         "30"

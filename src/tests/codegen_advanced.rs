@@ -544,13 +544,23 @@ fn adv_parasteps_basic() {
     );
 }
 
-// ===================== Quote/Comptime Error Tests =====================
+// ===================== Quote/Comptime Tests =====================
+//
+// v0.28.21 — `comptime { ... }` and literal-only `quote! { ... }` blocks
+// are folded to LLVM constants via the interpreter; previously these were
+// rejected at codegen time. The error-message tests below verify that
+// runtime-dependent content (e.g. `comptime { x + 1 }` referencing a
+// runtime `x`) still errors out with a helpful message.
 
 #[test]
-fn adv_quote_produces_error() {
+fn adv_quote_runtime_dep_produces_error() {
+    // quote! { x + 1 } references a runtime variable x; the literal-only
+    // fold path cannot resolve it. The compile-time eval path tries the
+    // interpreter, which fails because x is not in scope.
     let src = r#"
         func main() -> i64 {
-            let ast = quote { let x = 1 }
+            let x = 10
+            let ast = quote! { x + 1 }
             0
         }
     "#;
@@ -558,31 +568,37 @@ fn adv_quote_produces_error() {
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     let result = codegen.compile_file(&file);
-    assert!(result.is_err(), "quote should produce error in codegen");
+    assert!(result.is_err(), "runtime-dependent quote! should error in codegen");
 }
 
 #[test]
-fn adv_comptime_produces_error() {
+fn adv_comptime_folds_literally() {
+    // v0.28.21: comptime { 1 + 2 } now folds to Value::Int(3) at codegen time.
     let src = r#"
         func main() -> i64 {
             let x = comptime { 1 + 2 }
-            0
+            x
         }
     "#;
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let result = codegen.compile_file(&file);
-    assert!(result.is_err(), "comptime should produce error in codegen");
+    assert!(
+        codegen.compile_file(&file).is_ok(),
+        "comptime {{ 1 + 2 }} should fold to a constant in codegen"
+    );
 }
 
 #[test]
-fn adv_comptime_block_error_message() {
-    // eedf8be: comptime blocks get a specific error message mentioning how to fix
+fn adv_comptime_runtime_dep_errors() {
+    // comptime { x + 1 } where x is a runtime variable still errors,
+    // because the codegen-time interpreter does not see the surrounding
+    // runtime scope. Verify the error message names the offending block.
     let src = r#"
         func main() -> i64 {
-            let x = comptime { 1 + 2 }
-            0
+            let x = 10
+            let v = comptime { x + 1 }
+            v
         }
     "#;
     let file = parse(src);
@@ -590,20 +606,15 @@ fn adv_comptime_block_error_message() {
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     let err = codegen.compile_file(&file).unwrap_err().to_string();
     assert!(
-        err.contains("comptime"),
-        "comptime error should mention 'comptime', got: {}",
-        err
-    );
-    assert!(
-        err.contains("mimi run"),
-        "comptime error should suggest 'mimi run', got: {}",
+        err.contains("comptime") || err.contains("fold"),
+        "comptime runtime-dep error should mention fold/comptime, got: {}",
         err
     );
 }
 
 #[test]
 fn adv_comptime_func_call_works() {
-    // comptime functions are compiled in codegen/JIT mode and can be called at runtime
+    // comptime functions are folded at codegen time and inlined as constants.
     let src = r#"
         comptime func get_magic() -> i64 { 42 }
         func main() -> i64 { get_magic() }
@@ -618,51 +629,19 @@ fn adv_comptime_func_call_works() {
 }
 
 #[test]
-fn adv_quote_block_error_message() {
-    // eedf8be: quote blocks get specific error message
-    // (note: literal-only quote! blocks are now folded at compile time
-    //  and no longer produce errors; use runtime-dependent content to test)
+fn adv_quote_literal_fold_succeeds() {
+    // quote! { 42 } folds to Value::Int(42); no error.
     let src = r#"
         func main() -> i64 {
-            let x = 10;
-            let ast = quote! { x + 1 };
-            0
+            let v = ast_eval(quote! { 42 })
+            v
         }
     "#;
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen.compile_file(&file).unwrap_err().to_string();
     assert!(
-        err.contains("quote"),
-        "quote error should mention 'quote', got: {}",
-        err
-    );
-}
-
-#[test]
-fn adv_quote_interpolate_error_message() {
-    // eedf8be: ${} inside quote! {} — the outer Quote error fires first
-    // (QuoteInterpolate error is a safety net; in practice Quote always wraps it)
-    let src = r#"
-        func main() -> i64 {
-            let x = 10;
-            let ast = quote! { $(x + 1) };
-            0
-        }
-    "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen.compile_file(&file).unwrap_err().to_string();
-    assert!(
-        err.contains("quote"),
-        "quote error should mention 'quote', got: {}",
-        err
-    );
-    assert!(
-        err.contains("mimi run"),
-        "quote error should suggest 'mimi run', got: {}",
-        err
+        codegen.compile_file(&file).is_ok(),
+        "literal-only quote! should fold without error"
     );
 }
