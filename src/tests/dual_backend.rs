@@ -6878,3 +6878,39 @@ fn dual_quote_with_comptime_conditional() {
         "100"
     );
 }
+
+#[test]
+fn dual_match_bare_zero_arity_constructor_does_not_bind() {
+    // Regression: a bare zero-arity constructor pattern like `Null` must be
+    // treated as a constructor match, not as a variable binding that silently
+    // captures any other variant.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Status {
+            Pending
+            Running
+            Done
+            Failed
+        }
+        func label(s: Status) -> string {
+            match s {
+                Pending => "pending"
+                Running => "running"
+                Done => "done"
+                Failed => "failed"
+            }
+        }
+        func main() -> i32 {
+            println(label(Pending()))
+            println(label(Running()))
+            println(label(Done()))
+            println(label(Failed()))
+            0
+        }
+        "#,
+        "pending\nrunning\ndone\nfailed"
+    );
+}

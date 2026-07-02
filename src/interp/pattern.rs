@@ -1,13 +1,35 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
+    /// Match a pattern in a matching context (match arm, while-let).
+    /// Bare constructor names are treated as constructor patterns unless the
+    /// name is currently bound as a variable (shadowing).
     pub(crate) fn match_pattern(
         &self,
         pat: &Pattern,
         value: &Value,
     ) -> Option<Vec<(String, Value)>> {
+        self.match_pattern_with_mode(pat, value, true)
+    }
+
+    /// Match a pattern in a binding context (let, parasteps spawn).
+    /// Bare constructor names are always bound as variables.
+    pub(crate) fn match_pattern_bind(
+        &self,
+        pat: &Pattern,
+        value: &Value,
+    ) -> Option<Vec<(String, Value)>> {
+        self.match_pattern_with_mode(pat, value, false)
+    }
+
+    fn match_pattern_with_mode(
+        &self,
+        pat: &Pattern,
+        value: &Value,
+        allow_constructor: bool,
+    ) -> Option<Vec<(String, Value)>> {
         let mut bindings = Vec::new();
-        if self.match_pattern_inner(pat, value, &mut bindings) {
+        if self.match_pattern_inner(pat, value, allow_constructor, &mut bindings) {
             Some(bindings)
         } else {
             None
@@ -18,23 +40,23 @@ impl<'a> Interpreter<'a> {
         &self,
         pat: &Pattern,
         value: &Value,
+        allow_constructor: bool,
         bindings: &mut Vec<(String, Value)>,
     ) -> bool {
         match pat {
             Pattern::Wildcard => true,
             Pattern::Variable(name) => {
-                // Check if this is a zero-arity constructor (enum variant without payload).
-                // The parser produces Pattern::Variable for bare identifiers like `Red`,
-                // but we must treat them as constructor patterns at runtime.
-                // If the name matches a constructor AND the value actually IS that variant,
-                // treat as constructor match. Otherwise, fall through to variable binding.
-                if self.constructors.contains_key(name) {
+                // Bare identifiers like `Red` are parsed as Pattern::Variable, but at
+                // runtime they often denote zero-arity enum constructors. In matching
+                // contexts, treat a constructor name as a constructor pattern unless
+                // the name is currently bound as a variable (shadowing). In binding
+                // contexts (let, spawn), always bind it as a variable.
+                let is_bound = self.lookup(name).is_some();
+                if allow_constructor && !is_bound && self.constructors.contains_key(name) {
                     if let Value::Variant(vname, _) = value {
-                        if vname == name {
-                            return true;
-                        }
+                        return vname == name;
                     }
-                    // Not actually a constructor match — bind the value to the variable instead.
+                    return false;
                 }
                 bindings.push((name.clone(), value.clone()));
                 true
@@ -57,7 +79,7 @@ impl<'a> Interpreter<'a> {
                             return false;
                         }
                         for (p, v) in pats.iter().zip(vals.iter()) {
-                            if !self.match_pattern_inner(p, v, bindings) {
+                            if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
                                 return false;
                             }
                         }
@@ -65,7 +87,7 @@ impl<'a> Interpreter<'a> {
                     }
                     // Handle newtype pattern matching: UserId(v) matches Newtype(v)
                     Value::Newtype(inner) if pats.len() == 1 => {
-                        self.match_pattern_inner(&pats[0], inner, bindings)
+                        self.match_pattern_inner(&pats[0], inner, allow_constructor, bindings)
                     }
                     _ => false,
                 }
@@ -73,7 +95,7 @@ impl<'a> Interpreter<'a> {
             Pattern::Tuple(pats) => match value {
                 Value::Tuple(vals) if pats.len() == vals.len() => {
                     for (p, v) in pats.iter().zip(vals.iter()) {
-                        if !self.match_pattern_inner(p, v, bindings) {
+                        if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
                             return false;
                         }
                     }
@@ -92,7 +114,7 @@ impl<'a> Interpreter<'a> {
                     return false;
                 }
                 for (p, v) in pats.iter().zip(vals.iter()) {
-                    if !self.match_pattern_inner(p, v, bindings) {
+                    if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
                         return false;
                     }
                 }
@@ -110,14 +132,19 @@ impl<'a> Interpreter<'a> {
                 }
                 // Match prefix patterns
                 for (p, v) in pats.iter().zip(vals.iter()) {
-                    if !self.match_pattern_inner(p, v, bindings) {
+                    if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
                         return false;
                     }
                 }
                 // Bind rest pattern to remaining elements
                 if let Some(rest_pat) = rest {
                     let remaining: Vec<Value> = vals[pats.len()..].to_vec();
-                    return self.match_pattern_inner(rest_pat, &Value::List(remaining), bindings);
+                    return self.match_pattern_inner(
+                        rest_pat,
+                        &Value::List(remaining),
+                        allow_constructor,
+                        bindings,
+                    );
                 }
                 true
             }

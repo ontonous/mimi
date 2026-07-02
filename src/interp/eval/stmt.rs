@@ -70,7 +70,7 @@ impl<'a> Interpreter<'a> {
             v.clone()
         };
 
-        if let Some(bindings) = self.match_pattern(pat, &final_value) {
+        if let Some(bindings) = self.match_pattern_bind(pat, &final_value) {
             for (name, val) in bindings {
                 if mut_ {
                     self.bind_mut(&name, val)?;
@@ -764,7 +764,7 @@ impl<'a> Interpreter<'a> {
                         Some(e) => self.eval_expr(e)?,
                         None => Value::Unit,
                     };
-                    if let Some(bindings) = self.match_pattern(pat, &v) {
+                    if let Some(bindings) = self.match_pattern_bind(pat, &v) {
                         for (name, val) in bindings {
                             self.bind(&name, val)?;
                         }
