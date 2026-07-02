@@ -568,7 +568,10 @@ fn adv_quote_runtime_dep_produces_error() {
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     let result = codegen.compile_file(&file);
-    assert!(result.is_err(), "runtime-dependent quote! should error in codegen");
+    assert!(
+        result.is_err(),
+        "runtime-dependent quote! should error in codegen"
+    );
 }
 
 #[test]
