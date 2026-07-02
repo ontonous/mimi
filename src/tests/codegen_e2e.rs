@@ -855,7 +855,8 @@ fn e2e_float_sub() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:592 unwrap failed");
-    assert_eq!(stdout.trim(), "7.000000");
+    // P0-3: codegen now uses %g (shortest round-trip), matching interp.
+    assert_eq!(stdout.trim(), "7");
 }
 
 #[test]
@@ -870,7 +871,8 @@ fn e2e_float_mul() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:601 unwrap failed");
-    assert_eq!(stdout.trim(), "12.000000");
+    // P0-3: codegen now uses %g (shortest round-trip), matching interp.
+    assert_eq!(stdout.trim(), "12");
 }
 
 #[test]
@@ -885,7 +887,8 @@ fn e2e_float_div() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:610 unwrap failed");
-    assert_eq!(stdout.trim(), "2.500000");
+    // P0-3: codegen now uses %g (shortest round-trip), matching interp.
+    assert_eq!(stdout.trim(), "2.5");
 }
 
 #[test]

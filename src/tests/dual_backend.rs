@@ -875,6 +875,30 @@ fn dual_enum_ctor() {
     );
 }
 
+// P0-3: multi-arg println must match the interpreter's
+// `parts.join(" ")` semantics — single space between args, booleans
+// printed as "true"/"false" (not 1/0), and f64 in shortest round-trip
+// form (not fixed "%f" 6-decimals).
+#[test]
+fn dual_println_mixed_args() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let i: i32 = 42
+            let f: f64 = 3.14
+            let b: bool = true
+            let s: string = "hello"
+            println(i, f, b, s)
+            0
+        }
+    "#,
+        "42 3.14 true hello"
+    );
+}
+
 // P0-2: enum constructors with non-i32 single payloads (e.g. f64)
 // must round-trip the value, not replace it with garbage. The codegen
 // ctor was declared as `(i64) -> ...` regardless of payload type, so
@@ -3108,7 +3132,8 @@ fn dual_actor_f64_return() {
             0
         }
     "#,
-        "4.500000"
+        // P0-3: %g shortest round-trip, matches interp.
+        "4.5"
     );
 }
 
@@ -3569,7 +3594,8 @@ fn dual_numeric_coercion_i32_f64_add() {
             0
         }
     "#,
-        "12.500000"
+        // P0-3: %g shortest round-trip, matches interp.
+        "12.5"
     );
 }
 
@@ -3587,7 +3613,8 @@ fn dual_numeric_coercion_i64_f64_mul() {
             0
         }
     "#,
-        "14.000000"
+        // P0-3: %g shortest round-trip, matches interp.
+        "14"
     );
 }
 
@@ -4107,10 +4134,10 @@ fn dual_ffi_struct_multiple_fields() {
     let codegen_stdout = compile_and_run(src).expect("codegen failed");
     std::env::remove_var("MIMI_FFI_LIB");
     // 10 + 3.5 + 1 = 14.5 (the C function sums all fields)
-    // Note: %f format prints 6 decimal places, so "14.500000"
+    // P0-3: %g shortest round-trip, matches interp.
     assert_eq!(
         codegen_stdout.trim(),
-        "14.500000",
+        "14.5",
         "codegen mixed struct FFI mismatch"
     );
 }
@@ -4150,7 +4177,8 @@ fn dual_ffi_struct_return_complex() {
         Ok(out) => {
             let lines: Vec<&str> = out.trim().lines().collect();
             assert_eq!(lines.first().copied(), Some("10"));
-            assert_eq!(lines.get(1).copied(), Some("3.500000"));
+            // P0-3: %g shortest round-trip, matches interp.
+            assert_eq!(lines.get(1).copied(), Some("3.5"));
             assert_eq!(lines.get(2).copied(), Some("1"));
         }
         Err(e) => {
@@ -4180,7 +4208,8 @@ fn dual_ffi_struct_return_complex_simple() {
             0
         }
     "#;
-    dual_assert!(src, "10\n3.500000\n1");
+    // P0-3: %g shortest round-trip, matches interp.
+    dual_assert!(src, "10\n3.5\n1");
 }
 
 // ─── 25. v0.20 — Async/Poll-based Future (5 tests) ────────────
@@ -6196,7 +6225,8 @@ fn dual_append_file() {
             0
         }
         "#,
-        "1"
+        // P0-3: bools print as "true"/"false", matches interp.
+        "true"
     );
 }
 
@@ -6213,7 +6243,8 @@ fn dual_set_env() {
             0
         }
         "#,
-        "1"
+        // P0-3: bools print as "true"/"false", matches interp.
+        "true"
     );
 }
 

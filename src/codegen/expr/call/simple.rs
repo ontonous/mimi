@@ -169,6 +169,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
         }
         if crate::codegen::builtins::is_builtin(name) {
+            // P0-3: for the print/println/eprintln family only, convert
+            // boolean args to "true"/"false" string pointers before
+            // handing them to the builtin dispatch. Other builtins
+            // (e.g. atomic_bool_new) legitimately expect an i64, so the
+            // conversion must stay scoped to print sinks.
+            if matches!(name, "println" | "print" | "eprintln" | "format") {
+                for (i, src) in args.iter().enumerate() {
+                    if i >= metadata_args.len() {
+                        break;
+                    }
+                    if let Some(replaced) = self.maybe_bool_to_string(
+                        src,
+                        match metadata_args[i] {
+                            BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                            BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                            _ => continue,
+                        },
+                    ) {
+                        metadata_args[i] = match replaced {
+                            BasicValueEnum::IntValue(iv) => {
+                                BasicMetadataValueEnum::IntValue(iv)
+                            }
+                            BasicValueEnum::FloatValue(fv) => {
+                                BasicMetadataValueEnum::FloatValue(fv)
+                            }
+                            BasicValueEnum::PointerValue(pv) => {
+                                BasicMetadataValueEnum::PointerValue(pv)
+                            }
+                            BasicValueEnum::StructValue(sv) => {
+                                BasicMetadataValueEnum::StructValue(sv)
+                            }
+                            _ => continue,
+                        };
+                    }
+                }
+            }
             return self
                 .compile_builtin_call(name, &metadata_args)
                 .map_err(|e| CompileError::Generic(e.to_string()));

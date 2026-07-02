@@ -127,12 +127,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         | "substring"
                 )
             }
-            Expr::Turbofish(name, _, _) => {
-                matches!(name.as_str(), "to_string")
-            }
+            Expr::Turbofish(name, _, _) => matches!(name.as_str(), "to_string"),
             Expr::Binary(BinOp::Add, lhs, _) => self.expr_is_string(lhs),
             Expr::If { then_, else_, .. } => {
-                // Check if either branch returns a string
                 if let Some(Stmt::Expr(e)) = then_.last() {
                     if self.expr_is_string(e) {
                         return true;
@@ -148,6 +145,74 @@ impl<'ctx> CodeGenerator<'ctx> {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// P0-3: convert a bool source expression to a C string pointer
+    /// suitable for `%s` printf formatting. Returns `Some(ptr)` for
+    /// known bool literals (compile-time string globals) and for
+    /// variables whose tracked Mimi type is `bool` (runtime
+    /// `select` between "true"/"false" globals). Returns `None` for
+    /// other expression kinds; the caller leaves the original
+    /// compiled value alone.
+    pub(in crate::codegen) fn maybe_bool_to_string(
+        &self,
+        expr: &Expr,
+        value: BasicValueEnum<'ctx>,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let build_global = |s: &str, name: &str| -> Option<inkwell::values::PointerValue<'ctx>> {
+            Some(
+                self.builder
+                    .build_global_string_ptr(s, name)
+                    .ok()?
+                    .as_pointer_value(),
+            )
+        };
+        let make_string_value = |pv: inkwell::values::PointerValue<'ctx>| -> BasicValueEnum<'ctx> {
+            pv.into()
+        };
+        match expr {
+            Expr::Literal(Lit::Bool(true)) => {
+                Some(make_string_value(build_global("true", "bool_true_lit")?))
+            }
+            Expr::Literal(Lit::Bool(false)) => {
+                Some(make_string_value(build_global("false", "bool_false_lit")?))
+            }
+            Expr::Ident(name) => {
+                let is_bool = self
+                    .var_type_names
+                    .get(name)
+                    .map(|t| t == "bool")
+                    .unwrap_or(false);
+                if !is_bool {
+                    return None;
+                }
+                let true_global = build_global("true", "bool_true_var")?;
+                let false_global = build_global("false", "bool_false_var")?;
+                let cond = match value {
+                    BasicValueEnum::IntValue(iv) => self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            iv,
+                            self.context.i64_type().const_int(0, false),
+                            "bool_ne_zero",
+                        )
+                        .ok()?,
+                    _ => return None,
+                };
+                let selected = self
+                    .builder
+                    .build_select(
+                        cond,
+                        BasicValueEnum::PointerValue(true_global),
+                        BasicValueEnum::PointerValue(false_global),
+                        "bool_str",
+                    )
+                    .ok()?;
+                Some(selected)
+            }
+            _ => None,
         }
     }
     /// Determine the Mimi Type of an expression by resolving through the

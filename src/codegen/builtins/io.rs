@@ -27,7 +27,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Build format and arg list, handling struct/enum values by extracting the payload
         let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         let mut fmt_str = String::new();
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
+            // P0-3: insert a single space between adjacent args, matching
+            // the interpreter's `parts.join(" ")` semantics.
+            if i > 0 {
+                fmt_str.push(' ');
+            }
             let (print_arg, spec) = self.extract_print_arg(arg, i64_ty)?;
             print_args.push(print_arg);
             fmt_str.push_str(&spec);
@@ -90,7 +95,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((BasicMetadataValueEnum::IntValue(*iv), "%ld".to_string()))
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
-                Ok((BasicMetadataValueEnum::FloatValue(*fv), "%f".to_string()))
+                // P0-3: use %g (shortest round-trip) to match the
+                // interpreter's `{}` Display format. %f always prints 6
+                // decimals (e.g. "3.140000" for 3.14), %g prints "3.14".
+                Ok((BasicMetadataValueEnum::FloatValue(*fv), "%g".to_string()))
             }
             _ => Ok((*arg, "%p".to_string())),
         }
