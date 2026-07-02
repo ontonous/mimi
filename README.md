@@ -52,7 +52,7 @@ Mimi is evolving fast and we'd love your feedback. Whether you're a programming 
 
 | Method | Path |
 |---|---|
-| **Report Bugs** | Open an [Issue](https://github.com/ontos-hpc/mimi/issues) with reproduction steps, platform info, and a minimal reproducer. |
+| **Report Bugs** | Open an [Issue](https://github.com/ontonous/mimi/issues) with reproduction steps, platform info, and a minimal reproducer. |
 | **Feature Requests** | Describe your use case and expected behavior via an Issue. |
 | **Improve Docs** | Syntax reference, standard library comments, example programs — any change that makes Mimi easier to learn is welcome. |
 | **Contribute Code** | Read [CONTRIBUTING.md](CONTRIBUTING.md) and start with a `good first issue`. |
@@ -98,7 +98,7 @@ Mimi is the production compiler backend for the **MimiSpec** intent-description 
 
 ```bash
 # Clone
-git clone https://github.com/ontos-hpc/mimi
+git clone https://github.com/ontonous/mimi
 cd mimi
 
 # Setup LLVM 18

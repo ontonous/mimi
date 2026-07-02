@@ -107,6 +107,11 @@ pub(crate) fn build(
         file
     };
 
+    // Auto-merge standard library prelude unless --no-std
+    if !no_std {
+        loader::merge_prelude_into(&mut merged_file);
+    }
+
     // Map inline rule statements to structured contracts
     mimi::contracts::map_rule_contracts(&mut merged_file);
 

@@ -120,7 +120,14 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen, "`)`")?;
-                Ok(Type::Tuple(elems))
+                // Empty tuple `()` is the unit type — use the canonical Name form
+                // so it unifies with other unit representations (default return type,
+                // Lit::Unit literal, etc.)
+                if elems.is_empty() {
+                    Ok(Type::Name("unit".into(), vec![]))
+                } else {
+                    Ok(Type::Tuple(elems))
+                }
             }
             TokenKind::Shared => {
                 self.advance();

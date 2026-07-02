@@ -376,6 +376,54 @@ impl ModuleLoader {
     }
 }
 
+/// Load the standard library prelude and return its items.
+/// Returns an empty vec if prelude.mimi cannot be found or parsed.
+/// Items from the prelude are intended to be merged into user programs
+/// so that utility functions (identity, clamp, is_even, etc.) are
+/// available without explicit imports.
+pub fn load_prelude_items() -> Vec<Item> {
+    let std_dir = match stdlib_dir() {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let prelude_path = std_dir.join("prelude.mimi");
+    if !prelude_path.exists() {
+        return vec![];
+    }
+    let source = match std::fs::read_to_string(&prelude_path) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let tokens = match crate::lexer::Lexer::new(&source).tokenize() {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    match crate::parser::Parser::new(tokens).parse_file() {
+        Ok(file) => file.items,
+        Err(_) => vec![],
+    }
+}
+
+/// Merge prelude items into a File, skipping items that already exist
+/// (by name) in the destination. Mutates `dest` in place.
+pub fn merge_prelude_into(dest: &mut File) {
+    let prelude_items = load_prelude_items();
+    if prelude_items.is_empty() {
+        return;
+    }
+    // Collect existing item names (owned strings to avoid borrow conflict)
+    let existing: std::collections::HashSet<String> = dest.items.iter().filter_map(|i| item_name(i).map(String::from)).collect();
+    for item in prelude_items {
+        if let Some(name) = item_name(&item) {
+            if !existing.contains(name) {
+                dest.items.push(item);
+            }
+        } else {
+            dest.items.push(item);
+        }
+    }
+}
+
 /// Extract the name from an Item for duplicate detection in merge_all.
 fn item_name(item: &Item) -> Option<&str> {
     match item {

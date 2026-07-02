@@ -18,7 +18,12 @@ impl<'a> Checker<'a> {
                     result_type = self.infer_expr(e, scopes);
                     break;
                 }
-                Stmt::Let { init: Some(e), .. } => result_type = self.infer_expr(e, scopes),
+                Stmt::Let { pat, init: Some(e), .. } => {
+                    let ty = self.infer_expr(e, scopes);
+                    // Bind let variable to scope so subsequent statements can reference it
+                    Self::bind_pattern_to_scope(pat, &ty, scopes);
+                    result_type = ty;
+                }
                 _ => {}
             }
         }
@@ -42,7 +47,11 @@ impl<'a> Checker<'a> {
                     result_type = self.check_expr(expected, e, scopes);
                     break;
                 }
-                Stmt::Let { init: Some(e), .. } => result_type = self.infer_expr(e, scopes),
+                Stmt::Let { pat, init: Some(e), .. } => {
+                    let ty = self.infer_expr(e, scopes);
+                    Self::bind_pattern_to_scope(pat, &ty, scopes);
+                    result_type = ty;
+                }
                 _ => {}
             }
         }
@@ -253,6 +262,46 @@ impl<'a> Checker<'a> {
                 );
                 Type::Name("unknown".into(), vec![])
             }
+        }
+    }
+
+    /// Bind a pattern's variables to the current type-checking scope.
+    /// Supports Variable, Tuple, and Wildcard patterns.
+    fn bind_pattern_to_scope(
+        pat: &Pattern,
+        ty: &Type,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) {
+        match pat {
+            Pattern::Variable(name) => {
+                if let Some(s) = scopes.last_mut() {
+                    s.insert(name.clone(), ty.clone());
+                }
+            }
+            Pattern::Tuple(pats) => {
+                let types = match ty {
+                    Type::Tuple(ts) => Some(ts.as_slice()),
+                    Type::Name(n, args) if n == "Tuple" => Some(args.as_slice()),
+                    _ => None,
+                };
+                if let Some(types) = types {
+                    for (p, t) in pats.iter().zip(types.iter()) {
+                        Self::bind_pattern_to_scope(p, t, scopes);
+                    }
+                }
+            }
+            Pattern::Constructor(_, subpatterns) => {
+                for sp in subpatterns {
+                    Self::bind_pattern_to_scope(sp, ty, scopes);
+                }
+            }
+            Pattern::Array(pats) => {
+                for p in pats {
+                    Self::bind_pattern_to_scope(p, ty, scopes);
+                }
+            }
+            // Wildcard, Literal, Slice — no variables to bind
+            _ => {}
         }
     }
 

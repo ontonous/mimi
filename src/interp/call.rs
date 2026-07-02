@@ -685,16 +685,14 @@ impl<'a> Interpreter<'a> {
                     "trim" => Ok(Value::String(s.trim().to_string())),
                     "to_upper" => Ok(Value::String(s.to_uppercase())),
                     "to_lower" => Ok(Value::String(s.to_lowercase())),
-                    "parse_int" => Ok(Value::Int(
-                        s.trim()
-                            .parse::<i64>()
-                            .map_err(|e| format!("parse_int: {}", e))?,
-                    )),
-                    "parse_float" => Ok(Value::Float(
-                        s.trim()
-                            .parse::<f64>()
-                            .map_err(|e| format!("parse_float: {}", e))?,
-                    )),
+                    "parse_int" => {
+                        let n = s.trim().parse::<i64>().map_err(|e| format!("parse_int: {}", e))?;
+                        Ok(Value::Variant("Ok".into(), vec![Value::Int(n)]))
+                    }
+                    "parse_float" => {
+                        let f = s.trim().parse::<f64>().map_err(|e| format!("parse_float: {}", e))?;
+                        Ok(Value::Variant("Ok".into(), vec![Value::Float(f)]))
+                    }
                     "contains" => {
                         let substr = args
                             .into_iter()

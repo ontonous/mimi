@@ -120,36 +120,37 @@ pub func konst<T, U>(x: T) -> func(U) -> T {
 }
 
 // fail: Prints an error message and exits with code 1.
-pub func fail(msg: string) -> unit {
+pub func fail(msg: string) -> () {
     println("ERROR:", msg)
     exit(1)
 }
 
 // unreachable: Prints error and exits — marks unreachable code paths.
-pub func unreachable() -> unit {
+pub func unreachable() -> () {
     println("ERROR: reached unreachable code")
     exit(1)
 }
 
 // todo: Prints message and exits — marks unimplemented code paths.
-pub func todo() -> unit {
+pub func todo() -> () {
     println("TODO: unimplemented")
     exit(1)
 }
 
 // type_of: Returns the type name of x as a string.
-pub func type_of<T>(x: T) -> string {
-    type_name(x)
-}
+// pub func type_of<T>(x: T) -> string {
+//     type_name(x)
+// }
 
 // assert_non_null: Asserts x is not null/unknown, returns x. Exits on failure.
-pub func assert_non_null<T>(x: T, name: string) -> T {
-    if x == unknown {
-        println("ERROR:", name, "is null")
-        exit(1)
-    }
-    x
-}
+// Temporarily disabled — null/unknown checks not yet supported.
+// pub func assert_non_null<T>(x: T, name: string) -> T {
+//     if x == unknown {
+//         println("ERROR:", name, "is null")
+//         exit(1)
+//     }
+//     x
+// }
 
 // default_i32: Returns 0.
 pub func default_i32() -> i32 { 0 }
@@ -195,7 +196,7 @@ pub func not_eq<T>(a: T, b: T) -> bool where T: Eq {
 }
 
 // not: Boolean NOT.
-pub func not(b: bool) -> bool {
+pub func bool_not(b: bool) -> bool {
     !b
 }
 
@@ -205,6 +206,7 @@ pub func assert_msg(cond: bool, msg: string) {
         println("ASSERTION FAILED:", msg)
         exit(1)
     }
+    ()
 }
 
 // repeat_action: Calls f(i) for i in 0..n.

@@ -6,9 +6,9 @@ rust-version = "1.75"
 authors = ["ontonous"]
 description = "Mimi language reference implementation (Rust)"
 license = "Apache-2.0"
-homepage = "https://github.com/ontos-hpc/mimi"
-repository = "https://github.com/ontos-hpc/mimi"
-documentation = "https://github.com/ontos-hpc/mimi#readme"
+homepage = "https://github.com/ontonous/mimi"
+repository = "https://github.com/ontonous/mimi"
+documentation = "https://github.com/ontonous/mimi#readme"
 
 [lib]
 name = "mimi"

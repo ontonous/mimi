@@ -24,7 +24,7 @@ pub(crate) fn test(
     let file = parser::Parser::new(tokens).parse_file()?;
 
     // Load imports if any
-    let merged_file = if !file.imports.is_empty() {
+    let mut merged_file = if !file.imports.is_empty() {
         let base_dir = path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
@@ -35,6 +35,9 @@ pub(crate) fn test(
     } else {
         file
     };
+
+    // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
+    loader::merge_prelude_into(&mut merged_file);
 
     let check_result = if strict {
         mimi::core::check_strict(&merged_file)

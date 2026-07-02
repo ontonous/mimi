@@ -117,6 +117,9 @@ pub(crate) fn check(
         file
     };
 
+    // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
+    mimi::loader::merge_prelude_into(&mut file);
+
     // Map inline rule statements to structured contracts (independent of mms extraction)
     contracts::map_rule_contracts(&mut file);
 

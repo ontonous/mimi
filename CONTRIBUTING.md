@@ -30,7 +30,7 @@ _This project adheres to the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). All
 
 ### 🐛 报告 Bug / Report a Bug
 
-1. 搜索已有 [Issues](https://github.com/ontos-hpc/mimi/issues) 确认非重复
+1. 搜索已有 [Issues](https://github.com/ontonous/mimi/issues) 确认非重复
 2. 使用 Bug 报告模板创建 Issue
 3. 提供最小可复现示例
 

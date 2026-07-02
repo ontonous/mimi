@@ -60,7 +60,7 @@ impl Formatter {
             return line.to_string();
         }
         let mut out = String::with_capacity(line.len() + 8);
-        let mut chars: Vec<char> = line.chars().collect();
+        let chars: Vec<char> = line.chars().collect();
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
