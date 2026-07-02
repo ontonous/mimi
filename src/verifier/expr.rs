@@ -63,13 +63,32 @@ impl crate::verifier::Verifier {
             }
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
-                    // Special-case len(s) — returns the string length variable.
+                    // Special-case len(s) — returns the string or list length variable.
                     if name == "len" && call_args.len() == 1 {
                         if let Expr::Ident(s) = &call_args[0] {
                             if let Some(len_var) = vars.get_string_len(s) {
                                 return Some(len_var.clone());
                             }
-                            // Fallback: try call_var_key for consistency.
+                            // Fallback for list params: len(xs) → list_len[xs]
+                            if let Some(len_var) = vars.get_list_len(s) {
+                                return Some(len_var.clone());
+                            }
+                        }
+                        // len(sort(xs)) → list_len[xs] (sort preserves length)
+                        if let Expr::Call(callee2, args2) = &call_args[0] {
+                            if let Expr::Ident(name2) = callee2.as_ref() {
+                                if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
+                                    if let Some(list_len) = self.resolve_list_len(&args2[0], vars) {
+                                        return Some(list_len.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // sort() and reverse() preserve list length: len(result) == len(input)
+                    if (name == "sort" || name == "reverse") && call_args.len() == 1 {
+                        if let Some(list_len) = self.resolve_list_len(&call_args[0], vars) {
+                            return Some(list_len.clone());
                         }
                     }
                     let call_key = self.call_var_key(name, call_args);
@@ -198,6 +217,20 @@ impl crate::verifier::Verifier {
                         if let Expr::Ident(s) = &call_args[0] {
                             if let Some(len_var) = vars.get_string_len(s) {
                                 return Some(Z3Real::from_int(len_var));
+                            }
+                            // Fallback for list params: len(xs) → list_len[xs]
+                            if let Some(len_var) = vars.get_list_len(s) {
+                                return Some(Z3Real::from_int(len_var));
+                            }
+                        }
+                        // len(sort(xs)) → list_len[xs] (sort preserves length)
+                        if let Expr::Call(callee2, args2) = &call_args[0] {
+                            if let Expr::Ident(name2) = callee2.as_ref() {
+                                if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
+                                    if let Some(list_len) = self.resolve_list_len(&args2[0], vars) {
+                                        return Some(Z3Real::from_int(&list_len));
+                                    }
+                                }
                             }
                         }
                     }
@@ -386,6 +419,20 @@ impl crate::verifier::Verifier {
                         if let Expr::Ident(s) = &call_args[0] {
                             if let Some(len_var) = vars.get_string_len(s) {
                                 return Some(len_var.ne(Z3Int::from_i64(0)));
+                            }
+                            // Fallback for list params: len(xs) → list_len[xs]
+                            if let Some(len_var) = vars.get_list_len(s) {
+                                return Some(len_var.ne(Z3Int::from_i64(0)));
+                            }
+                        }
+                        // len(sort(xs)) → list_len[xs] (sort preserves length)
+                        if let Expr::Call(callee2, args2) = &call_args[0] {
+                            if let Expr::Ident(name2) = callee2.as_ref() {
+                                if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
+                                    if let Some(list_len) = self.resolve_list_len(&args2[0], vars) {
+                                        return Some(list_len.ne(Z3Int::from_i64(0)));
+                                    }
+                                }
                             }
                         }
                     }
@@ -683,6 +730,33 @@ impl crate::verifier::Verifier {
                         let s = self.resolve_string_expr(&args[0], vars)?;
                         let idx = self.expr_to_z3_int(&args[1], vars)?;
                         return Some(s.at(&idx));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve an expression to a Z3 list-length variable.
+    /// Handles identity (list param name), sort/reverse (which preserve length),
+    /// and old() snapshots.
+    pub(crate) fn resolve_list_len(&mut self, expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
+        match expr {
+            Expr::Ident(name) => vars.get_list_len(name).cloned(),
+            Expr::Old(inner) => {
+                if let Expr::Ident(name) = inner.as_ref() {
+                    let old_name = format!("old_{}", name);
+                    vars.get_list_len(&old_name).cloned()
+                } else {
+                    None
+                }
+            }
+            Expr::Call(callee, args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    // sort() and reverse() preserve input list length
+                    if (name == "sort" || name == "reverse") && args.len() == 1 {
+                        return self.resolve_list_len(&args[0], vars);
                     }
                 }
                 None

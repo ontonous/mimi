@@ -4,7 +4,7 @@ use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, Z3VarMap};
 use crate::verifier::helpers::{
-    collect_idents_in_stmt, extract_body_return, format_expr, parse_contract_expr,
+    block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr, parse_contract_expr,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -334,6 +334,13 @@ impl crate::verifier::Verifier {
                     Z3Int::new_const(format!("{}_len", p.name)),
                 );
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
+            } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
+                // List parameters get a length variable for modeling sort() etc.
+                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                vars.insert_list_len(
+                    p.name.as_str(),
+                    Z3Int::new_const(format!("{}_len", p.name)),
+                );
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -360,6 +367,9 @@ impl crate::verifier::Verifier {
                 );
                 vars.insert_string_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
                 vars.insert_string_var(old_name, Z3String::new_const(old_name));
+            } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
+                vars.insert_int(old_name, Z3Int::new_const(old_name));
+                vars.insert_list_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
             } else {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
             }
@@ -473,6 +483,13 @@ impl crate::verifier::Verifier {
                 if let Some(i) = vars.get_int("result") {
                     self.solver.assert(i.eq(&body_z3));
                 }
+                // Link result length to body return length for sort/reverse.
+                // This ensures len(result) == len(sort(xs)) == len(xs).
+                if let Some(body_len) = self.resolve_list_len(return_expr, &mut vars) {
+                    let len_key = self.call_var_key("len", &[Expr::Ident("result".to_string())]);
+                    let result_len = vars.get_or_create_int(&len_key);
+                    self.solver.assert(result_len.eq(&body_len));
+                }
             } else {
                 parse_errors.push(
                     "could not encode return expression — result may be unconstrained".into(),
@@ -511,6 +528,10 @@ impl crate::verifier::Verifier {
             .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
             .collect();
         self.assert_callee_ensures_in_block(&expanded_body, &mut vars);
+
+        // Model length-preserving builtins (sort, reverse) so that
+        // postconditions like len(result) == len(xs) can be verified.
+        self.assert_builtin_length_preserving_in_block(&expanded_body, &mut vars);
 
         // P1-18: check call-site requires satisfaction. For each function
         // call in the body, verify that the callee's requires (preconditions)
@@ -1322,6 +1343,99 @@ impl crate::verifier::Verifier {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Walk an expression tree modeling length-preserving builtins (sort, reverse).
+    /// For each `sort(xs)` or `reverse(xs)` call, assert that the output length
+    /// equals the input length: len(result) == len(xs).
+    fn assert_builtin_length_preserving(&mut self, expr: &Expr, vars: &mut Z3VarMap) {
+        match expr {
+            Expr::Call(callee, call_args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    if (name == "sort" || name == "reverse") && call_args.len() == 1 {
+                        // len(sort(xs)) == len(xs)
+                        if let Some(input_len) = self.resolve_list_len(&call_args[0], vars) {
+                            let len_key = self.call_var_key("len", &[expr.clone()]);
+                            let output_len = vars.get_or_create_int(&len_key);
+                            self.solver.assert(output_len.eq(&input_len));
+                        }
+                    }
+                }
+                for arg in call_args {
+                    self.assert_builtin_length_preserving(arg, vars);
+                }
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.assert_builtin_length_preserving(lhs, vars);
+                self.assert_builtin_length_preserving(rhs, vars);
+            }
+            Expr::Unary(_, inner) => self.assert_builtin_length_preserving(inner, vars),
+            Expr::If { cond, then_, else_ } => {
+                self.assert_builtin_length_preserving(cond, vars);
+                if let Some(tail) = block_tail_expr(then_) {
+                    self.assert_builtin_length_preserving(&tail, vars);
+                }
+                if let Some(eb) = else_ {
+                    if let Some(tail) = block_tail_expr(eb) {
+                        self.assert_builtin_length_preserving(&tail, vars);
+                    }
+                }
+            }
+            Expr::Block(stmts) => {
+                if let Some(tail) = block_tail_expr(stmts) {
+                    self.assert_builtin_length_preserving(&tail, vars);
+                }
+            }
+            Expr::Match(_, arms) => {
+                for arm in arms {
+                    self.assert_builtin_length_preserving(&arm.body, vars);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk function body statements modeling length-preserving builtins.
+    fn assert_builtin_length_preserving_in_block(&mut self, block: &[Stmt], vars: &mut Z3VarMap) {
+        for stmt in block {
+            match stmt {
+                Stmt::Expr(e) => self.assert_builtin_length_preserving(e, vars),
+                Stmt::Return(Some(e)) => self.assert_builtin_length_preserving(e, vars),
+                Stmt::If { cond, then_, else_ } => {
+                    self.assert_builtin_length_preserving(cond, vars);
+                    self.assert_builtin_length_preserving_in_block(then_, vars);
+                    if let Some(eb) = else_ {
+                        self.assert_builtin_length_preserving_in_block(eb, vars);
+                    }
+                }
+                Stmt::Block(inner) | Stmt::Arena(inner) => {
+                    self.assert_builtin_length_preserving_in_block(inner, vars);
+                }
+                Stmt::While { cond, body } => {
+                    self.assert_builtin_length_preserving(cond, vars);
+                    self.assert_builtin_length_preserving_in_block(body, vars);
+                }
+                Stmt::WhileLet { init, body, .. } => {
+                    self.assert_builtin_length_preserving(init, vars);
+                    self.assert_builtin_length_preserving_in_block(body, vars);
+                }
+                Stmt::Loop(body) | Stmt::Parasteps(body) => {
+                    self.assert_builtin_length_preserving_in_block(body, vars);
+                }
+                Stmt::For { iterable, body, .. } => {
+                    self.assert_builtin_length_preserving(iterable, vars);
+                    self.assert_builtin_length_preserving_in_block(body, vars);
+                }
+                Stmt::Let { init: Some(e), .. } => {
+                    self.assert_builtin_length_preserving(e, vars);
+                }
+                Stmt::Assign { target, value } => {
+                    self.assert_builtin_length_preserving(target, vars);
+                    self.assert_builtin_length_preserving(value, vars);
+                }
+                _ => {}
+            }
         }
     }
 

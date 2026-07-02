@@ -43,6 +43,9 @@ pub(crate) struct Z3VarMap {
     /// Z3 string theory variables for string params. Enables string equality,
     /// contains, at, and other native Z3 string operations.
     pub(crate) string_vars: HashMap<String, Z3String>,
+    /// List length variables: xs_len = Z3Int for each list param.
+    /// Used to model length-preserving list operations like sort().
+    pub(crate) list_len: HashMap<String, Z3Int>,
 }
 
 impl Z3VarMap {
@@ -53,6 +56,7 @@ impl Z3VarMap {
             string_nonempty: HashMap::new(),
             string_len: HashMap::new(),
             string_vars: HashMap::new(),
+            list_len: HashMap::new(),
         }
     }
 
@@ -91,6 +95,16 @@ impl Z3VarMap {
     #[inline]
     pub(crate) fn get_string_len(&self, name: &str) -> Option<&Z3Int> {
         self.string_len.get(name)
+    }
+
+    /// Register a length variable for a list parameter (e.g., sort() preserves length).
+    pub(crate) fn insert_list_len(&mut self, name: impl Into<String>, var: Z3Int) {
+        self.list_len.insert(name.into(), var);
+    }
+
+    #[inline]
+    pub(crate) fn get_list_len(&self, name: &str) -> Option<&Z3Int> {
+        self.list_len.get(name)
     }
 
     /// Register a Z3 string theory variable for a string parameter.
