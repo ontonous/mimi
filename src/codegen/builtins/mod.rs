@@ -6,6 +6,7 @@ pub mod math;
 pub mod network;
 pub mod string;
 pub mod time_env;
+pub mod concurrency;
 
 use crate::codegen::CallSiteValueExt;
 use inkwell::context::Context;
@@ -38,6 +39,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_binary_i_o_streaming_line_reading(module, ctx, i8_ptr, i32, i64, void);
     register_crypto_fns(module, ctx, i8_ptr, i32, i64, void);
     register_actor_concurrency_rt(module, ctx, i8_ptr, i32, i64, void);
+    register_atomic_mutex_channel_rt(module, ctx, i8_ptr, i32, i64, void);
 }
 
 fn register_libc<'ctx>(
@@ -1355,6 +1357,16 @@ pub fn is_builtin(name: &str) -> bool {
         | "str_to_c_str" | "c_str_to_string"
         | "now" | "timestamp" | "now_ms" | "timestamp_ms" | "sleep"
         | "getenv" | "args"
+        // v0.28.20 concurrency primitives
+        | "atomic_i32_new" | "atomic_i32_load" | "atomic_i32_store"
+        | "atomic_i32_fetch_add" | "atomic_i32_compare_exchange" | "atomic_i32_drop"
+        | "atomic_i64_new" | "atomic_i64_load" | "atomic_i64_store"
+        | "atomic_i64_fetch_add" | "atomic_i64_drop"
+        | "atomic_bool_new" | "atomic_bool_load" | "atomic_bool_store" | "atomic_bool_drop"
+        | "mutex_new" | "mutex_lock" | "mutex_get" | "mutex_set"
+        | "mutex_unlock" | "mutex_drop"
+        | "channel_new" | "channel_send" | "channel_recv"
+        | "channel_try_recv" | "channel_drop"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1563,6 +1575,48 @@ impl<'ctx> CodeGenerator<'ctx> {
             "regex_replace" => self.compile_regex_replace(args),
             "regex_find_all" => self.compile_regex_find_all(args),
             "regex_capture_groups" => self.compile_regex_capture_groups(args),
+            // v0.28.20 concurrency primitives
+            "atomic_i32_new" => self.compile_atomic_i32_new(args),
+            "atomic_i32_load" => self.compile_atomic_i32_load(args),
+            "atomic_i32_store" => self.compile_atomic_i32_store(args),
+            "atomic_i32_fetch_add" => self.compile_atomic_i32_fetch_add(args),
+            "atomic_i32_compare_exchange" => self.compile_atomic_i32_compare_exchange(args),
+            "atomic_i32_drop" => {
+                self.compile_atomic_drop_helper("mimi_atomic_i32_drop", args)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
+            "atomic_i64_new" => self.compile_atomic_i64_new(args),
+            "atomic_i64_load" => self.compile_atomic_i64_load(args),
+            "atomic_i64_store" => self.compile_atomic_i64_store(args),
+            "atomic_i64_fetch_add" => self.compile_atomic_i64_fetch_add(args),
+            "atomic_i64_drop" => {
+                self.compile_atomic_drop_helper("mimi_atomic_i64_drop", args)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
+            "atomic_bool_new" => self.compile_atomic_bool_new(args),
+            "atomic_bool_load" => self.compile_atomic_bool_load(args),
+            "atomic_bool_store" => self.compile_atomic_bool_store(args),
+            "atomic_bool_drop" => {
+                self.compile_atomic_drop_helper("mimi_atomic_bool_drop", args)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
+            "mutex_new" => self.compile_mutex_new(args),
+            "mutex_lock" => self.compile_mutex_lock(args),
+            "mutex_get" => self.compile_mutex_get(args),
+            "mutex_set" => self.compile_mutex_set(args),
+            "mutex_unlock" => self.compile_mutex_unlock(args),
+            "mutex_drop" => {
+                self.compile_atomic_drop_helper("mimi_mutex_drop", args)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
+            "channel_new" => self.compile_channel_new(args),
+            "channel_send" => self.compile_channel_send(args),
+            "channel_recv" => self.compile_channel_recv(args),
+            "channel_try_recv" => self.compile_channel_try_recv(args),
+            "channel_drop" => {
+                self.compile_atomic_drop_helper("mimi_channel_drop", args)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
             "ast_eval" => {
                 // ast_eval on a compile-time folded quote block:
                 // quote! { 42 } evaluates directly to i64(42) at compile time,
@@ -1755,6 +1809,206 @@ fn register_actor_concurrency_rt<'ctx>(
     module.add_function(
         "mimi_actor_drop",
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+}
+
+// v0.28.20 — concurrent primitive runtime declarations.
+//
+// Most primitives take/return i64; the channel `try_recv` returns -1 on
+// failure (no message available). All return types follow Rust's stdlib
+// conventions so the interp path (which calls the same runtime functions)
+// produces identical results.
+fn register_atomic_mutex_channel_rt<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    _i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+    // ----- AtomicI32 -----
+    // mimi_atomic_i32_new(value: i32) -> i64
+    module.add_function(
+        "mimi_atomic_i32_new",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i32_load",
+        i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i32_store",
+        void.fn_type(
+            &[BasicMetadataTypeEnum::IntType(i64), BasicMetadataTypeEnum::IntType(i32)],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // fetch_add returns the previous value (i32).
+    module.add_function(
+        "mimi_atomic_i32_fetch_add",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i32),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i32_compare_exchange",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::IntType(i32),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i32_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ----- AtomicI64 -----
+    module.add_function(
+        "mimi_atomic_i64_new",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i64_load",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i64_store",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i64_fetch_add",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_i64_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ----- AtomicBool (stored as i32 with 0/1) -----
+    module.add_function(
+        "mimi_atomic_bool_new",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_bool_load",
+        i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_bool_store",
+        void.fn_type(
+            &[BasicMetadataTypeEnum::IntType(i64), BasicMetadataTypeEnum::IntType(i32)],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_atomic_bool_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ----- Mutex -----
+    module.add_function(
+        "mimi_mutex_new",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mutex_lock",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mutex_get",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mutex_set",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mutex_unlock",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mutex_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    // ----- Channel -----
+    module.add_function(
+        "mimi_channel_new",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_channel_send",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_channel_recv",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_channel_try_recv",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_channel_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
 }
