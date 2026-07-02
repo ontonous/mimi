@@ -201,8 +201,11 @@ impl CHeaderGenerator {
             self.generate_function_declaration(&mut header, func)?;
         }
 
-        writeln!(header)?;
-        writeln!(header, "#endif // MIMI_FFI_H")?;
+        // Note: the closing #endif is emitted by the caller, after any
+        // exported Mimi function declarations have been appended. This
+        // matches the user's repro from examples/ffi/math.mimi where
+        // extern "C" funcs end up below the guard otherwise and the C
+        // preprocessor drops them.
 
         Ok(header)
     }
@@ -502,6 +505,14 @@ pub fn generate_c_header_with_exported(
         }
     }
 
+    // P0-6: close the header guard AFTER the exported function
+    // declarations so the C preprocessor actually includes them. The
+    // earlier code emitted `#endif` inside `generate()`, which placed it
+    // before the appended export block and silently dropped every
+    // `extern "C"` function from the resulting header.
+    let _ = writeln!(&mut header);
+    let _ = writeln!(&mut header, "#endif // MIMI_FFI_H");
+
     Ok(header)
 }
 
@@ -571,9 +582,16 @@ pub fn generate_c_header(
     type_defs: HashMap<String, TypeDef>,
 ) -> Result<String, String> {
     let generator = CHeaderGenerator::new(type_defs);
-    generator
+    let mut header = generator
         .generate(extern_funcs)
-        .map_err(|e| format!("Failed to generate C header: {}", e))
+        .map_err(|e| format!("Failed to generate C header: {}", e))?;
+    // P0-6: close the header guard here. The `#endif` was previously
+    // emitted inside `generate()` which broke callers that append
+    // additional declarations (exported funcs) after the fact.
+    use std::fmt::Write;
+    let _ = writeln!(&mut header);
+    let _ = writeln!(&mut header, "#endif // MIMI_FFI_H");
+    Ok(header)
 }
 
 #[cfg(test)]
@@ -607,6 +625,73 @@ mod tests {
         let header = generate_c_header(&extern_funcs, HashMap::new())
             .expect("src/ffi/c_header.rs:396 unwrap failed");
         assert!(header.contains("int32_t add(int32_t a, int32_t b);"));
+    }
+
+    // P0-6: the header guard `#endif` must come AFTER the function
+    // declarations, not before. Regression for the user-reported
+    // `mimi emit-c-headers` output that put every `extern "C"`
+    // function declaration outside the include guard, where the C
+    // preprocessor silently dropped them.
+    #[test]
+    fn test_header_endif_after_declarations() {
+        let extern_funcs = vec![ExternFunc {
+            name: "add".to_string(),
+            params: vec![
+                ExternParam {
+                    name: "a".to_string(),
+                    ty: Type::Name("i32".to_string(), vec![]),
+                    cap_mode: None,
+                },
+                ExternParam {
+                    name: "b".to_string(),
+                    ty: Type::Name("i32".to_string(), vec![]),
+                    cap_mode: None,
+                },
+            ],
+            ret: Some(Type::Name("i32".to_string(), vec![])),
+            requires: None,
+            ensures: None,
+            variadic: false,
+            no_panic: false,
+        }];
+        let header = generate_c_header(&extern_funcs, HashMap::new())
+            .expect("test_header_endif_after_declarations: generate failed");
+        let endif_pos = header
+            .find("#endif")
+            .expect("header must contain an #endif");
+        let decl_pos = header
+            .find("int32_t add(")
+            .expect("header must contain the function declaration");
+        assert!(
+            decl_pos < endif_pos,
+            "#endif must come after the function declaration (decl at {}, #endif at {})",
+            decl_pos,
+            endif_pos
+        );
+    }
+
+    #[test]
+    fn test_exported_funcs_inside_header_guard() {
+        // The exported function path is the one that surfaced the bug
+        // for the user: `generate_c_header_with_exported` previously
+        // appended the export block AFTER `#endif` had been emitted.
+        // We can't easily construct a full FuncDef here, but we can at
+        // least verify that even with no exports the guard closes at
+        // the end of the file. The "with exports" path is covered by
+        // the integration test in `tests/dual_backend.rs` for the
+        // emit-c-headers command.
+        let header = generate_c_header(&[], HashMap::new())
+            .expect("test_exported_funcs_inside_header_guard: generate failed");
+        let endif_pos = header
+            .rfind("#endif")
+            .expect("header must contain an #endif");
+        // The header must end with the #endif (or whitespace/newline after it).
+        let trimmed_end = header[endif_pos..].trim_end();
+        assert!(
+            trimmed_end.starts_with("#endif"),
+            "#endif must be the last non-whitespace token (got tail: {:?})",
+            &header[endif_pos..]
+        );
     }
 
     #[test]
