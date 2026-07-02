@@ -2,8 +2,19 @@
 
 ## [Unreleased] — v0.28.22-dev
 
-### Planned
-- **自举最后准备**：libmimi 接口冻结、MimiSpec AST 端口稳定、差距表清零或文档化、类型检查器统一收尾
+### Fixed
+- **Match arm `let` 作用域** (`src/core/infer/helpers.rs`)：`infer_block_expr` 现在在推断 `let` 绑定表达式类型后，将变量名+类型注册到当前作用域。修复 `match x { Ok(v) => { let y = ...; println(y) } }` 报 undefined variable 的问题
+- **Prelude 自动加载** (`src/loader.rs`, `src/main/run|check|build|test.rs`)：所有程序现在自动合并 `std/prelude.mimi` 的 42 个工具函数（identity, clamp, is_even, min3, to_int_safe 等），无需 `use` 导入
+- **`()` 类型统一** (`src/parser/parse_type.rs`)：`-> ()` 作为类型注解现在解析为 `Type::Name("unit", [])` 而非 `Type::Tuple([])`，修复 "expected (), found unit" 类型错误
+- **`parse` 内置重命名为 `mms_parse`** (`src/core/infer/call/simple.rs`, `src/interp/call.rs`, `src/codegen/builtins/mod.rs`)：移除 `parse` 别名，仅保留 `mms_parse`。`use csv` 后的 `parse()` 现在正确调用 csv 库函数
+- **`csv::parse` 模块解析** (`src/core/infer/call/method.rs`, `src/interp/eval/expr.rs`)：`use csv` 后的 `parse(content)` 和 `csv::parse(content)` 均能正确路由到 csv 模块的 parse 函数
+- **`sort`/`reverse` 返回类型推断** (`src/core/infer/call/simple.rs`)：从输入列表传播元素类型，`sort([3,1,2])` 不再返回 `List<unknown>`
+- **`parse_int`/`parse_float` 返回类型一致** (`src/interp/call.rs`)：字符串方法 `parse_int()` 现在返回 `Result<i32, string>` 变体（`Ok(val)`），与 trait 签名一致
+- **Z3 `sort`/`reverse` 长度语义建模** (`src/verifier/ctx.rs`, `src/verifier/expr.rs`, `src/verifier/func.rs`)：新增 `list_len` 变量跟踪，`len(sort(xs)) == len(xs)` 约束，使 `ensures: len(result) == len(xs)` 等后置条件可通过验证
+- **`use pkgname` 包导入** (`src/loader.rs`)：依赖的 `mimi.toml` entry 文件现在自动解析，`use mymath` 和 `use mymath::func` 均正常工作
+- **仓库 URL 统一**：`Cargo.toml`、`README.md`、`README.zh.md`、`CONTRIBUTING.md` 中所有 `ontos-hpc/mimi` 改为 `ontonous/mimi`
+- **`unused_mut` warning 消除** (`src/fmt.rs`)：移除不必要的 `mut` 关键字
+- **Error span 改进** (`src/core/check_stmt.rs`)：不再重置 current_line/col 为 (0,0)，错误至少指向正确的函数边界
 
 ## [v0.28.21] - 2026-07-02
 

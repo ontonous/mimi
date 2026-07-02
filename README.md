@@ -4,9 +4,9 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.28.8-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.22--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2388%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2815%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend

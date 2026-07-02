@@ -4,9 +4,9 @@
 
 **带合约验证、结构化并发与线性能力的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.28.8-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.22--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2388%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2815%20passed%20%7C%200%20failed-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec 生产编译后端 · Z3 形式化验证 · LLVM 原生编译 · 解释器 + Codegen 双后端
