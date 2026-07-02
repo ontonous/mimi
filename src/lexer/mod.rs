@@ -46,6 +46,12 @@ impl<'a> Lexer<'a> {
 
     pub fn tokenize(mut self) -> Result<Vec<Token>, LexerError> {
         let mut tokens = Vec::new();
+        // Skip shebang line at the very beginning of the file (e.g. #!/usr/bin/env mimi)
+        if self.peek() == Some('#') && self.chars.clone().next() == Some('!') {
+            while self.peek().map_or(false, |c| c != '\n') {
+                self.advance();
+            }
+        }
         loop {
             self.process_line_start(&mut tokens)?;
             self.skip_whitespace_inline();
