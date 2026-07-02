@@ -105,7 +105,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let void_ty = self.context.void_type();
 
         let dispatch_name = format!("{}__dispatch", actor.name);
-        let i64_ptr = i64_ty.ptr_type(inkwell::AddressSpace::default());
+        let i64_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_type = void_ty.fn_type(
             &[
                 inkwell::types::BasicMetadataTypeEnum::IntType(i32_ty),
@@ -201,7 +201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_cast")
+                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_cast")
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_val")?
@@ -209,7 +209,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::FloatType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_fcast")
+                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_fcast")
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_fval")?
@@ -225,7 +225,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::StructType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, t.ptr_type(inkwell::AddressSpace::default()), "arg_scast")
+                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_scast")
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_sval")?
@@ -234,7 +234,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Default: load as i64
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, i64_ty.ptr_type(inkwell::AddressSpace::default()), "arg_icast")
+                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_icast")
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(i64_ty, cast_ptr, "arg_ival")?
@@ -254,7 +254,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_bit_cast(
                     result_blob,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     "result_cast",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
@@ -292,7 +292,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_bit_cast(
                             result_blob,
-                            sty.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "result_scast",
                         )
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
@@ -385,10 +385,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         i64_ty.const_int(const_size, false)
                     } else {
                         // Non-constant size — load from sizeof value at runtime.
-                        self.builder
-                            .build_int_z_extend(s, i64_ty, "struct_size")
-                            .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
-                            .into()
+                        // `s` may already be i64 (modern inkwell) — only z_extend if narrower.
+                        let s_ty = s.get_type();
+                        if s_ty.get_bit_width() < 64 {
+                            self.builder
+                                .build_int_z_extend(s, i64_ty, "struct_size")
+                                .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
+                        } else {
+                            s
+                        }
                     }
                 } else {
                     // size_of() returned None — opaque type. Allocate via malloc.
@@ -1069,7 +1074,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_bit_cast(
                     gep,
-                    i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
                     &format!("arg_cast_{}", i),
                 )
                 .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
@@ -1115,7 +1120,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_bit_cast(
                 result_blob,
-                i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "result_cast",
             )
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
