@@ -64,7 +64,7 @@
 | 递归栈溢出保护 | ✅ | ✅ | 浅递归已支持；极深递归仍依赖宿主栈大小 |
 | Comptime 块 | ✅ | ✅ | v0.28.21: codegen `fold_comptime_block` + `fold_comptime_items` 支持 Int/Float/Bool/Unit/String 折叠 |
 | Quote!（非纯字面量） | ✅ | ⚠️ | v0.28.21: 三阶段折叠（literal→interp→runtime），运行时依赖报错提示用 `comptime { ... }` 包裹 |
-| `ast_eval(ast)` | ✅ | ⬜ | 仅在解释器路径；codegen 返回 graceful error |
+| `ast_eval(ast)` | ✅ | ⚠️ | v0.28.21: 编译期折叠 quote 块直接 pass-through；运行时堆 QuotedAst 暂不支持求值 |
 | Valgrind | ✅ | ✅ | 已安装；8 个 Valgrind 测试全部默认通过（含 shared/weak 生命周期 4 个、spawn 多线程 1 个） |
 | Miri | ✅ | ⬜ | 解释器子集通过（`tests::basic_*`、`interpreter_features`）；codegen/FFI 测试因 Miri 不支持外部函数/子进程，不纳入 Miri 回归 |
 | ASan | ✅ | ✅ | `e2e_asan_*` 已取消 #[ignore]，在可用工具链下通过 |

@@ -48,7 +48,7 @@ impl<'a> Lexer<'a> {
         let mut tokens = Vec::new();
         // Skip shebang line at the very beginning of the file (e.g. #!/usr/bin/env mimi)
         if self.peek() == Some('#') && self.chars.clone().next() == Some('!') {
-            while self.peek().map_or(false, |c| c != '\n') {
+            while self.peek().is_some_and(|c| c != '\n') {
                 self.advance();
             }
         }

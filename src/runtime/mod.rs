@@ -6625,7 +6625,7 @@ pub extern "C" fn mimi_quote_new_leaf(tag: i32, value: i64) -> *mut MimiQuotedAs
         data1: 0,
         data2: 0,
     });
-    Box::into_raw(node) as *mut MimiQuotedAst
+    Box::into_raw(node)
 }
 
 /// Allocate a binary / unary / index / field-style node with up to two
@@ -6645,7 +6645,7 @@ pub extern "C" fn mimi_quote_new_node(
         data1: if child1.is_null() { 0 } else { child1 as i64 },
         data2: extra,
     });
-    Box::into_raw(node) as *mut MimiQuotedAst
+    Box::into_raw(node)
 }
 
 /// Allocate a node backed by a heap-allocated children array (Call,
@@ -6667,7 +6667,7 @@ pub extern "C" fn mimi_quote_new_list(
         unsafe { std::slice::from_raw_parts(children, len).to_vec() }
     };
     let boxed: Box<Vec<*mut MimiQuotedAst>> = Box::new(vec);
-    let ptr = Box::into_raw(boxed) as *mut Vec<*mut MimiQuotedAst> as i64;
+    let ptr = Box::into_raw(boxed) as i64;
     let node = Box::new(MimiQuotedAst {
         tag,
         argc: len as i32,
@@ -6675,7 +6675,7 @@ pub extern "C" fn mimi_quote_new_list(
         data1: 0,
         data2: len as i64,
     });
-    Box::into_raw(node) as *mut MimiQuotedAst
+    Box::into_raw(node)
 }
 
 /// Recursively free a QuotedAst subtree, including any children-array
