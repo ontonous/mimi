@@ -174,9 +174,9 @@ trait FloatMath {
     func map_range(in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64
     func power(exp: f64) -> f64
     func sqrt_val() -> f64
-    func floor_val() -> i64
-    func ceil_val() -> i64
-    func round_val() -> i64
+    func floor_val() -> f64
+    func ceil_val() -> f64
+    func round_val() -> f64
     func area_circle() -> f64
     func circumference() -> f64
     func hypot(other: f64) -> f64
@@ -194,9 +194,9 @@ impl FloatMath for f64 {
     }
     func power(exp: f64) -> f64 { pow(self, exp) }
     func sqrt_val() -> f64 { sqrt(self) }
-    func floor_val() -> i64 { floor(self) }
-    func ceil_val() -> i64 { ceil(self) }
-    func round_val() -> i64 { round(self) }
+    func floor_val() -> f64 { floor(self) }
+    func ceil_val() -> f64 { ceil(self) }
+    func round_val() -> f64 { round(self) }
     func area_circle() -> f64 { pi() * self * self }
     func circumference() -> f64 { 2.0 * pi() * self }
     func hypot(other: f64) -> f64 { sqrt(self * self + other * other) }
@@ -382,18 +382,18 @@ pub func sqrt_val(x: f64) -> f64 {
     sqrt(x)
 }
 
-// floor_val: Returns the largest integer <= x as i64.
-pub func floor_val(x: f64) -> i64 {
+// floor_val: Returns the largest integer <= x as f64.
+pub func floor_val(x: f64) -> f64 {
     floor(x)
 }
 
-// ceil_val: Returns the smallest integer >= x as i64.
-pub func ceil_val(x: f64) -> i64 {
+// ceil_val: Returns the smallest integer >= x as f64.
+pub func ceil_val(x: f64) -> f64 {
     ceil(x)
 }
 
-// round_val: Returns x rounded to nearest integer as i64.
-pub func round_val(x: f64) -> i64 {
+// round_val: Returns x rounded to nearest integer as f64.
+pub func round_val(x: f64) -> f64 {
     round(x)
 }
 

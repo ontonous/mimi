@@ -40,14 +40,16 @@ impl FsOps for string {
     func read() -> Result<string, string> { read_file(self) }
     func write(content: string) -> Result<(), string> { write_file(self, content) }
     func read_lines() -> Result<List<string>, string> {
-        let result = read_file(self)
-        if result.is_ok() { Ok(str_split(result.unwrap(), "\n")) }
-        else { result.map_err(|e| "read_lines(" + self + "): " + e) }
+        match read_file(self) {
+            Ok(content) => Ok(str_split(content, "\n"))
+            Err(e) => Err("read_lines(" + self + "): " + e)
+        }
     }
     func file_size() -> Result<i32, string> {
-        let result = read_file(self)
-        if result.is_ok() { Ok(len(result.unwrap())) }
-        else { result.map_err(|e| "file_size(" + self + "): " + e) }
+        match read_file(self) {
+            Ok(content) => Ok(len(content))
+            Err(e) => Err("file_size(" + self + "): " + e)
+        }
     }
     func write_lines(xs: List<string>) -> Result<(), string> {
         write_file(self, str_join(xs, "\n"))
@@ -76,11 +78,9 @@ pub func write(path: string, content: string) -> Result<(), string> {
 // read_lines: Reads file at path and splits by newline.
 // Returns Err with original I/O error message if the file cannot be read.
 pub func read_lines(path: string) -> Result<List<string>, string> {
-    let result = read_file(path)
-    if result.is_ok() {
-        Ok(str_split(result.unwrap(), "\n"))
-    } else {
-        result.map_err(|e| "read_lines(" + path + "): " + e)
+    match read_file(path) {
+        Ok(content) => Ok(str_split(content, "\n"))
+        Err(e) => Err("read_lines(" + path + "): " + e)
     }
 }
 
@@ -90,11 +90,9 @@ pub func read_lines(path: string) -> Result<List<string>, string> {
 // file_size: Returns the size of the file at path in bytes.
 // Returns Err with original I/O error message if the file cannot be read.
 pub func file_size(path: string) -> Result<i32, string> {
-    let result = read_file(path)
-    if result.is_ok() {
-        Ok(len(result.unwrap()))
-    } else {
-        result.map_err(|e| "file_size(" + path + "): " + e)
+    match read_file(path) {
+        Ok(content) => Ok(len(content))
+        Err(e) => Err("file_size(" + path + "): " + e)
     }
 }
 

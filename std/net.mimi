@@ -48,14 +48,14 @@ type NetError {
 
 // NetOps: Trait for network operations on file descriptors and URLs.
 trait NetOps {
-    func send(data: string) -> Result<i32, NetError>
+    func send(data: string) -> Result<i64, NetError>
     func recv(buf_size: i32) -> Result<string, NetError>
     func fetch() -> Result<string, NetError>
     func fetch_post(body: string) -> Result<string, NetError>
 }
 
-// NetOps implementation for built-in i32 (file descriptor) type.
-impl NetOps for i32 {
+// NetOps implementation for built-in i64 (file descriptor) type.
+impl NetOps for i64 {
     func send(data: string) -> Result<i32, NetError> {
         let n = send(self, data)
         if n < 0 { Err(SendFailed) } else { Ok(n) }
@@ -85,12 +85,12 @@ impl NetOps for string {
 // Compatibility functions — keep original signatures.
 
 // tcp_socket: Creates a TCP socket. Returns fd or negative on error.
-pub func tcp_socket() -> i32 {
+pub func tcp_socket() -> i64 {
     socket(AF_INET, SOCK_STREAM, 0)
 }
 
 // tcp_connect: Connects to host:port over TCP. Returns fd on success.
-pub func tcp_connect(host: string, port: i32) -> Result<i32, NetError> {
+pub func tcp_connect(host: string, port: i32) -> Result<i64, NetError> {
     let fd = tcp_socket()
     if fd < 0 { return Err(SocketCreate) }
     let ret = connect(fd, host, port)
@@ -102,7 +102,7 @@ pub func tcp_connect(host: string, port: i32) -> Result<i32, NetError> {
 }
 
 // tcp_listen: Listens on port with backlog. Returns fd on success.
-pub func tcp_listen(port: i32, backlog: i32) -> Result<i32, NetError> {
+pub func tcp_listen(port: i32, backlog: i32) -> Result<i64, NetError> {
     let fd = tcp_socket()
     if fd < 0 { return Err(SocketCreate) }
     let ret = bind(fd, port)
@@ -119,19 +119,19 @@ pub func tcp_listen(port: i32, backlog: i32) -> Result<i32, NetError> {
 }
 
 // tcp_accept: Accepts a connection on a listening socket fd.
-pub func tcp_accept(fd: i32) -> Result<i32, NetError> {
+pub func tcp_accept(fd: i64) -> Result<i64, NetError> {
     let client_fd = accept(fd)
     if client_fd < 0 { Err(AcceptFailed) } else { Ok(client_fd) }
 }
 
 // tcp_send: Sends data over socket fd. Returns bytes sent on success.
-pub func tcp_send(fd: i32, data: string) -> Result<i32, NetError> {
+pub func tcp_send(fd: i64, data: string) -> Result<i64, NetError> {
     let n = send(fd, data)
     if n < 0 { Err(SendFailed) } else { Ok(n) }
 }
 
 // tcp_recv: Receives up to buf_size bytes from socket fd.
-pub func tcp_recv(fd: i32, buf_size: i32) -> Result<string, NetError> {
+pub func tcp_recv(fd: i64, buf_size: i32) -> Result<string, NetError> {
     let data = recv(fd, buf_size)
     if data == "" { Err(RecvFailed) } else { Ok(data) }
 }

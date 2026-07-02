@@ -41,7 +41,7 @@ pub func is_valid_hex(s: string) -> bool {
 pub func hex_encode(s: string) -> string {
     let mut result = ""
     for i in range(0, len(s)) {
-        let code = char_code(str_char_at(s, i))
+        let code = char_code(s, i)
         let hi = code / 16
         let lo = code % 16
         result = result + hex_digit(hi) + hex_digit(lo)
@@ -49,7 +49,7 @@ pub func hex_encode(s: string) -> string {
     result
 }
 
-func hex_digit(n: i32) -> string {
+func hex_digit(n: i64) -> string {
     if n < 10 { to_string(n) }
     else if n == 10 { "a" }
     else if n == 11 { "b" }

@@ -20,7 +20,7 @@ trait MapExt {
 impl MapExt for Record {
     func get(key: string) -> (bool, Any) { map_get(self, key) }
     func set(key: string, value: Any) -> Record { map_set(self, key, value) }
-    func has_key(key: string) -> bool { map_has_key(self, key) }
+    func has_key(key: string) -> bool { map_get(self, key).0 }
     func remove(key: string) -> Record { map_remove(self, key) }
     func size() -> i32 { map_size(self) }
     func is_empty() -> bool { map_size(self) == 0 }
@@ -39,8 +39,13 @@ impl MapExt for Record {
     }
     func to_list() -> List<(string, Any)> {
         let ks = keys(self)
-        let vs = values(self)
-        zip(ks, vs)
+        let mut result: List<(string, Any)> = []
+        let mut i = 0
+        while i < len(ks) {
+            push(result, (ks[i], map_get(self, ks[i]).1))
+            i = i + 1
+        }
+        result
     }
     func filter_keys(pred: func(string) -> bool) -> Record {
         let ks = keys(self)
@@ -103,7 +108,7 @@ pub func set(m: Record, key: string, value: Any) -> Record {
 
 // has_key: Returns true if key exists in m.
 pub func has_key(m: Record, key: string) -> bool {
-    map_has_key(m, key)
+    map_get(m, key).0
 }
 
 // remove: Removes key from map m, returns updated map.
@@ -146,8 +151,13 @@ pub func merge(a: Record, b: Record) -> Record {
 // to_list: Converts a map to a list of (key, value) pairs.
 pub func to_list(m: Record) -> List<(string, Any)> {
     let ks = keys(m)
-    let vs = values(m)
-    zip(ks, vs)
+    let mut result: List<(string, Any)> = []
+    let mut i = 0
+    while i < len(ks) {
+        push(result, (ks[i], map_get(m, ks[i]).1))
+        i = i + 1
+    }
+    result
 }
 
 // filter_keys: Returns a new map with only keys satisfying pred.

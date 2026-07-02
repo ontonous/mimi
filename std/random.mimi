@@ -27,6 +27,18 @@ trait RandomChoice<T> {
     func shuffle() -> List<T>
 }
 
+// remove_at: returns a new list with the element at idx removed.
+func remove_at<T>(xs: List<T>, idx: i32) -> List<T> {
+    let mut result: List<T> = []
+    let mut i: i32 = 0
+    let n = to_int(len(xs))
+    while i < n {
+        if i != idx { push(result, xs[i]) }
+        i = i + 1
+    }
+    result
+}
+
 // RandomChoice implementation for built-in List<T> type.
 impl<T> RandomChoice<T> for List<T> {
     func random_choice() -> Result<T, string> {
@@ -44,9 +56,9 @@ impl<T> RandomChoice<T> for List<T> {
         let mut rs_k = 0
         while rs_k < n && rs_k < rs_len {
             let rs_idx = to_int(floor(random() * to_float(len(rs_remaining))))
-            rs_result = push(rs_result, rs_remaining[rs_idx])
+            push(rs_result, rs_remaining[rs_idx])
             rs_remaining = remove_at(rs_remaining, rs_idx)
-            rs_k += 1
+            rs_k = rs_k + 1
         }
         rs_result
     }
@@ -55,7 +67,7 @@ impl<T> RandomChoice<T> for List<T> {
         let mut sh_res: List<T> = []
         while len(sh_rest) > 0 {
             let sh_idx = to_int(floor(random() * to_float(len(sh_rest))))
-            sh_res = push(sh_res, sh_rest[sh_idx])
+            push(sh_res, sh_rest[sh_idx])
             sh_rest = remove_at(sh_rest, sh_idx)
         }
         sh_res

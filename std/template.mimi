@@ -29,14 +29,22 @@ pub func render(template: string, lookup: func(string) -> string) -> string {
     let mut n = len(result)
 
     while pos < n {
-        let start_idx = str_index_of(str_substring(result, pos, n), "{{")
-        if !start_idx.0 { break }
+        let start_opt = str_index_of(str_substring(result, pos, n), "{{")
+        let start_idx = match start_opt {
+            Some(idx) => idx
+            None => -1
+        }
+        if start_idx < 0 { break }
 
-        let var_start = pos + start_idx.1 + 2
-        let end_idx = str_index_of(str_substring(result, var_start, n), "}}")
-        if !end_idx.0 { break }
+        let var_start = pos + start_idx + 2
+        let end_opt = str_index_of(str_substring(result, var_start, n), "}}")
+        let end_idx = match end_opt {
+            Some(idx) => idx
+            None => -1
+        }
+        if end_idx < 0 { break }
 
-        let var_end = var_start + end_idx.1
+        let var_end = var_start + end_idx
         let var_name = str_substring(result, var_start, var_end)
         let replacement = lookup(var_name)
 
@@ -50,20 +58,55 @@ pub func render(template: string, lookup: func(string) -> string) -> string {
     result
 }
 
+// lookup_with_default: returns the string value for key in vars, or default_val.
+func lookup_with_default(vars: Record, key: string, default_val: string) -> string {
+    let ks = keys(vars)
+    let vs = values(vars)
+    let mut ki = 0
+    let mut found = default_val
+    while ki < len(ks) {
+        if ks[ki] == key {
+            found = to_string(vs[ki])
+        }
+        ki = ki + 1
+    }
+    found
+}
+
 // render_with_defaults: Like render, but returns default for unknown keys.
 pub func render_with_defaults(template: string, vars: Record, default_val: string) -> string {
-    render(template, func(key: string) -> string {
-        let ks = keys(vars)
-        let vs = values(vars)
-        let mut ki = 0
-        while ki < len(ks) {
-            if ks[ki] == key {
-                return to_string(vs[ki])
-            }
-            ki = ki + 1
+    let mut result = template
+    let mut pos = 0
+    let mut n = len(result)
+
+    while pos < n {
+        let start_opt = str_index_of(str_substring(result, pos, n), "{{")
+        let start_idx = match start_opt {
+            Some(idx) => idx
+            None => -1
         }
-        default_val
-    })
+        if start_idx < 0 { break }
+
+        let var_start = pos + start_idx + 2
+        let end_opt = str_index_of(str_substring(result, var_start, n), "}}")
+        let end_idx = match end_opt {
+            Some(idx) => idx
+            None => -1
+        }
+        if end_idx < 0 { break }
+
+        let var_end = var_start + end_idx
+        let var_name = str_substring(result, var_start, var_end)
+        let replacement = lookup_with_default(vars, var_name, default_val)
+
+        let before = str_substring(result, 0, var_start - 2)
+        let after = str_substring(result, var_end + 2, n)
+        result = before + replacement + after
+        n = len(result)
+        pos = var_start - 2 + len(replacement)
+    }
+
+    result
 }
 
 // render_csv: Renders CSV rows using {{col_0}}, {{col_1}}, etc.
@@ -76,7 +119,7 @@ pub func render_csv(template: string, rows: List<List<string>>) -> string {
             vars = map_set(vars, "col_" + to_string(ci), row[ci])
             ci = ci + 1
         }
-        results = push(results, simple_render(template, vars))
+        push(results, simple_render(template, vars))
     }
     str_join(results, "\n")
 }

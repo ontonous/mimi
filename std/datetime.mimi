@@ -154,10 +154,10 @@ pub func sleep_until(timestamp_secs: i64) {
 }
 
 // Time constants
-pub const SECONDS_PER_MINUTE: i64 = 60
-pub const SECONDS_PER_HOUR: i64 = 3600
-pub const SECONDS_PER_DAY: i64 = 86400
-pub const MILLIS_PER_SECOND: i64 = 1000
-pub const MILLIS_PER_MINUTE: i64 = 60000
-pub const MILLIS_PER_HOUR: i64 = 3600000
-pub const MILLIS_PER_DAY: i64 = 86400000
+pub const SECONDS_PER_MINUTE = 60
+pub const SECONDS_PER_HOUR = 3600
+pub const SECONDS_PER_DAY = 86400
+pub const MILLIS_PER_SECOND = 1000
+pub const MILLIS_PER_MINUTE = 60000
+pub const MILLIS_PER_HOUR = 3600000
+pub const MILLIS_PER_DAY = 86400000

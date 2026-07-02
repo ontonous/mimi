@@ -20,11 +20,8 @@ trait ListExt<T> {
     func chunks(size: i32) -> List<List<T>>
     func intersperse(sep: T) -> List<T>
     func filter(pred: func(T) -> bool) -> List<T>
-    func min_index() -> i32
-    func max_index() -> i32
     func map<U>(f: func(T) -> U) -> List<U>
-    func find_map<U>(f: func(T) -> (bool, U)) -> (bool, U)
-    func group_by<K>(key_fn: func(T) -> K) -> Record
+    func find_map<U>(f: func(T) -> (bool, U)) -> Option<U>
     func reduce<U>(f: func(U, T) -> U, init: U) -> U
 }
 
@@ -58,23 +55,27 @@ impl<T> ListExt<T> for List<T> {
     }
     func dedup() -> List<T> {
         reduce(self, fn(dd_acc: List<T>, dd_x: T) -> List<T> {
-            if contains(dd_acc, dd_x) { dd_acc } else { push(dd_acc, dd_x) }
+            if !contains(dd_acc, dd_x) { push(dd_acc, dd_x) }
+            dd_acc
         }, [])
     }
     func concat(ys: List<T>) -> List<T> {
         reduce(ys, fn(ct_acc: List<T>, ct_x: T) -> List<T> {
             push(ct_acc, ct_x)
+            ct_acc
         }, self)
     }
     func reverse() -> List<T> { reverse(self) }
     func remove_at(index: i32) -> List<T> {
         reduce(range(0, len(self)), fn(ra_acc: List<T>, ra_i: i32) -> List<T> {
-            if ra_i != index { push(ra_acc, self[ra_i]) } else { ra_acc }
+            if ra_i != index { push(ra_acc, self[ra_i]) }
+            ra_acc
         }, [])
     }
     func remove(value: T) -> List<T> {
         reduce(self, fn(rv_acc: List<T>, rv_x: T) -> List<T> {
-            if rv_x != value { push(rv_acc, rv_x) } else { rv_acc }
+            if rv_x != value { push(rv_acc, rv_x) }
+            rv_acc
         }, [])
     }
     func any(pred: func(T) -> bool) -> bool {
@@ -115,7 +116,7 @@ impl<T> ListExt<T> for List<T> {
         while is_i < len(self) {
             push(is_result, sep)
             push(is_result, self[is_i])
-            is_i += 1
+            is_i = is_i + 1
         }
         is_result
     }
@@ -126,56 +127,18 @@ impl<T> ListExt<T> for List<T> {
         }
         fl_res
     }
-    func min_index() -> i32 {
-        if len(self) == 0 { return -1 }
-        let mut mi_idx = 0
-        let mut mi_min = self[0]
-        for mi_k in range(1, len(self)) {
-            if self[mi_k] < mi_min {
-                mi_min = self[mi_k]
-                mi_idx = mi_k
-            }
-        }
-        mi_idx
-    }
-    func max_index() -> i32 {
-        if len(self) == 0 { return -1 }
-        let mut mi_idx = 0
-        let mut mi_max = self[0]
-        for mi_k in range(1, len(self)) {
-            if self[mi_k] > mi_max {
-                mi_max = self[mi_k]
-                mi_idx = mi_k
-            }
-        }
-        mi_idx
-    }
     func map<U>(f: func(T) -> U) -> List<U> {
         reduce(self, fn(ml_acc: List<U>, ml_x: T) -> List<U> {
             push(ml_acc, f(ml_x))
+            ml_acc
         }, [])
     }
-    func find_map<U>(f: func(T) -> (bool, U)) -> (bool, U) {
+    func find_map<U>(f: func(T) -> (bool, U)) -> Option<U> {
         for fm_x in self {
             let fm_result = f(fm_x)
-            if fm_result.0 { return fm_result }
+            if fm_result.0 { return Some(fm_result.1) }
         }
-        (false, unknown)
-    }
-    func group_by<K>(key_fn: func(T) -> K) -> Record {
-        let mut result = map_new()
-        for gb_x in self {
-            let gb_k = key_fn(gb_x)
-            if map_has_key(result, to_string(gb_k)) {
-                let gb_old = map_get(result, to_string(gb_k))
-                let mut gb_list: List<T> = gb_old.1
-                push(gb_list, gb_x)
-                result = map_set(result, to_string(gb_k), gb_list)
-            } else {
-                result = map_set(result, to_string(gb_k), [gb_x])
-            }
-        }
-        result
+        None
     }
     func reduce<U>(f: func(U, T) -> U, init: U) -> U {
         let mut rl_acc = init
@@ -258,36 +221,44 @@ pub func remove_value<T>(xs: List<T>, value: T) -> List<T> {
 
 // fill_list: Creates a list of length n filled with value.
 pub func fill_list<T>(n: i32, value: T) -> List<T> {
-    reduce(range(0, n), fn(fl_acc: List<T>, _: i32) -> List<T> {
-        push(fl_acc, value)
-    }, [])
+    let mut result: List<T> = []
+    let mut i = 0
+    while i < n {
+        push(result, value)
+        i = i + 1
+    }
+    result
 }
 
 // range_step: Generates a range [start, end) with given step.
 pub func range_step(start: i32, end: i32, step: i32) -> List<i32> {
-    if step == 0 {
-        []
-    } else if step > 0 {
-        reduce(range(0, (end - start + step - 1) / step), fn(rs_acc: List<i32>, rs_k: i32) -> List<i32> {
-            push(rs_acc, start + rs_k * step)
-        }, [])
+    let mut result: List<i32> = []
+    if step == 0 { return result }
+    let mut x = start
+    if step > 0 {
+        while x < end {
+            push(result, x)
+            x = x + step
+        }
     } else {
-        reduce(range(0, (start - end - step - 1) / (-step)), fn(rs_acc: List<i32>, rs_k: i32) -> List<i32> {
-            push(rs_acc, start + rs_k * step)
-        }, [])
+        while x > end {
+            push(result, x)
+            x = x + step
+        }
     }
+    result
 }
 
 // sum: Sums a list of integers.
 pub func sum(xs: List<i32>) -> i32 {
-    reduce(xs, fn(s_acc: i32, s_x: i32) -> i32 {
+    reduce_list(xs, fn(s_acc: i32, s_x: i32) -> i32 {
         s_acc + s_x
     }, 0)
 }
 
 // sum_float: Sums a list of floats.
 pub func sum_float(xs: List<f64>) -> f64 {
-    reduce(xs, fn(sf_acc: f64, sf_x: f64) -> f64 {
+    reduce_list(xs, fn(sf_acc: f64, sf_x: f64) -> f64 {
         sf_acc + sf_x
     }, 0.0)
 }
@@ -356,19 +327,14 @@ pub func all<T>(xs: List<T>, pred: func(T) -> bool) -> bool {
     xs.all(pred)
 }
 
-// find_map: Finds first element matching f, returns (true, mapped) or (false, unknown).
-pub func find_map<T, U>(xs: List<T>, f: func(T) -> (bool, U)) -> (bool, U) {
+// find_map: Finds first element matching f, returns Some(mapped) or None.
+pub func find_map<T, U>(xs: List<T>, f: func(T) -> (bool, U)) -> Option<U> {
     xs.find_map(f)
 }
 
 // partition: Splits xs into (matching, non-matching) per pred.
 pub func partition<T>(xs: List<T>, pred: func(T) -> bool) -> (List<T>, List<T>) {
     xs.partition(pred)
-}
-
-// group_by: Groups elements by key_fn into a Record.
-pub func group_by<T, K>(xs: List<T>, key_fn: func(T) -> K) -> Record {
-    xs.group_by(key_fn)
 }
 
 // chunks: Splits xs into chunks of size (last chunk may be smaller).
@@ -432,11 +398,33 @@ pub func reduce_list<T, U>(xs: List<T>, f: func(U, T) -> U, init: U) -> U {
 }
 
 // min_index: Returns the index of the minimum element (-1 if empty).
-pub func min_index<T>(xs: List<T>) -> i32 {
-    xs.min_index()
+pub func min_index(xs: List<i32>) -> i32 {
+    if len(xs) == 0 { return -1 }
+    let mut mi_idx = 0
+    let mut mi_min = xs[0]
+    let mut i = 1
+    while i < len(xs) {
+        if xs[i] < mi_min {
+            mi_min = xs[i]
+            mi_idx = i
+        }
+        i = i + 1
+    }
+    mi_idx
 }
 
 // max_index: Returns the index of the maximum element (-1 if empty).
-pub func max_index<T>(xs: List<T>) -> i32 {
-    xs.max_index()
+pub func max_index(xs: List<i32>) -> i32 {
+    if len(xs) == 0 { return -1 }
+    let mut mi_idx = 0
+    let mut mi_max = xs[0]
+    let mut i = 1
+    while i < len(xs) {
+        if xs[i] > mi_max {
+            mi_max = xs[i]
+            mi_idx = i
+        }
+        i = i + 1
+    }
+    mi_idx
 }
