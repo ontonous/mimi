@@ -136,9 +136,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .gep()
                         .build_struct_gep(sty, field_ptr, idx as u32, field_name)
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                    let field_ty = types::mimi_type_to_llvm(self.context, &fields[idx].ty)
-                        .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                    return self.build_load(field_ty, gep, field_name);
+                    // i32 fields must be loaded as i32 then sign-extended to i64 to
+                    // match Mimi's i64-uniform value convention; otherwise an i64
+                    // load would over-read into the next struct field.
+                    let (load_ty, ext) = match &fields[idx].ty {
+                        Type::Name(n, _) if n == "i32" => {
+                            (BasicTypeEnum::IntType(self.context.i32_type()), true)
+                        }
+                        _ => (
+                            types::mimi_type_to_llvm(self.context, &fields[idx].ty)
+                                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+                            false,
+                        ),
+                    };
+                    let loaded = self.build_load(load_ty, gep, field_name)?;
+                    if ext {
+                        if let BasicValueEnum::IntValue(iv) = loaded {
+                            return Ok(self
+                                .builder
+                                .build_int_s_extend(iv, self.context.i64_type(), "i32_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .into());
+                        }
+                    }
+                    return Ok(loaded);
                 }
             }
         }
