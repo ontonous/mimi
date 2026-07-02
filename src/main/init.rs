@@ -2,14 +2,14 @@ use mimi::manifest;
 use std::path::Path;
 
 pub(crate) fn init(base_dir: &Path, name: Option<&str>) -> Result<(), String> {
-    let project_dir = match name {
-        Some(n) => base_dir.join(n),
-        None => base_dir.to_path_buf(),
-    };
+    // P1-12: always initialize in the current directory, regardless of
+    // whether a package name is given. The name only sets the `name`
+    // field in mimi.toml, making the behavior consistent with `cargo init`.
+    let project_dir = base_dir.to_path_buf();
 
-    if name.is_some() && project_dir.exists() {
+    if !project_dir.exists() {
         return Err(format!(
-            "directory '{}' already exists",
+            "directory '{}' does not exist",
             project_dir.display()
         ));
     }
@@ -55,22 +55,22 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_project_in_named_subdirectory() {
+    fn init_creates_project_in_current_directory() {
         let base = temp_dir();
         init(&base, Some("myapp")).expect("init should succeed");
 
-        let project_dir = base.join("myapp");
         assert!(
-            project_dir.exists(),
-            "project subdirectory should be created"
+            base.join("mimi.toml").exists(),
+            "mimi.toml should exist in base dir"
         );
         assert!(
-            project_dir.join("mimi.toml").exists(),
-            "mimi.toml should exist"
+            base.join("main.mimi").exists(),
+            "main.mimi should exist in base dir"
         );
+        let content = std::fs::read_to_string(base.join("mimi.toml")).expect("read toml");
         assert!(
-            project_dir.join("main.mimi").exists(),
-            "main.mimi should exist"
+            content.contains(r#"name = "myapp""#),
+            "toml should contain given package name"
         );
 
         // Cleanup
@@ -96,18 +96,14 @@ mod tests {
     }
 
     #[test]
-    fn init_refuses_existing_subdirectory() {
+    fn init_with_given_name_writes_correct_toml() {
         let base = temp_dir();
-        let existing = base.join("exists");
-        std::fs::create_dir(&existing).unwrap();
-
-        let result = init(&base, Some("exists"));
+        init(&base, Some("myapp")).expect("init should succeed");
+        let content = std::fs::read_to_string(base.join("mimi.toml")).expect("read toml");
         assert!(
-            result.is_err(),
-            "init should fail when target subdirectory exists"
+            content.contains(r#"name = "myapp""#),
+            "toml should use the given package name"
         );
-
-        // Cleanup
         std::fs::remove_dir_all(&base).ok();
     }
 }
