@@ -261,6 +261,15 @@ impl ModuleLoader {
             }
         }
 
+        // P1-16: try stdlib for any bare module name (e.g. `use csv`
+        // resolves to `<stdlib>/csv.mimi`).
+        if let Some(std_dir) = stdlib_dir() {
+            let std_path = std_dir.join(&relative).with_extension("mimi");
+            if std_path.exists() {
+                return Ok(std_path);
+            }
+        }
+
         // Try selective import: if path has 2+ elements and doesn't resolve as a file,
         // the last element may be a specific function/item imported from the prefix module.
         // e.g., `use strings::replace_all` → resolve `strings.mimi`
