@@ -1,6 +1,6 @@
 [package]
 name = "mimi"
-version = "0.28.19"
+version = "0.28.20-dev"
 edition = "2021"
 rust-version = "1.75"
 authors = ["ontonous"]
