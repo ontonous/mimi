@@ -2,8 +2,92 @@ use crate::ast::*;
 use crate::codegen::types;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::{BasicType, BasicTypeEnum, StructType};
 use inkwell::values::BasicMetadataValueEnum;
+
+/// P0-2: how a variant's payload maps onto the constructor function's
+/// parameter shape. The uniform runtime representation is `{i32 tag, i64
+/// payload}` so anything that doesn't fit in a single primitive must be
+/// packed into a heap-allocated struct and ptrtoint-encoded into the
+/// i64 slot (matching the existing single-struct payload encoding).
+#[derive(Debug, Clone, Copy)]
+enum PayloadKind<'ctx> {
+    /// Variant carries no payload (e.g. `None`).
+    None,
+    /// Variant carries exactly one payload and it maps to a single
+    /// non-struct LLVM primitive (e.g. `Circle(f64)` → f64).
+    Single(BasicTypeEnum<'ctx>),
+    /// Variant carries a struct payload OR a multi-arg tuple; the args
+    /// are packed into an LLVM struct that the constructor takes by
+    /// value and stores on the heap.
+    Packed(StructType<'ctx>),
+}
+
+impl<'ctx> CodeGenerator<'ctx> {
+    /// Classify a variant payload into the constructor parameter shape
+    /// described by [`PayloadKind`]. Multi-arg tuples and struct
+    /// payloads share the `Packed` branch so the existing
+    /// `decode_payload_struct` match-side path keeps working.
+    fn classify_variant_payload(
+        &self,
+        payload: &Option<VariantPayload>,
+    ) -> PayloadKind<'ctx> {
+        let Some(payload) = payload else {
+            return PayloadKind::None;
+        };
+        match payload {
+            VariantPayload::Tuple(types) if types.len() == 1 => {
+                match self.llvm_type_for(&types[0]) {
+                    Some(BasicTypeEnum::StructType(st)) => PayloadKind::Packed(st),
+                    Some(ty) => PayloadKind::Single(ty),
+                    None => {
+                        // Unknown payload type: fall back to packed (i64, i64)
+                        // so the caller still gets a defined function shape.
+                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                        PayloadKind::Packed(self.context.struct_type(&[i64_ty, i64_ty], false))
+                    }
+                }
+            }
+            VariantPayload::Tuple(types) => {
+                // Multi-arg tuple: pack each arg's LLVM type into a struct.
+                let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(types.len());
+                let mut all_known = true;
+                for t in types {
+                    if let Some(ty) = self.llvm_type_for(t) {
+                        field_tys.push(ty);
+                    } else {
+                        all_known = false;
+                        break;
+                    }
+                }
+                if all_known && !field_tys.is_empty() {
+                    PayloadKind::Packed(self.context.struct_type(&field_tys, false))
+                } else {
+                    let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                    PayloadKind::Packed(self.context.struct_type(&[i64_ty, i64_ty], false))
+                }
+            }
+            VariantPayload::Record(fields) => {
+                let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(fields.len());
+                let mut all_known = true;
+                for f in fields {
+                    if let Some(ty) = self.llvm_type_for(&f.ty) {
+                        field_tys.push(ty);
+                    } else {
+                        all_known = false;
+                        break;
+                    }
+                }
+                if all_known && !field_tys.is_empty() {
+                    PayloadKind::Packed(self.context.struct_type(&field_tys, false))
+                } else {
+                    let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                    PayloadKind::Packed(self.context.struct_type(&[i64_ty, i64_ty], false))
+                }
+            }
+        }
+    }
+}
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn register_type_def(
@@ -71,36 +155,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &[BasicTypeEnum::IntType(self.context.i32_type()), payload_ty],
                         false,
                     );
-                    // Metadata type for constructor parameter
-                    let meta_payload_ty = types::basic_to_metadata(self.context, payload_ty);
                     for (ordinal, v) in sorted_variants.iter().enumerate() {
                         let ctor_name = format!("{}_{}", t.name, v.name);
                         if self.module.get_function(&ctor_name).is_none() {
-                            // Determine payload LLVM type for this variant
-                            let payload_llvm = v.payload.as_ref().and_then(|p| match p {
-                                crate::ast::VariantPayload::Tuple(types) if types.len() == 1 => {
-                                    self.llvm_type_for(&types[0])
+                            // P0-2: classify the variant payload so the
+                            // constructor function is declared with the right
+                            // parameter shape. Three cases:
+                            //   - no payload: () -> {i32 tag, i64 payload}
+                            //   - single primitive (non-struct): (T) -> ...
+                            //     with the natural LLVM type T (f64, i64, ...);
+                            //     the body bitcasts T -> i64 before storing.
+                            //   - struct payload OR multi-arg tuple: the args
+                            //     are packed into an LLVM struct, the ctor takes
+                            //     that struct by value, mallocs+stores+ptrtoint
+                            //     into the i64 payload slot (matches the
+                            //     existing single-struct payload encoding, so
+                            //     decode_payload_struct on the match side
+                            //     continues to work without changes).
+                            let payload_kind = self.classify_variant_payload(&v.payload);
+                            let fn_type = match &payload_kind {
+                                PayloadKind::None => struct_ty.fn_type(&[], false),
+                                PayloadKind::Single(ty) => {
+                                    let meta = types::basic_to_metadata(self.context, *ty);
+                                    struct_ty.fn_type(&[meta], false)
                                 }
-                                _ => None,
-                            });
-                            let payload_is_struct =
-                                matches!(payload_llvm, Some(BasicTypeEnum::StructType(_)));
-                            let fn_type = if v.payload.is_some() {
-                                if payload_is_struct {
-                                    struct_ty.fn_type(
-                                        &[types::basic_to_metadata(
-                                            self.context,
-                                            payload_llvm.expect(
-                                                "payload_llvm is Some when payload_is_struct",
-                                            ),
-                                        )],
-                                        false,
-                                    )
-                                } else {
-                                    struct_ty.fn_type(&[meta_payload_ty], false)
+                                PayloadKind::Packed(packed_ty) => {
+                                    let meta = types::basic_to_metadata(
+                                        self.context,
+                                        BasicTypeEnum::StructType(*packed_ty),
+                                    );
+                                    struct_ty.fn_type(&[meta], false)
                                 }
-                            } else {
-                                struct_ty.fn_type(&[], false)
                             };
                             let ctor = self.module.add_function(
                                 &ctor_name,
@@ -130,27 +215,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("store error: {}", e))
                                 })?;
-                            if v.payload.is_some() {
-                                let payload_arg = ctor.get_nth_param(0).ok_or_else(|| {
-                                    CompileError::LlvmError("missing payload param".to_string())
+                            let payload_gep = self
+                                .gep()
+                                .build_struct_gep(struct_ty, alloca, 1, "payload")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("gep error: {}", e))
                                 })?;
-                                let payload_gep = self
-                                    .gep()
-                                    .build_struct_gep(struct_ty, alloca, 1, "payload")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("gep error: {}", e))
+                            match &payload_kind {
+                                PayloadKind::None => {}
+                                PayloadKind::Single(ty) => {
+                                    // P0-2: bitcast the natural type (e.g. f64)
+                                    // to i64 so it fits in the uniform payload
+                                    // slot. The match side reads it as i64 and
+                                    // bitcasts back when binding to f64.
+                                    let payload_arg = ctor.get_nth_param(0).ok_or_else(|| {
+                                        CompileError::LlvmError(
+                                            "missing payload param".to_string(),
+                                        )
                                     })?;
-                                if payload_is_struct {
-                                    // Struct-typed payload: malloc, store, ptrtoint to i64
-                                    let payload_struct = payload_arg.into_struct_value();
-                                    let payload_struct_ty = payload_llvm
-                                        .expect("payload_llvm is Some when payload_is_struct");
-                                    let struct_size =
-                                        payload_struct_ty.size_of().ok_or_else(|| {
+                                    let i64_payload = if *ty
+                                        == BasicTypeEnum::IntType(
+                                            self.context.i64_type(),
+                                        )
+                                    {
+                                        payload_arg
+                                    } else {
+                                        self.builder
+                                            .build_bit_cast(
+                                                payload_arg,
+                                                BasicTypeEnum::IntType(
+                                                    self.context.i64_type(),
+                                                ),
+                                                "payload_bc",
+                                            )
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "bitcast payload: {}",
+                                                    e
+                                                ))
+                                            })?
+                                    };
+                                    self.builder
+                                        .build_store(payload_gep, i64_payload)
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "store payload: {}",
+                                                e
+                                            ))
+                                        })?;
+                                }
+                                PayloadKind::Packed(packed_ty) => {
+                                    let payload_arg = ctor.get_nth_param(0).ok_or_else(|| {
+                                        CompileError::LlvmError(
+                                            "missing packed payload param".to_string(),
+                                        )
+                                    })?;
+                                    let payload_struct_ty =
+                                        BasicTypeEnum::StructType(*packed_ty);
+                                    let struct_size = payload_struct_ty.size_of().ok_or_else(
+                                        || {
                                             CompileError::LlvmError(
                                                 "cannot get payload struct size".to_string(),
                                             )
-                                        })?;
+                                        },
+                                    )?;
                                     let malloc_fn = self
                                         .module
                                         .get_function("malloc")
@@ -177,16 +305,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .builder
                                         .build_pointer_cast(
                                             malloc_result,
-                                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                                            self.context
+                                                .ptr_type(inkwell::AddressSpace::default()),
                                             "typed_ptr",
                                         )
                                         .map_err(|e| {
                                             CompileError::LlvmError(format!("ptr cast: {}", e))
                                         })?;
                                     self.builder
-                                        .build_store(typed_ptr, payload_struct)
+                                        .build_store(typed_ptr, payload_arg)
                                         .map_err(|e| {
-                                            CompileError::LlvmError(format!("store struct: {}", e))
+                                            CompileError::LlvmError(format!(
+                                                "store packed: {}",
+                                                e
+                                            ))
                                         })?;
                                     let i8_ptr =
                                         self.context.ptr_type(inkwell::AddressSpace::default());
@@ -208,10 +340,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         })?;
                                     self.builder.build_store(payload_gep, int_val).map_err(
                                         |e| CompileError::LlvmError(format!("store int: {}", e)),
-                                    )?;
-                                } else {
-                                    self.builder.build_store(payload_gep, payload_arg).map_err(
-                                        |e| CompileError::LlvmError(format!("store error: {}", e)),
                                     )?;
                                 }
                             }

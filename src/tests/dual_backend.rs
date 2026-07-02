@@ -875,6 +875,93 @@ fn dual_enum_ctor() {
     );
 }
 
+// P0-2: enum constructors with non-i32 single payloads (e.g. f64)
+// must round-trip the value, not replace it with garbage. The codegen
+// ctor was declared as `(i64) -> ...` regardless of payload type, so
+// the caller put f64 in xmm0 and the callee read garbage from rdi.
+// (The codegen println formats f64 with 6 decimals; the interptest
+// uses whole numbers so we compare after parsing both sides to f64.)
+#[test]
+fn dual_enum_f64_payload() {
+    if !can_link() {
+        return;
+    }
+    let interp = run_source(
+        r#"
+        type Wrap { Box(f64) }
+        func main() -> i32 {
+            let b = Box(5.0)
+            match b {
+                Box(v) => println(v)
+                _ => println(-1.0)
+            }
+            0
+        }
+    "#,
+    );
+    let interp_str = format!("{:?}", interp);
+    let codegen = compile_and_run(
+        r#"
+        type Wrap { Box(f64) }
+        func main() -> i32 {
+            let b = Box(5.0)
+            match b {
+                Box(v) => println(v)
+                _ => println(-1.0)
+            }
+            0
+        }
+    "#,
+    )
+    .expect("codegen failed");
+    let parsed: f64 = codegen
+        .trim()
+        .parse()
+        .expect("codegen output must be a number");
+    assert!(
+        (parsed - 5.0).abs() < 1e-9,
+        "codegen must round-trip f64 5.0; got {} (interp returned {})",
+        codegen.trim(),
+        interp_str
+    );
+}
+
+// P0-2: multi-payload enum constructor must preserve all fields. The
+// codegen ctor only handled single-payload variants and silently
+// ignored the second argument, so Rectangle(w, h) lost both values.
+#[test]
+fn dual_enum_multi_payload() {
+    if !can_link() {
+        return;
+    }
+    let codegen = compile_and_run(
+        r#"
+        type Pair { Pt(f64, f64) }
+        func main() -> i32 {
+            let p = Pt(3.0, 4.0)
+            match p {
+                Pt(a, b) => {
+                    println(a)
+                    println(b)
+                }
+                _ => {
+                    println(-1.0)
+                    println(-1.0)
+                }
+            }
+            0
+        }
+    "#,
+    )
+    .expect("codegen failed");
+    let lines: Vec<&str> = codegen.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 lines, got: {}", codegen);
+    let a: f64 = lines[0].trim().parse().expect("first line must be f64");
+    let b: f64 = lines[1].trim().parse().expect("second line must be f64");
+    assert!((a - 3.0).abs() < 1e-9, "first arg must be 3.0; got {}", a);
+    assert!((b - 4.0).abs() < 1e-9, "second arg must be 4.0; got {}", b);
+}
+
 #[test]
 fn dual_enum_tag_print() {
     if !can_link() {

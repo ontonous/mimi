@@ -66,6 +66,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     1
                 };
+                // P0-2: For custom enums, multi-arg variants pack their fields into
+                // a struct that lives at the i64 payload slot (ptrtoint-encoded).
+                // We need to decode that struct and bind each inner pattern to its
+                // respective field, instead of binding the entire payload to every
+                // inner pattern variable.
+                let variant_arg_tys: Option<Vec<crate::ast::Type>> =
+                    self.find_variant_owner(name).and_then(|(owner, _)| {
+                        self.type_defs.get(&owner).and_then(|td| {
+                            if let TypeDefKind::Enum(variants) = &td.kind {
+                                variants
+                                    .iter()
+                                    .find(|v| v.name == *name)
+                                    .and_then(|v| match &v.payload {
+                                        Some(VariantPayload::Tuple(ts)) if ts.len() > 1 => {
+                                            Some(ts.clone())
+                                        }
+                                        _ => None,
+                                    })
+                            } else {
+                                None
+                            }
+                        })
+                    });
                 let (payload, payload_ty) = match scrutinee_val {
                     BasicValueEnum::StructValue(sv) => {
                         let payload_val = self
@@ -109,9 +132,102 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     _ => return Err("constructor pattern requires enum struct value".into()),
                 };
-                for inner_pat in inner_patterns {
-                    if let Pattern::Variable(name) = inner_pat {
-                        self.bind_pattern_var(&mut local_vars, name, payload, payload_ty)?;
+                if let Some(arg_tys) = variant_arg_tys {
+                    // P0-2: Multi-arg variant — the constructor packed the
+                    // args into a struct on the heap and stored the ptrtoint
+                    // result in the i64 payload slot. Int-toptr + load to
+                    // recover the struct, then bind each inner pattern to
+                    // the corresponding field.
+                    let payload_int = match payload {
+                        BasicValueEnum::IntValue(iv) => iv,
+                        BasicValueEnum::PointerValue(pv) => {
+                            self.builder
+                                .build_ptr_to_int(
+                                    pv,
+                                    self.context.i64_type(),
+                                    "payload_int_recover",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("ptr2int: {}", e))
+                                })?
+                        }
+                        _ => {
+                            return Err(
+                                "multi-arg constructor pattern: expected int payload".into(),
+                            )
+                        }
+                    };
+                    let mut field_tys: Vec<BasicTypeEnum<'ctx>> =
+                        Vec::with_capacity(arg_tys.len());
+                    let mut all_known = true;
+                    for t in &arg_tys {
+                        if let Some(ty) = self.llvm_type_for(t) {
+                            field_tys.push(ty);
+                        } else {
+                            all_known = false;
+                            break;
+                        }
+                    }
+                    if !all_known || field_tys.is_empty() {
+                        return Err(
+                            "multi-arg constructor pattern: cannot resolve payload field types"
+                                .into(),
+                        );
+                    }
+                    let packed_ty = self.context.struct_type(&field_tys, false);
+                    let packed_ty_enum = BasicTypeEnum::StructType(packed_ty);
+                    let ptr = self
+                        .builder
+                        .build_int_to_ptr(
+                            payload_int,
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "multi_payload_ptr",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?;
+                    let payload_sv = self
+                        .builder
+                        .build_load(packed_ty_enum, ptr, "multi_payload_struct")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!(
+                                "load multi payload struct: {}",
+                                e
+                            ))
+                        })?
+                        .into_struct_value();
+                    let payload_ptr =
+                        self.build_alloca(packed_ty_enum, "multi_payload_alloca")?;
+                    self.build_store(payload_ptr, payload_sv)?;
+                    for (j, inner_pat) in inner_patterns.iter().enumerate() {
+                        if let Pattern::Variable(pname) = inner_pat {
+                            if j >= arg_tys.len() {
+                                break;
+                            }
+                            let elem_ty = packed_ty
+                                .get_field_type_at_index(j as u32)
+                                .unwrap_or(BasicTypeEnum::IntType(
+                                    self.context.i64_type(),
+                                ));
+                            let gep = self
+                                .gep()
+                                .build_struct_gep(
+                                    packed_ty_enum,
+                                    payload_ptr,
+                                    j as u32,
+                                    &format!("multi_el{}", j),
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("gep: {}", e))
+                                })?;
+                            let val =
+                                self.build_load(elem_ty, gep, &format!("multi_v{}", j))?;
+                            self.bind_pattern_var(&mut local_vars, pname, val, elem_ty)?;
+                        }
+                    }
+                } else {
+                    for inner_pat in inner_patterns {
+                        if let Pattern::Variable(name) = inner_pat {
+                            self.bind_pattern_var(&mut local_vars, name, payload, payload_ty)?;
+                        }
                     }
                 }
             }
@@ -451,7 +567,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok((payload_val, payload_val.get_type()));
         }
 
-        let is_payload_struct = self
+        let payload_info = self
             .find_variant_owner(variant_name)
             .and_then(|(owner, _)| {
                 self.type_defs.get(&owner).and_then(|td| {
@@ -462,50 +578,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .and_then(|v| {
                                 if let Some(VariantPayload::Tuple(types)) = &v.payload {
                                     if types.len() == 1 {
-                                        self.llvm_type_for(&types[0])
-                                            .map(|t| matches!(t, BasicTypeEnum::StructType(_)))
+                                        self.llvm_type_for(&types[0]).map(|t| {
+                                            (
+                                                matches!(t, BasicTypeEnum::StructType(_)),
+                                                Some(t),
+                                            )
+                                        })
                                     } else {
-                                        Some(false)
+                                        None
                                     }
                                 } else {
-                                    Some(false)
+                                    None
                                 }
                             })
                     } else {
                         None
                     }
                 })
-            })
-            .unwrap_or(false);
-        if is_payload_struct {
+            });
+        if let Some((true, Some(data_ty))) = payload_info {
+            // Struct-typed single payload: inttoptr then load the struct.
             let payload_int = payload_val.into_int_value();
-            let data_ty = self
-                .find_variant_owner(variant_name)
-                .and_then(|(owner, _)| {
-                    self.type_defs.get(&owner).and_then(|td| {
-                        if let TypeDefKind::Enum(variants) = &td.kind {
-                            variants
-                                .iter()
-                                .find(|v| v.name == *variant_name)
-                                .and_then(|v| {
-                                    if let Some(VariantPayload::Tuple(types)) = &v.payload {
-                                        if types.len() == 1 {
-                                            self.llvm_type_for(&types[0])
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                })
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .ok_or_else(|| {
-                    CompileError::LlvmError("cannot determine payload struct type".to_string())
-                })?;
             let ptr = self
                 .builder
                 .build_int_to_ptr(
@@ -519,6 +612,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_load(data_ty, ptr, "payload_struct")
                 .map_err(|e| CompileError::LlvmError(format!("load payload struct: {}", e)))?;
             Ok((loaded_struct, data_ty))
+        } else if let Some((false, Some(natural_ty))) = payload_info {
+            // P0-2: Single primitive payload (e.g. f64). The constructor
+            // stored the bit pattern into the i64 payload slot. Bitcast back
+            // to the natural LLVM type so the bound variable has the right
+            // representation (e.g. `Circle(5.0)` binds `r` as f64 5.0).
+            if natural_ty == BasicTypeEnum::IntType(self.context.i64_type()) {
+                Ok((payload_val, natural_ty))
+            } else {
+                let decoded = self
+                    .builder
+                    .build_bit_cast(payload_val, natural_ty, "payload_bc_back")
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("bitcast payload back: {}", e))
+                    })?;
+                Ok((decoded, natural_ty))
+            }
         } else {
             Ok((payload_val, i64_ty))
         }
