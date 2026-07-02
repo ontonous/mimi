@@ -660,7 +660,7 @@ impl<'a> Checker<'a> {
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"
             | "atomic_i64_fetch_add" => {
-                if args.len() < 1 {
+                if args.is_empty() {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
                         format!("{} expects at least 1 argument", name),

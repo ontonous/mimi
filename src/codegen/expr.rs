@@ -494,6 +494,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///   1. Convert the AST into a `QuotedAst` via `quote_block`.
     ///   2. Run `eval_quoted_ast` against the interpreter, which
     ///      resolves identifiers against the (codegen-time) scope.
+    ///
     /// The result is then converted to an LLVM constant the same way as
     /// a literal fold. Variable bindings from `comptime func` results
     /// are seeded ahead of time so calls inside the quote block resolve

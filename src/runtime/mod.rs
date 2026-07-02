@@ -6143,8 +6143,11 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
 // null-checked.
 // =========================================================================
 
-/// Global concurrency-primitive table mutex (LazyLock because the table
-/// contains a non-`const` HashMap).
+/// Global concurrency-primitive table. LazyLock because the table
+/// contains a non-`const` HashMap. The `incompatible_msrv` allow mirrors
+/// `src/ffi/runtime.rs`'s `MIMI_POOL` static — the project runtime
+/// requires 1.80+ features regardless of the lib `rust-version` pin.
+#[allow(clippy::incompatible_msrv)]
 static CONCURRENCY_HANDLES: std::sync::LazyLock<std::sync::Mutex<ConcurrencyHandleTable>> =
     std::sync::LazyLock::new(|| {
         std::sync::Mutex::new(ConcurrencyHandleTable {
