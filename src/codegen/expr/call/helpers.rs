@@ -963,4 +963,62 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = self.build_load(BasicTypeEnum::IntType(i64_ty), acc_alloca, "result")?;
         Ok(result)
     }
+
+    /// Wrap a raw C string pointer into the Mimi `{ ptr, len }` string struct.
+    pub(in crate::codegen) fn wrap_raw_string_ptr(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                "strlen_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .into_int_value();
+        self.build_string_struct(ptr, len)
+    }
+
+    /// For direct calls to user-defined functions whose parameter is typed as
+    /// `string`, wrap raw string-pointer arguments (string literals, format
+    /// strings, etc.) into the Mimi string struct so the callee ABI matches.
+    /// Extern functions keep the raw C-string pointer ABI and are not wrapped.
+    pub(in crate::codegen) fn maybe_wrap_string_args_for_call(
+        &mut self,
+        name: &str,
+        arg_exprs: &[Expr],
+        compiled_args: &mut [BasicValueEnum<'ctx>],
+    ) -> Result<(), CompileError> {
+        let Some(fdef) = self.func_defs.get(name) else {
+            return Ok(());
+        };
+        let param_types: Vec<Type> = fdef.params.iter().map(|p| p.ty.clone()).collect();
+        for (i, (arg_expr, compiled)) in arg_exprs.iter().zip(compiled_args.iter_mut()).enumerate()
+        {
+            if i >= param_types.len() {
+                break;
+            }
+            if !Self::is_string_type(&param_types[i]) {
+                continue;
+            }
+            if !self.expr_is_string(arg_expr) {
+                continue;
+            }
+            if let BasicValueEnum::PointerValue(pv) = *compiled {
+                *compiled = self.wrap_raw_string_ptr(pv)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn is_string_type(ty: &Type) -> bool {
+        match ty {
+            Type::Name(name, _) if name == "string" => true,
+            Type::Ref(_, inner) | Type::RefMut(_, inner) => Self::is_string_type(inner),
+            _ => false,
+        }
+    }
 }

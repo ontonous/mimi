@@ -867,7 +867,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build the Mimi string struct `{ ptr: i8*, len: i64 }` on the stack and load it.
-    fn build_string_struct(
+    pub(in crate::codegen) fn build_string_struct(
         &self,
         ptr: PointerValue<'ctx>,
         len: inkwell::values::IntValue<'ctx>,

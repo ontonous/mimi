@@ -227,6 +227,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => {}
         }
 
+        self.maybe_wrap_string_args_for_call(name, args, &mut compiled_args)?;
         self.maybe_convert_list_args_to_values(name, &mut compiled_args)?;
         self.maybe_wrap_named_fn_args_to_closures(name, args, &mut compiled_args)?;
 

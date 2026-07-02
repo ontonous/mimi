@@ -427,23 +427,30 @@ pub fn load_prelude_items() -> Vec<Item> {
 }
 
 /// Merge prelude items into a File, skipping items that already exist
-/// (by name) in the destination. Mutates `dest` in place.
+/// (by name) in the destination. Prelude items are inserted at the front
+/// so they are defined before user code in the codegen pass, which compiles
+/// functions in source order and does not pre-declare forward references.
+/// Mutates `dest` in place.
 pub fn merge_prelude_into(dest: &mut File) {
     let prelude_items = load_prelude_items();
     if prelude_items.is_empty() {
         return;
     }
     // Collect existing item names (owned strings to avoid borrow conflict)
-    let existing: std::collections::HashSet<String> = dest.items.iter().filter_map(|i| item_name(i).map(String::from)).collect();
+    let existing: std::collections::HashSet<String> =
+        dest.items.iter().filter_map(|i| item_name(i).map(String::from)).collect();
+    let mut new_items: Vec<Item> = Vec::new();
     for item in prelude_items {
         if let Some(name) = item_name(&item) {
             if !existing.contains(name) {
-                dest.items.push(item);
+                new_items.push(item);
             }
         } else {
-            dest.items.push(item);
+            new_items.push(item);
         }
     }
+    // Insert prelude items before user items so callees are compiled first.
+    dest.items.splice(0..0, new_items);
 }
 
 /// Extract the name from an Item for duplicate detection in merge_all.
