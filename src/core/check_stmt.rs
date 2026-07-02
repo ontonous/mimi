@@ -543,12 +543,10 @@ impl<'a> Checker<'a> {
     ) {
         match stmt {
             Stmt::Let {
-                pat,
-                ty,
-                init,
-                mut_,
-                ref_,
+                pat, init, mut_, ref_, ty, pos,
             } => {
+                // P1-8: use the statement's recorded position for error spans.
+                self.set_pos(pos.0, pos.1);
                 // Shadowing detection: only check current scope (allow nested scope shadowing)
                 if let Pattern::Variable(name) = pat {
                     if let Some(current_scope) = self.var_scopes.last() {

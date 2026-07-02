@@ -252,6 +252,8 @@ pub enum Stmt {
         init: Option<Expr>,
         mut_: bool,
         ref_: bool, // let ref x = ... for arena references
+        /// Source position (line, col) from the `let` keyword (1-indexed).
+        pos: (usize, usize),
     },
     Return(Option<Expr>),
     Break(Option<Expr>),

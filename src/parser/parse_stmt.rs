@@ -380,6 +380,8 @@ impl Parser {
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
+        // Capture position from the `let`/`const` token before consuming.
+        let pos = (self.peek().line, self.peek().col);
         let is_const = self.at(&TokenKind::Const);
         if is_const {
             self.advance();
@@ -430,6 +432,7 @@ impl Parser {
             init,
             mut_,
             ref_,
+            pos,
         })
     }
 

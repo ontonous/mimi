@@ -369,12 +369,14 @@ fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -
             init,
             mut_,
             ref_,
+            ..
         } => Stmt::Let {
             pat: pat.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| substitute_args(e, params, args)),
             mut_: *mut_,
             ref_: *ref_,
+            pos: (0, 0),
         },
         Stmt::If { cond, then_, else_ } => Stmt::If {
             cond: substitute_args(cond, params, args),

@@ -136,6 +136,7 @@ impl<'a> Interpreter<'a> {
                 mut_,
                 ref_,
                 ty,
+                ..
             } => {
                 self.eval_let(pat, init, *mut_, *ref_, ty)?;
             }
