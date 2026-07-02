@@ -7,6 +7,14 @@
   - `src/codegen/expr.rs:497-500` `fold_quote_block` doc list 缩进
   - `src/core/infer/call/simple.rs:663` `args.len() < 1` → `is_empty()`
   - `src/runtime/mod.rs:6148-6149` `LazyLock` 触发 3 个 MSRV 警告，加 `#[allow(clippy::incompatible_msrv)]` 与 `src/ffi/runtime.rs:966 MIMI_POOL` 模式一致
+- Rust 2021 edition `reserved_prefix`：assertion 消息中单词后紧跟 `"` 被视作前缀（如 `codegen"`、`error"`、`mode"`、`succeed"`），修复 5 处字符串改为不以 `<word>"` 结尾
+- `dual_map_has_key` 期望值被意外覆盖恢复（`"100"` → `"yes\nno"`）
+
+### Added
+- **Runtime QuotedAst 表示**（`src/runtime/mod.rs`）：`MimiQuotedAst` repr(C) 结构 + 11 个 C ABI 函数（`mimi_quote_new_leaf` / `_new_node` / `_new_list` / `_drop` / `_tag` / `_data0` / `_data1` / `_data2` / `_argc` / `_list_child`），支持递归构建和释放 0/1/2 子节点及变长列表
+- **`Expr::Quote` 三阶段构造**（`src/codegen/expr.rs`）：literal 折叠 → interp fold → `mimi_quote_new_*` 运行时构造。`compile_quote_runtime` 递归生成 LLVM IR 调用，支持 Literal/Ident/Binary/Unary/QuoteInterpolate/Tuple
+- **`mimi verify` 不求值 comptime 块**：新增 2 个测试（`dual_verify_skips_comptime_block` / `dual_verify_contracts_skips_comptime`），直接调 Z3 `verify_source` 验证 comptime 内容不被求值
+- **Codegen `register_quoted_ast_rt`**（`src/codegen/builtins/mod.rs`）：注册 11 个 `mimi_quote_*` 函数到 LLVM IR
 
 ### Added
 - **Codegen `comptime { ... }` block fold path** (`src/codegen/expr.rs`)：Expr::Comptime 路径调 `fold_comptime_block`，构造临时 Interpreter 并预先注入已折叠的 `comptime func` 结果，求值后转 LLVM 常量。支持的 scalar 值类型：Int / Float / Bool / Unit / String（String 走 `build_global_string_ptr` 与 Lit::String 一致）
