@@ -1,6 +1,32 @@
 use crate::ast::{Item, Stmt, Type, TypeDefKind};
 use crate::{lexer, parser};
 
+fn item_line(item: &Item) -> usize {
+    match item {
+        Item::Func(f) => f.pos.0,
+        _ => 0,
+    }
+}
+
+/// Extract comment lines immediately preceding an item definition.
+fn extract_preceding_comments(source: &str, item: &Item) -> String {
+    let item_line = item_line(item);
+    if item_line == 0 {
+        return String::new();
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    let idx = item_line.saturating_sub(1); // 0-indexed
+    let mut block = Vec::new();
+    let mut i = idx.wrapping_sub(1);
+    while i < lines.len() && lines[i].trim_start().starts_with("//") {
+        let text = lines[i].trim_start().trim_start_matches('/').trim();
+        block.push(text.to_string());
+        i = i.wrapping_sub(1);
+    }
+    block.reverse();
+    block.join("\n")
+}
+
 fn type_to_string(ty: &Type) -> String {
     match ty {
         Type::Name(name, generics) => {
@@ -78,6 +104,12 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
     let mut out = String::new();
 
     for item in &file.items {
+        let comment = extract_preceding_comments(source, item);
+        if !comment.is_empty() {
+            for line in comment.lines() {
+                out.push_str(&format!("> *{}*\n\n", line));
+            }
+        }
         match item {
             Item::Func(f) => {
                 let params: Vec<String> = f
