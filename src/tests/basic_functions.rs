@@ -414,3 +414,37 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
+
+#[test]
+fn return_after_unit_call_typechecks() {
+    // Regression: a unit-returning call followed by an explicit return
+    // should not produce a spurious "implicit return: expected i32, found unit".
+    let src = r#"
+func do_unit() {}
+func main() -> i32 {
+    do_unit()
+    return 42
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "expected no implicit-return error"
+    );
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn return_after_print_typechecks() {
+    // Regression: println followed by explicit return should typecheck.
+    let src = r#"
+func main() -> i32 {
+    println("hello")
+    return 42
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "println + return should typecheck"
+    );
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}

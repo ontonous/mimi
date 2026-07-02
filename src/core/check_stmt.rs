@@ -23,7 +23,6 @@ impl<'a> Checker<'a> {
         self.cap_vars.push(HashMap::new());
         self.push_borrow_scope();
         let mut seen_return = false;
-        let mut last_expr_type = None;
         for (i, stmt) in block.iter().enumerate() {
             // Unreachable code detection
             if seen_return {
@@ -41,11 +40,16 @@ impl<'a> Checker<'a> {
                 self.release_borrows_at_last_use(block, i);
             }
             self.check_stmt(stmt, ret, scopes);
-            // Track the type of the last expression for implicit return
-            if let Stmt::Expr(e) = stmt {
-                last_expr_type = Some(self.infer_expr(e, scopes));
-            }
         }
+        // Only the actual last statement determines the implicit return type.
+        // If it is not an expression statement, there is no implicit return.
+        let last_expr_type = block.last().and_then(|stmt| {
+            if let Stmt::Expr(e) = stmt {
+                Some(self.infer_expr(e, scopes))
+            } else {
+                None
+            }
+        });
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
         self.pop_borrow_scope();
