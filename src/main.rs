@@ -64,7 +64,7 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Parse and type-check a .mimi file (v0.1: parse only)
+    /// Parse and type-check a .mimi file, reporting all type errors
     Check {
         path: Option<PathBuf>,
         /// Extract and display contracts from mms blocks

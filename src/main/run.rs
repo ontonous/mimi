@@ -133,7 +133,12 @@ fn run_once(
     interp.cli_args = extra_args.to_vec();
     match interp.run() {
         Ok(value) => {
-            println!("-> {}", value);
+            // P1-19: suppress the `-> ()` noise when the program's
+            // return value is Unit (most main() functions). Show the
+            // value only when it carries real information.
+            if value != mimi::interp::Value::Unit {
+                println!("-> {}", value);
+            }
             Ok(())
         }
         Err(interp_err) => {
