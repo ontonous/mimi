@@ -107,9 +107,9 @@ mod tests {
         ("exit", true, true, true),
         ("exec_pipe", true, true, true),
         ("from_int", true, true, true),
-        // lexer/parse are in is_builtin() but codegen returns a compile error
+        // lexer/mms_parse are in is_builtin() but codegen returns a compile error
         ("lexer", true, true, true),
-        ("parse", true, true, true),
+        ("mms_parse", true, true, true),
         // TC + interp only (no codegen implementation)
         ("type_name", false, true, true),
         ("type_fields", false, true, true),

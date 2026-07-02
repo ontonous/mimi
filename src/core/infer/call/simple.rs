@@ -330,7 +330,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
-            "mms_parse" | "parse" => {
+            "mms_parse" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -452,10 +452,15 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0242,
                         format!("{} expects 1 argument", name),
                     );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+                let arg_ty = self.infer_expr(&args[0], scopes);
+                // Extract element type from input list to propagate to result
+                let elem_ty = match &arg_ty {
+                    Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
+                    _ => Type::Name("unknown".into(), vec![]),
+                };
+                return Type::Name("List".into(), vec![elem_ty]);
             }
             "sort_f64" => {
                 if args.len() != 1 {

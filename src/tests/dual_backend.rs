@@ -5856,7 +5856,7 @@ fn dual_parse_builtin_codegen() {
     }
     let src = r#"
         func main() -> i32 {
-            let ast = parse("func add(a: i32, b: i32) -> i32 { a + b }")
+            let ast = mms_parse("func add(a: i32, b: i32) -> i32 { a + b }")
             println(ast)
             0
         }

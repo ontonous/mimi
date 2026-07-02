@@ -209,7 +209,7 @@ func main() -> i32 {
 fn builtin_parse_basic() {
     let src = r#"
 func main() -> i32 {
-    let result = parse("module Test:")
+    let result = mms_parse("module Test:")
     0
 }
 "#;
@@ -222,7 +222,7 @@ func main() -> i32 {
 fn builtin_parse_with_error() {
     let src = r#"
 func main() -> i32 {
-    let result = parse("module Test")
+    let result = mms_parse("module Test")
     0
 }
 "#;

@@ -8,7 +8,7 @@
 // a dedicated CSV library for production use.
 pub func parse(csv_str: string) -> List<List<string>> {
     let lines: List<string> = str_split(csv_str, "\n")
-    let mut rows = []
+    let mut rows: List<List<string>> = []
     let mut li = 0
     while li < len(lines) {
         let fields: List<string> = str_split(lines[li], ",")

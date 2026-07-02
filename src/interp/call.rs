@@ -393,7 +393,7 @@ impl<'a> Interpreter<'a> {
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),
             "lexer" => self.builtin_lexer(args),
-            "mms_parse" | "parse" => self.builtin_parse(args),
+            "mms_parse" => self.builtin_parse(args),
             "str_to_c_str" => self.builtin_str_to_c_str(args),
             "c_str_to_string" => self.builtin_c_str_to_string(args),
             "format" => self.builtin_format(args),

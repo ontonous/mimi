@@ -475,6 +475,14 @@ impl<'a> Interpreter<'a> {
                         return self.call_func(&f, vals);
                     }
                 }
+                // P1-16: Fallback for flattened module imports — try bare function name.
+                // When merge_all flattens imported module items, csv::parse is stored
+                // as "parse" (not "csv::parse") in the function index.
+                if let Expr::Ident(_module_name) = obj.as_ref() {
+                    if let Some(f) = self.find_function(method) {
+                        return self.call_func(&f, vals);
+                    }
+                }
                 // Regular method call: evaluate the object and call method on it
                 let obj_val = self.eval_expr(obj)?;
                 self.call_method(&obj_val, method, vals)
@@ -634,6 +642,17 @@ impl<'a> Interpreter<'a> {
         // Build qualified path by collecting nested Field(Ident(...), ...) nodes
         if let Some(qualified) = Self::build_qualified_path(obj, field) {
             if let Some(f) = self.find_function(&qualified) {
+                return Ok(Value::Closure {
+                    params: f.params.clone(),
+                    ret: f.ret.clone(),
+                    body: f.body.clone(),
+                    captured: HashMap::new(),
+                });
+            }
+            // P1-16: Fallback for flattened module imports — try bare function name.
+            // When merge_all flattens imported module items, csv::parse is stored
+            // as "parse" (not "csv::parse") in the function index.
+            if let Some(f) = self.find_function(field) {
                 return Ok(Value::Closure {
                     params: f.params.clone(),
                     ret: f.ret.clone(),

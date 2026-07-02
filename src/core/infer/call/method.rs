@@ -13,6 +13,16 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // P1-16: Handle module-qualified calls via use imports.
+        // merge_all flattens imported module items, so the bare function
+        // name is registered in self.funcs. Route csv::parse() to
+        // check_call("parse", ...) when csv is a known module name.
+        if let Expr::Ident(module_name) = obj {
+            if self.use_imports.contains(module_name) {
+                return self.check_call(method_name, args, scopes);
+            }
+        }
+
         let obj_ty = self.infer_expr(obj, scopes);
         if let Type::Name(type_name, type_args) = &obj_ty {
             // Check built-in Option/Result methods; fall through to trait dispatch for unknown methods

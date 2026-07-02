@@ -1335,7 +1335,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "assert_approx_eq" | "range" | "len" | "to_string" | "abs" | "min" | "max"
         | "push" | "pop" | "sqrt" | "floor" | "ceil" | "round"
         | "int_to_string" | "float_to_string" | "string_to_int"
-        | "exit" | "lexer" | "mms_parse" | "parse" | "ast_eval"
+        | "exit" | "lexer" | "mms_parse" | "ast_eval"
         | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
@@ -1569,7 +1569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "http_get" => self.compile_http_get(args),
             "http_post" => self.compile_http_post(args),
             "lexer" => self.compile_lexer(args),
-            "mms_parse" | "parse" => self.compile_parse(args),
+            "mms_parse" => self.compile_parse(args),
             "from_int" => self.compile_from_int(args),
             "regex_match" => self.compile_regex_match(args),
             "regex_find" => self.compile_regex_find(args),
