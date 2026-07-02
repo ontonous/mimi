@@ -516,6 +516,20 @@ fn main() {
 /// Resolve the target path, either from argument or by finding mimi.toml
 pub(crate) fn resolve_path(arg: Option<&Path>) -> Result<PathBuf, String> {
     if let Some(path) = arg {
+        // P1-11: if the argument is a directory, look for mimi.toml
+        // inside it and resolve the entry point, matching the behavior
+        // when no argument is provided.
+        if path.is_dir() {
+            match mimi::manifest::Manifest::find(path)? {
+                Some((dir, m)) => return Ok(m.entry_path(&dir)),
+                None => {
+                    return Err(format!(
+                        "{} is a directory and no mimi.toml found",
+                        path.display()
+                    ))
+                }
+            }
+        }
         return Ok(path.to_path_buf());
     }
     // Search for mimi.toml
