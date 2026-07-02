@@ -2600,6 +2600,40 @@ fn e2e_valgrind_string_literal_return() {
     assert_eq!(stdout.trim(), "positive\nnegative\nzero");
 }
 
+// P0-5: arena block with a return statement inside must not segfault.
+// The codegen compiled the arena body before emitting stackrestore;
+// if the body ended with a terminator (ret), the stackrestore and
+// subsequent branch were inserted after the terminator, crashing LLVM.
+#[test]
+fn e2e_valgrind_arena_return() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = compile_and_run_valgrind(
+        r#"
+        func process() -> i32 {
+            arena {
+                let x = 10
+                let y = 20
+                return x + y
+            }
+        }
+        func main() -> i32 {
+            let result = process()
+            println(result)
+            0
+        }
+    "#,
+    )
+    .expect("e2e_valgrind_arena_return failed");
+    assert_eq!(stdout.trim(), "30");
+}
+
 #[test]
 fn e2e_asan_large_struct_return() {
     if !can_link() {

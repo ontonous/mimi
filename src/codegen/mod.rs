@@ -1270,7 +1270,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.pop_cap_scope();
-        self.build_stackrestore(saved)?;
+        if !self.block_has_terminator() {
+            self.build_stackrestore(saved)?;
+        }
         if !self.block_has_terminator() {
             self.builder
                 .build_unconditional_branch(arena_cont_bb)
