@@ -2,6 +2,12 @@
 
 ## [Unreleased] — v0.28.21-dev
 
+### Fixed
+- §13.6 门禁清理 8 个 clippy 警告：
+  - `src/codegen/expr.rs:497-500` `fold_quote_block` doc list 缩进
+  - `src/core/infer/call/simple.rs:663` `args.len() < 1` → `is_empty()`
+  - `src/runtime/mod.rs:6148-6149` `LazyLock` 触发 3 个 MSRV 警告，加 `#[allow(clippy::incompatible_msrv)]` 与 `src/ffi/runtime.rs:966 MIMI_POOL` 模式一致
+
 ### Added
 - **Codegen `comptime { ... }` block fold path** (`src/codegen/expr.rs`)：Expr::Comptime 路径调 `fold_comptime_block`，构造临时 Interpreter 并预先注入已折叠的 `comptime func` 结果，求值后转 LLVM 常量。支持的 scalar 值类型：Int / Float / Bool / Unit / String（String 走 `build_global_string_ptr` 与 Lit::String 一致）
 - **Codegen `comptime func` / `const` 预折叠** (`src/codegen/compile.rs` + `src/codegen/mod.rs`)：compile_file 起始 `fold_comptime_items` 用 interp 求值所有 no-arg `comptime func` + `const`，缓存到 `comptime_values: HashMap<String, Value>`。同时持有 `comptime_file: Option<Rc<File>>` clone 避免原 file 借用冲突
