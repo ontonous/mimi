@@ -1,5 +1,13 @@
 // Mimi 文件字数统计 CLI (wc) — 简化调试版
 
+func count_lines(text: string) -> i32 {
+    len(str_split(text, "\n"))
+}
+
+func count_words(text: string) -> i32 {
+    len(str_split(str_trim(text), " "))
+}
+
 func main() -> i32 {
     println("=== 文件字数统计 ===");
 
@@ -8,12 +16,9 @@ func main() -> i32 {
         Ok(content) => {
             println("File content:");
             println(content);
-            let trimmed = str_trim(content);
-            let lines = str_split(trimmed, "\n");
-            let words = str_split(trimmed, " ");
-            println("lines:", len(lines));
-            println("words:", len(words));
-            println("chars:", len(trimmed));
+            println("lines:", count_lines(content));
+            println("words:", count_words(content));
+            println("chars:", len(str_trim(content)));
             0
         }
         Err(msg) => {

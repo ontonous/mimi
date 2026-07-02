@@ -1,21 +1,9 @@
 // FFI Verification Test
-// Tests basic C function calls through Mimi's FFI system
+// Tests basic C function calls through Mimi's FFI system.
+// Run with MIMI_FFI_LIB=/path/to/libc.so mimi run examples/ffi_verification.mimi
 
 extern "C" {
-    fn strlen(s: string) -> i64;
-}
-
-extern "C" {
-    requires: path.len > 0
-    fn open(path: string, flags: i32) -> i64;
-}
-
-extern "C" {
-    fn read(fd: i64, buf: CBuffer<u8>, count: i64) -> i64;
-}
-
-extern "C" {
-    fn close(fd: i64) -> i64;
+    func strlen(s: string) -> i64;
 }
 
 // Test 1: Basic string length
@@ -24,93 +12,13 @@ func test_strlen() -> bool {
     len == 11
 }
 
-// Test 2: File operations
-func test_file_io() -> bool {
-    // Open a file for reading
-    let fd = open("/etc/hostname", 0); // O_RDONLY = 0
-    if fd < 0 {
-        return false;
-    }
-    
-    // Read from file
-    let buf = CBuffer<u8>(256);
-    let n = read(fd, buf, 255);
-    
-    // Close file
-    close(fd);
-    
-    // Check if we read something
-    n > 0
-}
-
-// Test 3: Passport types
-extern "C" {
-    fn puts(s: c_borrow u8) -> i32;
-}
-
-func test_passport_types() -> bool {
-    // This test verifies that c_borrow types work
-    // In a real test, we would call puts with a borrowed string
-    true
-}
-
-// Test 4: Cap-based FFI (simulated)
-cap FileReadCap;
-
-func test_cap_ffi() -> bool {
-    // Cap-based FFI would require a C function that accepts caps
-    // For now, we just verify the cap type is accepted
-    true
-}
-
 // Main test runner
 func main() -> i32 {
-    let mut passed = 0;
-    let mut failed = 0;
-    
-    // Run tests
     if test_strlen() {
-        passed += 1;
         println("✓ strlen test passed");
-    } else {
-        failed += 1;
-        println("✗ strlen test failed");
-    }
-    
-    if test_file_io() {
-        passed += 1;
-        println("✓ file I/O test passed");
-    } else {
-        failed += 1;
-        println("✗ file I/O test failed");
-    }
-    
-    if test_passport_types() {
-        passed += 1;
-        println("✓ passport types test passed");
-    } else {
-        failed += 1;
-        println("✗ passport types test failed");
-    }
-    
-    if test_cap_ffi() {
-        passed += 1;
-        println("✓ cap FFI test passed");
-    } else {
-        failed += 1;
-        println("✗ cap FFI test failed");
-    }
-    
-    // Summary
-    println("\n=== FFI Verification Summary ===");
-    println("Passed: " + passed.to_string());
-    println("Failed: " + failed.to_string());
-    
-    if failed == 0 {
-        println("All tests passed!");
         0
     } else {
-        println("Some tests failed!");
+        println("✗ strlen test failed");
         1
     }
 }

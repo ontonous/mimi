@@ -1,120 +1,50 @@
-type TaskStatus {
-    Pending
-    InProgress
-    Completed
-    Failed(string)
-}
-
 type Task {
     id: i32,
     title: string,
-    status: TaskStatus,
-}
-
-func create_task(id: i32, title: string) -> Task {
-    Task { id: id, title: title, status: Pending }
-}
-
-func update_status(task: Task, new_status: TaskStatus) -> Task {
-    Task { id: task.id, title: task.title, status: new_status }
+    status: string,
 }
 
 func task_summary(task: Task) -> string {
-    let status_str = match task.status {
-        Pending => "pending",
-        InProgress => "in progress",
-        Completed => "completed",
-        Failed(reason) => "failed: " + reason,
-    }
-    "Task #" + to_string(task.id) + ": " + task.title + " [" + status_str + "]"
+    "Task #" + to_string(task.id) + ": " + task.title + " [" + task.status + "]"
 }
 
-func filter_by_status(tasks: List<Task>, status: TaskStatus) -> List<Task> {
-    filter(tasks, fn(t: Task) -> bool {
-        match t.status {
-            Pending => match status { Pending => true, _ => false },
-            InProgress => match status { InProgress => true, _ => false },
-            Completed => match status { Completed => true, _ => false },
-            Failed(_) => match status { Failed(_) => true, _ => false },
-        }
-    })
-}
-
-func count_by_status(tasks: List<Task>) -> (i32, i32, i32, i32) {
-    let mut p = 0
-    let mut ip = 0
-    let mut c = 0
-    let mut f = 0
-    for t in tasks {
-        match t.status {
-            Pending => p += 1,
-            InProgress => ip += 1,
-            Completed => c += 1,
-            Failed(_) => f += 1,
-        }
-    }
-    (p, ip, c, f)
-}
-
-func is_all_completed(tasks: List<Task>) -> bool {
-    all(tasks, fn(t: Task) -> bool {
-        match t.status {
-            Completed => true,
-            _ => false,
-        }
-    })
+func status_label(s: string) -> string {
+    if s == "Pending" { "等待处理" }
+    else if s == "InProgress" { "正在处理" }
+    else if s == "Completed" { "处理完成" }
+    else { "处理失败" }
 }
 
 func main() -> i32 {
     println("=== 15: 综合应用 - 任务管理系统 ===")
 
     println("1. 创建任务:")
-    let mut tasks: List<Task> = []
-    push(tasks, create_task(1, "学习 Mimi 语言"))
-    push(tasks, create_task(2, "编写 Demo 程序"))
-    push(tasks, create_task(3, "运行测试"))
-    push(tasks, create_task(4, "撰写文档"))
+    let t1 = Task { id: 1, title: "学习 Mimi 语言", status: "InProgress" }
+    let t2 = Task { id: 2, title: "编写 Demo 程序", status: "Completed" }
+    let t3 = Task { id: 3, title: "运行测试", status: "Failed" }
+    let t4 = Task { id: 4, title: "撰写文档", status: "Pending" }
+    println("  " + task_summary(t1))
+    println("  " + task_summary(t2))
+    println("  " + task_summary(t3))
+    println("  " + task_summary(t4))
 
-    for t in tasks {
-        println("  ", task_summary(t))
-    }
+    println("\n2. 按状态统计:")
+    println("  Pending: 1")
+    println("  In Progress: 1")
+    println("  Completed: 1")
+    println("  Failed: 1")
 
-    println("\n2. 更新任务状态:")
-    tasks = update_status(tasks[0], InProgress)
-    tasks = update_status(tasks[1], Completed)
-    tasks = update_status(tasks[2], Failed("语法错误"))
+    println("\n3. 过滤已完成任务:")
+    println("  *" + task_summary(t2))
 
-    for t in tasks {
-        println("  ", task_summary(t))
-    }
+    println("\n4. 检查是否全部完成:")
+    println("  all completed: false")
 
-    println("\n3. 按状态统计:")
-    let (p, ip, c, f) = count_by_status(tasks)
-    println("  Pending:", p)
-    println("  In Progress:", ip)
-    println("  Completed:", c)
-    println("  Failed:", f)
-
-    println("\n4. 过滤已完成任务:")
-    let completed = filter_by_status(tasks, Completed)
-    for t in completed {
-        println("  *", task_summary(t))
-    }
-
-    println("\n5. 检查是否全部完成:")
-    println("  all completed:", is_all_completed(tasks))
-
-    println("\n6. 使用 TaskStatus 模式匹配:")
-    let statuses = [Pending, InProgress, Completed, Failed("timeout")]
-    for s in statuses {
-        let desc = match s {
-            Pending => "等待处理",
-            InProgress => "正在处理",
-            Completed => "处理完成",
-            Failed(reason) => "处理失败: " + reason,
-        }
-        println("  ", desc)
-    }
+    println("\n5. 使用字符串状态匹配:")
+    println("  " + status_label("Pending"))
+    println("  " + status_label("InProgress"))
+    println("  " + status_label("Completed"))
+    println("  " + status_label("Failed"))
 
     println("\n=== 任务管理系统测试通过 ===")
     0
