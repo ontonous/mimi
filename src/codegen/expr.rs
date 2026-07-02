@@ -557,9 +557,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (name, value) in self.comptime_values.clone() {
             interp.inject_comptime_result(name, value);
         }
-        let result = interp.eval_expr(inner).map_err(|e| {
-            CompileError::Generic(format!("$() interpolation fold failed: {}", e))
-        })?;
+        let result = interp
+            .eval_expr(inner)
+            .map_err(|e| CompileError::Generic(format!("$() interpolation fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)
     }
 

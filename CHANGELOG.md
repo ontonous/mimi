@@ -7,10 +7,19 @@
 - **Codegen `comptime func` / `const` 预折叠** (`src/codegen/compile.rs` + `src/codegen/mod.rs`)：compile_file 起始 `fold_comptime_items` 用 interp 求值所有 no-arg `comptime func` + `const`，缓存到 `comptime_values: HashMap<String, Value>`。同时持有 `comptime_file: Option<Rc<File>>` clone 避免原 file 借用冲突
 - **`comptime { 1 + 2 }` 双后端等价** (`src/tests/dual_backend.rs`)：7 个 L1 dual 测试覆盖 block 表达式、let 块、字符串、`comptime func` 调用、`ast_eval(quote! { ... })`
 - **`compile_quote_fold` 扩展至字面量算术** (`src/codegen/expr.rs`)：递归处理 Expr::Binary / Expr::Unary，覆盖 + - * / % == != < <= > >= && || & |。Float 折叠暂不支持（inkwell FloatValue::get_constant 返回 opaque LLVMValueRef）
+- **`fold_quote_block` 三阶段 quote 折叠** (`src/codegen/expr.rs`)：literal fast-path → interp `quote_block` + `eval_quoted_ast` 折叠 → 真正 runtime-only 显式报错并提示重构为 `comptime { ... }`
+- **`fold_quote_interpolate` `$(expr)` 插值** (`src/codegen/expr.rs`)：codegen 路径调 `interp.eval_expr` 求值 interpolation，结果转 LLVM 常量并 splice 到外层 quote 块
+- **6 个 L1 dual-backend quote 测试** (`src/tests/dual_backend.rs`)：`dual_quote_comptime_ident_fold`、`_nested_comptime`、`_comptime_let_fold`、`_runtime_var_errors`、`_interpolate_in_comptime`、`_with_comptime_conditional`
+
+### Fixed
+- **comptime func 不再生成 LLVM IR**：v0.28.21 之前同时被 fold 缓存 + 生成 LLVM 函数（运行时实际走 LLVM 函数而非 fold 路径），与 §12.1 目标 "codegen 排除 comptime 函数本身的 LLVM 编译" 不符。`compile.rs:132` 跳过 `is_comptime` 函数的 `compile_func` 调用，call site 改用 `comptime_values` 缓存
+- **parser `$(...)` 闭合** (`src/parser/parse_expr.rs:320`)：lexer 把 `$(` 合并为单 `DollarParen` token，外层 `)` 仍需在 parse_expr 中显式 `expect(RParen)` 消耗。修复前 quote! 块内 `$(flag())` 等会报 "expected `(`, found )"
 
 ### Changed
 - Interpreter 新增公开 API：`eval_comptime_block(&Block)` 与 `inject_comptime_result(name, value)`（之前只 pub(in crate::interp)）
+- `value_to_llvm_const` 可见性从 `pub(super)` 提升为 `pub(crate)`，让 `codegen/expr/call/simple.rs` 的 call site fallback 也能调用
 - 旧 `adv_comptime_*_error_message` / `adv_comptime_produces_error` / `adv_quote_*_error_message`（v0.28.21 之前期望 codegen 失败）改为正向测试：`adv_comptime_folds_literally`、`adv_comptime_runtime_dep_errors`、`adv_quote_literal_fold_succeeds`、`adv_quote_runtime_dep_produces_error`、`adv_comptime_func_call_works`
+- `dual_comptime_with_requires` 改为 no-arg 变体（v0.28.22 backlog 中实现有参 `comptime func` call site fold）
 
 ## [v0.28.20] - 2026-07-02
 
