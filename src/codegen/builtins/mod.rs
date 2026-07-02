@@ -40,6 +40,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_crypto_fns(module, ctx, i8_ptr, i32, i64, void);
     register_actor_concurrency_rt(module, ctx, i8_ptr, i32, i64, void);
     register_atomic_mutex_channel_rt(module, ctx, i8_ptr, i32, i64, void);
+    register_quoted_ast_rt(module, ctx, i8_ptr, i32, i64, void);
 }
 
 fn register_libc<'ctx>(
@@ -2025,6 +2026,106 @@ fn register_atomic_mutex_channel_rt<'ctx>(
     module.add_function(
         "mimi_channel_drop",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+}
+
+// v0.28.21 — Runtime QuotedAst (malloc + tagged union)
+//
+// The `mimi_quote_*` functions let codegen construct runtime QuotedAst
+// nodes via heap-allocated MimiQuotedAst structs. Expr::Quote blocks
+// that cannot be folded to constants at compile time emit calls to
+// these functions to build the AST at runtime, then pass the resulting
+// pointer to `ast_eval`.
+fn register_quoted_ast_rt<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i32: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+    // mimi_quote_new_leaf(tag: i32, value: i64) -> i8*
+    module.add_function(
+        "mimi_quote_new_leaf",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_quote_new_node(tag: i32, child0: i8*, child1: i8*, extra: i64) -> i8*
+    module.add_function(
+        "mimi_quote_new_node",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_quote_new_list(tag: i32, children: i8**, len: i64) -> i8*
+    module.add_function(
+        "mimi_quote_new_list",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i32),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_quote_drop(node: i8*)
+    module.add_function(
+        "mimi_quote_drop",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_quote_tag(node: i8*) -> i32
+    module.add_function(
+        "mimi_quote_tag",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // Accessors
+    module.add_function(
+        "mimi_quote_data0",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_quote_data1",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_quote_data2",
+        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_quote_argc",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_quote_list_child",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
 }

@@ -554,9 +554,8 @@ fn adv_parasteps_basic() {
 
 #[test]
 fn adv_quote_runtime_dep_produces_error() {
-    // quote! { x + 1 } references a runtime variable x; the literal-only
-    // fold path cannot resolve it. The compile-time eval path tries the
-    // interpreter, which fails because x is not in scope.
+    // v0.28.21 — quote! { x + 1 } with a runtime x now constructs
+    // a runtime MimiQuotedAst via mimi_quote_new_* (no error).
     let src = r#"
         func main() -> i64 {
             let x = 10
@@ -567,11 +566,7 @@ fn adv_quote_runtime_dep_produces_error() {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let result = codegen.compile_file(&file);
-    assert!(
-        result.is_err(),
-        "runtime-dependent quote! should error in codegen"
-    );
+    assert!(codegen.compile_file(&file).is_ok());
 }
 
 #[test]
@@ -588,7 +583,7 @@ fn adv_comptime_folds_literally() {
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     assert!(
         codegen.compile_file(&file).is_ok(),
-        "comptime {{ 1 + 2 }} should fold to a constant in codegen"
+        "comptime block should fold to constant."
     );
 }
 
@@ -627,7 +622,7 @@ fn adv_comptime_func_call_works() {
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     assert!(
         codegen.compile_file(&file).is_ok(),
-        "comptime function should be compilable in codegen mode"
+        "comptime function should be compilable."
     );
 }
 
@@ -645,6 +640,6 @@ fn adv_quote_literal_fold_succeeds() {
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     assert!(
         codegen.compile_file(&file).is_ok(),
-        "literal-only quote! should fold without error"
+        "literal-only quote should fold ok."
     );
 }

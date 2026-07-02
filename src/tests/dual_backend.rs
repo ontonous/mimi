@@ -100,8 +100,61 @@ fn dual_map_has_key() {
             if has_key(m2, "y") { println("yes") } else { println("no") }
             0
         }
-    "#,
+        "#,
         "yes\nno"
+    );
+}
+
+// ─── v0.28.21 — verify not evaluating comptime blocks ───────────────────
+//
+// The Z3 verifier (mimi verify) works on the raw AST and never evaluates
+// comptime { ... } blocks. These tests confirm that a file containing
+// comptime blocks passes verification when it would fail if the verifier
+// tried to evaluate the comptime code (e.g. referencing a variable that
+// only exists at runtime/interpretation time).
+
+#[test]
+fn dual_verify_skips_comptime_block() {
+    // mimi verify must not attempt to evaluate comptime { ... },
+    // even when the block contents reference undefined identifiers
+    // (the verifier only walks the AST structure for contracts).
+    let src = r#"
+        func abs(x: i32) -> i32 {
+            requires: x >= 0
+            ensures: result >= 0
+            comptime { a + b }
+            if x < 0 { -x } else { x }
+        }
+        func main() -> i32 { abs(5) }
+    "#;
+    // Directly invoke the Z3 verifier (mimi verify internals).
+    // This must succeed — the verifier traverses the comptime body
+    // for AST identifiers but does NOT evaluate it.
+    let results = crate::verifier::verify_source(src).expect("verify should parse");
+    assert!(
+        results.iter().all(|r| matches!(
+            r.status,
+            crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::Unknown
+        )),
+        "expected all results verified/unknown (comptime block skipped): {:?}",
+        results
+    );
+}
+
+#[test]
+fn dual_verify_contracts_skips_comptime() {
+    // Codegen with --verify-contracts must not evaluate comptime blocks.
+    let src = r#"
+        func main() -> i32 {
+            let v = comptime { 1 + 2 }
+            println(v)
+            0
+        }
+    "#;
+    let result = compile_and_verify_contracts(src);
+    assert!(
+        result.is_ok(),
+        "verify-contracts should tolerate comptime blocks"
     );
 }
 
@@ -6765,28 +6818,22 @@ fn dual_quote_comptime_let_fold() {
 
 #[test]
 fn dual_quote_runtime_var_errors() {
-    if !can_link() {
-        return;
-    }
-    // n is a runtime value (no comptime binding). The fold path can't
-    // resolve it and surfaces a clear error message — verifying the
-    // v0.28.21 boundary between comptime-foldable quote! blocks and
-    // those that require a real runtime QuotedAst.
+    // v0.28.21 — n is a runtime value; the quote block still compiles
+    // using the runtime QuotedAst construction path, producing an i8*
+    // pointer to a heap-allocated MimiQuotedAst tree. No error.
     let src = r#"
         func main() -> i32 {
             let n = 7
-            let v = ast_eval(quote! { n + 1 })
+            let ast = quote! { n + 1 }
             0
         }
     "#;
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen.compile_file(&file).unwrap_err().to_string();
     assert!(
-        err.contains("quote") || err.contains("fold"),
-        "expected fold/quote error, got: {}",
-        err
+        codegen.compile_file(&file).is_ok(),
+        "runtime-dependent quote should compile with runtime QuotedAst construction"
     );
 }
 

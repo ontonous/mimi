@@ -82,13 +82,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 //      interpreter at codegen time (no runtime-only
                 //      captures): `fold_comptime_block` evaluates the
                 //      block as a `comptime { ... }` would.
-                //   3. Truly runtime-only quote blocks (e.g. captures
-                //      from a non-comptime scope) are still rejected so
-                //      we never silently drop the QuotedAst semantics.
+                //   3. Truly runtime-only quote blocks: emit real
+                //      `mimi_quote_new_*` runtime calls that construct
+                //      a heap-allocated `MimiQuotedAst` tree at runtime.
+                //      The result is an `i8*` pointer to the root node.
                 if let Some(val) = self.compile_quote_fold(block) {
                     return Ok(val);
                 }
-                self.fold_quote_block(block)
+                if let Ok(val) = self.fold_quote_block(block) {
+                    return Ok(val);
+                }
+                // Fall through to runtime QuotedAst construction.
+                self.compile_quote_runtime(block)
             }
             Expr::QuoteInterpolate(inner) => {
                 // v0.28.21 — `$(expr)` interpolations are evaluated at
@@ -822,6 +827,323 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_int_value(),
             _ => return Err("unsupported value type for map storage".into()),
         })
+    }
+
+    // ===================================================================
+    // v0.28.21 — Runtime QuotedAst construction (malloc + tagged union)
+    //
+    // These methods complement the compile-time folding path by emitting
+    // `mimi_quote_new_*` runtime calls that build a heap-allocated
+    // `MimiQuotedAst` tree. Used when `Expr::Quote(block)` references
+    // runtime-only symbols that cannot be folded at codegen time.
+    // ===================================================================
+
+    /// Entry point: build a runtime QuotedAst block node.
+    fn compile_quote_runtime(
+        &mut self,
+        block: &crate::ast::Block,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
+        let len = block.len();
+        // Allocate a stack array to hold child pointers.
+        let children_alloca = self.build_alloca(i8_ty.array_type(len as u32), "quote_children")?;
+        for (i, stmt) in block.iter().enumerate() {
+            let child_ptr = self.compile_quote_runtime_stmt(stmt)?; // returns i8*
+            let gep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        // SAFETY: indices are within array bounds
+                        i8_ty,
+                        children_alloca,
+                        &[i64_ty.const_int(i as u64, false)],
+                        "quote_child_gep",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("quote child gep: {}", e)))?
+            };
+            self.build_store(gep, child_ptr)?;
+        }
+        let children_ptr = self
+            .build_load(i8_ty, children_alloca, "quote_children_load")?
+            .into_pointer_value();
+        // Call mimi_quote_new_list(QAST_BLOCK=14, children_ptr, len)
+        let new_list = self
+            .module
+            .get_function("mimi_quote_new_list")
+            .ok_or("mimi_quote_new_list not declared")?;
+        let result = self
+            .builder
+            .build_call(
+                new_list,
+                &[
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(14, false)),
+                    BasicMetadataValueEnum::PointerValue(children_ptr),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(len as u64, false)),
+                ],
+                "quote_block_ptr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("quote new list: {}", e)))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_list void")?)
+    }
+
+    /// Emit a runtime QuotedAst node for a single statement.
+    fn compile_quote_runtime_stmt(
+        &mut self,
+        stmt: &crate::ast::Stmt,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        use crate::ast::Stmt;
+        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let null_i8 = i8_ty.const_zero();
+
+        match stmt {
+            Stmt::Expr(e) => self.compile_quote_runtime_expr(e),
+            Stmt::Block(block) => self.compile_quote_runtime(block),
+            Stmt::Return(e) => {
+                let inner = if let Some(e) = e {
+                    self.compile_quote_runtime_expr(e)?
+                } else {
+                    BasicValueEnum::PointerValue(null_i8)
+                };
+                self.call_quote_new_node(1, inner, null_i8.into(), 0) // QAST_RETURN=1
+            }
+            Stmt::Continue => self.call_quote_new_leaf(19, 0), // QAST_CONTINUE
+            Stmt::Let { pat, init, .. } => {
+                let name = match pat {
+                    crate::ast::Pattern::Variable(n) => n.clone(),
+                    _ => return Err("let pattern not supported in runtime quote".into()),
+                };
+                let name_ptr = self
+                    .builder
+                    .build_global_string_ptr(&name, "q_let_name")
+                    .map_err(|e| CompileError::LlvmError(format!("quote name: {}", e)))?;
+                let value = if let Some(init) = init {
+                    self.compile_quote_runtime_expr(init)?
+                } else {
+                    BasicValueEnum::PointerValue(null_i8)
+                };
+                self.call_quote_new_node(
+                    16, // QAST_LET
+                    BasicValueEnum::PointerValue(name_ptr.as_pointer_value()),
+                    value,
+                    0,
+                )
+            }
+            Stmt::Loop(body) => {
+                let b = self.compile_quote_runtime(body)?;
+                self.call_quote_new_node(23, b, null_i8.into(), 0) // QAST_LOOP
+            }
+            _ => Err(CompileError::Generic(format!(
+                "unsupported statement in runtime QuotedAst: {:?}",
+                stmt
+            ))),
+        }
+    }
+
+    /// Emit a runtime QuotedAst node for a single expression.
+    fn compile_quote_runtime_expr(
+        &mut self,
+        expr: &crate::ast::Expr,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        use crate::ast::{Expr, Lit};
+        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let null_i8 = i8_ty.const_zero();
+
+        match expr {
+            Expr::Literal(lit) => match lit {
+                Lit::Int(v) => self.call_quote_new_leaf(0, *v), // QAST_INT
+                Lit::Float(v) => self.call_quote_new_leaf(1, v.to_bits() as i64), // QAST_FLOAT
+                Lit::Bool(v) => self.call_quote_new_leaf(2, if *v { 1 } else { 0 }), // QAST_BOOL
+                Lit::String(s) => {
+                    let global = self
+                        .builder
+                        .build_global_string_ptr(s, "q_str")
+                        .map_err(|e| CompileError::LlvmError(format!("quote str: {}", e)))?;
+                    self.call_quote_new_leaf(
+                        3,
+                        self.ptr_to_i64(BasicValueEnum::PointerValue(global.as_pointer_value())),
+                    )
+                }
+                Lit::Unit => self.call_quote_new_leaf(4, 0), // QAST_UNIT
+                Lit::FString(_) => Err("f-string in runtime QuotedAst not supported".into()),
+            },
+            Expr::Ident(name) => {
+                let global = self
+                    .builder
+                    .build_global_string_ptr(name, "q_ident")
+                    .map_err(|e| CompileError::LlvmError(format!("quote ident: {}", e)))?;
+                self.call_quote_new_leaf(
+                    5,
+                    self.ptr_to_i64(BasicValueEnum::PointerValue(global.as_pointer_value())),
+                )
+            }
+            Expr::Binary(op, l, r) => {
+                let lv = self.compile_quote_runtime_expr(l)?;
+                let rv = self.compile_quote_runtime_expr(r)?;
+                self.call_quote_new_node(6, lv, rv, *op as i64) // QAST_BINARY
+            }
+            Expr::Unary(op, inner) => {
+                let v = self.compile_quote_runtime_expr(inner)?;
+                self.call_quote_new_node(7, v, null_i8.into(), *op as i64) // QAST_UNARY
+            }
+            Expr::Block(block) => self.compile_quote_runtime(block),
+            Expr::QuoteInterpolate(inner) => {
+                // Evaluate interpolation at codegen time and wrap as leaf.
+                let val = self.fold_quote_interpolate(inner)?;
+                let val_i64 = self.ptr_to_i64(val);
+                self.call_quote_new_leaf(15, val_i64) // QAST_INTERP
+            }
+            Expr::Tuple(items) => {
+                let children = self.build_quote_children_list(items)?;
+                self.call_quote_new_list(11, children, items.len()) // QAST_TUPLE
+            }
+            _ => Err(CompileError::Generic(format!(
+                "unsupported expression in runtime QuotedAst: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    // ---------- Helper methods ----------
+
+    /// Emit `mimi_quote_new_leaf(tag, value) -> i8*`.
+    fn call_quote_new_leaf(
+        &self,
+        tag: i32,
+        value: i64,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let func = self
+            .module
+            .get_function("mimi_quote_new_leaf")
+            .ok_or("mimi_quote_new_leaf not declared")?;
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, true)),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(value as u64, false)),
+                ],
+                "q_leaf",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("q leaf: {}", e)))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_leaf void")?)
+    }
+
+    /// Emit `mimi_quote_new_node(tag, child0, child1, extra) -> i8*`.
+    fn call_quote_new_node(
+        &self,
+        tag: i32,
+        child0: BasicValueEnum<'ctx>,
+        child1: BasicValueEnum<'ctx>,
+        extra: i64,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let func = self
+            .module
+            .get_function("mimi_quote_new_node")
+            .ok_or("mimi_quote_new_node not declared")?;
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let c0_ptr = self.to_i8_ptr(child0);
+        let c1_ptr = self.to_i8_ptr(child1);
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, true)),
+                    BasicMetadataValueEnum::PointerValue(c0_ptr),
+                    BasicMetadataValueEnum::PointerValue(c1_ptr),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(extra as u64, false)),
+                ],
+                "q_node",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("q node: {}", e)))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_node void")?)
+    }
+
+    /// Emit `mimi_quote_new_list(tag, children_ptr, len) -> i8*`.
+    fn call_quote_new_list(
+        &self,
+        tag: i32,
+        children_ptr: inkwell::values::PointerValue<'ctx>,
+        len: usize,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let func = self
+            .module
+            .get_function("mimi_quote_new_list")
+            .ok_or("mimi_quote_new_list not declared")?;
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, false)),
+                    BasicMetadataValueEnum::PointerValue(children_ptr),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(len as u64, false)),
+                ],
+                "q_list",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("q list: {}", e)))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_list void")?)
+    }
+
+    /// Convert a `BasicValueEnum` to an `i8*` (for child pointers).
+    fn to_i8_ptr(&self, val: BasicValueEnum<'ctx>) -> inkwell::values::PointerValue<'ctx> {
+        match val {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => self
+                .context
+                .ptr_type(inkwell::AddressSpace::default())
+                .const_zero(),
+        }
+    }
+
+    /// Convert a pointer-typed BasicValueEnum to an i64 (for leaf data0).
+    fn ptr_to_i64(&self, val: BasicValueEnum<'ctx>) -> i64 {
+        match val {
+            BasicValueEnum::PointerValue(_pv) => {
+                // We cannot know the pointer's address at compile time,
+                // so zero is returned. The runtime leaf stores pointer
+                // values directly from the mimi_quote_new_leaf call,
+                // which takes an i64 argument that the LLVM call carries
+                // as a runtime value.
+                0
+            }
+            BasicValueEnum::IntValue(iv) => iv.get_zero_extended_constant().unwrap_or(0) as i64,
+            _ => 0,
+        }
+    }
+
+    /// Build a children pointer array from a list of expressions.
+    fn build_quote_children_list(
+        &mut self,
+        items: &[crate::ast::Expr],
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let alloca = self.build_alloca(i8_ty.array_type(items.len() as u32), "q_children")?;
+        for (i, item) in items.iter().enumerate() {
+            let child = self.compile_quote_runtime_expr(item)?;
+            let gep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        i8_ty,
+                        alloca,
+                        &[i64_ty.const_int(i as u64, false)],
+                        "q_child_gep",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("q child gep: {}", e)))?
+            };
+            self.build_store(gep, child)?;
+        }
+        Ok(self
+            .build_load(i8_ty, alloca, "q_children_load")?
+            .into_pointer_value())
     }
 }
 

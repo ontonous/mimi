@@ -313,6 +313,26 @@ declare i64 @mimi_channel_try_recv(i64)
 
 declare void @mimi_channel_drop(i64)
 
+declare ptr @mimi_quote_new_leaf(i32, i64)
+
+declare ptr @mimi_quote_new_node(i32, ptr, ptr, i64)
+
+declare ptr @mimi_quote_new_list(i32, ptr, i64)
+
+declare void @mimi_quote_drop(ptr)
+
+declare i32 @mimi_quote_tag(ptr)
+
+declare i64 @mimi_quote_data0(ptr)
+
+declare i64 @mimi_quote_data1(ptr)
+
+declare i64 @mimi_quote_data2(ptr)
+
+declare i32 @mimi_quote_argc(ptr)
+
+declare ptr @mimi_quote_list_child(ptr, i64)
+
 define i64 @main() {
 entry:
   %closure = alloca { ptr, ptr }, align 8
