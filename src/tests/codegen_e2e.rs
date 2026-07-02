@@ -2560,6 +2560,46 @@ fn e2e_valgrind_large_struct_return() {
     assert_eq!(stdout.trim(), "19");
 }
 
+// P0-4: string literals returned from inside if/else branches must
+// not cause Invalid free() in valgrind. The nested return path in
+// block.rs bypassed `claim_string_return_value`, so the caller
+// received a .rodata pointer and tried to free() it at scope exit.
+#[test]
+fn e2e_valgrind_string_literal_return() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = compile_and_run_valgrind(
+        r#"
+        func classify(x: i32) -> string {
+            if x > 0 {
+                return "positive"
+            } else if x < 0 {
+                return "negative"
+            } else {
+                return "zero"
+            }
+        }
+        func main() -> i32 {
+            let s = classify(5)
+            println(s)
+            let s2 = classify(-3)
+            println(s2)
+            let s3 = classify(0)
+            println(s3)
+            0
+        }
+    "#,
+    )
+    .expect("e2e_valgrind_string_literal_return failed");
+    assert_eq!(stdout.trim(), "positive\nnegative\nzero");
+}
+
 #[test]
 fn e2e_asan_large_struct_return() {
     if !can_link() {

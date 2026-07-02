@@ -767,6 +767,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let mut val = self.compile_expr(e, vars)?;
                     let ret_type = self.current_fn_ret_type();
                     val = self.adjust_int_val(val, ret_type)?;
+                    // P0-4: heap-copy string returns so the caller
+                    // doesn't later free() a .rodata literal pointer.
+                    val = self.claim_string_return_value(val, ret_type, Some(e), vars)?;
                     self.build_return(Some(&val))?;
                     return Ok(val);
                 }

@@ -420,7 +420,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// via the struct's data pointer. For expressions that already own heap
     /// allocations (concat, f-string, builtin raw returns) we pop the most
     /// recent registration as before.
-    fn claim_string_return_value(
+    pub(in crate::codegen) fn claim_string_return_value(
         &self,
         val: BasicValueEnum<'ctx>,
         ret_type: BasicTypeEnum<'ctx>,
