@@ -170,6 +170,16 @@ pub struct CodeGenerator<'ctx> {
     /// Names of comptime functions declared in the current file.
     /// Used for better error messages and unused-comptime warnings.
     comptime_func_names: std::collections::HashSet<String>,
+    /// v0.28.21 — Folded values for `comptime func` and `const` items.
+    /// Populated by `fold_comptime_items` at the start of `compile_file`;
+    /// consumed by the `Expr::Comptime` fold path so it does not have to
+    /// re-evaluate the source. Maps the comptime item's declared name to
+    /// the `interp::Value` returned by the interpreter.
+    comptime_values: HashMap<String, crate::interp::Value>,
+    /// v0.28.21 — Optional reference to the file currently being compiled.
+    /// Held so `Expr::Comptime` block paths can construct a fresh
+    /// interpreter per fold without re-borrowing the original argument.
+    comptime_file: Option<std::rc::Rc<crate::ast::File>>,
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
     vtable_globals: HashMap<String, inkwell::values::GlobalValue<'ctx>>,
@@ -315,6 +325,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             ensures_stmts: Vec::new(),
             old_snapshots: HashMap::new(),
             comptime_func_names: std::collections::HashSet::new(),
+            // v0.28.21 — cache of `comptime func` and `const` results evaluated
+            // via the interpreter during `compile_file`. Used to fold
+            // `comptime { ... }` blocks and `comptime func name()` call sites
+            // to LLVM constants instead of erroring.
+            comptime_values: HashMap::new(),
+            comptime_file: None,
             in_parasteps: false,
             parasteps_future_ptrs: Vec::new(),
             trait_defs: HashMap::new(),

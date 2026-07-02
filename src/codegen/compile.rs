@@ -59,6 +59,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Register built-in Record types used by builtins
         self.register_builtin_record_types()?;
 
+        // v0.28.21 — Hold an owned copy of the file so `Expr::Comptime`
+        // block folds can construct a fresh interpreter later, after
+        // the original `&File` borrow has ended. The clone is shallow
+        // w.r.t. String interning but acceptable at this scope.
+        self.comptime_file = Some(std::rc::Rc::new(crate::ast::File {
+            imports: file.imports.clone(),
+            items: file.items.clone(),
+        }));
+
+        // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
+        // interpreter and cache the results so `Expr::Comptime` blocks and
+        // `comptime func name()` calls can fold to constants at codegen time.
+        self.fold_comptime_items(file)?;
+
         // First pass: collect type definitions, function definitions, and cap definitions
         Self::process_items(&file.items, &mut |item| {
             match item {
@@ -260,5 +274,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module
             .run_passes("default<O2>", &tm, options)
             .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))
+    }
+
+    /// v0.28.21 — Walk top-level items and fold any `comptime func` or
+    /// `const` declaration into `self.comptime_values` by running the
+    /// interpreter. This is what allows `comptime { ... }` blocks and
+    /// `comptime func name()` call sites in subsequent compilation to
+    /// resolve to a constant value without re-evaluating the AST at
+    /// codegen time.
+    ///
+    /// Errors from individual items are downgraded to `eprintln!`
+    /// warnings so a single broken `comptime` declaration does not
+    /// prevent the rest of the file from compiling. (This matches
+    /// the v0.28.19 behaviour of warning-on-uncompilable-comptime.)
+    fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
+        // Use the cloned file stored in self.comptime_file so the
+        // interpreter can be created without re-borrowing the caller's
+        // argument after `compile_file` has moved on.
+        let file_ref = match &self.comptime_file {
+            Some(rc) => rc.as_ref(),
+            None => return Ok(()),
+        };
+        let mut interp = crate::interp::Interpreter::new(file_ref);
+        // Drive the same `eval_comptime_funcs` step `Interpreter::run`
+        // uses so we get a `comptime_results` map populated before any
+        // user-level `Expr::Comptime` block is asked to fold.
+        if let Err(e) = interp.eval_comptime_block(&Vec::new()) {
+            eprintln!("warning: fold_comptime_items bootstrap: {}", e);
+        }
+        // Drain every pre-computed comptime result into the codegen cache.
+        for (name, value) in interp.drain_comptime_results() {
+            self.comptime_values.insert(name, value);
+        }
+        Ok(())
     }
 }

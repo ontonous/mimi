@@ -65,8 +65,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut block_vars = vars.clone();
                 self.compile_block_last_val(block, &mut block_vars)
             }
-            Expr::Comptime(_) => {
-                Err("comptime { ... } block encountered in runtime function: compile-time evaluation must be resolved before codegen (use `mimi run` to evaluate compile-time code)".into())
+            Expr::Comptime(block) => {
+                // v0.28.21 — Fold the comptime block via the interpreter and
+                // convert the resulting `Value` into an LLVM constant. The
+                // interpreter has already been bootstrapped by
+                // `fold_comptime_items` in `compile_file`, so any
+                // `comptime func` calls inside the block resolve to their
+                // pre-computed results.
+                self.fold_comptime_block(block)
             }
             Expr::Quote(block) => {
                 // Compile-time folding for literal-only quote blocks:
@@ -377,6 +383,81 @@ impl<'ctx> CodeGenerator<'ctx> {
         match block.as_slice() {
             [Stmt::Expr(expr)] => self.compile_quote_fold_expr(expr),
             _ => None,
+        }
+    }
+
+    /// v0.28.21 — Fold a `comptime { ... }` block by spinning up a fresh
+    /// interpreter over the file currently being compiled. The interpreter
+    /// reuses the `comptime_results` pre-populated by `fold_comptime_items`,
+    /// so any `comptime func` calls inside the block already have their
+    /// values cached. The resulting `Value` is converted to an LLVM
+    /// constant via `value_to_llvm_const` and returned as the block's value.
+    fn fold_comptime_block(
+        &mut self,
+        block: &crate::ast::Block,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let file_rc = match self.comptime_file.clone() {
+            Some(rc) => rc,
+            None => {
+                return Err(CompileError::Generic(
+                    "comptime { ... } block encountered before compile_file stored the file context"
+                        .to_string(),
+                ));
+            }
+        };
+        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
+        // Pre-load any pre-computed `comptime func` results so calls
+        // inside the block resolve to the values already folded by
+        // `fold_comptime_items`.
+        for (name, value) in self.comptime_values.clone() {
+            interp.inject_comptime_result(name, value);
+        }
+        let result = interp.eval_comptime_block(block).map_err(|e| {
+            CompileError::Generic(format!("comptime block fold failed: {}", e))
+        })?;
+        self.value_to_llvm_const(&result)
+    }
+
+    /// v0.28.21 — Convert a small `interp::Value` scalar into an LLVM
+    /// constant. Supports the shapes the v0.28.21 L1 tests need: int,
+    /// float, bool, unit, and string. Tuples / lists are intentionally
+    /// not yet supported; those will land in v0.28.22 alongside the
+    /// `QuotedAst` codegen path.
+    pub(super) fn value_to_llvm_const(
+        &self,
+        v: &crate::interp::Value,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        use crate::interp::Value;
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        match v {
+            Value::Int(i) => Ok(BasicValueEnum::IntValue(
+                i64_ty.const_int(*i as u64, true),
+            )),
+            Value::Float(f) => Ok(BasicValueEnum::FloatValue(f64_ty.const_float(*f))),
+            Value::Bool(b) => Ok(BasicValueEnum::IntValue(
+                i64_ty.const_int(if *b { 1 } else { 0 }, false),
+            )),
+            Value::Unit => Ok(BasicValueEnum::IntValue(i64_ty.const_int(0, false))),
+            Value::String(s) => {
+                // String constants become a pointer to a global byte array.
+                // Mirrors how `compile_literal_expr` handles Lit::String.
+                let global = self
+                    .builder
+                    .build_global_string_ptr(s, "comptime_str")
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!(
+                            "comptime string global: {}",
+                            e
+                        ))
+                    })?;
+                Ok(BasicValueEnum::PointerValue(global.as_pointer_value()))
+            }
+            other => Err(CompileError::Generic(format!(
+                "comptime fold: unsupported runtime value type {:?}; \
+                 only Int/Float/Bool/Unit/String are folded in v0.28.21",
+                std::mem::discriminant(other)
+            ))),
         }
     }
 

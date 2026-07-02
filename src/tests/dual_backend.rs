@@ -6563,7 +6563,9 @@ fn dual_comptime_block_int() {
     dual_assert!(
         r#"
         func main() -> i32 {
-            comptime { 1 + 2 }
+            let v = comptime { 1 + 2 }
+            println(v)
+            0
         }
         "#,
         "3"
@@ -6578,11 +6580,13 @@ fn dual_comptime_block_let() {
     dual_assert!(
         r#"
         func main() -> i32 {
-            comptime {
+            let v = comptime {
                 let x = 10
                 let y = 20
                 x + y
             }
+            println(v)
+            0
         }
         "#,
         "30"
@@ -6594,15 +6598,19 @@ fn dual_comptime_block_string() {
     if !can_link() {
         return;
     }
+    // v0.28.21 — comptime string fold; verify the folded pointer
+    // round-trips through println. We use println directly which goes
+    // through the runtime string printing path, ensuring the constant
+    // is a valid C string at the IR level.
     dual_assert!(
         r#"
         func main() -> i32 {
             let s = comptime { "hello" }
-            if eq_string(s, "hello") { println("ok") } else { println("no") }
+            println(s)
             0
         }
         "#,
-        "ok"
+        "hello"
     );
 }
 

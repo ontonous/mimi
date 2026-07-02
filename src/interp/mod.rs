@@ -744,6 +744,33 @@ impl<'a> Interpreter<'a> {
         self.call_func(&main, vec![])
     }
 
+    /// Evaluate a `comptime { ... }` block as a standalone expression.
+    /// Runs `eval_comptime_funcs` first so the block can call top-level
+    /// `comptime func` results; this is the canonical fold-time entry
+    /// used by codegen when it encounters an `Expr::Comptime` node.
+    pub fn eval_comptime_block(
+        &mut self,
+        block: &crate::ast::Block,
+    ) -> Result<Value, InterpError> {
+        self.eval_comptime_funcs()?;
+        self.eval_comptime(block)
+    }
+
+    /// Move all cached `comptime func` results out of the interpreter.
+    /// Used by codegen to seed its `comptime_values` cache after
+    /// `eval_comptime_block` has been called once for bootstrap.
+    pub fn drain_comptime_results(&mut self) -> std::collections::HashMap<String, Value> {
+        std::mem::take(&mut self.comptime_results)
+    }
+
+    /// v0.28.21 — Insert a single pre-folded `comptime func` result so
+    /// the next `eval_comptime_block` can see it without re-evaluating
+    /// the function. Used by codegen to seed a fresh interpreter with
+    /// results it already has.
+    pub fn inject_comptime_result(&mut self, name: String, value: Value) {
+        self.comptime_results.insert(name, value);
+    }
+
     /// Evaluate comptime functions with no arguments at startup
     fn eval_comptime_funcs(&mut self) -> Result<(), InterpError> {
         let funcs: Vec<FuncDef> = self
