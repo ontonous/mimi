@@ -11,6 +11,7 @@
 ### Fixed
 - Codegen actor 不再返回 struct-by-value 的退化 path——`{Name}_spawn` 现在返回 `i8*`（actor 句柄），符合解释器行为。
 - Actor 字段大小在 `sty.size_of()` 返回 `None`（opaque type）时回退到 i64 zero-extension，避免 codegen 传入 0 字节字段 blob 导致 dispatch 越界。
+- **i32 record 字段 load 越界 bug** (`src/codegen/expr/access.rs`)：`compile_field_expr` 之前对 declared i32 字段调 `mimi_type_to_llvm("i32")` 拿到 i64 LLVM type，导致 `build_load(i64, i32 字段 GEP)` 读 8 字节越界到相邻字段。修复：i32 字段用 i32 LLVM type load + `build_int_s_extend` 到 i64，与 Mimi 整数统一 i64 的设计一致。`dual_exec_basic` / `dual_exec_exit_code`（`ExecResult.exit_code` 是 i32）从 CI 间歇性失败（`140728898420736` 之类越界读）变为稳定通过。
 
 ### Tests
 - `dual_actor_state_persistence_mailbox` (`src/tests/dual_backend.rs`)：验证 3 次 mailbox-mediated `add()` 后 `get()` 返回累计值（60）。
@@ -19,6 +20,9 @@
 - `dual_actor_stress_many_calls`：10 次连续 mailbox 跨线程调用无丢失。
 - `dual_actor_long_lived_state`：3 轮 add+get 序列验证 state 持久。
 - `dual_actor_1000_mailbox_calls`：1000 次 mailbox-mediated `increment()` 无死锁无丢失（v0.28.19 §12 L1 压力测试验收）。
+
+### Changed
+- **Clippy 0 warnings**：v0.28.19 actor 代码清理——`<inttype>.ptr_type(addr_space)` 替换为 `self.context.ptr_type(addr_space)`（inkwell 15+ 弃用 API）；`thread_local!` 改用 `const { Cell::new(0) }` initializer；`MimiActorRepr.fields` 字段加 `#[allow(dead_code)]`；useless int_z_extend 去除。
 
 ## [v0.28.18] - 2026-07-02
 
