@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8dfaeef903b8a3fdbdb2f0381dd0ad67f483925141fa7bd986dc6971f036a688 # shrinks to src = "func fib(n: i32) -> i32 {\n    if n <= 1 { n } else { fib(n-1) + fib(n-2) }\n}\nfunc main() -> i32 {\n    let r = fib(1);\n    println(r);\n    0\n}"
+cc 41eab46604feeffa8fd25ad95eabbfa26371ceb939a5ea0fb2983c37ff5805de # shrinks to (body, result) = ("    let mut s = 0;\n    let mut i = 0;\n    while i < 1 { s = s + i; i = i + 1 }", "s")
+cc 08809f71072bbcbbdd94d45eb060a56ab8a4eb0f17b36f60651567b632283e18 # shrinks to (body, result) = ("    let base = 0;\n    let f = fn(x: i32) -> i32 { x + base };", "f(0)")
+cc b1f15fd22f2628c97fe1f21c58dfd424f9619e41d8d5c0c733044ddf55b9297b # shrinks to (body, result) = ("    let x = 0;\n    let x = x + 0;", "x")
+cc ffddf54d666c9c5fd0c9c49129b3be0493b27365d710992c551a405441c58564 # shrinks to expr = "(if true { 0 } else { 0 })"
+cc 387244c74099608762114688160f9f7593381917e8c7403086561e05a11985b4 # shrinks to expr = "0"
