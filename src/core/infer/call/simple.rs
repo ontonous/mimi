@@ -330,7 +330,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
-            "parse" => {
+            "mms_parse" | "parse" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
