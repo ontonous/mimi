@@ -20,9 +20,11 @@
 - `dual_actor_stress_many_calls`：10 次连续 mailbox 跨线程调用无丢失。
 - `dual_actor_long_lived_state`：3 轮 add+get 序列验证 state 持久。
 - `dual_actor_1000_mailbox_calls`：1000 次 mailbox-mediated `increment()` 无死锁无丢失（v0.28.19 §12 L1 压力测试验收）。
+- 7 个边界 case L1 测试（v0.28.19 actor mailbox 完整覆盖）：`dual_actor_field_init_expression`（non-zero init 表达式在 worker 线程求值）、`dual_actor_bool_field`（bool 字段持久）、`dual_actor_f64_return`（f64 返回值从 i64 bitcast 还原）、`dual_actor_i32_return_via_truncate`（i32 返回值 truncate）、`dual_actor_interleaved_two_actors`（两 actor 交替 mailbox 调用不串台）、`dual_actor_void_method`（无返回值方法）、`dual_actor_method_with_string_param`（string 参数方法）。
 
 ### Changed
-- **Clippy 0 warnings**：v0.28.19 actor 代码清理——`<inttype>.ptr_type(addr_space)` 替换为 `self.context.ptr_type(addr_space)`（inkwell 15+ 弃用 API）；`thread_local!` 改用 `const { Cell::new(0) }` initializer；`MimiActorRepr.fields` 字段加 `#[allow(dead_code)]`；useless int_z_extend 去除。
+- **Clippy 0 warnings**：v0.28.19 actor 代码清理——`<inttype>.ptr_type(addr_space)` 替换为 `self.context.ptr_type(addr_space)`（inkwell 15+ 弃用 API）；`thread_local!` 改用 `const { Cell::new(0) }` initializer；`MimiActorRepr.fields` 字段加 `#[allow(dead_code)]`；useless int_z_extend 去除；`src/lint.rs` 两处嵌套 `match`+`if` 改 match guard（修复 rust 1.96.0 clippy::collapsible_match）。
+- **Codegen mailbox result unpack** (`src/codegen/actors.rs`)：dispatch 把返回值统一 pack 成 i64 进 result blob，call site 按 declared return type unpack——f64 走 `build_bit_cast i64 → f64`、i32 走 `build_int_truncate i64 → i32`、i64 直接返回。`CodeGenerator` 新增 `actor_defs: HashMap<String, ActorDef>` 字段缓存 actor 定义用于反查 ret type。
 
 ## [v0.28.18] - 2026-07-02
 
