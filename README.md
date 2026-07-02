@@ -252,7 +252,7 @@ func main() {
 | `mimi doc <file>` | Generate docs |
 | `mimi promote <file>` | `.mms` → `.mimi` promotion |
 | `mimi mms <files>` | Process MimiSpec files |
-| `mimi stats <file>` | Usage statistics |
+| `mimi stats <file>` | Usage statistics (function-level call counts) |
 | `mimi emit-c-headers <file>` | Emit C headers |
 | `mimi emit-cpp-bindings <file>` | Emit C++ RAII bindings |
 | `mimi emit-rust-bindings <file>` | Emit Rust FFI bindings |

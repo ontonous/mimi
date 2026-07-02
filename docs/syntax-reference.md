@@ -133,9 +133,9 @@ INDENT   DEDENT   NEWLINE   EOF
 | 类型 | 示例 | 描述 |
 |------|------|------|
 | 元组 | `(i32, string)` | 异质序列 |
-| 列表 | `[i32]` | 同质动态数组 |
+| 列表 | `List<i32>` | 同质动态数组 |
 | 固定数组 | `[i32; 4]` | 编译期定长数组 |
-| 切片 | `&[T]` | 不可变切片视图 |
+| 切片 | `&List<T>` | 不可变列表视图（借用） |
 | 函数 | `func(i32) -> bool` | 函数类型（注意是 `func` 关键字） |
 | 外部函数 | `extern "C" fn(i32) -> bool` | C ABI 函数指针 |
 | Option | `i32?` 或 `Option<i32>` | 可选值（`?` 后缀语法糖） |
@@ -437,7 +437,7 @@ func name(param: Type) -> RetType {
 pub func add(x: i32, y: i32) -> i32 { x + y }
 
 // 泛型函数
-func first<T>(list: [T]) -> T { list[0] }
+func first<T>(list: List<T>) -> T { list[0] }
 
 // 带 where 子句
 func clone<T>(x: T) -> T where T: Clone { ... }
