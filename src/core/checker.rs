@@ -131,7 +131,19 @@ impl<'a> Checker<'a> {
         if self.errors.is_empty() {
             Ok(())
         } else {
-            Err(std::mem::take(&mut self.errors))
+            // P1-7: deduplicate identical errors (same code + message),
+            // which can occur when a method-call expression inside a
+            // multi-arg expression is type-checked along multiple paths.
+            let mut seen: std::collections::HashSet<(Option<String>, String)> =
+                std::collections::HashSet::new();
+            let mut deduped: Vec<Diagnostic> = Vec::with_capacity(self.errors.len());
+            for e in std::mem::take(&mut self.errors) {
+                let key = (e.code.clone(), e.message.clone());
+                if seen.insert(key) {
+                    deduped.push(e);
+                }
+            }
+            Err(deduped)
         }
     }
 

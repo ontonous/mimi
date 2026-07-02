@@ -541,6 +541,11 @@ impl<'a> Checker<'a> {
         ret: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) {
+        // Reset position so non-positioned statements (Stmt::Expr,
+        // Stmt::If, etc.) don't inherit stale line numbers from
+        // prior statements. Stmt::Let will immediately override.
+        self.current_line = 0;
+        self.current_col = 0;
         match stmt {
             Stmt::Let {
                 pat, init, mut_, ref_, ty, pos,
