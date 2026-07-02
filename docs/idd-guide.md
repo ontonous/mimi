@@ -62,6 +62,9 @@
 | `exec(...)` Record 布局 | ✅ | ✅ | 已实现（ExecResult 字段偏移正确） |
 | `match` on `Result` in codegen | ✅ | ⚠️ | 部分支持：内层自定义枚举负载的匹配可能失败（见 `e2e_net_fetch_failure`） |
 | 递归栈溢出保护 | ✅ | ✅ | 浅递归已支持；极深递归仍依赖宿主栈大小 |
+| Comptime 块 | ✅ | ✅ | v0.28.21: codegen `fold_comptime_block` + `fold_comptime_items` 支持 Int/Float/Bool/Unit/String 折叠 |
+| Quote!（非纯字面量） | ✅ | ⚠️ | v0.28.21: 三阶段折叠（literal→interp→runtime），运行时依赖报错提示用 `comptime { ... }` 包裹 |
+| `ast_eval(ast)` | ✅ | ⬜ | 仅在解释器路径；codegen 返回 graceful error |
 | Valgrind | ✅ | ✅ | 已安装；8 个 Valgrind 测试全部默认通过（含 shared/weak 生命周期 4 个、spawn 多线程 1 个） |
 | Miri | ✅ | ⬜ | 解释器子集通过（`tests::basic_*`、`interpreter_features`）；codegen/FFI 测试因 Miri 不支持外部函数/子进程，不纳入 Miri 回归 |
 | ASan | ✅ | ✅ | `e2e_asan_*` 已取消 #[ignore]，在可用工具链下通过 |
@@ -86,23 +89,30 @@
 
 ---
 
-## 6. CI 门禁顺序
+## 6. CI 门禁顺序（执行与修复优先级）
 
 ```
-1.  cargo test                    # 全量测试
-2.  cargo test dual_              # L1 双后端等价性
-3.  cargo test "typecheck::"      # L2 类型系统健全性
-4.  cargo test ffi_               # FFI 契约等价性
-5.  cargo test codegen_e2e        # 代码生成 E2E
-6.  cargo test e2e_asan -- --ignored  # L3 AddressSanitizer（如工具链可用）
-7.  cargo test -- --ignored       # 已知差距（必须编译；允许失败）
-8.  cargo clippy -- -D warnings   # 代码质量
-9.  cargo fmt -- --check          # 格式化
+1.  cargo test                          # 全量测试（当前 2,810+ 个 + 1 doc-test）
+2.  cargo test dual_                    # L1 双后端等价性
+3.  cargo test "typecheck::"            # L2 类型系统健全性
+4.  cargo test "adv_comptime|adv_quote" # 编译时元编程
+5.  cargo test ffi_                     # FFI 契约等价性
+6.  cargo test codegen_e2e              # 代码生成 E2E
+7.  cargo test "fmt_type"               # 类型格式化一致性
+8.  cargo test -- --ignored             # 已知差距（必须编译，允许失败）
+9.  cargo +nightly miri test ffi::runtime            # L3 Miri UB 检测（FFI runtime 子集）
+10. cargo +nightly miri test basic_control_flow      # L3 Miri UB 检测（解释器子集示例）
+11. cargo test e2e_valgrind -- --nocapture          # L3 Valgrind 内存安全
 ```
+
+规则：
+- 第 1 项失败 → 禁止提交新功能，先修复基础设施。
+- 第 2 项失败 → 后端语义分歧，必须优先修复。
+- 新增功能的 L1 测试不可跳过；与代码一起提交。
 
 注意：
 - Valgrind/Miri 测试需要外部工具链；在可用环境中单独运行。
-- 网络相关测试需要外部 HTTP 服务，保持 `#[ignore]`。
+- 当前全量测试通过数：2810，0 failed，0 ignored（仅 sanitizer/Valgrind 测试保持 `#[ignore]`）。
 - `cargo test -- --ignored` 允许失败，但所有被忽略测试必须能编译。
 
 ---
@@ -131,6 +141,14 @@
 | v0.28.13 std/array.mimi | array_new/fill/slice/rotate/binary_search/etc — run_with_stdlib 辅助 → L1 24 测试 | ✅ |
 | v0.28.13 std/iter.mimi | iter_range/zip/enumerate/take/drop/chain/repeat/count/unique — L1 19 测试 | ✅ |
 | v0.28.13 codegen inline/GVN scaffold | small-fn heuristic + CSE cache + pure tracking — 8 测试 | ✅ |
+| v0.28.14 诊断与格式化 | 错误恢复继续解析、多位置诊断、formatter 覆盖剩余语法、lint 规则扩展 | ✅ |
+| v0.28.15 安全审查与自举准备 | 关闭 `#[ignore]` 差距、unsafe 审计 ~270 条、MiRI/ASan/Valgrind 回归 | ✅ |
+| v0.28.16 Codegen 根基补强 | shared/weak 生命周期 4 个 Valgrind 测试、Miri UB 修复、spawn 线程栈泄漏 | ✅ |
+| v0.28.17 CLI 一致性 | CLI 类型检查器统一、`use std::xxx` 语义、`mimi init <path>`、SAFETY 注释 59 处 | ✅ |
+| v0.28.18 FFI 导出完整 | 复杂 repr(C) struct-by-value 返回、跨线程 callback、FFI 参数布局验证 | ✅ |
+| v0.28.19 Actor Codegen 真实并发 | mailbox + worker thread + self-call 死锁避免 + 1000 次压力测试 | ✅ |
+| v0.28.20 并发原语 | Mutex&lt;T&gt;、AtomicI32/I64/Bool、Channel&lt;T&gt; — 11 L1 dual 测试 | ✅ |
+| v0.28.21 Comptime/Quote Codegen | comptime 块 codegen 折叠 + quote 三阶段折叠 + 13 L1 测试 + usability DX pass | ✅ |
 
 ---
 

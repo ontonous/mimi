@@ -1,42 +1,17 @@
 # Changelog
 
-## [Unreleased] — v0.28.21-dev
+## [Unreleased] — v0.28.22-dev
 
-### Fixed (usability & ease-of-use pass)
-- **CLI `--version` 现在与 `Cargo.toml` 一致**：`src/main.rs` 使用 `env!("CARGO_PKG_VERSION")`，避免手动版本字符串过时（之前报告 `0.28.17-dev` 实际已是 `0.28.21`）
-- **`check_block_with_implicit_return` 不再把前一条表达式类型误判为隐式返回**：当函数最后一条语句是 `return`/`if`/`while` 等非表达式语句时，不再拿上一条 `Stmt::Expr` 的类型做隐式返回检查。修复 `println(...); return 42` 等常见模式被误报 "implicit return: expected i32, found unit" 的问题
-- **`let x =` 缺初始化表达式现在报 parse error**：`parse_let` 在 `=` 后紧跟语句结束符时返回 "expected expression after `=`"，避免静默把后续表达式当成函数体隐式返回
-- **parser recovery 模式现在收集语句级错误**：`parse_block_with_recovery` 把 `parse_stmt` 错误加入 `Parser::errors`，`parse_file_with_recovery` 最终一并返回，避免函数体内的语法错误被静默吞掉
-- **Lexer 支持 shebang**：文件首行 `#!/usr/bin/env mimi` 被跳过，不再 tokenize 为 `# ! / ...`
+### Planned
+- **自举最后准备**：libmimi 接口冻结、MimiSpec AST 端口稳定、差距表清零或文档化、类型检查器统一收尾
 
-### Changed (DX)
-- **`mimi lint` 默认不再因 warning 退出非零**：新增 `--fail-on-warnings` 标志，默认仅 error 导致非零退出，更符合常见 linter 习惯
-- **`mimi fmt` 支持项目自动发现**：不带文件参数时，若当前目录有 `mimi.toml` 则格式化项目内所有 `.mimi` 文件，否则格式化当前目录下的 `.mimi` 文件；同时支持 `-` 从 stdin 读取并输出到 stdout
-- **`mimi test` 尊重 `NO_COLOR`**：测试输出现在使用 `colors_enabled()` 判断，与 `run`/`check`/`build` 一致
-
-### Fixed
-- 大量 `examples/` 和 `demos/` 示例 outdated syntax / runtime 行为，使以下示例可以正常 `mimi run`：
-  - `examples/benchmark.mimi`（修复 mutability、降低输入规模避免超时、支持 shebang）
-  - `examples/fib.mimi`、`examples/validation_basics.mimi`、`examples/validation_collections.mimi`（受益于 implicit return 修复）
-  - `examples/ffi_verification.mimi`（更新 extern 语法为 `func`，移除不支持的 `CBuffer`/`u8` 用法）
-  - `examples/wc.mimi`（避免在 match arm block 内使用 `let`，绕开当前 block 表达式作用域限制）
-  - `demos/15_task_mgr.mimi`（重写为类型正确、可运行的版本）
-
-### Fixed
-- §13.6 门禁清理 8 个 clippy 警告：
-  - `src/codegen/expr.rs:497-500` `fold_quote_block` doc list 缩进
-  - `src/core/infer/call/simple.rs:663` `args.len() < 1` → `is_empty()`
-  - `src/runtime/mod.rs:6148-6149` `LazyLock` 触发 3 个 MSRV 警告，加 `#[allow(clippy::incompatible_msrv)]` 与 `src/ffi/runtime.rs:966 MIMI_POOL` 模式一致
-- Rust 2021 edition `reserved_prefix`：assertion 消息中单词后紧跟 `"` 被视作前缀（如 `codegen"`、`error"`、`mode"`、`succeed"`），修复 5 处字符串改为不以 `<word>"` 结尾
-- `dual_map_has_key` 期望值被意外覆盖恢复（`"100"` → `"yes\nno"`）
+## [v0.28.21] - 2026-07-02
 
 ### Added
 - **Runtime QuotedAst 表示**（`src/runtime/mod.rs`）：`MimiQuotedAst` repr(C) 结构 + 11 个 C ABI 函数（`mimi_quote_new_leaf` / `_new_node` / `_new_list` / `_drop` / `_tag` / `_data0` / `_data1` / `_data2` / `_argc` / `_list_child`），支持递归构建和释放 0/1/2 子节点及变长列表
 - **`Expr::Quote` 三阶段构造**（`src/codegen/expr.rs`）：literal 折叠 → interp fold → `mimi_quote_new_*` 运行时构造。`compile_quote_runtime` 递归生成 LLVM IR 调用，支持 Literal/Ident/Binary/Unary/QuoteInterpolate/Tuple
 - **`mimi verify` 不求值 comptime 块**：新增 2 个测试（`dual_verify_skips_comptime_block` / `dual_verify_contracts_skips_comptime`），直接调 Z3 `verify_source` 验证 comptime 内容不被求值
 - **Codegen `register_quoted_ast_rt`**（`src/codegen/builtins/mod.rs`）：注册 11 个 `mimi_quote_*` 函数到 LLVM IR
-
-### Added
 - **Codegen `comptime { ... }` block fold path** (`src/codegen/expr.rs`)：Expr::Comptime 路径调 `fold_comptime_block`，构造临时 Interpreter 并预先注入已折叠的 `comptime func` 结果，求值后转 LLVM 常量。支持的 scalar 值类型：Int / Float / Bool / Unit / String（String 走 `build_global_string_ptr` 与 Lit::String 一致）
 - **Codegen `comptime func` / `const` 预折叠** (`src/codegen/compile.rs` + `src/codegen/mod.rs`)：compile_file 起始 `fold_comptime_items` 用 interp 求值所有 no-arg `comptime func` + `const`，缓存到 `comptime_values: HashMap<String, Value>`。同时持有 `comptime_file: Option<Rc<File>>` clone 避免原 file 借用冲突
 - **`comptime { 1 + 2 }` 双后端等价** (`src/tests/dual_backend.rs`)：7 个 L1 dual 测试覆盖 block 表达式、let 块、字符串、`comptime func` 调用、`ast_eval(quote! { ... })`
@@ -48,12 +23,35 @@
 ### Fixed
 - **comptime func 不再生成 LLVM IR**：v0.28.21 之前同时被 fold 缓存 + 生成 LLVM 函数（运行时实际走 LLVM 函数而非 fold 路径），与 §12.1 目标 "codegen 排除 comptime 函数本身的 LLVM 编译" 不符。`compile.rs:132` 跳过 `is_comptime` 函数的 `compile_func` 调用，call site 改用 `comptime_values` 缓存
 - **parser `$(...)` 闭合** (`src/parser/parse_expr.rs:320`)：lexer 把 `$(` 合并为单 `DollarParen` token，外层 `)` 仍需在 parse_expr 中显式 `expect(RParen)` 消耗。修复前 quote! 块内 `$(flag())` 等会报 "expected `(`, found )"
+- **`check_block_with_implicit_return` 不再把前一条表达式类型误判为隐式返回**：当函数最后一条语句是 `return`/`if`/`while` 等非表达式语句时，不再拿上一条 `Stmt::Expr` 的类型做隐式返回检查。修复 `println(...); return 42` 等常见模式被误报 "implicit return: expected i32, found unit" 的问题
+- **`let x =` 缺初始化表达式现在报 parse error**：`parse_let` 在 `=` 后紧跟语句结束符时返回 "expected expression after `=`"，避免静默把后续表达式当成函数体隐式返回
+- **parser recovery 模式现在收集语句级错误**：`parse_block_with_recovery` 把 `parse_stmt` 错误加入 `Parser::errors`，`parse_file_with_recovery` 最终一并返回，避免函数体内的语法错误被静默吞掉
+- **Lexer 支持 shebang**：文件首行 `#!/usr/bin/env mimi` 被跳过，不再 tokenize 为 `# ! / ...`
+- 大量 `examples/` 和 `demos/` 示例 outdated syntax / runtime 行为，使以下示例可以正常 `mimi run`：
+  - `examples/benchmark.mimi`（修复 mutability、降低输入规模避免超时、支持 shebang）
+  - `examples/fib.mimi`、`examples/validation_basics.mimi`、`examples/validation_collections.mimi`（受益于 implicit return 修复）
+  - `examples/ffi_verification.mimi`（更新 extern 语法为 `func`，移除不支持的 `CBuffer`/`u8` 用法）
+  - `examples/wc.mimi`（避免在 match arm block 内使用 `let`，绕开当前 block 表达式作用域限制）
+  - `demos/15_task_mgr.mimi`（重写为类型正确、可运行的版本）
+- §13.6 门禁清理 8 个 clippy 警告：
+  - `src/codegen/expr.rs:497-500` `fold_quote_block` doc list 缩进
+  - `src/core/infer/call/simple.rs:663` `args.len() < 1` → `is_empty()`
+  - `src/runtime/mod.rs:6148-6149` `LazyLock` 触发 3 个 MSRV 警告，加 `#[allow(clippy::incompatible_msrv)]` 与 `src/ffi/runtime.rs:966 MIMI_POOL` 模式一致
+- Rust 2021 edition `reserved_prefix`：assertion 消息中单词后紧跟 `"` 被视作前缀（如 `codegen"`、`error"`、`mode"`、`succeed"`），修复 5 处字符串改为不以 `<word>"` 结尾
+- `dual_map_has_key` 期望值被意外覆盖恢复（`"100"` → `"yes\nno"`）
 
 ### Changed
+- **CLI `--version` 现在与 `Cargo.toml` 一致**：`src/main.rs` 使用 `env!("CARGO_PKG_VERSION")`，避免手动版本字符串过时（之前报告 `0.28.17-dev` 实际已是 `0.28.21`）
+- **`mimi lint` 默认不再因 warning 退出非零**：新增 `--fail-on-warnings` 标志，默认仅 error 导致非零退出，更符合常见 linter 习惯
+- **`mimi fmt` 支持项目自动发现**：不带文件参数时，若当前目录有 `mimi.toml` 则格式化项目内所有 `.mimi` 文件，否则格式化当前目录下的 `.mimi` 文件；同时支持 `-` 从 stdin 读取并输出到 stdout
+- **`mimi test` 尊重 `NO_COLOR`**：测试输出现在使用 `colors_enabled()` 判断，与 `run`/`check`/`build` 一致
 - Interpreter 新增公开 API：`eval_comptime_block(&Block)` 与 `inject_comptime_result(name, value)`（之前只 pub(in crate::interp)）
 - `value_to_llvm_const` 可见性从 `pub(super)` 提升为 `pub(crate)`，让 `codegen/expr/call/simple.rs` 的 call site fallback 也能调用
 - 旧 `adv_comptime_*_error_message` / `adv_comptime_produces_error` / `adv_quote_*_error_message`（v0.28.21 之前期望 codegen 失败）改为正向测试：`adv_comptime_folds_literally`、`adv_comptime_runtime_dep_errors`、`adv_quote_literal_fold_succeeds`、`adv_quote_runtime_dep_produces_error`、`adv_comptime_func_call_works`
 - `dual_comptime_with_requires` 改为 no-arg 变体（v0.28.22 backlog 中实现有参 `comptime func` call site fold）
+
+### Tests
+- 全量测试 2810 通过，0 failed，0 ignored（仅 sanitizer 测试 `#[ignore]` 需 `--ignored` 运行）
 
 ## [v0.28.20] - 2026-07-02
 
