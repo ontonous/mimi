@@ -706,10 +706,10 @@ fn calls_self_directly(block: &[Stmt], name: &str) -> bool {
                     return true;
                 }
             }
-            Stmt::For { iterable, body, .. } => {
-                if expr_calls_name(iterable, name) || calls_self_directly(body, name) {
-                    return true;
-                }
+            Stmt::For { iterable, body, .. }
+                if expr_calls_name(iterable, name) || calls_self_directly(body, name) =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -796,11 +796,7 @@ fn has_conditional_guard(block: &[Stmt]) -> bool {
             Stmt::If { .. } => return true,
             Stmt::While { .. } => return true, // while has a condition
             Stmt::Expr(Expr::If { .. } | Expr::Match(..)) => return true,
-            Stmt::Block(b) => {
-                if has_conditional_guard(b) {
-                    return true;
-                }
-            }
+            Stmt::Block(b) if has_conditional_guard(b) => return true,
             _ => {}
         }
     }
