@@ -66,6 +66,24 @@ pub(crate) fn add(
                 manifest.save(&dir)?;
                 return Ok(());
             }
+            // Package found but version constraint unmatched
+            eprintln!(
+                "⚠ warning: version '{}' for package '{}' not found in registry",
+                constraint, name
+            );
+            eprintln!("  Available versions: {}", version_refs.join(", "));
+            eprintln!("  The dependency has been added to mimi.toml but");
+            eprintln!("  `mimi install` will fail until the correct version is specified.");
+        } else {
+            // P1-13: warn when the package doesn't exist in the local
+            // registry, so the user knows `mimi install` will fail.
+            eprintln!(
+                "⚠ warning: package '{}' not found in local registry at {}",
+                name,
+                reg.display()
+            );
+            eprintln!("  The dependency has been added to mimi.toml, but");
+            eprintln!("  `mimi install` will fail until the package is available.");
         }
     }
 
