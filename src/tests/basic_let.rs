@@ -146,3 +146,23 @@ func main() -> i32 {
     let result = check_source(src);
     assert!(result.is_ok());
 }
+
+#[test]
+fn parse_let_missing_initializer_errors() {
+    // Regression: `let x =` with no expression should be a parse error.
+    let src = r#"
+func main() -> i32 {
+    let x =
+    42
+}
+"#;
+    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
+    let (_file, errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("expected expression after `=`")),
+        "expected parse error for missing initializer, got: {:?}",
+        errors
+    );
+}

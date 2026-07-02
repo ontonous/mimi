@@ -408,6 +408,17 @@ impl Parser {
         };
         let init = if self.at(&TokenKind::Eq) {
             self.advance();
+            if self.at(&TokenKind::Semi)
+                || self.at(&TokenKind::Newline)
+                || self.at(&TokenKind::RBrace)
+                || self.at(&TokenKind::Eof)
+            {
+                return Err(ParseError::new(
+                    "expected expression after `=` in let binding",
+                    self.peek().line,
+                    self.peek().col,
+                ));
+            }
             Some(self.parse_expr(0)?)
         } else {
             None
@@ -789,7 +800,8 @@ impl Parser {
             }
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
-                Err(_) => {
+                Err(e) => {
+                    self.errors.push(e);
                     self.advance();
                 }
             }

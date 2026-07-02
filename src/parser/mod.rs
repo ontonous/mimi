@@ -77,6 +77,9 @@ pub struct Parser {
     mode: ParseMode,
     recovery_mode: bool,
     recursion_depth: std::cell::Cell<usize>,
+    /// Statement-level errors collected during recovery parsing.
+    /// These are returned alongside top-level errors by `parse_file_with_recovery`.
+    errors: Vec<ParseError>,
 }
 
 impl Parser {
@@ -95,6 +98,7 @@ impl Parser {
             mode,
             recovery_mode: false,
             recursion_depth: std::cell::Cell::new(0),
+            errors: Vec::new(),
         }
     }
 
@@ -107,6 +111,7 @@ impl Parser {
             mode: ParseMode::Production,
             recovery_mode: true,
             recursion_depth: std::cell::Cell::new(0),
+            errors: Vec::new(),
         }
     }
 
@@ -200,6 +205,7 @@ impl Parser {
             }
         }
 
+        errors.extend(self.errors);
         (File { imports, items }, errors)
     }
 
