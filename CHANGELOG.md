@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.28.19-dev
+## [v0.28.19] - 2026-07-02
 
 ### Added
 - **Runtime actor mailbox** (`src/runtime/mod.rs`)：新增 `MimiActorRepr` + `mimi_actor_spawn`、`mimi_actor_call`、`mimi_actor_drop`、`mimi_actor_id`、`mimi_actor_current_id` C ABI runtime API。每个 actor 实例拥有专用 worker 线程（`std::thread::Builder::new().name("mimi-actor-{id}")`）+ `mpsc::channel` mailbox；actor 字段存储在 heap-allocated blob 中，worker 独占访问。`CURRENT_ACTOR_ID` thread-local 实现自调用死锁避免。
