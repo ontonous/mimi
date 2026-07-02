@@ -405,9 +405,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             let call = self.build_call(function, metadata_args, "call")?;
             Ok(call_try_basic_value(&call)
                 .unwrap_or(self.context.i64_type().const_int(0, false).into()))
+        } else if let Some(value) = self.comptime_values.get(name).cloned() {
+            // v0.28.21 — `comptime func` items are folded at codegen-start
+            // and intentionally not compiled to LLVM IR. Look up the
+            // pre-computed value here and emit a constant in its place.
+            // No-arg `comptime func` is the only supported shape.
+            if !metadata_args.is_empty() {
+                return Err(format!(
+                    "comptime function '{}' is no-arg only in v0.28.21; got {} args",
+                    name,
+                    metadata_args.len()
+                )
+                .into());
+            }
+            self.value_to_llvm_const(&value)
         } else {
             let msg = if self.comptime_func_names.contains(name) {
-                format!("comptime function '{}' is compile-time only and cannot be called from runtime code", name)
+                format!("comptime function '{}' is compile-time only; its body could not be folded (missing from comptime_values cache)", name)
             } else {
                 format!("undefined function '{}' in codegen", name)
             };

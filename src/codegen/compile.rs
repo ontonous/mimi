@@ -125,11 +125,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compile_impl_methods()?;
         // Fourth pass: compile vtables (needed before user function compilation)
         self.compile_vtables()?;
-        // Fifth pass: compile user functions and actors
+        // Fifth pass: compile user functions and actors.
+        // v0.28.21 — `comptime func` items are folded at codegen-start by
+        // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
+        // (the caller resolves them via the cached `comptime_values` map,
+        // so no runtime symbol is required for the function body).
         Self::process_items(&file.items, &mut |item| {
             match item {
                 Item::Func(f) => {
-                    self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
+                    if f.is_comptime {
+                        // Skip — folded value lives in self.comptime_values.
+                    } else {
+                        self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
+                    }
                 }
                 Item::Actor(actor) => {
                     self.compile_actor(actor)?;

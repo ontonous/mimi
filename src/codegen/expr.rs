@@ -414,9 +414,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (name, value) in self.comptime_values.clone() {
             interp.inject_comptime_result(name, value);
         }
-        let result = interp.eval_comptime_block(block).map_err(|e| {
-            CompileError::Generic(format!("comptime block fold failed: {}", e))
-        })?;
+        let result = interp
+            .eval_comptime_block(block)
+            .map_err(|e| CompileError::Generic(format!("comptime block fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)
     }
 
@@ -425,7 +425,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// float, bool, unit, and string. Tuples / lists are intentionally
     /// not yet supported; those will land in v0.28.22 alongside the
     /// `QuotedAst` codegen path.
-    pub(super) fn value_to_llvm_const(
+    pub(crate) fn value_to_llvm_const(
         &self,
         v: &crate::interp::Value,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
@@ -433,9 +433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let f64_ty = self.context.f64_type();
         match v {
-            Value::Int(i) => Ok(BasicValueEnum::IntValue(
-                i64_ty.const_int(*i as u64, true),
-            )),
+            Value::Int(i) => Ok(BasicValueEnum::IntValue(i64_ty.const_int(*i as u64, true))),
             Value::Float(f) => Ok(BasicValueEnum::FloatValue(f64_ty.const_float(*f))),
             Value::Bool(b) => Ok(BasicValueEnum::IntValue(
                 i64_ty.const_int(if *b { 1 } else { 0 }, false),
@@ -448,10 +446,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr(s, "comptime_str")
                     .map_err(|e| {
-                        CompileError::LlvmError(format!(
-                            "comptime string global: {}",
-                            e
-                        ))
+                        CompileError::LlvmError(format!("comptime string global: {}", e))
                     })?;
                 Ok(BasicValueEnum::PointerValue(global.as_pointer_value()))
             }
@@ -496,17 +491,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
                 let result = match op {
                     BinOp::Add => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant().unwrap_or(0)
+                        a.get_zero_extended_constant()
+                            .unwrap_or(0)
                             .wrapping_add(b.get_zero_extended_constant().unwrap_or(0)),
                         false,
                     ),
                     BinOp::Sub => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant().unwrap_or(0)
+                        a.get_zero_extended_constant()
+                            .unwrap_or(0)
                             .wrapping_sub(b.get_zero_extended_constant().unwrap_or(0)),
                         false,
                     ),
                     BinOp::Mul => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant().unwrap_or(0)
+                        a.get_zero_extended_constant()
+                            .unwrap_or(0)
                             .wrapping_mul(b.get_zero_extended_constant().unwrap_or(0)),
                         false,
                     ),
@@ -515,49 +513,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if rb == 0 {
                             return None;
                         }
-                        self.context.i64_type().const_int(
-                            a.get_zero_extended_constant().unwrap_or(0) / rb,
-                            false,
-                        )
+                        self.context
+                            .i64_type()
+                            .const_int(a.get_zero_extended_constant().unwrap_or(0) / rb, false)
                     }
                     BinOp::Mod => {
                         let rb = b.get_zero_extended_constant().unwrap_or(0);
                         if rb == 0 {
                             return None;
                         }
-                        self.context.i64_type().const_int(
-                            a.get_zero_extended_constant().unwrap_or(0) % rb,
-                            false,
-                        )
+                        self.context
+                            .i64_type()
+                            .const_int(a.get_zero_extended_constant().unwrap_or(0) % rb, false)
                     }
                     BinOp::EqCmp => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            == b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            == b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::NeCmp => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            != b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            != b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::Lt => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            < b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            < b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::Le => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            <= b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            <= b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::Gt => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            > b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            > b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::Ge => self.context.bool_type().const_int(
                         (a.get_zero_extended_constant().unwrap_or(0)
-                            >= b.get_zero_extended_constant().unwrap_or(0)) as u64,
+                            >= b.get_zero_extended_constant().unwrap_or(0))
+                            as u64,
                         false,
                     ),
                     BinOp::And | BinOp::BitAnd => self.context.bool_type().const_int(
@@ -600,7 +602,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::IntValue(iv) => {
                     let n = iv.get_zero_extended_constant().unwrap_or(0);
                     Some(BasicValueEnum::IntValue(
-                        self.context.i64_type().const_int((!n).wrapping_add(1), true),
+                        self.context
+                            .i64_type()
+                            .const_int((!n).wrapping_add(1), true),
                     ))
                 }
                 BasicValueEnum::FloatValue(_) => {
