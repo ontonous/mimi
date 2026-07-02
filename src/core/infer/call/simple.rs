@@ -648,21 +648,18 @@ impl<'a> Checker<'a> {
                 return Type::Name("Record".into(), vec![]);
             }
             // v0.28.20 — concurrency primitives; handle types are uniform i64.
-            "atomic_i32_new"
-            | "atomic_i32_drop"
-            | "atomic_i64_new"
-            | "atomic_i64_drop"
-            | "atomic_bool_new"
-            | "atomic_bool_drop"
-            | "mutex_new"
-            | "mutex_lock"
+            "atomic_i32_new" | "atomic_i32_drop" | "atomic_i64_new" | "atomic_i64_drop"
+            | "atomic_bool_new" | "atomic_bool_drop" | "mutex_new" | "mutex_lock"
             | "channel_new" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }
                 return Type::Name("i64".into(), vec![]);
             }
-            "atomic_i32_load" | "atomic_i32_compare_exchange" | "atomic_i32_fetch_add" | "atomic_i64_fetch_add" => {
+            "atomic_i32_load"
+            | "atomic_i32_compare_exchange"
+            | "atomic_i32_fetch_add"
+            | "atomic_i64_fetch_add" => {
                 if args.len() < 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -676,7 +673,8 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i32".into(), vec![]);
             }
-            "atomic_i64_load" | "atomic_bool_load" | "mutex_get" | "channel_recv" | "channel_try_recv" => {
+            "atomic_i64_load" | "atomic_bool_load" | "mutex_get" | "channel_recv"
+            | "channel_try_recv" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -687,14 +685,8 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i64".into(), vec![]);
             }
-            "atomic_i32_store"
-            | "atomic_i64_store"
-            | "atomic_bool_store"
-            | "mutex_set"
-            | "mutex_unlock"
-            | "mutex_drop"
-            | "channel_send"
-            | "channel_drop" => {
+            "atomic_i32_store" | "atomic_i64_store" | "atomic_bool_store" | "mutex_set"
+            | "mutex_unlock" | "mutex_drop" | "channel_send" | "channel_drop" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }

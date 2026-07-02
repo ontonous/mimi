@@ -141,9 +141,7 @@ impl<'a> Interpreter<'a> {
         args: Vec<Value>,
     ) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new(
-                "atomic_i64_fetch_add expects 2 arguments",
-            ));
+            return Err(InterpError::new("atomic_i64_fetch_add expects 2 arguments"));
         }
         let h = args[0].as_i64_for_handle()?;
         let d = match &args[1] {
@@ -250,7 +248,9 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_mutex_get(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
-            return Err(InterpError::new("mutex_get expects 1 argument (lock token)"));
+            return Err(InterpError::new(
+                "mutex_get expects 1 argument (lock token)",
+            ));
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid mutex handle.
@@ -260,7 +260,9 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_mutex_set(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("mutex_set expects 2 arguments (lock, value)"));
+            return Err(InterpError::new(
+                "mutex_set expects 2 arguments (lock, value)",
+            ));
         }
         let h = args[0].as_i64_for_handle()?;
         let v = match &args[1] {

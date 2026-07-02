@@ -1,6 +1,6 @@
 use crate::ast::*;
-use crate::codegen::types;
 use crate::codegen::call_try_basic_value;
+use crate::codegen::types;
 use std::collections::HashMap;
 
 use inkwell::types::BasicTypeEnum;
@@ -18,8 +18,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Cache the actor definition so mailbox call-sites can recover the
         // declared method return type.
-        self.actor_defs
-            .insert(actor.name.clone(), actor.clone());
+        self.actor_defs.insert(actor.name.clone(), actor.clone());
 
         // Assign method IDs (used as method_id in dispatch + mimi_actor_call).
         for (i, method) in actor.methods.iter().enumerate() {
@@ -129,39 +128,52 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let method_id = function
             .get_nth_param(0)
-            .ok_or_else(|| CompileError::LlvmError("dispatch: missing method_id param".to_string()))?
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing method_id param".to_string())
+            })?
             .into_int_value();
         let self_fields_ptr = function
             .get_nth_param(1)
-            .ok_or_else(|| CompileError::LlvmError("dispatch: missing self_fields_ptr param".to_string()))?
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing self_fields_ptr param".to_string())
+            })?
             .into_pointer_value();
         let args_blob = function
             .get_nth_param(2)
-            .ok_or_else(|| CompileError::LlvmError("dispatch: missing args_blob param".to_string()))?
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing args_blob param".to_string())
+            })?
             .into_pointer_value();
         // args_size = param 3 (not used directly; args are unpacked by offset)
         let result_blob = function
             .get_nth_param(4)
-            .ok_or_else(|| CompileError::LlvmError("dispatch: missing result_blob param".to_string()))?
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing result_blob param".to_string())
+            })?
             .into_pointer_value();
         let result_size_out = function
             .get_nth_param(5)
-            .ok_or_else(|| CompileError::LlvmError("dispatch: missing result_size_out param".to_string()))?
+            .ok_or_else(|| {
+                CompileError::LlvmError("dispatch: missing result_size_out param".to_string())
+            })?
             .into_pointer_value();
 
         // Generate a switch on method_id.
-        let default_bb = self.context.append_basic_block(function, "dispatch_default");
+        let default_bb = self
+            .context
+            .append_basic_block(function, "dispatch_default");
         let merge_bb = self.context.append_basic_block(function, "dispatch_end");
 
-        let mut switch_cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            Vec::new();
+        let mut switch_cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
         let mut case_bbs: Vec<(usize, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
 
         for (i, _method) in actor.methods.iter().enumerate() {
-            let case_bb = self.context.append_basic_block(
-                function,
-                &format!("dispatch_case_{}", i),
-            );
+            let case_bb = self
+                .context
+                .append_basic_block(function, &format!("dispatch_case_{}", i));
             switch_cases.push((i32_ty.const_int(i as u64, false), case_bb));
             case_bbs.push((i, case_bb));
         }
@@ -176,10 +188,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             let method = &actor.methods[i];
             let mangled = format!("{}__{}__method", actor.name, method.name);
-            let method_fn = self
-                .module
-                .get_function(&mangled)
-                .ok_or_else(|| CompileError::LlvmError(format!("method fn {} not found", mangled)))?;
+            let method_fn = self.module.get_function(&mangled).ok_or_else(|| {
+                CompileError::LlvmError(format!("method fn {} not found", mangled))
+            })?;
 
             // Build args: self_fields_ptr (as the self pointer) + unpacked params.
             let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
@@ -206,7 +217,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::IntType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_cast")
+                            .build_bit_cast(
+                                gep,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "arg_cast",
+                            )
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_val")?
@@ -214,7 +229,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::FloatType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_fcast")
+                            .build_bit_cast(
+                                gep,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "arg_fcast",
+                            )
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_fval")?
@@ -230,7 +249,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicTypeEnum::StructType(t) => {
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_scast")
+                            .build_bit_cast(
+                                gep,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "arg_scast",
+                            )
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(t, cast_ptr, "arg_sval")?
@@ -239,7 +262,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Default: load as i64
                         let cast_ptr = self
                             .builder
-                            .build_bit_cast(gep, self.context.ptr_type(inkwell::AddressSpace::default()), "arg_icast")
+                            .build_bit_cast(
+                                gep,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "arg_icast",
+                            )
                             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                             .into_pointer_value();
                         self.build_load(i64_ty, cast_ptr, "arg_ival")?
@@ -250,8 +277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
 
             let call = self.build_call(method_fn, &call_args, "dispatch_method_call")?;
-            let ret_val = call_try_basic_value(&call)
-                .unwrap_or(i64_ty.const_int(0, false).into());
+            let ret_val = call_try_basic_value(&call).unwrap_or(i64_ty.const_int(0, false).into());
 
             // Pack return value into result_blob (first 8 bytes).
             // For void methods, write 0.
@@ -279,17 +305,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 BasicValueEnum::FloatValue(fv) => {
                     // Store float as bits in i64
-                    let as_i64 = self.builder
+                    let as_i64 = self
+                        .builder
                         .build_bit_cast(fv, i64_ty, "ret_f2i")
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?;
                     as_i64
                 }
-                BasicValueEnum::PointerValue(pv) => {
-                    self.builder
-                        .build_ptr_to_int(pv, i64_ty, "ret_p2i")
-                        .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
-                        .into()
-                }
+                BasicValueEnum::PointerValue(pv) => self
+                    .builder
+                    .build_ptr_to_int(pv, i64_ty, "ret_p2i")
+                    .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
+                    .into(),
                 BasicValueEnum::StructValue(sv) => {
                     // Store struct by copying into result_blob
                     let sty = sv.get_type();
@@ -395,7 +421,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if s_ty.get_bit_width() < 64 {
                             self.builder
                                 .build_int_z_extend(s, i64_ty, "struct_size")
-                                .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("size error: {}", e))
+                                })?
                         } else {
                             s
                         }
@@ -410,10 +438,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Get the dispatch function pointer.
         let dispatch_name = format!("{}__dispatch", actor.name);
-        let dispatch_fn = self
-            .module
-            .get_function(&dispatch_name)
-            .ok_or_else(|| CompileError::LlvmError(format!("dispatch fn {} not found", dispatch_name)))?;
+        let dispatch_fn = self.module.get_function(&dispatch_name).ok_or_else(|| {
+            CompileError::LlvmError(format!("dispatch fn {} not found", dispatch_name))
+        })?;
 
         // Call mimi_actor_spawn(fields_ptr, fields_size, dispatch_fn) -> i8*
         let spawn_rt = self.get_runtime_fn("mimi_actor_spawn")?;
@@ -433,8 +460,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_handle",
         )?;
 
-        let handle_val = call_try_basic_value(&handle)
-            .unwrap_or(i8_ptr.const_null().into());
+        let handle_val = call_try_basic_value(&handle).unwrap_or(i8_ptr.const_null().into());
         self.build_return(Some(&handle_val))?;
 
         Ok(())
@@ -913,10 +939,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Find the actor's method declaration to recover the declared return type.
         // The dispatch result is always packed as i64 in result_blob; we have to
         // re-shape the i64 to match the declared return type at the call site.
-        let method_ret_ty: Option<crate::ast::Type> = self
-            .actor_defs
-            .get(&obj_type)
-            .and_then(|a| {
+        let method_ret_ty: Option<crate::ast::Type> =
+            self.actor_defs.get(&obj_type).and_then(|a| {
                 a.methods
                     .iter()
                     .find(|m| m.name == method_name)
@@ -941,7 +965,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let actor_id_fn = self.get_runtime_fn("mimi_actor_id")?;
 
         let current_id = self.build_call(current_id_fn, &[], "cur_actor_id")?;
-        let current_id = call_try_basic_value(&current_id).unwrap_or(i64_ty.const_int(0, false).into());
+        let current_id =
+            call_try_basic_value(&current_id).unwrap_or(i64_ty.const_int(0, false).into());
         let actor_id = self.build_call(actor_id_fn, &[handle_ptr.into()], "handle_actor_id")?;
         let actor_id = call_try_basic_value(&actor_id).unwrap_or(i64_ty.const_int(0, false).into());
 
@@ -960,8 +985,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             CompileError::LlvmError("no current function for actor method call".to_string())
         })?;
         let self_call_bb = self.context.append_basic_block(function, "actor_self_call");
-        let mailbox_bb = self.context.append_basic_block(function, "actor_mailbox_call");
-        let merge_bb = self.context.append_basic_block(function, "actor_call_merge");
+        let mailbox_bb = self
+            .context
+            .append_basic_block(function, "actor_mailbox_call");
+        let merge_bb = self
+            .context
+            .append_basic_block(function, "actor_call_merge");
 
         self.build_cond_br(is_self_call, self_call_bb, mailbox_bb)?;
 
@@ -986,10 +1015,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Direct call on self — call the method function directly.
                 let mangled = format!("{}__{}__method", obj_type, method_name);
                 if let Some(method_fn) = self.module.get_function(&mangled) {
-                    let self_ptr = vars
-                        .get("self")
-                        .map(|&(alloca, _)| alloca)
-                        .ok_or_else(|| {
+                    let self_ptr =
+                        vars.get("self").map(|&(alloca, _)| alloca).ok_or_else(|| {
                             CompileError::LlvmError("self not found in vars for self-call".into())
                         })?;
                     // Load the self pointer from the alloca.
@@ -999,13 +1026,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "self_ptr_load",
                     )?;
 
-                    let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![self_val.into()];
+                    let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+                        vec![self_val.into()];
                     for arg in args {
                         call_args.push(self.compile_expr(arg, vars)?.into());
                     }
                     let call = self.build_call(method_fn, &call_args, "self_method_call")?;
-                    let result = call_try_basic_value(&call)
-                        .unwrap_or(i64_ty.const_int(0, false).into());
+                    let result =
+                        call_try_basic_value(&call).unwrap_or(i64_ty.const_int(0, false).into());
 
                     // Branch to merge with result.
                     let result_alloca = self.build_alloca(i64_ty, "self_call_result")?;
@@ -1042,10 +1070,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(mailbox_bb);
 
         // Pack args into a blob.
-        let args_blob = self.build_alloca(
-            self.context.i8_type().array_type(256),
-            "actor_args_blob",
-        )?;
+        let args_blob =
+            self.build_alloca(self.context.i8_type().array_type(256), "actor_args_blob")?;
 
         // Store each arg at offset i*8.
         for (i, arg) in args.iter().enumerate() {
@@ -1073,17 +1099,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         iv.into()
                     }
                 }
-                BasicValueEnum::PointerValue(pv) => {
-                    self.builder
-                        .build_ptr_to_int(pv, i64_ty, &format!("arg_p2i_{}", i))
-                        .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
-                        .into()
-                }
-                BasicValueEnum::FloatValue(fv) => {
-                    self.builder
-                        .build_bit_cast(fv, i64_ty, &format!("arg_f2i_{}", i))
-                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                }
+                BasicValueEnum::PointerValue(pv) => self
+                    .builder
+                    .build_ptr_to_int(pv, i64_ty, &format!("arg_p2i_{}", i))
+                    .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
+                    .into(),
+                BasicValueEnum::FloatValue(fv) => self
+                    .builder
+                    .build_bit_cast(fv, i64_ty, &format!("arg_f2i_{}", i))
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?,
                 _ => i64_ty.const_int(0, false).into(),
             };
 
@@ -1102,10 +1126,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let args_size = i64_ty.const_int((args.len() * 8) as u64, false);
 
         // Allocate result blob.
-        let result_blob = self.build_alloca(
-            self.context.i8_type().array_type(256),
-            "actor_result_blob",
-        )?;
+        let result_blob =
+            self.build_alloca(self.context.i8_type().array_type(256), "actor_result_blob")?;
 
         // Call mimi_actor_call(handle, method_id, args_ptr, args_size, result_ptr)
         let call_fn = self.get_runtime_fn("mimi_actor_call")?;

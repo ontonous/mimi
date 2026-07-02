@@ -56,7 +56,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         //    This routes through mimi_actor_call for real concurrency.
         //    Falls back to direct call for self-calls inside actor methods.
         if self.actor_names.contains(&obj_type) {
-            if let Some(result) = self.try_compile_actor_mailbox_call(obj, method_name, args, vars)? {
+            if let Some(result) =
+                self.try_compile_actor_mailbox_call(obj, method_name, args, vars)?
+            {
                 return Ok(result);
             }
         }

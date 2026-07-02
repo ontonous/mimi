@@ -115,9 +115,7 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     } else {
-                        for (i, (arg, param)) in
-                            args.iter().zip(method.params.iter()).enumerate()
-                        {
+                        for (i, (arg, param)) in args.iter().zip(method.params.iter()).enumerate() {
                             let declared = self.resolve_type(&param.ty);
                             let at = self.infer_expr(arg, scopes);
                             if !same_type(&at, &declared) {

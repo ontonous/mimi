@@ -51,7 +51,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_atomic_i32_load not declared")?;
         let result = self
             .builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(handle)], "atomic_load")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(handle)],
+                "atomic_load",
+            )
             .map_err(|e| format!("atomic_i32_load error: {}", e))?;
         // Runtime returns i32; sext to i64 (Mimi's integer width).
         let raw = call_try_basic_value(&result)
@@ -102,7 +106,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| format!("atomic_i32_store error: {}", e))?;
         // Returns unit; emit a dummy i64 0.
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     pub(super) fn compile_atomic_i32_fetch_add(
@@ -195,7 +201,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "atomic_cas",
             )
             .map_err(|e| format!("cas error: {}", e))?;
-        let raw = call_try_basic_value(&result).ok_or("cas returned void")?.into_int_value();
+        let raw = call_try_basic_value(&result)
+            .ok_or("cas returned void")?
+            .into_int_value();
         let i64_ty = self.context.i64_type();
         let sext = self
             .builder
@@ -221,7 +229,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_function(rt_fn)
             .ok_or_else(|| format!("{} not declared", rt_fn))?;
         self.builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(handle)], "atomic_drop")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(handle)],
+                "atomic_drop",
+            )
             .map_err(|e| format!("{} error: {}", rt_fn, e))?;
         Ok(())
     }
@@ -245,7 +257,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_atomic_i64_new not declared")?;
         let result = self
             .builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(v)], "atomic_i64_new")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(v)],
+                "atomic_i64_new",
+            )
             .map_err(|e| format!("atomic_i64_new error: {}", e))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_atomic_i64_new returned void")?)
     }
@@ -267,7 +283,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_atomic_i64_load not declared")?;
         let result = self
             .builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "atomic_i64_load")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(h)],
+                "atomic_i64_load",
+            )
             .map_err(|e| format!("atomic_i64_load error: {}", e))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_atomic_i64_load returned void")?)
     }
@@ -294,11 +314,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(
                 func,
-                &[BasicMetadataValueEnum::IntValue(h), BasicMetadataValueEnum::IntValue(v)],
+                &[
+                    BasicMetadataValueEnum::IntValue(h),
+                    BasicMetadataValueEnum::IntValue(v),
+                ],
                 "atomic_i64_store",
             )
             .map_err(|e| format!("atomic_i64_store error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     pub(super) fn compile_atomic_i64_fetch_add(
@@ -324,7 +349,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(
                 func,
-                &[BasicMetadataValueEnum::IntValue(h), BasicMetadataValueEnum::IntValue(d)],
+                &[
+                    BasicMetadataValueEnum::IntValue(h),
+                    BasicMetadataValueEnum::IntValue(d),
+                ],
                 "atomic_i64_fetch_add",
             )
             .map_err(|e| format!("atomic_i64_fetch_add error: {}", e))?;
@@ -382,10 +410,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_atomic_bool_load not declared")?;
         let result = self
             .builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "atomic_bool_load")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(h)],
+                "atomic_bool_load",
+            )
             .map_err(|e| format!("atomic_bool_load error: {}", e))?;
         // Runtime returns i32 (0/1); zext to i64 (Mimi bool is i64 in memory).
-        let raw = call_try_basic_value(&result).ok_or("void")?.into_int_value();
+        let raw = call_try_basic_value(&result)
+            .ok_or("void")?
+            .into_int_value();
         let i64_ty = self.context.i64_type();
         let zext = self
             .builder
@@ -428,7 +462,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "atomic_bool_store",
             )
             .map_err(|e| format!("atomic_bool_store error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     // ---------- Mutex ----------
@@ -521,11 +557,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(
                 func,
-                &[BasicMetadataValueEnum::IntValue(h), BasicMetadataValueEnum::IntValue(v)],
+                &[
+                    BasicMetadataValueEnum::IntValue(h),
+                    BasicMetadataValueEnum::IntValue(v),
+                ],
                 "mutex_set",
             )
             .map_err(|e| format!("mutex_set error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     pub(super) fn compile_mutex_unlock(
@@ -546,7 +587,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "mutex_unlock")
             .map_err(|e| format!("mutex_unlock error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     // ---------- Channel ----------
@@ -588,11 +631,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(
                 func,
-                &[BasicMetadataValueEnum::IntValue(h), BasicMetadataValueEnum::IntValue(v)],
+                &[
+                    BasicMetadataValueEnum::IntValue(h),
+                    BasicMetadataValueEnum::IntValue(v),
+                ],
                 "channel_send",
             )
             .map_err(|e| format!("channel_send error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
     }
 
     pub(super) fn compile_channel_recv(
@@ -634,7 +682,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_channel_try_recv not declared")?;
         let result = self
             .builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "channel_try_recv")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(h)],
+                "channel_try_recv",
+            )
             .map_err(|e| format!("channel_try_recv error: {}", e))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_channel_try_recv returned void")?)
     }

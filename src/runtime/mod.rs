@@ -5985,7 +5985,10 @@ pub extern "C" fn mimi_actor_spawn(
                 };
 
                 // Send result back; ignore error (caller may have timed out / dropped).
-                let _ = msg.response.send(ActorMsgResult { data, size: result_size as u64 });
+                let _ = msg.response.send(ActorMsgResult {
+                    data,
+                    size: result_size as u64,
+                });
             }
         })
         .expect("failed to spawn actor worker thread");
@@ -6183,7 +6186,9 @@ struct ConcurrencyChannel {
 }
 
 fn alloc_atomic(a: ConcurrencyAtomic) -> i64 {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let id = table.next_id;
     table.next_id += 1;
     table.atomics.insert(id, a);
@@ -6191,7 +6196,9 @@ fn alloc_atomic(a: ConcurrencyAtomic) -> i64 {
 }
 
 fn alloc_mutex(m: ConcurrencyMutex) -> i64 {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let id = table.next_id;
     table.next_id += 1;
     table.mutexes.insert(id, m);
@@ -6199,7 +6206,9 @@ fn alloc_mutex(m: ConcurrencyMutex) -> i64 {
 }
 
 fn alloc_channel(c: ConcurrencyChannel) -> i64 {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let id = table.next_id;
     table.next_id += 1;
     table.channels.insert(id, c);
@@ -6210,23 +6219,27 @@ fn alloc_channel(c: ConcurrencyChannel) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i32_new(value: i32) -> i64 {
-    alloc_atomic(ConcurrencyAtomic::I32(std::sync::atomic::AtomicI32::new(value)))
+    alloc_atomic(ConcurrencyAtomic::I32(std::sync::atomic::AtomicI32::new(
+        value,
+    )))
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i32_load(handle: i64) -> i32 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
-        Some(ConcurrencyAtomic::I32(a)) => {
-            a.load(std::sync::atomic::Ordering::SeqCst)
-        }
+        Some(ConcurrencyAtomic::I32(a)) => a.load(std::sync::atomic::Ordering::SeqCst),
         _ => 0,
     }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i32_store(handle: i64, value: i32) {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ConcurrencyAtomic::I32(a)) = table.atomics.get(&(handle as u64)) {
         a.store(value, std::sync::atomic::Ordering::SeqCst);
     }
@@ -6234,11 +6247,11 @@ pub extern "C" fn mimi_atomic_i32_store(handle: i64, value: i32) {
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i32_fetch_add(handle: i64, delta: i32) -> i32 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
-        Some(ConcurrencyAtomic::I32(a)) => {
-            a.fetch_add(delta, std::sync::atomic::Ordering::SeqCst)
-        }
+        Some(ConcurrencyAtomic::I32(a)) => a.fetch_add(delta, std::sync::atomic::Ordering::SeqCst),
         _ => 0,
     }
 }
@@ -6251,7 +6264,9 @@ pub extern "C" fn mimi_atomic_i32_compare_exchange(
     expected: i32,
     new_value: i32,
 ) -> i32 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
         Some(ConcurrencyAtomic::I32(a)) => match a.compare_exchange(
             expected,
@@ -6268,7 +6283,9 @@ pub extern "C" fn mimi_atomic_i32_compare_exchange(
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i32_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     table.atomics.remove(&(handle as u64));
 }
 
@@ -6276,23 +6293,27 @@ pub extern "C" fn mimi_atomic_i32_drop(handle: i64) {
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i64_new(value: i64) -> i64 {
-    alloc_atomic(ConcurrencyAtomic::I64(std::sync::atomic::AtomicI64::new(value)))
+    alloc_atomic(ConcurrencyAtomic::I64(std::sync::atomic::AtomicI64::new(
+        value,
+    )))
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i64_load(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
-        Some(ConcurrencyAtomic::I64(a)) => {
-            a.load(std::sync::atomic::Ordering::SeqCst)
-        }
+        Some(ConcurrencyAtomic::I64(a)) => a.load(std::sync::atomic::Ordering::SeqCst),
         _ => 0,
     }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i64_store(handle: i64, value: i64) {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ConcurrencyAtomic::I64(a)) = table.atomics.get(&(handle as u64)) {
         a.store(value, std::sync::atomic::Ordering::SeqCst);
     }
@@ -6300,18 +6321,20 @@ pub extern "C" fn mimi_atomic_i64_store(handle: i64, value: i64) {
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i64_fetch_add(handle: i64, delta: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
-        Some(ConcurrencyAtomic::I64(a)) => {
-            a.fetch_add(delta, std::sync::atomic::Ordering::SeqCst)
-        }
+        Some(ConcurrencyAtomic::I64(a)) => a.fetch_add(delta, std::sync::atomic::Ordering::SeqCst),
         _ => 0,
     }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_i64_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     table.atomics.remove(&(handle as u64));
 }
 
@@ -6320,12 +6343,16 @@ pub extern "C" fn mimi_atomic_i64_drop(handle: i64) {
 #[no_mangle]
 pub extern "C" fn mimi_atomic_bool_new(value: i32) -> i64 {
     let b = value != 0;
-    alloc_atomic(ConcurrencyAtomic::Bool(std::sync::atomic::AtomicBool::new(b)))
+    alloc_atomic(ConcurrencyAtomic::Bool(std::sync::atomic::AtomicBool::new(
+        b,
+    )))
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
         Some(ConcurrencyAtomic::Bool(a)) => {
             if a.load(std::sync::atomic::Ordering::SeqCst) {
@@ -6341,7 +6368,9 @@ pub extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
 #[no_mangle]
 pub extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
     let b = value != 0;
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ConcurrencyAtomic::Bool(a)) = table.atomics.get(&(handle as u64)) {
         a.store(b, std::sync::atomic::Ordering::SeqCst);
     }
@@ -6349,7 +6378,9 @@ pub extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
 
 #[no_mangle]
 pub extern "C" fn mimi_atomic_bool_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     table.atomics.remove(&(handle as u64));
 }
 
@@ -6370,10 +6401,12 @@ pub extern "C" fn mimi_mutex_new(value: i64) -> i64 {
 /// the same global table, which provides mutual exclusion.)
 #[no_mangle]
 pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.mutexes.get(&(handle as u64)) {
         Some(m) => {
-            let _guard = m.inner.lock().unwrap();
+            let _guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
             // Lock succeeded. Return handle as the "lock token".
             handle
         }
@@ -6383,10 +6416,12 @@ pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_get(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match table.mutexes.get(&(handle as u64)) {
         Some(m) => {
-            let guard = m.inner.lock().unwrap();
+            let guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
             *guard
         }
         _ => 0,
@@ -6395,16 +6430,20 @@ pub extern "C" fn mimi_mutex_get(handle: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_set(handle: i64, value: i64) {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(m) = table.mutexes.get(&(handle as u64)) {
-        let mut guard = m.inner.lock().unwrap();
+        let mut guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
         *guard = value;
     }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_unlock(handle: i64) {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(m) = table.mutexes.get(&(handle as u64)) {
         // Briefly acquire then immediately drop. The v0 single-thread L1
         // model treats lock/unlock as a no-op for mutual exclusion (the
@@ -6415,7 +6454,9 @@ pub extern "C" fn mimi_mutex_unlock(handle: i64) {
 
 #[no_mangle]
 pub extern "C" fn mimi_mutex_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     table.mutexes.remove(&(handle as u64));
 }
 
@@ -6432,7 +6473,9 @@ pub extern "C" fn mimi_channel_new() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_send(handle: i64, value: i64) {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ch) = table.channels.get(&(handle as u64)) {
         let _ = ch.tx.send(value);
     }
@@ -6440,9 +6483,11 @@ pub extern "C" fn mimi_channel_send(handle: i64, value: i64) {
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ch) = table.channels.get(&(handle as u64)) {
-        if let Some(rx) = ch.rx.lock().unwrap().as_ref() {
+        if let Some(rx) = ch.rx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             // Recv on a moved reference would break — but we only borrow.
             // Using a one-shot peek by locking/unlocking is correct here.
             match rx.recv() {
@@ -6458,9 +6503,11 @@ pub extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
 /// currently available (channel still open, queue empty).
 #[no_mangle]
 pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES.lock().unwrap();
+    let table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ch) = table.channels.get(&(handle as u64)) {
-        if let Some(rx) = ch.rx.lock().unwrap().as_ref() {
+        if let Some(rx) = ch.rx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             match rx.try_recv() {
                 Ok(v) => return v,
                 Err(_) => return -1,
@@ -6472,11 +6519,13 @@ pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES.lock().unwrap();
+    let mut table = CONCURRENCY_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ch) = table.channels.remove(&(handle as u64)) {
         // Drop receiver first so any pending `send` fails fast.
-        *ch.rx.lock().unwrap() = None;
-        // Sender drops when `ch` is dropped at end of fn.
+        *ch.rx.lock().unwrap_or_else(|e| e.into_inner()) = None; // Drop receiver first so any pending `send` fails fast.
+                                                                 // Sender drops when `ch` is dropped at end of fn.
         drop(ch.tx);
     }
 }

@@ -1,3 +1,4 @@
+pub mod concurrency;
 pub mod io;
 pub mod json;
 pub mod list;
@@ -6,7 +7,6 @@ pub mod math;
 pub mod network;
 pub mod string;
 pub mod time_env;
-pub mod concurrency;
 
 use crate::codegen::CallSiteValueExt;
 use inkwell::context::Context;
@@ -1583,7 +1583,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "atomic_i32_compare_exchange" => self.compile_atomic_i32_compare_exchange(args),
             "atomic_i32_drop" => {
                 self.compile_atomic_drop_helper("mimi_atomic_i32_drop", args)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             "atomic_i64_new" => self.compile_atomic_i64_new(args),
             "atomic_i64_load" => self.compile_atomic_i64_load(args),
@@ -1591,14 +1593,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             "atomic_i64_fetch_add" => self.compile_atomic_i64_fetch_add(args),
             "atomic_i64_drop" => {
                 self.compile_atomic_drop_helper("mimi_atomic_i64_drop", args)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             "atomic_bool_new" => self.compile_atomic_bool_new(args),
             "atomic_bool_load" => self.compile_atomic_bool_load(args),
             "atomic_bool_store" => self.compile_atomic_bool_store(args),
             "atomic_bool_drop" => {
                 self.compile_atomic_drop_helper("mimi_atomic_bool_drop", args)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             "mutex_new" => self.compile_mutex_new(args),
             "mutex_lock" => self.compile_mutex_lock(args),
@@ -1607,7 +1613,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "mutex_unlock" => self.compile_mutex_unlock(args),
             "mutex_drop" => {
                 self.compile_atomic_drop_helper("mimi_mutex_drop", args)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             "channel_new" => self.compile_channel_new(args),
             "channel_send" => self.compile_channel_send(args),
@@ -1615,7 +1623,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {
                 self.compile_atomic_drop_helper("mimi_channel_drop", args)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             "ast_eval" => {
                 // ast_eval on a compile-time folded quote block:
@@ -1842,7 +1852,10 @@ fn register_atomic_mutex_channel_rt<'ctx>(
     module.add_function(
         "mimi_atomic_i32_store",
         void.fn_type(
-            &[BasicMetadataTypeEnum::IntType(i64), BasicMetadataTypeEnum::IntType(i32)],
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i32),
+            ],
             false,
         ),
         Some(inkwell::module::Linkage::External),
@@ -1930,7 +1943,10 @@ fn register_atomic_mutex_channel_rt<'ctx>(
     module.add_function(
         "mimi_atomic_bool_store",
         void.fn_type(
-            &[BasicMetadataTypeEnum::IntType(i64), BasicMetadataTypeEnum::IntType(i32)],
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i32),
+            ],
             false,
         ),
         Some(inkwell::module::Linkage::External),
