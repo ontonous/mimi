@@ -3,7 +3,14 @@
 ## [Unreleased] — v0.28.21-dev
 
 ### Added
-- TBD
+- **Codegen `comptime { ... }` block fold path** (`src/codegen/expr.rs`)：Expr::Comptime 路径调 `fold_comptime_block`，构造临时 Interpreter 并预先注入已折叠的 `comptime func` 结果，求值后转 LLVM 常量。支持的 scalar 值类型：Int / Float / Bool / Unit / String（String 走 `build_global_string_ptr` 与 Lit::String 一致）
+- **Codegen `comptime func` / `const` 预折叠** (`src/codegen/compile.rs` + `src/codegen/mod.rs`)：compile_file 起始 `fold_comptime_items` 用 interp 求值所有 no-arg `comptime func` + `const`，缓存到 `comptime_values: HashMap<String, Value>`。同时持有 `comptime_file: Option<Rc<File>>` clone 避免原 file 借用冲突
+- **`comptime { 1 + 2 }` 双后端等价** (`src/tests/dual_backend.rs`)：7 个 L1 dual 测试覆盖 block 表达式、let 块、字符串、`comptime func` 调用、`ast_eval(quote! { ... })`
+- **`compile_quote_fold` 扩展至字面量算术** (`src/codegen/expr.rs`)：递归处理 Expr::Binary / Expr::Unary，覆盖 + - * / % == != < <= > >= && || & |。Float 折叠暂不支持（inkwell FloatValue::get_constant 返回 opaque LLVMValueRef）
+
+### Changed
+- Interpreter 新增公开 API：`eval_comptime_block(&Block)` 与 `inject_comptime_result(name, value)`（之前只 pub(in crate::interp)）
+- 旧 `adv_comptime_*_error_message` / `adv_comptime_produces_error` / `adv_quote_*_error_message`（v0.28.21 之前期望 codegen 失败）改为正向测试：`adv_comptime_folds_literally`、`adv_comptime_runtime_dep_errors`、`adv_quote_literal_fold_succeeds`、`adv_quote_runtime_dep_produces_error`、`adv_comptime_func_call_works`
 
 ## [v0.28.20] - 2026-07-02
 
