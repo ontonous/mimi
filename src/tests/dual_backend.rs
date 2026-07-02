@@ -6292,3 +6292,261 @@ fn dual_push_in_block_no_leak() {
         "3"
     );
 }
+
+// ─── v0.28.20 — Concurrency primitives (atomic / mutex / channel) ────
+//
+// Each test runs the same Mimi source through both the interpreter and the
+// LLVM codegen, asserting identical outputs. These primitives are pure
+// single-thread in this v1 batch (no spawn/threads); the cross-thread
+// stress tests live in `concurrency_stress.rs` (compile-only stubs) and
+// in dedicated actor-with-shared-state tests.
+
+#[test]
+fn dual_atomic_i32_new_load() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i32_new(42)
+            let v = atomic_i32_load(c)
+            println(v)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_atomic_i32_store() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i32_new(0)
+            atomic_i32_store(c, 99)
+            let v = atomic_i32_load(c)
+            println(v)
+            0
+        }
+        "#,
+        "99"
+    );
+}
+
+#[test]
+fn dual_atomic_i32_fetch_add() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i32_new(10)
+            // fetch_add returns the previous value.
+            let old = atomic_i32_fetch_add(c, 5)
+            println(old)
+            let now = atomic_i32_load(c)
+            println(now)
+            0
+        }
+        "#,
+        "10\n15"
+    );
+}
+
+#[test]
+fn dual_atomic_i32_compare_exchange() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i32_new(7)
+            // expected == current → swap to 100, ok=1
+            let ok1 = atomic_i32_compare_exchange(c, 7, 100)
+            println(ok1)
+            // expected != current → no swap, ok=0, value unchanged
+            let ok2 = atomic_i32_compare_exchange(c, 7, 200)
+            println(ok2)
+            let v = atomic_i32_load(c)
+            println(v)
+            0
+        }
+        "#,
+        "1\n0\n100"
+    );
+}
+
+#[test]
+fn dual_atomic_i64_new_load() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_i64_new(123456789012)
+            let v = atomic_i64_load(c)
+            println(v)
+            0
+        }
+        "#,
+        "123456789012"
+    );
+}
+
+#[test]
+fn dual_atomic_bool_load_store() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = atomic_bool_new(true)
+            let v1 = atomic_bool_load(c)
+            if v1 { println("on") } else { println("off") }
+            atomic_bool_store(c, false)
+            let v2 = atomic_bool_load(c)
+            if v2 { println("on") } else { println("off") }
+            0
+        }
+        "#,
+        "on\noff"
+    );
+}
+
+#[test]
+fn dual_mutex_lock_get_unlock() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = mutex_new(123)
+            let h = mutex_lock(m)
+            let v = mutex_get(h)
+            println(v)
+            mutex_unlock(h)
+            // Lock again to confirm value persists.
+            let h2 = mutex_lock(m)
+            let v2 = mutex_get(h2)
+            println(v2)
+            mutex_unlock(h2)
+            // Drop the mutex (handled automatically by codegen cleanup,
+            // but explicit drop_allowed in interpreter path).
+            mutex_drop(m)
+            0
+        }
+        "#,
+        "123\n123"
+    );
+}
+
+#[test]
+fn dual_mutex_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = mutex_new(0)
+            let h = mutex_lock(m)
+            mutex_set(h, 77)
+            mutex_unlock(h)
+            let h2 = mutex_lock(m)
+            let v = mutex_get(h2)
+            println(v)
+            mutex_unlock(h2)
+            mutex_drop(m)
+            0
+        }
+        "#,
+        "77"
+    );
+}
+
+#[test]
+fn dual_channel_send_recv() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ch = channel_new()
+            channel_send(ch, 100)
+            channel_send(ch, 200)
+            let a = channel_recv(ch)
+            let b = channel_recv(ch)
+            println(a)
+            println(b)
+            channel_drop(ch)
+            0
+        }
+        "#,
+        "100\n200"
+    );
+}
+
+#[test]
+fn dual_channel_try_recv_empty() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ch = channel_new()
+            let has = channel_try_recv(ch)
+            // try_recv on empty channel returns -1 (no value yet).
+            println(has)
+            channel_send(ch, 50)
+            let v = channel_try_recv(ch)
+            println(v)
+            channel_drop(ch)
+            0
+        }
+        "#,
+        "-1\n50"
+    );
+}
+
+#[test]
+fn dual_channel_many_messages() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ch = channel_new()
+            let i = 0
+            while i < 5 {
+                channel_send(ch, i * 10)
+                i = i + 1
+            }
+            let sum = 0
+            let j = 0
+            while j < 5 {
+                let v = channel_recv(ch)
+                sum = sum + v
+                j = j + 1
+            }
+            // 0 + 10 + 20 + 30 + 40 = 100
+            println(sum)
+            channel_drop(ch)
+            0
+        }
+        "#,
+        "100"
+    );
+}
