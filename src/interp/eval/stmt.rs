@@ -808,8 +808,23 @@ impl<'a> Interpreter<'a> {
             crate::interp::value::poll_deferred(&mut fut);
             match &mut *fut {
                 crate::interp::value::PollFuture::Pending(rx) => {
-                    if let Ok(Err(e)) = rx.recv() {
-                        return Err(e);
+                    match rx.recv() {
+                        Ok(Err(e)) => return Err(e),
+                        Ok(Ok(val)) => {
+                            // P2-24: check if returned value is a failure
+                            // variant and propagate via early_return so
+                            // on_failure compensations trigger.
+                            if let Value::Variant(name, _) = &val {
+                                if self.failure_variants.get(name).copied().unwrap_or(false) {
+                                    self.early_return = Some(val);
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Channel closed: the future was consumed by
+                            // an explicit `await` elsewhere. Silently skip.
+                        }
                     }
                 }
                 crate::interp::value::PollFuture::Ready(result) => {

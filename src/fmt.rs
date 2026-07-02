@@ -52,14 +52,127 @@ impl Formatter {
         result
     }
 
-    /// Format source code, returning the formatted version.
+    /// Normalize spacing around operators and punctuation.
+    /// Handles: space before `{`, after `,`, around `:`, around `->`.
+    fn normalize_spacing(line: &str) -> String {
+        // Quick check: if no known punctuation needing normalization, skip
+        if !line.contains(&['{', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&'][..]) {
+            return line.to_string();
+        }
+        let mut out = String::with_capacity(line.len() + 8);
+        let mut chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '{' => {
+                    // Ensure space before `{` (unless at start or preceded by space)
+                    if i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '(' {
+                        out.push(' ');
+                    }
+                    out.push('{');
+                    // Ensure space after `{` (unless at end or followed by space/})
+                    if i + 1 < chars.len() && chars[i + 1] != ' ' && chars[i + 1] != '}' {
+                        out.push(' ');
+                    }
+                }
+                '}' => {
+                    // Normalize `}` to have space before if needed
+                    if i > 0 && chars[i - 1] == '{' {
+                        // single-line block: already handled
+                    }
+                    out.push('}');
+                }
+                ',' => {
+                    out.push(',');
+                    // Ensure space after `,` (unless at end or already space)
+                    if i + 1 < chars.len() && chars[i + 1] != ' ' {
+                        out.push(' ');
+                    }
+                }
+                ':' => {
+                    // Avoid double colon ::
+                    if i + 1 < chars.len() && chars[i + 1] == ':' {
+                        out.push(':');
+                        out.push(':');
+                        i += 1;
+                    } else {
+                        out.push(':');
+                        // Space after `:`  (e.g. `a: i32`, not `a:i32`)
+                        if i + 1 < chars.len() && chars[i + 1] != ' ' && chars[i + 1] != ':' {
+                            out.push(' ');
+                        }
+                    }
+                }
+                '=' => {
+                    // Space before `=` (unless already space or after `<>!`)
+                    if i == 0 || (chars[i - 1] != ' '
+                        && !matches!(chars.get(i - 1), Some('<' | '>' | '!' | '=')))
+                    {
+                        out.push(' ');
+                    }
+                    out.push('=');
+                    // Space after `=`
+                    if i + 1 < chars.len() && chars[i + 1] != ' ' {
+                        out.push(' ');
+                    }
+                }
+                '-' => {
+                    if i + 1 < chars.len() && chars[i + 1] == '>' {
+                        out.push(' ');
+                        out.push('-');
+                        out.push('>');
+                        i += 1;
+                        if i + 1 < chars.len() && chars[i + 1] != ' ' {
+                            out.push(' ');
+                        }
+                    } else {
+                        out.push('-');
+                    }
+                }
+                '+' | '*' | '/' | '<' | '>' | '|' | '&' => {
+                    // Space before operator (unless at start or preceded by space/punct)
+                    if i > 0 && chars[i - 1] != ' '
+                        && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
+                    {
+                        out.push(' ');
+                    }
+                    out.push(c);
+                    // Space after operator
+                    if i + 1 < chars.len() && chars[i + 1] != ' '
+                        && !matches!(chars.get(i + 1), Some(')' | ']' | '}' | ',' | ';'))
+                    {
+                        out.push(' ');
+                    }
+                }
+                _ => out.push(c),
+            }
+            i += 1;
+        }
+        // Collapse multiple spaces
+        let mut result = String::with_capacity(out.len());
+        let mut prev_space = false;
+        for c in out.chars() {
+            if c == ' ' {
+                if !prev_space {
+                    result.push(c);
+                }
+                prev_space = true;
+            } else {
+                result.push(c);
+                prev_space = false;
+            }
+        }
+        result.trim().to_string()
+    }
     pub fn format(&self, source: &str) -> String {
         let mut output = String::new();
         let mut indent_level: usize = 0;
         let mut prev_blank = false;
 
         for line in source.lines() {
-            let trimmed = line.trim();
+            let trimmed = Self::normalize_spacing(line.trim());
+            let trimmed: &str = &trimmed;
 
             // Skip empty lines but track them
             if trimmed.is_empty() {

@@ -1,5 +1,5 @@
 // Test parasteps error propagation with compensation
-// Note: parasteps v1.0 runs spawns sequentially for simplicity
+// Note: parasteps v1.0 runs spawns sequentially (not yet parallel).
 
 type Res {
     Ok(i32)
