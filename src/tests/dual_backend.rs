@@ -6546,3 +6546,133 @@ fn dual_channel_many_messages() {
         "100"
     );
 }
+
+// ─── v0.28.21 — Comptime / Quote codegen ───────────────────────────────
+//
+// These dual-backend tests verify that the codegen path resolves
+// `comptime { ... }` blocks via the interpreter (single-shot evaluation)
+// and folds the resulting value into the LLVM IR as a constant. The
+// `quote!` macro is folded similarly when the quoted block contains only
+// literal data; runtime-dependent quote! blocks are out of scope for v0.28.21.
+
+#[test]
+fn dual_comptime_block_int() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            comptime { 1 + 2 }
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_comptime_block_let() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            comptime {
+                let x = 10
+                let y = 20
+                x + y
+            }
+        }
+        "#,
+        "30"
+    );
+}
+
+#[test]
+fn dual_comptime_block_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = comptime { "hello" }
+            if eq_string(s, "hello") { println("ok") } else { println("no") }
+            0
+        }
+        "#,
+        "ok"
+    );
+}
+
+#[test]
+fn dual_comptime_func_literal() {
+    if !can_link() {
+        return;
+    }
+    // comptime func get_magic() returns 42; main exits with 42.
+    // Print the value so codegen + interp both produce stdout.
+    dual_assert!(
+        r#"
+        comptime func get_magic() -> i32 { 42 }
+        func main() -> i32 {
+            let v = get_magic()
+            println(v)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_comptime_func_arithmetic() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        comptime func make_seven() -> i32 { 3 + 4 }
+        func main() -> i32 {
+            let v = make_seven()
+            println(v)
+            0
+        }
+        "#,
+        "7"
+    );
+}
+
+#[test]
+fn dual_quote_literal_fold() {
+    if !can_link() {
+        return;
+    }
+    // quote! { 42 } folds to Value::Int(42) at codegen time.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let v = ast_eval(quote! { 42 })
+            v
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_quote_arith_fold() {
+    if !can_link() {
+        return;
+    }
+    // quote! { 10 + 20 } folds to Value::Int(30).
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            ast_eval(quote! { 10 + 20 })
+        }
+        "#,
+        "30"
+    );
+}
