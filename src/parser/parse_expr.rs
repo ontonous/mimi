@@ -320,6 +320,11 @@ impl Parser {
             TokenKind::DollarParen => {
                 self.advance();
                 let inner = self.parse_expr(0)?;
+                // v0.28.21 — The `$(` token is a single DollarParen
+                // token, so the closing `)` is still in the stream and
+                // must be consumed here. `parse_postfix` does not eat
+                // stray `)`s, so this is the canonical place.
+                self.expect(TokenKind::RParen, "`)` to close $(...) interpolation")?;
                 return self.parse_postfix(Expr::QuoteInterpolate(Box::new(inner)));
             }
             TokenKind::Fn => {

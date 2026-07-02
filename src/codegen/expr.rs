@@ -75,15 +75,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.fold_comptime_block(block)
             }
             Expr::Quote(block) => {
-                // Compile-time folding for literal-only quote blocks:
-                // quote! { literal } is equivalent to the literal itself.
+                // v0.28.21 — three-stage fold for quote blocks:
+                //   1. Pure literal/arithmetic: `compile_quote_fold` peels
+                //      a constant value without going through QuotedAst.
+                //   2. Anything that can be resolved through the
+                //      interpreter at codegen time (no runtime-only
+                //      captures): `fold_comptime_block` evaluates the
+                //      block as a `comptime { ... }` would.
+                //   3. Truly runtime-only quote blocks (e.g. captures
+                //      from a non-comptime scope) are still rejected so
+                //      we never silently drop the QuotedAst semantics.
                 if let Some(val) = self.compile_quote_fold(block) {
                     return Ok(val);
                 }
-                Err("quote { ... } expression encountered in runtime function: quoted AST construction must be resolved before codegen (use `mimi run` to evaluate quote expressions)".into())
+                self.fold_quote_block(block)
             }
-            Expr::QuoteInterpolate(_) => {
-                Err("${ ... } interpolation encountered in runtime function: interpolation must be resolved before codegen (use `mimi run` to evaluate quote expressions)".into())
+            Expr::QuoteInterpolate(inner) => {
+                // v0.28.21 — `$(expr)` interpolations are evaluated at
+                // codegen time. The resulting `Value` is then converted
+                // to an LLVM constant via the same path as a literal.
+                self.fold_quote_interpolate(inner)
             }
             Expr::MapLiteral { entries } => self.compile_map_literal(entries, vars),
             Expr::SetLiteral(elems) => self.compile_set_literal(elems, vars),
@@ -476,6 +487,80 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => None,
         }
+    }
+
+    /// v0.28.21 — Fallback fold for a `quote! { ... }` block whose body
+    /// isn't pure literal/arithmetic. Goes through the interpreter:
+    ///   1. Convert the AST into a `QuotedAst` via `quote_block`.
+    ///   2. Run `eval_quoted_ast` against the interpreter, which
+    ///      resolves identifiers against the (codegen-time) scope.
+    /// The result is then converted to an LLVM constant the same way as
+    /// a literal fold. Variable bindings from `comptime func` results
+    /// are seeded ahead of time so calls inside the quote block resolve
+    /// without surprises.
+    fn fold_quote_block(
+        &mut self,
+        block: &crate::ast::Block,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let file_rc = match self.comptime_file.clone() {
+            Some(rc) => rc,
+            None => {
+                return Err(CompileError::Generic(
+                    "quote! block encountered before compile_file stored the file context"
+                        .to_string(),
+                ));
+            }
+        };
+        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
+        for (name, value) in self.comptime_values.clone() {
+            interp.inject_comptime_result(name, value);
+        }
+        // Construct the QuotedAst from the block.
+        let qa = interp.quote_block(block).map_err(|e| {
+            CompileError::Generic(format!("quote! block construction failed: {}", e))
+        })?;
+        // Evaluate it. eval_quoted_ast will look up identifiers in the
+        // interpreter's own scope (which starts empty at this point but
+        // receives the seeded `comptime_results` above). Anything truly
+        // runtime-only will surface as an InterpError.
+        let result = interp.eval_quoted_ast(&qa).map_err(|e| {
+            CompileError::Generic(format!(
+                "quote! block fold: ast_eval failed: {} \
+                 (v0.28.21 cannot yet lower this construct to a constant; \
+                  if all variables are comptime-known, refactor to \
+                  `comptime {{ ... }}` so the value can be folded directly)",
+                e
+            ))
+        })?;
+        self.value_to_llvm_const(&result)
+    }
+
+    /// v0.28.21 — Fold a `$(expr)` interpolation. The inner expression
+    /// is evaluated through the interpreter at codegen time; its
+    /// resulting `Value` becomes the splice point in the surrounding
+    /// `quote!` block (which is itself evaluated by `fold_quote_block`
+    /// or the explicit `ast_eval` builtin).
+    fn fold_quote_interpolate(
+        &mut self,
+        inner: &Expr,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let file_rc = match self.comptime_file.clone() {
+            Some(rc) => rc,
+            None => {
+                return Err(CompileError::Generic(
+                    "$() interpolation encountered before compile_file stored the file context"
+                        .to_string(),
+                ));
+            }
+        };
+        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
+        for (name, value) in self.comptime_values.clone() {
+            interp.inject_comptime_result(name, value);
+        }
+        let result = interp.eval_expr(inner).map_err(|e| {
+            CompileError::Generic(format!("$() interpolation fold failed: {}", e))
+        })?;
+        self.value_to_llvm_const(&result)
     }
 
     /// v0.28.21 — Apply a binary op to two LLVM constant values at codegen

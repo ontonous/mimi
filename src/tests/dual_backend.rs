@@ -6692,3 +6692,142 @@ fn dual_quote_arith_fold() {
         "30"
     );
 }
+
+// ─── v0.28.21 — Quote AST codegen (comptime variable folding) ──────────
+//
+// These tests exercise the `fold_quote_block` path added in v0.28.21:
+// when a quote! block contains identifiers bound to comptime-known
+// values, the block is folded through the interpreter and emitted as
+// a constant. Anything that depends on a runtime-only binding still
+// errors — that's expected and matches the spirit of the v0.28.21 goal
+// "在 codegen 中构造 QuotedAst 值".
+
+#[test]
+fn dual_quote_comptime_ident_fold() {
+    if !can_link() {
+        return;
+    }
+    // Comptime call result is interpolated into a quote! block; the
+    // fold path runs the call through the interpreter and emits the
+    // sum as a constant.
+    dual_assert!(
+        r#"
+        comptime func seven() -> i32 { 7 }
+        func main() -> i32 {
+            let v = ast_eval(quote! { $(seven() + 1) })
+            println(v)
+            0
+        }
+        "#,
+        "8"
+    );
+}
+
+#[test]
+fn dual_quote_nested_comptime() {
+    if !can_link() {
+        return;
+    }
+    // Two comptime funcs combined inside a quote! block.
+    dual_assert!(
+        r#"
+        comptime func base() -> i32 { 100 }
+        comptime func step() -> i32 { 23 }
+        func main() -> i32 {
+            let v = ast_eval(quote! { $(base() + step()) })
+            println(v)
+            0
+        }
+        "#,
+        "123"
+    );
+}
+
+#[test]
+fn dual_quote_comptime_let_fold() {
+    if !can_link() {
+        return;
+    }
+    // A let-binding inside a quote! block, with the rhs supplied by a
+    // comptime call (folded into a constant).
+    dual_assert!(
+        r#"
+        comptime func make_sum() -> i32 { 30 + 12 }
+        func main() -> i32 {
+            let v = ast_eval(quote! { let s = $(make_sum()); s })
+            println(v)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_quote_runtime_var_errors() {
+    if !can_link() {
+        return;
+    }
+    // n is a runtime value (no comptime binding). The fold path can't
+    // resolve it and surfaces a clear error message — verifying the
+    // v0.28.21 boundary between comptime-foldable quote! blocks and
+    // those that require a real runtime QuotedAst.
+    let src = r#"
+        func main() -> i32 {
+            let n = 7
+            let v = ast_eval(quote! { n + 1 })
+            0
+        }
+    "#;
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    assert!(
+        err.contains("quote") || err.contains("fold"),
+        "expected fold/quote error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn dual_quote_interpolate_in_comptime() {
+    if !can_link() {
+        return;
+    }
+    // Top-level $(expr) interpolation inside a quote! block that is
+    // wrapped in a comptime block — exercises Expr::QuoteInterpolate
+    // resolution through both quote and comptime fold paths.
+    dual_assert!(
+        r#"
+        comptime func k() -> i32 { 5 }
+        func main() -> i32 {
+            let v = comptime { ast_eval(quote! { $(k() * 2) }) }
+            println(v)
+            0
+        }
+        "#,
+        "10"
+    );
+}
+
+#[test]
+fn dual_quote_with_comptime_conditional() {
+    if !can_link() {
+        return;
+    }
+    // An `if` inside a quote! block whose branch values are both
+    // comptime-foldable, ensuring the If arm of QuotedAst::eval
+    // participates in the codegen fold.
+    dual_assert!(
+        r#"
+        comptime func flag() -> bool { true }
+        func main() -> i32 {
+            let v = ast_eval(quote! { if $(flag()) { 100 } else { 200 } })
+            println(v)
+            0
+        }
+        "#,
+        "100"
+    );
+}

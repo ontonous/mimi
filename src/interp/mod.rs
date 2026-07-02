@@ -748,10 +748,7 @@ impl<'a> Interpreter<'a> {
     /// Runs `eval_comptime_funcs` first so the block can call top-level
     /// `comptime func` results; this is the canonical fold-time entry
     /// used by codegen when it encounters an `Expr::Comptime` node.
-    pub fn eval_comptime_block(
-        &mut self,
-        block: &crate::ast::Block,
-    ) -> Result<Value, InterpError> {
+    pub fn eval_comptime_block(&mut self, block: &crate::ast::Block) -> Result<Value, InterpError> {
         self.eval_comptime_funcs()?;
         self.eval_comptime(block)
     }
