@@ -30,7 +30,7 @@ func main() -> i32 {
     let ret2 = listen(fd, 5)
     if ret2 < 0 { close_fd(fd); println("listen failed"); return 1 }
     println("listening on port 8080")
-    let client_fd = accept(fd)
+    let client_fd = accept(fd) as i32
     if client_fd < 0 { close_fd(fd); println("accept failed"); return 1 }
     handle_client(client_fd)
     close_fd(fd)
