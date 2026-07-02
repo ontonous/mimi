@@ -16,6 +16,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Register this actor type name for method-call dispatch routing.
         self.actor_names.insert(actor.name.clone());
 
+        // Cache the actor definition so mailbox call-sites can recover the
+        // declared method return type.
+        self.actor_defs
+            .insert(actor.name.clone(), actor.clone());
+
         // Assign method IDs (used as method_id in dispatch + mimi_actor_call).
         for (i, method) in actor.methods.iter().enumerate() {
             let key = format!("{}::{}", actor.name, method.name);
@@ -898,13 +903,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(None);
         }
 
-        // Look up the method ID.
+        // Look up the method ID and declared return type.
         let method_key = format!("{}::{}", obj_type, method_name);
         let method_id = match self.actor_method_ids.get(&method_key) {
             Some(&id) => id,
             None => return Ok(None), // Not an actor method, fall through
         };
 
+        // Find the actor's method declaration to recover the declared return type.
+        // The dispatch result is always packed as i64 in result_blob; we have to
+        // re-shape the i64 to match the declared return type at the call site.
+        let method_ret_ty: Option<crate::ast::Type> = self
+            .actor_defs
+            .get(&obj_type)
+            .and_then(|a| {
+                a.methods
+                    .iter()
+                    .find(|m| m.name == method_name)
+                    .and_then(|m| m.ret.clone())
+            });
         // Get the actor handle value (i8*).
         let handle_val = self.compile_expr(obj, vars)?;
         let handle_ptr = if let BasicValueEnum::PointerValue(p) = handle_val {
@@ -1125,7 +1142,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
-        let result_val = self.build_load(i64_ty, result_cast, "method_result")?;
+        let raw_result = self.build_load(i64_ty, result_cast, "method_result")?;
+
+        // Re-shape the packed i64 to match the declared method return type.
+        // - f64 declared → bitcast i64 → f64
+        // - i32 declared → truncate i64 → i32
+        // - i64 (or unit/None) → return raw i64
+        let result_val: BasicValueEnum<'ctx> = match method_ret_ty {
+            Some(crate::ast::Type::Name(n, _)) if n == "f64" => self
+                .builder
+                .build_bit_cast(raw_result, self.context.f64_type(), "result_f64")
+                .map_err(|e| CompileError::LlvmError(format!("bitcast f64 error: {}", e)))?,
+            Some(crate::ast::Type::Name(n, _)) if n == "i32" => self
+                .builder
+                .build_int_truncate(
+                    raw_result.into_int_value(),
+                    self.context.i32_type(),
+                    "result_i32",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("trunc i32 error: {}", e)))?
+                .into(),
+            _ => raw_result,
+        };
 
         self.build_br(merge_bb)?;
 

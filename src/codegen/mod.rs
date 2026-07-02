@@ -264,6 +264,10 @@ pub struct CodeGenerator<'ctx> {
     /// Maps "ActorName::method_name" → method index (i32), used as method_id
     /// in the dispatch function and mimi_actor_call.
     actor_method_ids: HashMap<String, i32>,
+    /// Cached actor definitions keyed by actor name. Lets the mailbox-call
+    /// call-site recover the declared method return type for unpacking the
+    /// packed i64 result blob back to the original LLVM type.
+    actor_defs: HashMap<String, crate::ast::ActorDef>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -348,6 +352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // v0.28.19 actor concurrency
             actor_names: std::collections::HashSet::new(),
             actor_method_ids: HashMap::new(),
+            actor_defs: HashMap::new(),
         }
     }
 
