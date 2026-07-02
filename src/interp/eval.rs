@@ -74,7 +74,16 @@ impl<'a> Interpreter<'a> {
                         Ok(Value::Error(msg)) => {
                             return Err(InterpError::new(msg));
                         }
-                        Ok(v) => return Ok(Some(v)),
+                        Ok(v) => {
+                            // Only a non-Unit trailing expression is a meaningful
+                            // return value for callers (e.g. function bodies).
+                            // Unit must fall through so loop/if-else bodies with
+                            // a trailing `println(...)` keep iterating.
+                            if v == Value::Unit {
+                                return Ok(None);
+                            }
+                            return Ok(Some(v));
+                        }
                         Err(e) => {
                             return Err(e);
                         }

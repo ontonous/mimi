@@ -555,6 +555,34 @@ fn dual_while_sum() {
     );
 }
 
+// P0-1: A `let` binding inside a while loop must not terminate the loop early.
+// Regression for the bug where assigning to a variable and then binding a fresh
+// `let` inside the loop body caused the interpreter to exit after one iteration.
+// Keep this test independent of P0-3 (codegen println separator) by computing
+// the result instead of printing inside the loop.
+#[test]
+fn dual_while_let_after_assign() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut i = 0
+            let mut acc = 0
+            while i < 3 {
+                i = i + 1
+                let x = i * 10
+                acc = acc + x
+            }
+            println(acc)
+            0
+        }
+    "#,
+        "60"
+    );
+}
+
 #[test]
 fn dual_while_fact() {
     if !can_link() {

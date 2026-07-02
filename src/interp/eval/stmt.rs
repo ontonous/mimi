@@ -135,11 +135,17 @@ impl<'a> Interpreter<'a> {
         let c = self.eval_expr(cond)?;
         if is_truthy(&c) {
             if let Some(v) = self.eval_block(then_)? {
-                return Ok(Some(v));
+                // Trailing Unit from a then-block must not turn the if-stmt
+                // into a value-returning one.
+                if v != Value::Unit {
+                    return Ok(Some(v));
+                }
             }
         } else if let Some(else_block) = else_ {
             if let Some(v) = self.eval_block(else_block)? {
-                return Ok(Some(v));
+                if v != Value::Unit {
+                    return Ok(Some(v));
+                }
             }
         }
         Ok(None)
@@ -156,8 +162,14 @@ impl<'a> Interpreter<'a> {
             }
             // Check invariants at each iteration start
             self.check_invariants(body)?;
+            // The trailing expression of a loop body is NOT the loop's return
+            // value (that role belongs to explicit `return`/`break val`). Ignore
+            // `Value::Unit` from trailing statements so loops with e.g. a final
+            // `println(...)` don't terminate after one iteration.
             if let Some(v) = self.eval_block(body)? {
-                return Ok(Some(v));
+                if v != Value::Unit {
+                    return Ok(Some(v));
+                }
             }
             if self.early_return.is_some() {
                 break;
@@ -198,8 +210,11 @@ impl<'a> Interpreter<'a> {
                 }
                 self.check_invariants(body)?;
                 if let Some(v) = self.eval_block(body)? {
-                    self.pop_scope();
-                    return Ok(Some(v));
+                    // See eval_while: trailing Unit must not terminate the loop.
+                    if v != Value::Unit {
+                        self.pop_scope();
+                        return Ok(Some(v));
+                    }
                 }
                 if self.early_return.is_some() {
                     self.pop_scope();
@@ -274,7 +289,10 @@ impl<'a> Interpreter<'a> {
             }
             self.check_invariants(body)?;
             if let Some(v) = self.eval_block(body)? {
-                return Ok(Some(v));
+                // See eval_while: trailing Unit must not terminate the loop.
+                if v != Value::Unit {
+                    return Ok(Some(v));
+                }
             }
             if self.early_return.is_some() {
                 break;
