@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased] — v0.28.20-dev
+## [Unreleased] — v0.28.21-dev
+
+### Added
+- TBD
+
+## [v0.28.20] - 2026-07-02
 
 ### Added
 - **Runtime concurrent primitives** (`src/runtime/mod.rs`)：新增 `ConcurrencyHandleTable` 持三类 handle（atomic / mutex / channel），由 `LazyLock<Mutex<...>>` 保护。
