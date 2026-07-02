@@ -3,7 +3,20 @@
 ## [Unreleased] — v0.28.20-dev
 
 ### Added
-- TBD
+- **Runtime concurrent primitives** (`src/runtime/mod.rs`)：新增 `ConcurrencyHandleTable` 持三类 handle（atomic / mutex / channel），由 `LazyLock<Mutex<...>>` 保护。
+  - 原子：mimi_atomic_i32/i64/bool_{new,load,store,fetch_add,compare_exchange,drop}
+  - 互斥：mimi_mutex_{new,lock,get,set,unlock,drop}
+  - 通道：mimi_channel_{new,send,recv,try_recv,drop}
+  - 全部 `#[no_mangle] pub extern "C"`；i64 handle 走与 set/map 一致的 handle-as-i64 模式
+- **Codegen 并发原语** (`src/codegen/builtins/concurrency.rs`)：每个 builtin 围绕 `mimi_*` runtime 调用生成最小 LLVM IR；i32↔i64 边界用 sext/zext/trunc 适配 Mimi 整数宽度
+- **Interp 并发原语** (`src/interp/builtins/concurrency.rs`)：26 个 builtin 方法每个是 runtime 调用的薄壳，保证 L1 双后端等价
+- **类型推断规则** (`src/core/infer/call/simple.rs`)：所有 handle 推断为 i64；fetch_add/compare_exchange 返回 i32（旧值/成功标志）
+- **L1 dual-backend 测试** (`src/tests/dual_backend.rs`)：11 个新测试覆盖 atomic/mutex/channel 核心操作，interp 与 codegen 输出一致
+
+### Fixed
+- `atomic_i32_fetch_add` 之前误归入 unit 推断组，导致 `let prev = atomic_i32_fetch_add(c, 5)` 类型推断为 unit → 现归入 i32 推断组
+- 测试源中 `old` 是 lexer 关键字（合约 `old()`），改用 `prev`
+- 测试源中 `let mut` 缺失的循环变量改用 `let mut`
 
 ## [v0.28.19] - 2026-07-02
 
