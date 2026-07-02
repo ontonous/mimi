@@ -267,6 +267,36 @@ impl crate::verifier::Verifier {
         }
 
         if requires_exprs.is_empty() && ensures_exprs.is_empty() && math_exprs.is_empty() {
+            // Even if this function has no contracts, it may call other
+            // functions that have requires. Check call sites in a minimal
+            // solver context.
+            let mut vars = Z3VarMap::new();
+            for p in &func.params {
+                if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                    vars.insert_real(p.name.as_str(), z3::ast::Real::new_const(p.name.as_str()));
+                } else {
+                    vars.insert_int(p.name.as_str(), z3::ast::Int::new_const(p.name.as_str()));
+                }
+            }
+            let let_subst = self.build_let_subst(&func.body);
+            let expanded_body: Vec<Stmt> = func
+                .body
+                .iter()
+                .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
+                .collect();
+            let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
+            self.check_callee_requires_in_block(&expanded_body, &mut vars, func.name.as_str(), &mut call_site_errors);
+            if !call_site_errors.is_empty() {
+                let (_, msg, _) = &call_site_errors[0];
+                return VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::Failed,
+                    message: msg.clone(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count: 0,
+                };
+            }
             let msg = if parse_errors.is_empty() {
                 "no contracts to verify".into()
             } else {
@@ -481,6 +511,24 @@ impl crate::verifier::Verifier {
             .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
             .collect();
         self.assert_callee_ensures_in_block(&expanded_body, &mut vars);
+
+        // P1-18: check call-site requires satisfaction. For each function
+        // call in the body, verify that the callee's requires (preconditions)
+        // are satisfiable given the current symbolic state.
+        let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
+        self.check_callee_requires_in_block(&expanded_body, &mut vars, func.name.as_str(), &mut call_site_errors);
+
+        if !call_site_errors.is_empty() {
+            let (_, msg, _) = &call_site_errors[0];
+            return VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::Failed,
+                message: msg.clone(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count: 0,
+            };
+        }
 
         let num_real_params = func
             .params
@@ -1325,6 +1373,136 @@ impl crate::verifier::Verifier {
             }
             Stmt::Alloc { body, .. } => {
                 self.assert_callee_ensures_in_block(body, vars);
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk the expand_lets body and check that every function call to a
+    /// known callee satisfies the callee's requires (preconditions).
+    fn check_callee_requires_in_block(
+        &mut self,
+        stmts: &[Stmt],
+        vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, crate::span::Span)>,
+    ) {
+        for stmt in stmts {
+            self.check_callee_requires_in_stmt(stmt, vars, caller_name, errors);
+        }
+    }
+
+    fn check_callee_requires_in_stmt(
+        &mut self,
+        stmt: &Stmt,
+        vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, crate::span::Span)>,
+    ) {
+        match stmt {
+            Stmt::Expr(e)
+            | Stmt::Return(Some(e))
+            | Stmt::Break(Some(e)) => {
+                self.check_callee_requires_in_expr(e, vars, caller_name, errors);
+            }
+            Stmt::Let { init: Some(init), .. } => {
+                self.check_callee_requires_in_expr(init, vars, caller_name, errors);
+            }
+            Stmt::If { cond, then_, else_ } => {
+                self.check_callee_requires_in_expr(cond, vars, caller_name, errors);
+                self.check_callee_requires_in_block(then_, vars, caller_name, errors);
+                if let Some(eb) = else_ {
+                    self.check_callee_requires_in_block(eb, vars, caller_name, errors);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                self.check_callee_requires_in_expr(cond, vars, caller_name, errors);
+                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::Parasteps(body) => {
+                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+            }
+            Stmt::Alloc { body, .. } => {
+                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_callee_requires_in_expr(
+        &mut self,
+        expr: &Expr,
+        vars: &mut Z3VarMap,
+        caller_name: &str,
+        errors: &mut Vec<(String, String, crate::span::Span)>,
+    ) {
+        match expr {
+            Expr::Call(callee, call_args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    // Clone callee data to avoid borrow conflict with self.*
+                    let callee_data: Option<(Vec<crate::ast::Param>, Vec<Expr>)> = self
+                        .func_defs
+                        .get(name)
+                        .map(|f| {
+                            let params = f.params.clone();
+                            let requires: Vec<Expr> = f
+                                .body
+                                .iter()
+                                .filter_map(|s| {
+                                    if let Stmt::Requires(e, _) = s {
+                                        Some(e.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            (params, requires)
+                        });
+                    if let Some((callee_params, requires_exprs)) = callee_data {
+                        for req in &requires_exprs {
+                            let substituted = self.substitute_call(
+                                req,
+                                &callee_params,
+                                call_args,
+                                &format!("call_{}", name),
+                            );
+                            if let Some(z3_req) = self.expr_to_z3_bool(&substituted, vars) {
+                                self.solver_push();
+                                self.solver.assert(z3_req.not());
+                                if self.check_safe() == z3::SatResult::Sat {
+                                    self.solver_pop(1);
+                                    errors.push((
+                                        caller_name.to_string(),
+                                        format!(
+                                            "call to '{}' may violate precondition",
+                                            name
+                                        ),
+                                        crate::span::Span::single(0, 0),
+                                    ));
+                                    return;
+                                }
+                                self.solver_pop(1);
+                            }
+                        }
+                    }
+                }
+                for arg in call_args {
+                    self.check_callee_requires_in_expr(arg, vars, caller_name, errors);
+                }
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.check_callee_requires_in_expr(lhs, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(rhs, vars, caller_name, errors);
+            }
+            Expr::Unary(_, inner) => {
+                self.check_callee_requires_in_expr(inner, vars, caller_name, errors);
+            }
+            Expr::Field(obj, _) => {
+                self.check_callee_requires_in_expr(obj, vars, caller_name, errors);
             }
             _ => {}
         }
