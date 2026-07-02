@@ -390,10 +390,10 @@ impl<'a> Checker<'a> {
                 return Type::Name("i32".into(), vec![]);
             }
             "input" => {
-                return Type::Result(
-                    Box::new(Type::Name("string".into(), vec![])),
-                    Box::new(Type::Name("string".into(), vec![])),
-                );
+                if !args.is_empty() {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
             }
             "map" => {
                 if args.len() != 2 {
@@ -1446,6 +1446,54 @@ impl<'a> Checker<'a> {
                 return Type::Name("string".into(), vec![]);
             }
             _ => {}
+        }
+
+        // Local variables (including function parameters) shadow global
+        // functions. Check scopes first before falling back to global function
+        // signatures; otherwise a prelude parameter named `f` would incorrectly
+        // resolve to a user-defined top-level function `f`.
+        if let Some(local_ty) = scopes.iter().rev().find_map(|scope| scope.get(name).cloned()) {
+            match local_ty {
+                Type::Func(param_types, ret_ty) => {
+                    if args.len() != param_types.len() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0257,
+                            format!(
+                                "closure '{}' expects {} arguments, got {}",
+                                name,
+                                param_types.len(),
+                                args.len()
+                            ),
+                        );
+                    } else {
+                        for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate()
+                        {
+                            let arg_ty = self.infer_expr(arg, scopes);
+                            let coerced = is_numeric_coercion(param_ty, &arg_ty);
+                            if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0211,
+                                    format!(
+                                        "argument {} of closure '{}' expected {}, found {}",
+                                        i + 1,
+                                        name,
+                                        fmt_type(param_ty),
+                                        fmt_type(&arg_ty)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    return *ret_ty;
+                }
+                _ => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0223,
+                        format!("'{}' is not a function and cannot be called", name),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+            }
         }
 
         let (params, mut ret) = match self.funcs.get(name) {

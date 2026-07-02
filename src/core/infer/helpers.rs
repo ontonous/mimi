@@ -11,7 +11,8 @@ impl<'a> Checker<'a> {
     ) -> Type {
         scopes.push(HashMap::new());
         let mut result_type = Type::Name("unit".into(), vec![]);
-        for stmt in block {
+        for (i, stmt) in block.iter().enumerate() {
+            let is_last = i == block.len() - 1;
             match stmt {
                 Stmt::Expr(e) => result_type = self.infer_expr(e, scopes),
                 Stmt::Return(Some(e)) => {
@@ -22,7 +23,13 @@ impl<'a> Checker<'a> {
                     let ty = self.infer_expr(e, scopes);
                     // Bind let variable to scope so subsequent statements can reference it
                     Self::bind_pattern_to_scope(pat, &ty, scopes);
-                    result_type = ty;
+                    // A let statement is not the value of the block; only the
+                    // trailing expression/return determines the block type.
+                }
+                Stmt::If { cond, then_, else_ } if is_last => {
+                    // Parser may emit a trailing if as a statement; treat it as
+                    // the block's result expression.
+                    result_type = self.infer_if_expr(cond, then_, else_.as_ref(), scopes);
                 }
                 _ => {}
             }
@@ -40,7 +47,8 @@ impl<'a> Checker<'a> {
     ) -> Type {
         scopes.push(HashMap::new());
         let mut result_type = Type::Name("unit".into(), vec![]);
-        for stmt in block {
+        for (i, stmt) in block.iter().enumerate() {
+            let is_last = i == block.len() - 1;
             match stmt {
                 Stmt::Expr(e) => result_type = self.check_expr(expected, e, scopes),
                 Stmt::Return(Some(e)) => {
@@ -50,7 +58,15 @@ impl<'a> Checker<'a> {
                 Stmt::Let { pat, init: Some(e), .. } => {
                     let ty = self.infer_expr(e, scopes);
                     Self::bind_pattern_to_scope(pat, &ty, scopes);
-                    result_type = ty;
+                    // Let statements do not determine block value.
+                }
+                Stmt::If { cond, then_, else_ } if is_last => {
+                    let if_expr = Expr::If {
+                        cond: Box::new(cond.clone()),
+                        then_: then_.clone(),
+                        else_: else_.clone(),
+                    };
+                    result_type = self.check_expr(expected, &if_expr, scopes);
                 }
                 _ => {}
             }
