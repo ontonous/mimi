@@ -18,7 +18,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_i32_new expects i32")),
         };
         // SAFETY: passing a well-typed i32; runtime returns a valid i64 handle.
-        let handle = unsafe { crate::runtime::mimi_atomic_i32_new(v) };
+        let handle = crate::runtime::mimi_atomic_i32_new(v);
         Ok(Value::Int(handle))
     }
 
@@ -28,7 +28,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is an i64 id returned by mimi_atomic_i32_new.
-        let v = unsafe { crate::runtime::mimi_atomic_i32_load(h) };
+        let v = crate::runtime::mimi_atomic_i32_load(h);
         Ok(Value::Int(v as i64))
     }
 
@@ -44,7 +44,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_i32_store expects i32 value")),
         };
         // SAFETY: handle is a valid atomic_i32 handle.
-        unsafe { crate::runtime::mimi_atomic_i32_store(h, v) };
+        crate::runtime::mimi_atomic_i32_store(h, v);
         Ok(Value::Unit)
     }
 
@@ -63,7 +63,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_i32_fetch_add expects i32 delta")),
         };
         // SAFETY: handle is a valid atomic_i32 handle.
-        let prev = unsafe { crate::runtime::mimi_atomic_i32_fetch_add(h, d) };
+        let prev = crate::runtime::mimi_atomic_i32_fetch_add(h, d);
         Ok(Value::Int(prev as i64))
     }
 
@@ -86,7 +86,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("expected i32")),
         };
         // SAFETY: handle is a valid atomic_i32 handle.
-        let ok = unsafe { crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv) };
+        let ok = crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv);
         Ok(Value::Int(ok as i64))
     }
 
@@ -96,7 +96,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid atomic_i32 handle.
-        unsafe { crate::runtime::mimi_atomic_i32_drop(h) };
+        crate::runtime::mimi_atomic_i32_drop(h);
         Ok(Value::Unit)
     }
 
@@ -106,7 +106,7 @@ impl<'a> Interpreter<'a> {
         }
         let v = args[0].as_i64_for_handle()?;
         // SAFETY: passing a valid i64.
-        let handle = unsafe { crate::runtime::mimi_atomic_i64_new(v) };
+        let handle = crate::runtime::mimi_atomic_i64_new(v);
         Ok(Value::Int(handle))
     }
 
@@ -116,7 +116,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid atomic_i64 handle.
-        let v = unsafe { crate::runtime::mimi_atomic_i64_load(h) };
+        let v = crate::runtime::mimi_atomic_i64_load(h);
         Ok(Value::Int(v))
     }
 
@@ -132,7 +132,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_i64_store expects i64")),
         };
         // SAFETY: handle is a valid atomic_i64 handle.
-        unsafe { crate::runtime::mimi_atomic_i64_store(h, v) };
+        crate::runtime::mimi_atomic_i64_store(h, v);
         Ok(Value::Unit)
     }
 
@@ -151,7 +151,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("expected i64 delta")),
         };
         // SAFETY: handle is a valid atomic_i64 handle.
-        let prev = unsafe { crate::runtime::mimi_atomic_i64_fetch_add(h, d) };
+        let prev = crate::runtime::mimi_atomic_i64_fetch_add(h, d);
         Ok(Value::Int(prev))
     }
 
@@ -161,7 +161,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid atomic_i64 handle.
-        unsafe { crate::runtime::mimi_atomic_i64_drop(h) };
+        crate::runtime::mimi_atomic_i64_drop(h);
         Ok(Value::Unit)
     }
 
@@ -180,7 +180,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_bool_new expects bool")),
         };
         // SAFETY: passing i32 with 0/1.
-        let handle = unsafe { crate::runtime::mimi_atomic_bool_new(v) };
+        let handle = crate::runtime::mimi_atomic_bool_new(v);
         Ok(Value::Int(handle))
     }
 
@@ -190,7 +190,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid atomic_bool handle.
-        let v = unsafe { crate::runtime::mimi_atomic_bool_load(h) };
+        let v = crate::runtime::mimi_atomic_bool_load(h);
         Ok(Value::Bool(v != 0))
     }
 
@@ -212,7 +212,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("atomic_bool_store expects bool")),
         };
         // SAFETY: handle is a valid atomic_bool handle.
-        unsafe { crate::runtime::mimi_atomic_bool_store(h, v) };
+        crate::runtime::mimi_atomic_bool_store(h, v);
         Ok(Value::Unit)
     }
 
@@ -222,7 +222,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid atomic_bool handle.
-        unsafe { crate::runtime::mimi_atomic_bool_drop(h) };
+        crate::runtime::mimi_atomic_bool_drop(h);
         Ok(Value::Unit)
     }
 
@@ -234,7 +234,7 @@ impl<'a> Interpreter<'a> {
         }
         let v = args[0].as_i64_for_handle()?;
         // SAFETY: passing a valid i64; runtime returns a valid handle.
-        let h = unsafe { crate::runtime::mimi_mutex_new(v) };
+        let h = crate::runtime::mimi_mutex_new(v);
         Ok(Value::Int(h))
     }
 
@@ -244,7 +244,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid mutex handle.
-        let token = unsafe { crate::runtime::mimi_mutex_lock(h) };
+        let token = crate::runtime::mimi_mutex_lock(h);
         Ok(Value::Int(token))
     }
 
@@ -254,7 +254,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid mutex handle.
-        let v = unsafe { crate::runtime::mimi_mutex_get(h) };
+        let v = crate::runtime::mimi_mutex_get(h);
         Ok(Value::Int(v))
     }
 
@@ -268,7 +268,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("mutex_set expects i64 value")),
         };
         // SAFETY: handle is a valid mutex handle.
-        unsafe { crate::runtime::mimi_mutex_set(h, v) };
+        crate::runtime::mimi_mutex_set(h, v);
         Ok(Value::Unit)
     }
 
@@ -278,7 +278,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid mutex handle.
-        unsafe { crate::runtime::mimi_mutex_unlock(h) };
+        crate::runtime::mimi_mutex_unlock(h);
         Ok(Value::Unit)
     }
 
@@ -288,7 +288,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid mutex handle.
-        unsafe { crate::runtime::mimi_mutex_drop(h) };
+        crate::runtime::mimi_mutex_drop(h);
         Ok(Value::Unit)
     }
 
@@ -296,7 +296,7 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_channel_new(&self, _args: Vec<Value>) -> Result<Value, InterpError> {
         // SAFETY: no parameters; runtime returns a valid i64 handle.
-        let h = unsafe { crate::runtime::mimi_channel_new() };
+        let h = crate::runtime::mimi_channel_new();
         Ok(Value::Int(h))
     }
 
@@ -312,7 +312,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("channel_send expects i64 value")),
         };
         // SAFETY: handle is a valid channel handle.
-        unsafe { crate::runtime::mimi_channel_send(h, v) };
+        crate::runtime::mimi_channel_send(h, v);
         Ok(Value::Unit)
     }
 
@@ -322,7 +322,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid channel handle.
-        let v = unsafe { crate::runtime::mimi_channel_recv(h) };
+        let v = crate::runtime::mimi_channel_recv(h);
         Ok(Value::Int(v))
     }
 
@@ -332,7 +332,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid channel handle.
-        let v = unsafe { crate::runtime::mimi_channel_try_recv(h) };
+        let v = crate::runtime::mimi_channel_try_recv(h);
         Ok(Value::Int(v))
     }
 
@@ -342,7 +342,7 @@ impl<'a> Interpreter<'a> {
         }
         let h = args[0].as_i64_for_handle()?;
         // SAFETY: handle is a valid channel handle.
-        unsafe { crate::runtime::mimi_channel_drop(h) };
+        crate::runtime::mimi_channel_drop(h);
         Ok(Value::Unit)
     }
 }

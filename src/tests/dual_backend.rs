@@ -6347,9 +6347,8 @@ fn dual_atomic_i32_fetch_add() {
         r#"
         func main() -> i32 {
             let c = atomic_i32_new(10)
-            // fetch_add returns the previous value.
-            let old = atomic_i32_fetch_add(c, 5)
-            println(old)
+            let prev = atomic_i32_fetch_add(c, 5)
+            println(prev)
             let now = atomic_i32_load(c)
             println(now)
             0
@@ -6368,10 +6367,8 @@ fn dual_atomic_i32_compare_exchange() {
         r#"
         func main() -> i32 {
             let c = atomic_i32_new(7)
-            // expected == current → swap to 100, ok=1
             let ok1 = atomic_i32_compare_exchange(c, 7, 100)
             println(ok1)
-            // expected != current → no swap, ok=0, value unchanged
             let ok2 = atomic_i32_compare_exchange(c, 7, 200)
             println(ok2)
             let v = atomic_i32_load(c)
@@ -6529,19 +6526,18 @@ fn dual_channel_many_messages() {
         r#"
         func main() -> i32 {
             let ch = channel_new()
-            let i = 0
+            let mut i = 0
             while i < 5 {
                 channel_send(ch, i * 10)
                 i = i + 1
             }
-            let sum = 0
-            let j = 0
+            let mut sum = 0
+            let mut j = 0
             while j < 5 {
                 let v = channel_recv(ch)
                 sum = sum + v
                 j = j + 1
             }
-            // 0 + 10 + 20 + 30 + 40 = 100
             println(sum)
             channel_drop(ch)
             0
