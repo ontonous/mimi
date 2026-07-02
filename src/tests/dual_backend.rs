@@ -2853,6 +2853,214 @@ fn dual_actor_1000_mailbox_calls() {
     );
 }
 
+#[test]
+fn dual_actor_field_init_expression() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: actor field has a non-zero initializer expression.
+    // The init value must be evaluated on the worker thread (not the caller)
+    // so that spawned instances start at 100, not 0.
+    dual_assert!(
+        r#"
+        actor Counter {
+            mut count: i32 = 100;
+            func get() -> i32 { return self.count; }
+            func reset() { self.count = 0; }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn();
+            let v1 = c.get();
+            c.reset();
+            let v2 = c.get();
+            println(v1);
+            println(v2);
+            0
+        }
+    "#,
+        "100\n0"
+    );
+}
+
+#[test]
+fn dual_actor_bool_field() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: bool field. toggling must persist across mailbox calls.
+    dual_assert!(
+        r#"
+        actor Toggle {
+            mut on: bool = false;
+            func flip() { self.on = !self.on; }
+            func is_on() -> bool { return self.on; }
+        }
+        func main() -> i32 {
+            let t = Toggle.spawn();
+            let v1 = t.is_on();
+            t.flip();
+            let v2 = t.is_on();
+            t.flip();
+            let v3 = t.is_on();
+            println(v1);
+            println(v2);
+            println(v3);
+            0
+        }
+    "#,
+        "0\n1\n0"
+    );
+}
+
+#[test]
+fn dual_actor_f64_return() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: f64 return value. The mailbox packs the f64 bits as i64;
+    // the call site must bitcast back to f64 so println formats correctly.
+    dual_assert!(
+        r#"
+        actor Stats {
+            mut value: f64 = 1.5;
+            func add(x: f64) { self.value = self.value + x; }
+            func get() -> f64 { return self.value; }
+        }
+        func main() -> i32 {
+            let s = Stats.spawn();
+            s.add(2.5);
+            s.add(0.5);
+            let v = s.get();
+            println(v);
+            0
+        }
+    "#,
+        "4.500000"
+    );
+}
+
+#[test]
+fn dual_actor_i32_return_via_truncate() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: i32 return value. The mailbox packs i32 zero-extended to i64;
+    // the call site must truncate back to i32 to match declared return type.
+    // Without truncation, the high 32 bits of i64 are zero, but the type mismatch
+    // would still cause downstream i32 ops to truncate incorrectly.
+    dual_assert!(
+        r#"
+        actor Box {
+            mut big: i64 = 0;
+            func set_big(v: i32) { self.big = v + 0; }
+            func get_i32() -> i32 { return 42; }
+        }
+        func main() -> i32 {
+            let b = Box.spawn();
+            let v = b.get_i32();
+            println(v);
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_actor_interleaved_two_actors() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: two actors with interleaved mailbox-mediated calls.
+    // Each call must serialize to the correct worker thread; no cross-talk.
+    dual_assert!(
+        r#"
+        actor A {
+            mut x: i32 = 0;
+            func bump() { self.x = self.x + 1; }
+            func get() -> i32 { return self.x; }
+        }
+        actor B {
+            mut x: i32 = 0;
+            func bump() { self.x = self.x + 10; }
+            func get() -> i32 { return self.x; }
+        }
+        func main() -> i32 {
+            let a = A.spawn();
+            let b = B.spawn();
+            a.bump();
+            b.bump();
+            a.bump();
+            b.bump();
+            a.bump();
+            let va = a.get();
+            let vb = b.get();
+            println(va);
+            println(vb);
+            0
+        }
+    "#,
+        "3\n20"
+    );
+}
+
+#[test]
+fn dual_actor_void_method() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: void method (no return type). dispatch should write result_size=8
+    // with zero payload; call site must not crash.
+    dual_assert!(
+        r#"
+        actor Sink {
+            mut count: i32 = 0;
+            func touch() { self.count = self.count + 1; }
+            func get() -> i32 { return self.count; }
+        }
+        func main() -> i32 {
+            let s = Sink.spawn();
+            s.touch();
+            s.touch();
+            s.touch();
+            let v = s.get();
+            println(v);
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_actor_method_with_string_param() {
+    if !can_link() {
+        return;
+    }
+    // Edge case: method with a string parameter. The args blob must hold a
+    // pointer to the string's data GEP, and the dispatch must reconstruct
+    // the parameter on the worker thread.
+    dual_assert!(
+        r#"
+        actor Logger {
+            mut len: i32 = 0;
+            func log(msg: string) { self.len = self.len + 1; }
+            func get_count() -> i32 { return self.len; }
+        }
+        func main() -> i32 {
+            let lg = Logger.spawn();
+            lg.log("hello");
+            lg.log("world");
+            lg.log("foo");
+            let v = lg.get_count();
+            println(v);
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
 // ─── 33.  Capabilities (3 tests) ───────────────────────────────
 
 #[test]
