@@ -863,6 +863,10 @@ map.values() -> [V]
 - `async func` 编译为状态机（poll-based）
 - `parasteps` 并行执行块内语句
 - 运行时使用协作式调度（单线程 executor）
+- **并发原语**
+  - `Mutex<T>`：`mutex_new(value)` 创建互斥锁；`mutex_lock(m)` 返回 lock token；`mutex_get(token)` / `mutex_set(token, v)` 读写受保护数据；`mutex_unlock(token)` 显式释放。
+  - 原子类型：`AtomicI32` / `AtomicI64` / `AtomicBool`，提供 `load()`、`store(v)`、`fetch_add(v)`、`compare_exchange(expected, desired)` 方法，codegen 映射到 LLVM 原子指令。
+  - `Channel<T>`：`channel_new()` 创建无界通道；`channel_send(ch, v)` 发送；`channel_recv(ch)` 接收；`channel_try_recv(ch)` 非阻塞接收。
 
 ## 11. 语法约定速查表
 
