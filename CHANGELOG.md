@@ -2,6 +2,26 @@
 
 ## [Unreleased] — v0.28.21-dev
 
+### Fixed (usability & ease-of-use pass)
+- **CLI `--version` 现在与 `Cargo.toml` 一致**：`src/main.rs` 使用 `env!("CARGO_PKG_VERSION")`，避免手动版本字符串过时（之前报告 `0.28.17-dev` 实际已是 `0.28.21`）
+- **`check_block_with_implicit_return` 不再把前一条表达式类型误判为隐式返回**：当函数最后一条语句是 `return`/`if`/`while` 等非表达式语句时，不再拿上一条 `Stmt::Expr` 的类型做隐式返回检查。修复 `println(...); return 42` 等常见模式被误报 "implicit return: expected i32, found unit" 的问题
+- **`let x =` 缺初始化表达式现在报 parse error**：`parse_let` 在 `=` 后紧跟语句结束符时返回 "expected expression after `=`"，避免静默把后续表达式当成函数体隐式返回
+- **parser recovery 模式现在收集语句级错误**：`parse_block_with_recovery` 把 `parse_stmt` 错误加入 `Parser::errors`，`parse_file_with_recovery` 最终一并返回，避免函数体内的语法错误被静默吞掉
+- **Lexer 支持 shebang**：文件首行 `#!/usr/bin/env mimi` 被跳过，不再 tokenize 为 `# ! / ...`
+
+### Changed (DX)
+- **`mimi lint` 默认不再因 warning 退出非零**：新增 `--fail-on-warnings` 标志，默认仅 error 导致非零退出，更符合常见 linter 习惯
+- **`mimi fmt` 支持项目自动发现**：不带文件参数时，若当前目录有 `mimi.toml` 则格式化项目内所有 `.mimi` 文件，否则格式化当前目录下的 `.mimi` 文件；同时支持 `-` 从 stdin 读取并输出到 stdout
+- **`mimi test` 尊重 `NO_COLOR`**：测试输出现在使用 `colors_enabled()` 判断，与 `run`/`check`/`build` 一致
+
+### Fixed
+- 大量 `examples/` 和 `demos/` 示例 outdated syntax / runtime 行为，使以下示例可以正常 `mimi run`：
+  - `examples/benchmark.mimi`（修复 mutability、降低输入规模避免超时、支持 shebang）
+  - `examples/fib.mimi`、`examples/validation_basics.mimi`、`examples/validation_collections.mimi`（受益于 implicit return 修复）
+  - `examples/ffi_verification.mimi`（更新 extern 语法为 `func`，移除不支持的 `CBuffer`/`u8` 用法）
+  - `examples/wc.mimi`（避免在 match arm block 内使用 `let`，绕开当前 block 表达式作用域限制）
+  - `demos/15_task_mgr.mimi`（重写为类型正确、可运行的版本）
+
 ### Fixed
 - §13.6 门禁清理 8 个 clippy 警告：
   - `src/codegen/expr.rs:497-500` `fold_quote_block` doc list 缩进
