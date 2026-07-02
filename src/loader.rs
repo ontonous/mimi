@@ -223,6 +223,17 @@ impl ModuleLoader {
                 if dep_root.exists() && path.len() == 1 {
                     return Ok(dep_root);
                 }
+                // Try the dependency's entry file from mimi.toml
+                if path.len() == 1 && dep_dir.is_dir() {
+                    if let Ok(Some((manifest_dir, manifest))) =
+                        crate::manifest::Manifest::find(dep_dir)
+                    {
+                        let entry_path = manifest.entry_path(&manifest_dir);
+                        if entry_path.exists() {
+                            return Ok(entry_path);
+                        }
+                    }
+                }
             }
         }
 
@@ -292,6 +303,17 @@ impl ModuleLoader {
                     let dep_path = dep_dir.join(&dep_prefix).with_extension("mimi");
                     if dep_path.exists() {
                         return Ok(dep_path);
+                    }
+                    // use pkgname::func: try the dependency's entry file
+                    if dep_prefix.as_os_str().is_empty() && dep_dir.is_dir() {
+                        if let Ok(Some((manifest_dir, manifest))) =
+                            crate::manifest::Manifest::find(dep_dir)
+                        {
+                            let entry_path = manifest.entry_path(&manifest_dir);
+                            if entry_path.exists() {
+                                return Ok(entry_path);
+                            }
+                        }
                     }
                 }
             }
