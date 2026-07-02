@@ -58,27 +58,27 @@ trait NetOps {
 impl NetOps for i32 {
     func send(data: string) -> Result<i32, NetError> {
         let n = send(self, data)
-        if n < 0 { Result::Err(SendFailed) } else { Result::Ok(n) }
+        if n < 0 { Err(SendFailed) } else { Ok(n) }
     }
     func recv(buf_size: i32) -> Result<string, NetError> {
         let data = recv(self, buf_size)
-        if data == "" { Result::Err(RecvFailed) } else { Result::Ok(data) }
+        if data == "" { Err(RecvFailed) } else { Ok(data) }
     }
-    func fetch() -> Result<string, NetError> { Result::Err(HttpGetFailed) }
-    func fetch_post(body: string) -> Result<string, NetError> { Result::Err(HttpPostFailed) }
+    func fetch() -> Result<string, NetError> { Err(HttpGetFailed) }
+    func fetch_post(body: string) -> Result<string, NetError> { Err(HttpPostFailed) }
 }
 
 // NetOps implementation for built-in string (URL) type.
 impl NetOps for string {
-    func send(data: string) -> Result<i32, NetError> { Result::Err(SendFailed) }
-    func recv(buf_size: i32) -> Result<string, NetError> { Result::Err(RecvFailed) }
+    func send(data: string) -> Result<i32, NetError> { Err(SendFailed) }
+    func recv(buf_size: i32) -> Result<string, NetError> { Err(RecvFailed) }
     func fetch() -> Result<string, NetError> {
         let body = http_get(self)
-        if body == "" { Result::Err(HttpGetFailed) } else { Result::Ok(body) }
+        if body == "" { Err(HttpGetFailed) } else { Ok(body) }
     }
     func fetch_post(body: string) -> Result<string, NetError> {
         let resp = http_post(self, body)
-        if resp == "" { Result::Err(HttpPostFailed) } else { Result::Ok(resp) }
+        if resp == "" { Err(HttpPostFailed) } else { Ok(resp) }
     }
 }
 
@@ -92,60 +92,60 @@ pub func tcp_socket() -> i32 {
 // tcp_connect: Connects to host:port over TCP. Returns fd on success.
 pub func tcp_connect(host: string, port: i32) -> Result<i32, NetError> {
     let fd = tcp_socket()
-    if fd < 0 { return Result::Err(SocketCreate) }
+    if fd < 0 { return Err(SocketCreate) }
     let ret = connect(fd, host, port)
     if ret < 0 {
         close_fd(fd)
-        return Result::Err(ConnectFailed)
+        return Err(ConnectFailed)
     }
-    Result::Ok(fd)
+    Ok(fd)
 }
 
 // tcp_listen: Listens on port with backlog. Returns fd on success.
 pub func tcp_listen(port: i32, backlog: i32) -> Result<i32, NetError> {
     let fd = tcp_socket()
-    if fd < 0 { return Result::Err(SocketCreate) }
+    if fd < 0 { return Err(SocketCreate) }
     let ret = bind(fd, port)
     if ret < 0 {
         close_fd(fd)
-        return Result::Err(BindFailed)
+        return Err(BindFailed)
     }
     let ret2 = listen(fd, backlog)
     if ret2 < 0 {
         close_fd(fd)
-        return Result::Err(ListenFailed)
+        return Err(ListenFailed)
     }
-    Result::Ok(fd)
+    Ok(fd)
 }
 
 // tcp_accept: Accepts a connection on a listening socket fd.
 pub func tcp_accept(fd: i32) -> Result<i32, NetError> {
     let client_fd = accept(fd)
-    if client_fd < 0 { Result::Err(AcceptFailed) } else { Result::Ok(client_fd) }
+    if client_fd < 0 { Err(AcceptFailed) } else { Ok(client_fd) }
 }
 
 // tcp_send: Sends data over socket fd. Returns bytes sent on success.
 pub func tcp_send(fd: i32, data: string) -> Result<i32, NetError> {
     let n = send(fd, data)
-    if n < 0 { Result::Err(SendFailed) } else { Result::Ok(n) }
+    if n < 0 { Err(SendFailed) } else { Ok(n) }
 }
 
 // tcp_recv: Receives up to buf_size bytes from socket fd.
 pub func tcp_recv(fd: i32, buf_size: i32) -> Result<string, NetError> {
     let data = recv(fd, buf_size)
-    if data == "" { Result::Err(RecvFailed) } else { Result::Ok(data) }
+    if data == "" { Err(RecvFailed) } else { Ok(data) }
 }
 
 // fetch: Performs HTTP GET, returns body string on success.
 pub func fetch(url: string) -> Result<string, NetError> {
     let body = http_get(url)
-    if body == "" { Result::Err(HttpGetFailed) } else { Result::Ok(body) }
+    if body == "" { Err(HttpGetFailed) } else { Ok(body) }
 }
 
 // fetch_post: Performs HTTP POST with body, returns response on success.
 pub func fetch_post(url: string, body: string) -> Result<string, NetError> {
     let resp = http_post(url, body)
-    if resp == "" { Result::Err(HttpPostFailed) } else { Result::Ok(resp) }
+    if resp == "" { Err(HttpPostFailed) } else { Ok(resp) }
 }
 
 // Socket address families

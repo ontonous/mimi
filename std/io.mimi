@@ -63,58 +63,58 @@ pub func print_list<T>(xs: List<T>) {
     println(to_string(xs))
 }
 
-// input_line: Reads a line from stdin. Returns Err on failure.
+// input_line: Reads a line from stdin. Returns Err on empty input.
 pub func input_line() -> Result<string, string> {
-    let result = input()
-    if result.0 {
-        Result::Ok(result.1)
+    let line = input()
+    if line == "" {
+        Err("input: failed to read line")
     } else {
-        Result::Err("input: failed to read line")
+        Ok(line)
     }
 }
 
 // input_int: Reads and parses an integer from stdin. Returns Err on failure.
 pub func input_int() -> Result<i32, string> {
     match input_line() {
-        Result::Ok(line) => {
+        Ok(line) => {
             let parsed = str_parse_int(line)
             if parsed.0 {
-                Result::Ok(parsed.1)
+                Ok(parsed.1)
             } else {
-                Result::Err("input_int: not a valid integer")
+                Err("input_int: not a valid integer")
             }
         }
-        Result::Err(e) => Result::Err(e)
+        Err(e) => Err(e)
     }
 }
 
 // input_float: Reads and parses a float from stdin. Returns Err on failure.
 pub func input_float() -> Result<f64, string> {
     match input_line() {
-        Result::Ok(line) => {
+        Ok(line) => {
             let parsed = str_parse_float(line)
             if parsed.0 {
-                Result::Ok(parsed.1)
+                Ok(parsed.1)
             } else {
-                Result::Err("input_float: not a valid float")
+                Err("input_float: not a valid float")
             }
         }
-        Result::Err(e) => Result::Err(e)
+        Err(e) => Err(e)
     }
 }
 
 // input_bool: Reads a bool from stdin (true/false/yes/no/1/0). Returns Err on failure.
 pub func input_bool() -> Result<bool, string> {
     match input_line() {
-        Result::Ok(line) => {
+        Ok(line) => {
             if line == "true" || line == "yes" || line == "1" {
-                Result::Ok(true)
+                Ok(true)
             } else if line == "false" || line == "no" || line == "0" {
-                Result::Ok(false)
+                Ok(false)
             } else {
-                Result::Err("input_bool: expected 'true'/'false'/'yes'/'no'/'1'/'0'")
+                Err("input_bool: expected 'true'/'false'/'yes'/'no'/'1'/'0'")
             }
         }
-        Result::Err(e) => Result::Err(e)
+        Err(e) => Err(e)
     }
 }

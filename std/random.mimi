@@ -32,10 +32,10 @@ impl<T> RandomChoice<T> for List<T> {
     func random_choice() -> Result<T, string> {
         let l = len(self)
         if l == 0 {
-            return Result::Err("random_choice: empty list")
+            return Err("random_choice: empty list")
         }
         let idx = to_int(floor(random() * to_float(l)))
-        Result::Ok(self[idx])
+        Ok(self[idx])
     }
     func random_sample(n: i32) -> List<T> {
         let rs_len = len(self)

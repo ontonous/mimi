@@ -33,11 +33,11 @@ impl<T> ListExt<T> for List<T> {
     func is_empty() -> bool { len(self) == 0 }
     func first() -> T { self[0] }
     func first_result() -> Result<T, string> {
-        if len(self) > 0 { Result::Ok(self[0]) } else { Result::Err("first_result: empty list") }
+        if len(self) > 0 { Ok(self[0]) } else { Err("first_result: empty list") }
     }
     func last() -> T { self[len(self) - 1] }
     func last_result() -> Result<T, string> {
-        if len(self) > 0 { Result::Ok(self[len(self) - 1]) } else { Result::Err("last_result: empty list") }
+        if len(self) > 0 { Ok(self[len(self) - 1]) } else { Err("last_result: empty list") }
     }
     func take(n: i32) -> List<T> {
         if n < len(self) { self[0..n] } else { self }
@@ -393,12 +393,12 @@ pub func min_list(xs: List<i32>) -> i32 {
 
 // min_list_result: Returns the minimum element of xs (integer), or Err if empty.
 pub func min_list_result(xs: List<i32>) -> Result<i32, string> {
-    if len(xs) == 0 { return Result::Err("min_list_result: empty list") }
+    if len(xs) == 0 { return Err("min_list_result: empty list") }
     let mut ml_min = xs[0]
     for ml_x in xs {
         if ml_x < ml_min { ml_min = ml_x }
     }
-    Result::Ok(ml_min)
+    Ok(ml_min)
 }
 
 // max_list: Returns the maximum element of xs (integer).
@@ -413,12 +413,12 @@ pub func max_list(xs: List<i32>) -> i32 {
 
 // max_list_result: Returns the maximum element of xs (integer), or Err if empty.
 pub func max_list_result(xs: List<i32>) -> Result<i32, string> {
-    if len(xs) == 0 { return Result::Err("max_list_result: empty list") }
+    if len(xs) == 0 { return Err("max_list_result: empty list") }
     let mut ml_max = xs[0]
     for ml_x in xs {
         if ml_x > ml_max { ml_max = ml_x }
     }
-    Result::Ok(ml_max)
+    Ok(ml_max)
 }
 
 // filter_list: Filters xs by predicate (custom implementation).

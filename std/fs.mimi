@@ -3,7 +3,7 @@
 // Built-in functions (no import needed):
 //   file_exists(path) -> bool
 //   read_file(path) -> Result<string, string>
-//   write_file(path, content) -> Result<unit, string>
+//   write_file(path, content) -> Result<(), string>
 //   listdir(path) -> List<string>
 //   walk_dir(path) -> List<string>
 //   is_dir(path) -> bool
@@ -28,28 +28,28 @@
 trait FsOps {
     func exists() -> bool
     func read() -> Result<string, string>
-    func write(content: string) -> Result<unit, string>
+    func write(content: string) -> Result<(), string>
     func read_lines() -> Result<List<string>, string>
     func file_size() -> Result<i32, string>
-    func write_lines(xs: List<string>) -> Result<unit, string>
+    func write_lines(xs: List<string>) -> Result<(), string>
 }
 
 // FsOps implementation for built-in string type.
 impl FsOps for string {
     func exists() -> bool { file_exists(self) }
     func read() -> Result<string, string> { read_file(self) }
-    func write(content: string) -> Result<unit, string> { write_file(self, content) }
+    func write(content: string) -> Result<(), string> { write_file(self, content) }
     func read_lines() -> Result<List<string>, string> {
         let result = read_file(self)
-        if result.is_ok() { Result::Ok(str_split(result.unwrap(), "\n")) }
+        if result.is_ok() { Ok(str_split(result.unwrap(), "\n")) }
         else { result.map_err(|e| "read_lines(" + self + "): " + e) }
     }
     func file_size() -> Result<i32, string> {
         let result = read_file(self)
-        if result.is_ok() { Result::Ok(len(result.unwrap())) }
+        if result.is_ok() { Ok(len(result.unwrap())) }
         else { result.map_err(|e| "file_size(" + self + "): " + e) }
     }
-    func write_lines(xs: List<string>) -> Result<unit, string> {
+    func write_lines(xs: List<string>) -> Result<(), string> {
         write_file(self, str_join(xs, "\n"))
     }
 }
@@ -69,7 +69,7 @@ pub func read(path: string) -> Result<string, string> {
 
 // write: Writes content to path, overwriting if it exists.
 // Returns Err if the write fails.
-pub func write(path: string, content: string) -> Result<unit, string> {
+pub func write(path: string, content: string) -> Result<(), string> {
     write_file(path, content)
 }
 
@@ -78,7 +78,7 @@ pub func write(path: string, content: string) -> Result<unit, string> {
 pub func read_lines(path: string) -> Result<List<string>, string> {
     let result = read_file(path)
     if result.is_ok() {
-        Result::Ok(str_split(result.unwrap(), "\n"))
+        Ok(str_split(result.unwrap(), "\n"))
     } else {
         result.map_err(|e| "read_lines(" + path + "): " + e)
     }
@@ -92,7 +92,7 @@ pub func read_lines(path: string) -> Result<List<string>, string> {
 pub func file_size(path: string) -> Result<i32, string> {
     let result = read_file(path)
     if result.is_ok() {
-        Result::Ok(len(result.unwrap()))
+        Ok(len(result.unwrap()))
     } else {
         result.map_err(|e| "file_size(" + path + "): " + e)
     }
@@ -100,7 +100,7 @@ pub func file_size(path: string) -> Result<i32, string> {
 
 // write_lines: Writes each string in xs as a line to path.
 // Returns Err if the write fails.
-pub func write_lines(path: string, xs: List<string>) -> Result<unit, string> {
+pub func write_lines(path: string, xs: List<string>) -> Result<(), string> {
     write_file(path, str_join(xs, "\n"))
 }
 
