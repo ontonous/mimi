@@ -16,7 +16,7 @@ pub(crate) fn run(
     watch: bool,
     profile: bool,
     extra_args: &[String],
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let path = resolve_path(path)?;
     if profile {
         mimi::runtime::profiler::profiler_init();
@@ -29,7 +29,8 @@ pub(crate) fn run(
             allocator,
             strict,
             extra_args,
-        )
+        )?;
+        0
     } else {
         run_once(
             &path,
@@ -38,12 +39,23 @@ pub(crate) fn run(
             allocator,
             strict,
             extra_args,
-        )
+        )?
     };
     if profile {
         mimi::runtime::profiler::profiler_report();
     }
-    result
+    Ok(result)
+}
+
+/// Extract the integer exit code from an interpreter return value.
+/// Unit returns are mapped to 0.
+fn value_to_exit_code(value: &mimi::interp::Value) -> i32 {
+    match value {
+        mimi::interp::Value::Int(n) => *n as i32,
+        mimi::interp::Value::Bool(b) => *b as i32,
+        mimi::interp::Value::Unit => 0,
+        _ => 0,
+    }
 }
 
 fn run_once(
@@ -53,7 +65,7 @@ fn run_once(
     allocator: &str,
     strict: bool,
     extra_args: &[String],
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let source = fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     if is_sketch(path) {
@@ -142,7 +154,7 @@ fn run_once(
             if value != mimi::interp::Value::Unit {
                 println!("-> {}", value);
             }
-            Ok(())
+            Ok(value_to_exit_code(&value))
         }
         Err(interp_err) => {
             let use_color = colors_enabled();
@@ -155,7 +167,7 @@ fn run_once(
             } else {
                 eprintln!("{}", strip_ansi(&formatted));
             }
-            std::process::exit(1);
+            Err("runtime error".into())
         }
     }
 }

@@ -375,7 +375,7 @@ fn main() {
             extra_args,
         } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
-            run::run(
+            match run::run(
                 path.as_deref(),
                 verify_contracts,
                 ffi_check,
@@ -384,7 +384,10 @@ fn main() {
                 watch,
                 profile,
                 &extra_args,
-            )
+            ) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(e),
+            }
         }
         Command::Test {
             path,
