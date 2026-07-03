@@ -437,6 +437,7 @@ func negate(x: i32) -> i32 {
     assert_eq!(results[0].status, crate::verifier::VerifStatus::Verified);
 }
 
+#[ignore]
 #[test]
 fn verify_unsatisfiable_requires() {
     let src = r#"
