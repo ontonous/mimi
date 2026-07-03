@@ -72,6 +72,41 @@ fn e2e_adt_enum_match() {
 }
 
 #[test]
+fn e2e_adt_trait_method() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        trait Sum {
+            func total() -> i32;
+        }
+
+        type Point {
+            Pt(i32, i32)
+        }
+
+        impl Sum for Point {
+            func total() -> i32 {
+                match self {
+                    Pt(x, y) => x + y
+                }
+            }
+        }
+
+        func main() -> i32 {
+            let p = Pt(2, 3)
+            println(p.total())
+            0
+        }
+    "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:e2e_adt_trait_method unwrap failed");
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
 fn e2e_nested_match() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

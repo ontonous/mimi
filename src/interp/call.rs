@@ -1028,10 +1028,27 @@ impl<'a> Interpreter<'a> {
                         Ok(Value::Int(ordinal as i64))
                     }
 
-                    _ => Err(InterpError::new(format!(
-                        "variant '{}' has no method '{}'",
-                        name, method
-                    ))),
+                    _ => {
+                        // Try user-defined trait methods on ADT variants
+                        if let Some(type_name) = self.variant_parent.get(name) {
+                            if let Some(impls) = self.type_impls.get(type_name) {
+                                for methods in impls.values() {
+                                    if let Some(func) = methods.iter().find(|f| f.name == method) {
+                                        let func = func.clone();
+                                        self.push_scope();
+                                        self.bind("self", obj.clone())?;
+                                        let result = self.call_func(&func, args);
+                                        self.pop_scope();
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                        Err(InterpError::new(format!(
+                            "variant '{}' has no method '{}'",
+                            name, method
+                        )))
+                    }
                 }
             }
             _ => Err(InterpError::new(format!(

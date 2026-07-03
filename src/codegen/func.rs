@@ -1112,7 +1112,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .insert(name.clone(), "Option".to_string());
                                     }
                                     _ => {
-                                        if let Some(fdef) = self.func_defs.get(func_name) {
+                                        if let Some((type_name, _)) =
+                                            self.find_variant_owner(func_name)
+                                        {
+                                            self.var_type_names
+                                                .insert(name.clone(), type_name);
+                                        } else if let Some(fdef) = self.func_defs.get(func_name) {
                                             if let Some(ret_ty) = &fdef.ret {
                                                 match ret_ty {
                                                     Type::ImplTrait(traits) => {

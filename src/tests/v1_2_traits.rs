@@ -290,3 +290,35 @@ func main() -> i32 {
     );
     assert_eq!(v, interp::Value::Int(3 + 4 + 5 * 6));
 }
+
+#[test]
+fn adt_trait_method_with_self() {
+    let v = run_source(
+        r#"
+trait Move {
+    func shift(dx: i32, dy: i32) -> Point
+}
+
+type Point {
+    Pt(i32, i32)
+}
+
+impl Move for Point {
+    func shift(dx: i32, dy: i32) -> Point {
+        match self {
+            Pt(x, y) => Pt(x + dx, y + dy)
+        }
+    }
+}
+
+func main() -> i32 {
+    let p = Pt(1, 2)
+    let q = p.shift(3, 4)
+    match q {
+        Pt(x, y) => x + y
+    }
+}
+"#,
+    );
+    assert_eq!(v, interp::Value::Int(10));
+}

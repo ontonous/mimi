@@ -45,6 +45,8 @@ pub struct Interpreter<'a> {
     newtype_constructors: HashMap<String, bool>,
     /// Maps type name to its variants (for Result/Option-like types)
     type_variants: HashMap<String, Vec<String>>,
+    /// Maps variant name to its parent ADT type name
+    variant_parent: HashMap<String, String>,
     /// Variants that represent "failure" (Err, None, *Error, *Fail)
     failure_variants: HashMap<String, bool>,
     /// Capability definitions: cap_name -> list of component caps
@@ -102,6 +104,7 @@ impl<'a> Interpreter<'a> {
         let mut constructors = HashMap::new();
         let mut newtype_constructors = HashMap::new();
         let mut type_variants: HashMap<String, Vec<String>> = HashMap::new();
+        let mut variant_parent: HashMap<String, String> = HashMap::new();
         let mut failure_variants: HashMap<String, bool> = HashMap::new();
         let mut cap_defs: HashMap<String, Vec<String>> = HashMap::new();
         for item in &file.items {
@@ -110,6 +113,7 @@ impl<'a> Interpreter<'a> {
                 &mut constructors,
                 &mut newtype_constructors,
                 &mut type_variants,
+                &mut variant_parent,
                 &mut failure_variants,
             );
             Self::collect_caps(item, &mut cap_defs);
@@ -156,6 +160,7 @@ impl<'a> Interpreter<'a> {
             constructors,
             newtype_constructors,
             type_variants,
+            variant_parent,
             failure_variants,
             cap_defs,
             compensation_stack: Vec::new(),
@@ -282,6 +287,7 @@ impl<'a> Interpreter<'a> {
         out: &mut HashMap<String, usize>,
         newtype_constructors: &mut HashMap<String, bool>,
         type_variants: &mut HashMap<String, Vec<String>>,
+        variant_parent: &mut HashMap<String, String>,
         failure_variants: &mut HashMap<String, bool>,
     ) {
         match item {
@@ -297,6 +303,7 @@ impl<'a> Interpreter<'a> {
                             };
                             out.insert(v.name.clone(), arity);
                             variant_names.push(v.name.clone());
+                            variant_parent.insert(v.name.clone(), t.name.clone());
                             // Mark failure-like variants
                             let name_lower = v.name.to_lowercase();
                             if name_lower == "err"
@@ -323,6 +330,7 @@ impl<'a> Interpreter<'a> {
                         out,
                         newtype_constructors,
                         type_variants,
+                        variant_parent,
                         failure_variants,
                     );
                 }
