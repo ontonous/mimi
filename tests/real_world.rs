@@ -263,6 +263,44 @@ fn real_world_json() {
     );
 }
 
+// ===================== Standard library: env =====================
+
+#[test]
+fn real_world_env_module() {
+    run_both(
+        r#"
+        use std::env
+
+        func main() -> i32 {
+            println(arg_count())
+            if has_var("PATH") { println("has_path") } else { println("no_path") }
+            println(get_var_or("MIMI_DEFINITELY_MISSING_VAR", "fallback"))
+            0
+        }
+    "#,
+        "0\nhas_path\nfallback",
+    );
+}
+
+// ===================== Standard library: array =====================
+
+#[test]
+fn real_world_array_module() {
+    run_both(
+        r#"
+        use std::array
+
+        func main() -> i32 {
+            let xs = ["a", "b", "c", "d"]
+            println(array_slice(xs, 1, 3))
+            println(array_len(xs))
+            0
+        }
+    "#,
+        "[b, c]\n4",
+    );
+}
+
 // ===================== Multiple std modules combined =====================
 
 #[test]
