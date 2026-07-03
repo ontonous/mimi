@@ -282,15 +282,13 @@ impl<'a> Interpreter<'a> {
                 let mut ret_buf = vec![0u8; buf_size];
                 let rvalue = ret_buf.as_mut_ptr() as *mut std::ffi::c_void;
                 // F-16: Apply crash protection to struct-by-value returns.
-                if self.verify_ffi {
+                if self.verify_ffi || extern_func.no_panic {
                     self.call_ffi_with_fork_isolation_struct(
                         &cif,
                         code_ptr,
                         &ffi_args,
                         &mut ret_buf,
                     )?;
-                } else if extern_func.no_panic {
-                    self.call_ffi_no_panic_struct(&cif, code_ptr, &ffi_args, rvalue)?;
                 } else {
                     // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
                     // with a caller-provided return buffer. rvalue points to a valid
@@ -301,10 +299,8 @@ impl<'a> Interpreter<'a> {
                 }
                 struct_buffers.push(ret_buf);
                 Ok(0i64) // placeholder; actual result read from buffer below
-            } else if self.verify_ffi {
+            } else if self.verify_ffi || extern_func.no_panic {
                 self.call_ffi_with_fork_isolation(&cif, code_ptr, &ffi_args, &contract.ret)
-            } else if extern_func.no_panic {
-                self.call_ffi_no_panic(&cif, code_ptr, &ffi_args, &contract.ret)
             } else {
                 self.call_ffi_direct(&cif, code_ptr, &ffi_args, &contract.ret)
             };

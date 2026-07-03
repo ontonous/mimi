@@ -3455,102 +3455,27 @@ pub extern "C" fn test_threaded_callback(
 // No_panic signal handlers (POSIX only)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// No_panic handlers (POSIX only)
+// ---------------------------------------------------------------------------
+// Previous versions installed signal handlers that used sigsetjmp/siglongjmp
+// to recover from C-level crashes. That is undefined behaviour: a signal
+// handler cannot non-locally jump back into arbitrary Rust code and preserve
+// Rust's invariants (destructors, borrow checker assumptions, platform ABI).
+//
+// The interpreter now isolates #[no_panic] FFI calls in a forked child process
+// (see src/interp/ffi/call.rs). The runtime symbols below are kept as no-ops so
+// that older generated binaries and codegen wrappers that reference them still
+// link, but they no longer install any signal handlers. Future codegen support
+// for #[no_panic] will use its own process isolation mechanism.
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod no_panic {
-    #[cfg(standalone)]
-    use crate::libc;
-    use std::cell::Cell;
-    use std::cell::UnsafeCell;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-    // glibc sigjmp_buf is ~200 bytes, macOS ~184, ARM64 ~200.
-    // Use 256 to cover all platforms safely.
-    const JMP_BUF_SIZE: usize = 256;
-    type SigJmpBuf = [u8; JMP_BUF_SIZE];
-
-    thread_local! {
-        static NO_PANIC_JUMP_BUF: Cell<*mut SigJmpBuf> =
-            const { Cell::new(std::ptr::null_mut()) };
-        // Store old handlers as opaque usize values (libc::signal uses usize on Linux)
-        static OLD_HANDLERS: UnsafeCell<[usize; 5]> = const {
-            UnsafeCell::new([usize::MAX; 5])
-        };
-    }
-
-    const SIGS: &[i32; 5] = &[
-        libc::SIGSEGV,
-        libc::SIGABRT,
-        libc::SIGBUS,
-        libc::SIGILL,
-        libc::SIGFPE,
-    ];
-
-    #[allow(dead_code)]
-    fn sig_index(sig: i32) -> Option<usize> {
-        SIGS.iter().position(|&s| s == sig)
-    }
-
-    #[allow(clashing_extern_declarations, dead_code)]
-    extern "C" {
-        fn sigsetjmp(env: *mut SigJmpBuf, savemask: i32) -> i32;
-        fn siglongjmp(env: *mut SigJmpBuf, val: i32) -> !;
-    }
-
-    extern "C" fn no_panic_handler(sig: i32) {
-        // Only reset the signal that was actually caught, not all managed signals
-        if let Some(idx) = sig_index(sig) {
-            // SAFETY: restoring the previous signal handler from the thread-local storage.
-            unsafe {
-                OLD_HANDLERS.with(|old| {
-                    let arr = &*old.get();
-                    // OLD_HANDLERS stores raw handler pointer as usize
-                    libc::signal(sig, arr[idx]);
-                });
-            }
-        }
-        NO_PANIC_JUMP_BUF.with(|buf| {
-            let jmp_buf = buf.get();
-            if !jmp_buf.is_null() {
-                // SAFETY: `jmp_buf` is non-null and was set by `sigsetjmp` in the same thread.
-                unsafe {
-                    siglongjmp(jmp_buf, sig);
-                }
-            }
-        });
-    }
+    #[no_mangle]
+    pub extern "C" fn mimi_install_no_panic_handlers() {}
 
     #[no_mangle]
-    // SAFETY: caller must ensure this is called before `sigsetjmp`/`mimi_restore_no_panic_handlers`.
-    pub unsafe extern "C" fn mimi_install_no_panic_handlers() {
-        let handler = no_panic_handler as *const () as usize;
-        OLD_HANDLERS.with(|old| {
-            let arr = &mut *old.get();
-            for (i, &sig) in SIGS.iter().enumerate() {
-                // SAFETY: installing our signal handler on the five crash signals.
-                arr[i] = libc::signal(sig, handler);
-            }
-        });
-        HANDLERS_INSTALLED.store(true, Ordering::Release);
-    }
-
-    #[no_mangle]
-    // SAFETY: caller must uphold the extern C ABI contract.
-    pub unsafe extern "C" fn mimi_restore_no_panic_handlers() {
-        OLD_HANDLERS.with(|old| {
-            let arr = &*old.get();
-            // SAFETY: restoring previous handlers stored in thread-local `OLD_HANDLERS`.
-            for (i, &sig) in SIGS.iter().enumerate() {
-                let prev = arr[i];
-                if prev != usize::MAX {
-                    // SAFETY: `prev` is a valid handler value previously returned by `libc::signal`.
-                    libc::signal(sig, prev);
-                }
-            }
-        });
-        NO_PANIC_JUMP_BUF.with(|buf| buf.set(std::ptr::null_mut()));
-    }
+    pub extern "C" fn mimi_restore_no_panic_handlers() {}
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
