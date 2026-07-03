@@ -177,3 +177,109 @@ y = 2
     assert!(result.contains("x = 1"));
     assert!(result.contains("y = 2"));
 }
+
+#[test]
+fn fmt_string_literal_braces_preserved() {
+    let input = r#"func main() {
+    let s = "a{b";
+    0
+}"#;
+    let result = check_format(input);
+    assert!(
+        result.contains("\"a{b\""),
+        "formatter must not insert spaces inside string literal: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_string_literal_colon_preserved() {
+    let input = r#"func main() {
+    let s = "a:b";
+    0
+}"#;
+    let result = check_format(input);
+    assert!(
+        result.contains("\"a:b\""),
+        "formatter must not insert spaces inside string literal: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_string_literal_equals_preserved() {
+    let input = r#"func main() {
+    let s = "a=b";
+    0
+}"#;
+    let result = check_format(input);
+    assert!(
+        result.contains("\"a=b\""),
+        "formatter must not insert spaces inside string literal: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_string_literal_combined_operators_preserved() {
+    let input = r#"func main() {
+    let s = "a:{b}=c,d";
+    0
+}"#;
+    let result = check_format(input);
+    assert!(
+        result.contains("\"a:{b}=c,d\""),
+        "formatter must not insert spaces inside string literal: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_string_literal_escaped_quote_preserved() {
+    let input = r#"func main() {
+    let s = "a\"b:c";
+    0
+}"#;
+    let result = check_format(input);
+    // The escaped quote should keep the literal open, so the colon stays inside.
+    assert!(
+        result.contains("\"a\\\"b:c\""),
+        "formatter must handle escaped quotes: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_char_literal_operators_preserved() {
+    let input = r#"func main() {
+    let c = '{';
+    0
+}"#;
+    let result = check_format(input);
+    assert!(
+        result.contains("'{'"),
+        "formatter must not alter char literal: got {}",
+        result
+    );
+}
+
+#[test]
+fn fmt_non_string_operators_still_normalized() {
+    let input = "func main(){let x=1;if x>0{x=x+1}}";
+    let result = check_format(input);
+    assert!(
+        result.contains("let x = 1"),
+        "formatter should still normalize assignments: got {}",
+        result
+    );
+    assert!(
+        result.contains("if x > 0"),
+        "formatter should still normalize comparisons: got {}",
+        result
+    );
+    assert!(
+        result.contains("x = x + 1"),
+        "formatter should still normalize operators: got {}",
+        result
+    );
+}

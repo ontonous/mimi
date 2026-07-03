@@ -663,3 +663,34 @@ func main() -> string {
     );
     assert_eq!(v, interp::Value::String("mimi".to_string()));
 }
+
+#[test]
+fn scope_cleaned_after_error_in_block() {
+    // When evaluation fails inside a nested block scope, the scope must still
+    // be popped so that variables bound in that block do not leak into later
+    // calls.
+    let src = r#"
+func leaky() -> i32 {
+    if true {
+        let y = "shadow";
+        1 / 0
+    }
+    0
+}
+
+func use_y() -> string {
+    y
+}
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    // First call fails inside the if-branch block.
+    let first = interp.call_named("leaky", vec![]);
+    assert!(first.is_err(), "leaky should fail with division by zero");
+    // A subsequent call must not see the leaked `y` from the failed block.
+    let second = interp.call_named("use_y", vec![]);
+    assert!(
+        second.is_err(),
+        "scope leaked from failed block: 'y' was visible after error"
+    );
+}

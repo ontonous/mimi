@@ -1596,3 +1596,87 @@ func main() -> i32 {
         result
     );
 }
+
+#[test]
+fn typecheck_block_expr_checks_assign_statement() {
+    // Block expressions must type-check every statement, not only Expr/Return/Let/If.
+    // Before the fix, the assignment below was silently skipped.
+    let src = r#"
+func main() -> i32 {
+    let x = {
+        let mut i = 0;
+        i = "hello";
+        42
+    };
+    x
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "assignment type error inside block expr must be caught");
+    let errors = result.unwrap_err();
+    let has_assign_error = errors.iter().any(|e| {
+        e.message.contains("cannot assign")
+            || e.message.contains("type mismatch")
+            || e.message.contains("initialized with")
+    });
+    assert!(
+        has_assign_error,
+        "Expected assignment type error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn typecheck_block_expr_checks_while_condition() {
+    let src = r#"
+func main() -> i32 {
+    let x = {
+        while 123 {
+            let _ = 1;
+        }
+        42
+    };
+    x
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "non-bool while condition inside block expr must be caught");
+    let errors = result.unwrap_err();
+    let has_cond_error = errors
+        .iter()
+        .any(|e| e.message.contains("while condition must be bool"));
+    assert!(
+        has_cond_error,
+        "Expected while condition error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn typecheck_block_expr_checks_for_iterable() {
+    let src = r#"
+func main() -> i32 {
+    let x = {
+        for i in 123 {
+            let _ = i;
+        }
+        42
+    };
+    x
+}
+"#;
+    let file = parse(src);
+    let result = core::check(&file);
+    assert!(result.is_err(), "bad for iterable inside block expr must be caught");
+    let errors = result.unwrap_err();
+    let has_for_error = errors
+        .iter()
+        .any(|e| e.message.contains("for loop requires"));
+    assert!(
+        has_for_error,
+        "Expected for-loop iterable error, got: {:?}",
+        errors
+    );
+}

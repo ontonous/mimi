@@ -6751,6 +6751,80 @@ fn dual_channel_many_messages() {
     );
 }
 
+#[test]
+fn dual_mutex_cross_thread_no_lost_updates() {
+    if !can_link() {
+        return;
+    }
+    // Two threads each increment a Mutex<i64> 1000 times. Without real
+    // mutual exclusion the final count would be less than 2000.
+    dual_assert!(
+        r#"
+        func increment(m: i64, n: i32) -> i32 {
+            let mut i = 0
+            while i < n {
+                let g = mutex_lock(m)
+                let v = mutex_get(g)
+                mutex_set(g, v + 1)
+                mutex_unlock(g)
+                i = i + 1
+            }
+            0
+        }
+
+        func main() -> i32 {
+            let m = mutex_new(0)
+            let t1 = spawn increment(m, 1000)
+            let t2 = spawn increment(m, 1000)
+            let _ = await t1
+            let _ = await t2
+            let g = mutex_lock(m)
+            let final = mutex_get(g)
+            println(final)
+            mutex_unlock(g)
+            mutex_drop(m)
+            0
+        }
+        "#,
+        "2000"
+    );
+}
+
+#[test]
+fn dual_channel_cross_thread_send_recv_no_deadlock() {
+    if !can_link() {
+        return;
+    }
+    // Receiver blocks waiting for a value sent from another thread. The old
+    // implementation held the global CONCURRENCY_HANDLES lock during recv,
+    // so the sender could never acquire it and the program deadlocked.
+    dual_assert!(
+        r#"
+        func sender(ch: i64) -> i32 {
+            channel_send(ch, 42)
+            0
+        }
+
+        func receiver(ch: i64) -> i32 {
+            let v = channel_recv(ch)
+            println(v)
+            0
+        }
+
+        func main() -> i32 {
+            let ch = channel_new()
+            let t1 = spawn sender(ch)
+            let t2 = spawn receiver(ch)
+            let _ = await t1
+            let _ = await t2
+            channel_drop(ch)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
 // ─── v0.28.21 — Comptime / Quote codegen ───────────────────────────────
 //
 // These dual-backend tests verify that the codegen path resolves
@@ -7058,5 +7132,82 @@ fn dual_match_bare_zero_arity_constructor_does_not_bind() {
         }
         "#,
         "pending\nrunning\ndone\nfailed"
+    );
+}
+
+// ─── v0.28.26 codegen P0/P1 regression tests ───────────────────────
+
+#[test]
+fn dual_reduce_lambda() {
+    // reduce with a lambda must invoke the closure, not the dummy __noop.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let nums = [1, 2, 3]
+            let total = reduce(nums, fn(a: i32, e: i32) -> i32 { a + e }, 0)
+            println(total)
+            0
+        }
+        "#,
+        "6"
+    );
+}
+
+#[test]
+fn dual_trait_impl_self_record() {
+    // Trait impl methods on record ADTs need self's type name tracked
+    // so method dispatch and field access both work in codegen.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+
+        trait HasX {
+            func x() -> i32;
+        }
+
+        impl HasX for Point {
+            func x() -> i32 { self.x }
+        }
+
+        func main() -> i32 {
+            let p = Point { x: 7, y: 8 }
+            println(p.x())
+            println(p.x)
+            0
+        }
+        "#,
+        "7\n7"
+    );
+}
+
+#[test]
+fn dual_newtype_pattern() {
+    // Newtype constructor patterns must destructure the transparent inner
+    // value instead of loading an enum tag/payload.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        newtype UserId = i32
+
+        func main() -> i32 {
+            let u = UserId(42)
+            let UserId(x) = u
+            println(x)
+            let y = match u {
+                UserId(v) => v
+            }
+            println(y)
+            0
+        }
+        "#,
+        "42\n42"
     );
 }
