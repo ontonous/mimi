@@ -1,6 +1,34 @@
 # Changelog
 
-## [Unreleased] — v0.28.25-dev
+## [Unreleased] — v0.28.26-dev
+
+### Fixed
+- **`mimi fmt` 不再破坏字符串字面量** (`src/fmt.rs`)：格式化器现在识别字符串/字符字面量边界，`normalize_spacing` 跳过字面量内部，避免修改含 `:`、`=`、`{` 等字符的字符串内容
+- **`mms{}` 解析超时不再泄露工作线程** (`src/parser/parse_stmt.rs`)：`try_parse_mimispec_with_timeout` 超时后通过 `JoinHandle::join` 等待子线程结束，避免后台线程堆积
+- **解析器错误恢复收集语句级错误** (`src/parser/mod.rs`, `src/parser/parse_stmt.rs`)：`parse_block_with_recovery` 把 `parse_stmt` 错误加入 `Parser::errors`，函数体内的语法错误不再被静默吞掉
+- **`let x =` 缺初始化表达式报 parse error** (`src/parser/parse_stmt.rs`)：`=` 后紧跟语句结束符时返回 "expected expression after `=`"
+- **`std/fs.mimi` 无限递归修复** (`std/fs.mimi`)：`read_lines_each` / `read_lines_json` 不再递归调用自身；未实现功能标记为未实现而非可编译的自杀代码
+- **`mimi run` 退出码反映 `main` 返回值** (`src/main/run.rs`)：`main() -> i32` 返回非零值时，`mimi run` 进程以该值退出；`unit` 返回 0
+- **内建 `abs` 返回类型修复** (`src/core/infer/call/simple.rs`)：内建 `abs` 现在根据输入类型返回 `i32`/`i64`/`f64`，不再返回 `unknown`
+- **`Mutex<T>` 真正互斥** (`src/runtime/mod.rs`)：C API `mimi_mutex_lock` 保留 guard 直到 `mimi_mutex_unlock`，修复 lock 后立即 drop 导致的不互斥问题
+- **`Channel<T>::recv` 移除全局死锁** (`src/runtime/mod.rs`)：recv 不再在全局 `CONCURRENCY_HANDLES` 锁内阻塞，避免 channel 全局死锁
+- **block 表达式类型检查覆盖全部语句** (`src/core/infer/helpers.rs`, `src/core/check_stmt.rs`)：`infer_block_expr` / `check_block_expr` 现在处理 let/assign/while/for/match/return 等所有语句类型，不再静默跳过
+- **解释器错误路径作用域清理** (`src/interp/eval/stmt.rs`, `src/interp/` 多处)：使用 `with_scope` / `with_func_scope` RAII 包装确保 `push_scope` 后 `Err` 路径也能弹栈，避免长生命周期解释器作用域泄漏
+- **`&List<T>` / `&mut List<T>` 支持索引** (`src/core/infer/expr.rs`, `src/interp/eval/expr.rs`, `src/codegen/expr.rs`)：借用列表现在可索引读取
+- **高阶函数 `reduce(lambda, ...)` codegen 修复** (`src/codegen/expr/call/helpers.rs`)：不再生成 dummy `__noop` 调用，改为真正的间接调用
+- **trait impl `self` 类型名跟踪** (`src/codegen/func.rs`)：`bind_func_params` 对 `Type::Ref` 写入 `var_type_names`，trait 方法中 `self` 字段/方法分发正确
+- **newtype 构造器模式 codegen** (`src/codegen/func/pattern.rs`)：`compile_pattern_bind` 不再将 newtype 值按 enum tag 处理
+- **泛型 ADT 构造推断** (`src/core/infer/` 多处)：`let b: Box<i32> = Box { value: 42 }` 可从上下文推断 `T = i32`
+- **包导入 codegen 支持** (`src/codegen/compile.rs`, `src/loader.rs`)：`use mylib::func` / `use mylib` 在 `mimi build` 中可找到并编译依赖函数
+- **`#[no_panic]` 移除 sigsetjmp/siglongjmp UB** (`src/interp/ffi/call.rs`, `src/runtime/mod.rs`)：信号处理程序非局部跳回 Rust 属于 UB；解释器路径改用 fork 进程隔离，runtime 中相关 C ABI 符号保留为 no-op 以保持链接兼容
+
+### Tests
+- 新增 formatter 回归测试（含字符串字面量保护）
+- 新增 parser / interpreter / borrow / loader / mms 回归套件
+- 新增 block 表达式类型检查回归测试
+- `verify_unsatisfiable_requires` 与 ASan 测试标记为 `#[ignore]`（Z3 累积内存限制 / ASan 16TB 虚拟地址需求与 `ulimit -v` 冲突）
+
+## [v0.28.25] - 2026-07-03
 
 ### Fixed
 - **Match arm `let` 作用域** (`src/core/infer/helpers.rs`)：`infer_block_expr` 现在在推断 `let` 绑定表达式类型后，将变量名+类型注册到当前作用域。修复 `match x { Ok(v) => { let y = ...; println(y) } }` 报 undefined variable 的问题
