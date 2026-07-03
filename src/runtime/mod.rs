@@ -116,8 +116,8 @@ mod libc {
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 // Re-export types used by FFI tests and codegen
 // Must match the C layouts exactly.
@@ -6209,18 +6209,41 @@ enum ConcurrencyAtomic {
     Bool(std::sync::atomic::AtomicBool),
 }
 
-/// Per-primitive Mutex storage. Held by handle; unlocked/locked via runtime
-/// calls. Public methods on the lock token are not used (no `MutexGuard<T>`
-/// ergonomics in C ABI); instead we expose lock/unlock/get/set explicitly.
+/// Per-primitive Mutex storage. The `Arc` gives the inner `Mutex` a stable
+/// address and keeps it alive even if the handle is dropped while a guard
+/// is still held (defensive against user error). Guards are stored in
+/// `MIMI_MUTEX_GUARDS` and keep an `Arc` clone so the lifetime extension to
+/// `'static` used in `HeldMutexGuard` is sound.
 struct ConcurrencyMutex {
-    inner: std::sync::Mutex<i64>,
+    inner: Arc<std::sync::Mutex<i64>>,
 }
+
+/// A held mutex guard returned to codegen/interpreter as an opaque guard
+/// handle. The `_arc` clone keeps the `Mutex` alive for the guard's lifetime;
+/// the `guard` lifetime is extended to `'static` because the mutex will not be
+/// deallocated while this struct exists.
+struct HeldMutexGuard {
+    _arc: Arc<std::sync::Mutex<i64>>,
+    guard: std::sync::MutexGuard<'static, i64>,
+}
+
+thread_local! {
+    /// Guards are stored per-thread because `std::sync::MutexGuard` is not
+    /// `Send`. A mutex guard should only be accessed from the thread that
+    /// locked it, so thread-local storage is both safe and semantically correct.
+    static MIMI_MUTEX_GUARDS: std::cell::RefCell<HashMap<u64, HeldMutexGuard>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+static MIMI_MUTEX_GUARD_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded mpsc channel of i64 values. Constructed via `mimi_channel_new`.
 /// `send` pushes; `recv`/`try_recv` pops; `drop` closes both endpoints.
+/// The receiver is wrapped in `Arc<Mutex<Option<Receiver>>>` so that a
+/// blocking `recv` can be performed without holding the global handle table
+/// lock.
 struct ConcurrencyChannel {
     tx: std::sync::mpsc::Sender<i64>,
-    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<i64>>>,
+    rx: Arc<Mutex<Option<std::sync::mpsc::Receiver<i64>>>>,
 }
 
 fn alloc_atomic(a: ConcurrencyAtomic) -> i64 {
@@ -6427,67 +6450,66 @@ pub extern "C" fn mimi_atomic_bool_drop(handle: i64) {
 #[no_mangle]
 pub extern "C" fn mimi_mutex_new(value: i64) -> i64 {
     alloc_mutex(ConcurrencyMutex {
-        inner: std::sync::Mutex::new(value),
+        inner: Arc::new(std::sync::Mutex::new(value)),
     })
 }
 
-/// Lock the mutex and return a separate lock-handle id. The lock handle can
-/// be passed to `mimi_mutex_get`/`set` to read/write the held value, and to
-/// `mimi_mutex_unlock` to release the lock. (We do not return the OS Mutex
-/// guard because handles are i64; one global mutex per Mimi mutex is sufficient
-/// for this v0 single-thread L1 batch — concurrent threads will serialize through
-/// the same global table, which provides mutual exclusion.)
+/// Lock the mutex and return a separate guard-handle id. The guard handle
+/// must be passed to `mimi_mutex_get`/`set` to read/write the held value, and
+/// to `mimi_mutex_unlock` to release the lock. The lock is held continuously
+/// between lock/get/set/unlock, providing real mutual exclusion across threads.
 #[no_mangle]
 pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    match table.mutexes.get(&(handle as u64)) {
-        Some(m) => {
-            let _guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
-            // Lock succeeded. Return handle as the "lock token".
-            handle
+    let arc = {
+        let table = CONCURRENCY_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.mutexes.get(&(handle as u64)) {
+            Some(m) => Arc::clone(&m.inner),
+            _ => return 0,
         }
-        _ => 0,
-    }
+    };
+    // Drop the global table lock before blocking on the mutex.
+    let guard = arc.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: the `Arc` clone in `HeldMutexGuard` keeps the mutex alive for as
+    // long as the guard exists, so extending the guard lifetime to `'static`
+    // is sound. The guard is stored in thread-local storage until
+    // `mimi_mutex_unlock` removes it.
+    let guard: std::sync::MutexGuard<'static, i64> = unsafe { std::mem::transmute(guard) };
+    let held = HeldMutexGuard { _arc: arc, guard };
+    let id = MIMI_MUTEX_GUARD_NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    MIMI_MUTEX_GUARDS.with(|guards| {
+        guards.borrow_mut().insert(id, held);
+    });
+    id as i64
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_mutex_get(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    match table.mutexes.get(&(handle as u64)) {
-        Some(m) => {
-            let guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
-            *guard
+pub extern "C" fn mimi_mutex_get(guard_handle: i64) -> i64 {
+    MIMI_MUTEX_GUARDS.with(|guards| {
+        guards
+            .borrow()
+            .get(&(guard_handle as u64))
+            .map(|held| *held.guard)
+            .unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn mimi_mutex_set(guard_handle: i64, value: i64) {
+    MIMI_MUTEX_GUARDS.with(|guards| {
+        if let Some(held) = guards.borrow_mut().get_mut(&(guard_handle as u64)) {
+            *held.guard = value;
         }
-        _ => 0,
-    }
+    });
 }
 
 #[no_mangle]
-pub extern "C" fn mimi_mutex_set(handle: i64, value: i64) {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(m) = table.mutexes.get(&(handle as u64)) {
-        let mut guard = m.inner.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = value;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mimi_mutex_unlock(handle: i64) {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(m) = table.mutexes.get(&(handle as u64)) {
-        // Briefly acquire then immediately drop. The v0 single-thread L1
-        // model treats lock/unlock as a no-op for mutual exclusion (the
-        // global CONCURRENCY_HANDLES table itself serialises calls).
-        drop(m.inner.lock());
-    }
+pub extern "C" fn mimi_mutex_unlock(guard_handle: i64) {
+    MIMI_MUTEX_GUARDS.with(|guards| {
+        // Removing the entry drops the `MutexGuard`, releasing the OS lock.
+        guards.borrow_mut().remove(&(guard_handle as u64));
+    });
 }
 
 #[no_mangle]
@@ -6505,67 +6527,110 @@ pub extern "C" fn mimi_channel_new() -> i64 {
     let (tx, rx) = std::sync::mpsc::channel::<i64>();
     alloc_channel(ConcurrencyChannel {
         tx,
-        rx: std::sync::Mutex::new(Some(rx)),
+        rx: Arc::new(Mutex::new(Some(rx))),
     })
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_send(handle: i64, value: i64) {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(ch) = table.channels.get(&(handle as u64)) {
-        let _ = ch.tx.send(value);
+    let tx = {
+        let table = CONCURRENCY_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        table.channels.get(&(handle as u64)).map(|ch| ch.tx.clone())
+    };
+    if let Some(tx) = tx {
+        let _ = tx.send(value);
     }
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(ch) = table.channels.get(&(handle as u64)) {
-        if let Some(rx) = ch.rx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            // Recv on a moved reference would break — but we only borrow.
-            // Using a one-shot peek by locking/unlocking is correct here.
-            match rx.recv() {
-                Ok(v) => return v,
-                Err(_) => return 0,
-            }
+    // Look up the channel under the global lock, then clone the receiver Arc
+    // and drop the global lock *before* blocking on recv(). This prevents a
+    // receiver from stalling all other concurrency-handle operations.
+    let rx_arc = {
+        let table = CONCURRENCY_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.channels.get(&(handle as u64)) {
+            Some(ch) => Arc::clone(&ch.rx),
+            _ => return 0,
         }
+    };
+    // Take the receiver out under the mutex lock, then drop the lock before
+    // blocking on recv(). This prevents a deadlock with mimi_channel_drop,
+    // which needs the same mutex to set the receiver slot to None.
+    let rx = rx_arc.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // MutexGuard is dropped here; the mutex is now free.
+    match rx {
+        Some(rx) => {
+            let result = rx.recv().unwrap_or_default();
+            // Re-acquire the mutex and put the receiver back only if the
+            // channel still exists in the global table (i.e. mimi_channel_drop
+            // has not been called while we were blocked).
+            let still_alive = CONCURRENCY_HANDLES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .channels
+                .contains_key(&(handle as u64));
+            if still_alive {
+                *rx_arc.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+            }
+            // If the channel was dropped, `rx` is dropped here.
+            result
+        }
+        None => 0,
     }
-    0
 }
 
 /// Non-blocking receive. Returns `value` on success, or `-1` if no value is
 /// currently available (channel still open, queue empty).
 #[no_mangle]
 pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
-    let table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(ch) = table.channels.get(&(handle as u64)) {
-        if let Some(rx) = ch.rx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            match rx.try_recv() {
-                Ok(v) => return v,
-                Err(_) => return -1,
-            }
+    let rx_arc = {
+        let table = CONCURRENCY_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.channels.get(&(handle as u64)) {
+            Some(ch) => Arc::clone(&ch.rx),
+            _ => return -1,
         }
+    };
+    // Take the receiver out, try_recv (which is non-blocking), then put back.
+    let rx = rx_arc.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match rx {
+        Some(rx) => {
+            let result = rx.try_recv().unwrap_or(-1);
+            let still_alive = CONCURRENCY_HANDLES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .channels
+                .contains_key(&(handle as u64));
+            if still_alive {
+                *rx_arc.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+            }
+            // If the channel was dropped, `rx` is dropped here.
+            result
+        }
+        None => -1,
     }
-    -1
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_channel_drop(handle: i64) {
-    let mut table = CONCURRENCY_HANDLES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(ch) = table.channels.remove(&(handle as u64)) {
-        // Drop receiver first so any pending `send` fails fast.
-        *ch.rx.lock().unwrap_or_else(|e| e.into_inner()) = None; // Drop receiver first so any pending `send` fails fast.
-                                                                 // Sender drops when `ch` is dropped at end of fn.
-        drop(ch.tx);
-    }
+    let rx_arc = {
+        let mut table = CONCURRENCY_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.channels.remove(&(handle as u64)) {
+            Some(ch) => ch.rx,
+            _ => return,
+        }
+    };
+    // Drop the receiver outside the global handle table lock so that any
+    // pending `recv` unblocks promptly without needing the global lock.
+    *rx_arc.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 // =========================================================================
