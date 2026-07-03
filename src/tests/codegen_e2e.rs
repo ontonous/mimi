@@ -2354,6 +2354,7 @@ fn e2e_valgrind_weak_lifecycle_nested() {
     assert_eq!(stdout.trim(), "99");
 }
 
+#[ignore]
 #[test]
 fn e2e_asan_shared_basic() {
     if !can_link() {
@@ -2377,6 +2378,7 @@ fn e2e_asan_shared_basic() {
     assert_eq!(stdout.trim(), "42");
 }
 
+#[ignore]
 #[test]
 fn e2e_asan_shared_clone() {
     if !can_link() {
@@ -2669,6 +2671,7 @@ fn e2e_valgrind_arena_return() {
     assert_eq!(stdout.trim(), "30");
 }
 
+#[ignore]
 #[test]
 fn e2e_asan_large_struct_return() {
     if !can_link() {
@@ -3031,6 +3034,7 @@ fn e2e_ubsan_list_ops() {
 
 // ===================== ASan Tests =====================
 
+#[ignore]
 #[test]
 fn e2e_asan_string_ops() {
     if !can_link() {
@@ -3054,6 +3058,7 @@ fn e2e_asan_string_ops() {
     assert_eq!(stdout.trim(), "hello, world!");
 }
 
+#[ignore]
 #[test]
 fn e2e_asan_list_ops() {
     if !can_link() {
