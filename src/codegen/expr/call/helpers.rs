@@ -870,46 +870,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::PointerValue(pv) => pv,
             _ => return Err("reduce: first arg must be a list".into()),
         };
-        let fn_name = match &args[1] {
-            Expr::Ident(n) => n.clone(),
-            _ => return Err("reduce: second arg must be a function name".into()),
-        };
         let init_val = self.compile_expr(&args[2], vars)?;
+
         // Reduce takes a 2-arg closure (acc, elem) -> acc. The codegen
         // path can either call a named user function directly, or invoke a
         // lambda value by extracting its {fn_ptr, env_ptr} pair and
         // dispatching via an indirect call inside the loop body.
-        let (fn_llvm, indirect_call): (
-            inkwell::values::FunctionValue<'ctx>,
-            Option<(
+        enum ReduceCallee<'ctx> {
+            Direct(inkwell::values::FunctionValue<'ctx>),
+            Indirect(
                 inkwell::values::PointerValue<'ctx>,
                 inkwell::values::PointerValue<'ctx>,
-            )>,
-        ) = match &args[1] {
-            Expr::Ident(n) => (
+            ),
+        }
+        let callee = match &args[1] {
+            Expr::Ident(n) => ReduceCallee::Direct(
                 self.module
                     .get_function(n)
                     .ok_or_else(|| format!("reduce: function '{}' not compiled", n))?,
-                None,
             ),
             Expr::Lambda { params, ret, body } => {
                 let closure_val = self.compile_lambda_expr(params, ret, body, vars)?;
                 let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
-                // Wrap the closure in a zero-arg shim so the loop body
-                // can perform a uniform call. Build the shim once
-                // outside the loop by re-emitting the closure call
-                // inline; here we just stash the closure info and
-                // synthesise a dummy function value that never runs.
-                let dummy_fn = self.module.get_function("__noop").unwrap_or_else(|| {
-                    let i64_ty = self.context.i64_type();
-                    let dummy_ty = i64_ty.fn_type(&[], false);
-                    self.module
-                        .add_function("__noop", dummy_ty, None)
-                });
-                (dummy_fn, Some((fn_ptr, env_ptr)))
+                ReduceCallee::Indirect(fn_ptr, env_ptr)
             }
-            _ => return Err("reduce: second arg must be a function name, lambda, or function pointer".into()),
+            _ => {
+                return Err(
+                    "reduce: second arg must be a function name, lambda, or function pointer"
+                        .into(),
+                )
+            }
         };
+
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(
@@ -971,17 +963,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let elem = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
         let acc = self.build_load(BasicTypeEnum::IntType(i64_ty), acc_alloca, "acc")?;
-        let fn_result = self
-            .build_call(
-                fn_llvm,
-                &[
-                    BasicMetadataValueEnum::IntValue(acc.into_int_value()),
-                    BasicMetadataValueEnum::IntValue(elem.into_int_value()),
-                ],
-                "reduce_call",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("function returned void")?;
+
+        let fn_result = match callee {
+            ReduceCallee::Direct(func) => self
+                .build_call(
+                    func,
+                    &[
+                        BasicMetadataValueEnum::IntValue(acc.into_int_value()),
+                        BasicMetadataValueEnum::IntValue(elem.into_int_value()),
+                    ],
+                    "reduce_call",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("function returned void")?,
+            ReduceCallee::Indirect(fn_ptr, env_ptr) => {
+                // Closure ABI: fn(env_ptr: i8*, acc: i64, elem: i64) -> i64
+                let closure_fn_type = i64_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64_ty),
+                        BasicMetadataTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let fn_ptr_typed = self.build_pointer_cast(fn_ptr, i8_ptr, "reduce_fn_ptr")?;
+                let call = self
+                    .builder
+                    .build_indirect_call(
+                        closure_fn_type,
+                        fn_ptr_typed,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(env_ptr),
+                            BasicMetadataValueEnum::IntValue(acc.into_int_value()),
+                            BasicMetadataValueEnum::IntValue(elem.into_int_value()),
+                        ],
+                        "reduce_call",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("indirect call error: {}", e)))?;
+                call_try_basic_value(&call)
+                    .ok_or_else(|| CompileError::LlvmError("closure returned void".into()))?
+            }
+        };
+
         self.build_store(acc_alloca, fn_result)?;
         let next = self
             .builder

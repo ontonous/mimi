@@ -830,14 +830,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         self.var_type_names.insert(param.name.clone(), tn.clone());
                     }
+                    self.var_types.insert(param.name.clone(), resolved.clone());
+                }
+                if let Type::Ref(_, inner) | Type::RefMut(_, inner) = &resolved {
+                    if let Type::Name(tn, args) = inner.as_ref() {
+                        if tn == "List" && !args.is_empty() {
+                            if let Some(full) = self.get_full_type_name(inner) {
+                                self.var_type_names.insert(param.name.clone(), full);
+                            }
+                        } else {
+                            self.var_type_names.insert(param.name.clone(), tn.clone());
+                        }
+                        self.var_types
+                            .insert(param.name.clone(), inner.as_ref().clone());
+                    }
                 }
                 if let Type::DynTrait(_) = &resolved {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
+                    self.var_types.insert(param.name.clone(), resolved.clone());
                 }
                 if let Type::ImplTrait(_) = &resolved {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
+                    self.var_types.insert(param.name.clone(), resolved.clone());
                 }
 
                 // Register list element type for List<T> params where T is a struct

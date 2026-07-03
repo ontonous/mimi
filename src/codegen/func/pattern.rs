@@ -81,9 +81,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("assert call error: {}", e)))?;
                 Ok(())
             }
-            Pattern::Constructor(_name, sub_patterns) => {
+            Pattern::Constructor(name, sub_patterns) => {
                 if sub_patterns.is_empty() {
                     return Ok(());
+                }
+                // Newtypes are transparent in codegen: the value *is* the inner
+                // type, so bind the sole inner pattern directly to it.
+                if let Some(td) = self.type_defs.get(name) {
+                    if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
+                        if sub_patterns.len() == 1 {
+                            self.compile_pattern_bind(&sub_patterns[0], val, vars)?;
+                        }
+                        return Ok(());
+                    }
                 }
                 // Load struct value if we have a pointer
                 let struct_val = match val {
@@ -288,6 +298,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Pattern::Constructor(name, _) => {
+                // Newtypes have only one constructor, so the pattern always matches.
+                if let Some(td) = self.type_defs.get(name) {
+                    if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
+                        return Ok(self.context.bool_type().const_int(1, false));
+                    }
+                }
                 // Extract enum tag (i32 at struct index 0) and compare with expected ordinal
                 let val_sv = match val {
                     BasicValueEnum::StructValue(sv) => *sv,

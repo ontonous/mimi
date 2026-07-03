@@ -187,12 +187,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                 Ok(result)
             }
-            BasicMetadataValueEnum::StructValue(_) => {
-                return Err(CompileError::TypeMismatch(
-                    "to_string: struct/List in codegen path not yet supported"
-                        .to_string(),
-                ));
-            }
+            BasicMetadataValueEnum::StructValue(_) => Err(CompileError::TypeMismatch(
+                "to_string: struct/List in codegen path not yet supported".to_string(),
+            )),
             BasicMetadataValueEnum::PointerValue(_) => {
                 // Treat a stray pointer (e.g. typed reference) as a C string.
                 let pv = if let BasicMetadataValueEnum::PointerValue(p) = args[0] {
@@ -220,13 +217,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_store(buf, self.context.i8_type().const_int(b'?' as u64, false))
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
                 let nul = unsafe {
-                    self.builder
-                        .build_in_bounds_gep(
-                            self.context.i8_type(),
-                            buf,
-                            &[self.context.i64_type().const_int(1, false)],
-                            "nul_pos",
-                        )
+                    self.builder.build_in_bounds_gep(
+                        self.context.i8_type(),
+                        buf,
+                        &[self.context.i64_type().const_int(1, false)],
+                        "nul_pos",
+                    )
                 }
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 self.builder
@@ -294,7 +290,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // if not already in the module.
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_ty = i8_ptr_ty.fn_type(
-            &[inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+            &[inkwell::types::BasicMetadataTypeEnum::PointerType(
+                i8_ptr_ty,
+            )],
             false,
         );
         let callee = self
@@ -370,10 +368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn build_string_literal(&self, s: &str) -> MimiResult<BasicValueEnum<'ctx>> {
         // Allocate enough room (len + 1 for the NUL terminator) and use
         // sprintf("%s", …) to copy the literal into the heap buffer.
-        let len_with_nul = self
-            .context
-            .i64_type()
-            .const_int(s.len() as u64 + 1, false);
+        let len_with_nul = self.context.i64_type().const_int(s.len() as u64 + 1, false);
         let malloc_fn = self
             .module
             .get_function("malloc")

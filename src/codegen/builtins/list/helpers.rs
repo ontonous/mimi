@@ -100,14 +100,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let alloca = self
                     .builder
                     .build_alloca(list_struct_ty, &format!("{}_arg_alloca", name))
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("list alloca error: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::LlvmError(format!("list alloca error: {}", e)))?;
                 self.builder
                     .build_store(alloca, sv)
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("list store error: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::LlvmError(format!("list store error: {}", e)))?;
                 Ok(alloca)
             }
             _ => Err(CompileError::TypeMismatch(format!(

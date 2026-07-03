@@ -49,6 +49,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.bind_pattern_var(&mut local_vars, name, val, ty)?;
             }
             Pattern::Constructor(name, inner_patterns) => {
+                // Newtypes are transparent: the constructor pattern binds the
+                // inner variable directly to the scrutinee value.
+                if let Some(td) = self.type_defs.get(name) {
+                    if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
+                        if let Some(first) = inner_patterns.first() {
+                            self.compile_pattern_bind(first, scrutinee_val, &mut local_vars)?;
+                        }
+                        return Ok(local_vars);
+                    }
+                }
                 // For constructor patterns, bind inner variables from the payload field.
                 // Most enum-like representations put the tag at index 0 and the payload
                 // at index 1. Built-in Result<T,E> is special: Ok uses index 1, Err uses
@@ -806,6 +816,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((arm_bb, next_bb))
             }
             Pattern::Constructor(name, _) => {
+                // Newtypes are transparent and have a single constructor, so
+                // the arm always matches.
+                if self
+                    .type_defs
+                    .get(name)
+                    .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)))
+                {
+                    self.build_br(arm_bb)?;
+                    let next_bb = self
+                        .context
+                        .append_basic_block(function, &format!("next{}", arm_idx));
+                    return Ok((arm_bb, next_bb));
+                }
                 // Constructor pattern: compare tag using ordinal index
                 let scrutinee_iv = scrutinee_iv.ok_or_else(|| {
                     CompileError::LlvmError(
