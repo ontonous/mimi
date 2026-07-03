@@ -260,3 +260,27 @@ fn real_world_json() {
         "mimi\n42",
     );
 }
+
+// ===================== Multiple std modules combined =====================
+
+#[test]
+fn real_world_multiple_std_modules() {
+    run_both(
+        r#"
+        use std::strings
+        use std::collections
+        use std::mymath
+
+        func main() -> i32 {
+            let nums = [1, 2, 3, 4, 5]
+            println(reduce_list(nums, fn(acc: i32, x: i32) -> i32 { acc + x }, 0))
+            println(filter_list(nums, fn(x: i32) -> bool { x % 2 == 0 }))
+            if contains("hello world", "world") { println("yes") } else { println("no") }
+            println(power(2, 10))
+            println(gcd(48, 18))
+            0
+        }
+    "#,
+        "15\n[2, 4]\nyes\n1024\n6",
+    );
+}

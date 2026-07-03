@@ -184,7 +184,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "len" && args.len() == 1 {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
         }
-        if crate::codegen::builtins::is_builtin(name) && !self.func_defs.contains_key(name) {
+        let builtin_available = crate::codegen::builtins::is_builtin(name);
+        let user_func_matches = self.user_func_signature_matches(name, args);
+        if builtin_available && !user_func_matches {
             // P0-3: for the print/println/eprintln family only, convert
             // boolean args to "true"/"false" string pointers before
             // handing them to the builtin dispatch. Other builtins
@@ -675,6 +677,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(())
+    }
+
+    /// Decide whether a user-defined function with the given name can plausibly
+    /// accept these argument expressions. This is used when a builtin and a user
+    /// function share a name (e.g. `contains`) to resolve the ambiguity created
+    /// by flattening imported modules into a single namespace.
+    fn user_func_signature_matches(&self, name: &str, args: &[Expr]) -> bool {
+        let fdef = match self.func_defs.get(name) {
+            Some(f) => f,
+            None => return false,
+        };
+        for (i, param) in fdef.params.iter().enumerate() {
+            if i >= args.len() {
+                break;
+            }
+            let arg_ty = match self.expr_type_of(&args[i], &HashMap::new()) {
+                Some(t) => t,
+                None => continue,
+            };
+            // For concrete scalar parameter types, require an exact match.
+            // Generic or complex parameter types are assumed compatible.
+            let is_concrete_scalar = matches!(
+                &param.ty,
+                crate::ast::Type::Name(n, _)
+                    if n == "string" || n == "i32" || n == "i64" || n == "f64" || n == "bool"
+            );
+            if is_concrete_scalar && arg_ty != param.ty {
+                return false;
+            }
+        }
+        true
     }
 
     /// Get or create a closure ABI wrapper for a named function.

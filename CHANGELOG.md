@@ -4,7 +4,7 @@
 
 ### Fixed
 - **heap slot 清理 dominance 修复** (`src/codegen/mod.rs`, `src/codegen/expr/record.rs`, `src/codegen/builtins/string/` 等)：将拥有堆数据的结构体 alloca 改在函数 entry block 分配，`free_heap_allocs` 在清理点重新 emit GEP，避免跨 basic block 释放时触发 `Instruction does not dominate all uses` 或内存泄漏
-- **codegen 用户函数优先于同名内建函数** (`src/codegen/expr/call/simple.rs`)：`contains` 等名字若被 `use std::strings` 导入为用户函数，不再被内建 `contains` 抢占，修复 `real_world_strings_module` 的 `mimi build`
+- **codegen 同名内建/用户函数类型分派** (`src/codegen/expr/call/simple.rs`)：当内建函数与用户导入函数同名时（如 `contains`），按实参类型决定走内建还是用户函数，修复同时 `use std::strings` / `use std::collections` 时 `contains` 在 codegen 中报 `undefined function` 的问题
 - **codegen 用户函数调用隐式数值转换** (`src/codegen/expr/call/simple.rs`, `src/codegen/mod.rs`)：按被调函数参数类型对实数做 i32↔i64、int→float 转换，修复 `power(2, 10)` 等调用
 - **codegen 浮点数转字符串格式对齐解释器** (`src/codegen/builtins/string/format.rs`)：`to_string` 对 `f64` 使用 `%.15g` 而非 `%f`，`1024.0` 输出 `1024` 而非 `1024.000000`
 - **`mimi fmt` 不再破坏字符串字面量** (`src/fmt.rs`)：格式化器现在识别字符串/字符字面量边界，`normalize_spacing` 跳过字面量内部，避免修改含 `:`、`=`、`{` 等字符的字符串内容
@@ -28,7 +28,7 @@
 
 ### Tests
 - `e2e_valgrind_list_ops` 内存泄漏修复；`golden_list_ops`  golden IR 已重生成
-- `real_world_strings_module` 与 `real_world_mymath_module` 现在 `mimi run` 与 `mimi build` 双后端均通过
+- `real_world_strings_module`、`real_world_mymath_module` 及新增的 `real_world_multiple_std_modules` 现在 `mimi run` 与 `mimi build` 双后端均通过
 - 新增 formatter 回归测试（含字符串字面量保护）
 - 新增 parser / interpreter / borrow / loader / mms 回归套件
 - 新增 block 表达式类型检查回归测试
