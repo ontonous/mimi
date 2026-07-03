@@ -173,12 +173,14 @@ fn real_world_collections_module() {
             let nums = [1, 2, 3, 4, 5]
             let sum = reduce_list(nums, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
             let evens = filter_list(nums, fn(x: i32) -> bool { x % 2 == 0 })
+            let doubled = map_list(nums, fn(x: i32) -> i32 { x * 2 })
             println(sum)
             println(evens)
+            println(doubled)
             0
         }
     "#,
-        "15\n[2, 4]",
+        "15\n[2, 4]\n[2, 4, 6, 8, 10]",
     );
 }
 

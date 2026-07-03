@@ -114,6 +114,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Type::Func(p_args, p_ret) => {
+                if let Type::Func(a_args, a_ret) = actual {
+                    if p_args.len() == a_args.len() {
+                        for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                            self.infer_type_params(pa, aa, generics, type_map);
+                        }
+                        self.infer_type_params(p_ret, a_ret, generics, type_map);
+                    }
+                }
+            }
             _ => {}
         }
     }
