@@ -905,6 +905,41 @@ pub extern "C" fn mimi_str_join(
     alloc_c_string(&result)
 }
 
+/// Render a `MimiList` (codegen `{i64 len, i8* data}`) to a printable
+/// heap-allocated C string. Used by the codegen `to_string` builtin
+/// when it encounters a list value.
+#[no_mangle]
+pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(", "));
+        }
+        // `lst.data` is `*mut *mut c_char`; dereference to a C string.
+        let item_ptr = unsafe { *lst.data.offset(i) };
+        if item_ptr.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            let s = unsafe { cstr_to_string(item_ptr) };
+            parts.push(s);
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_str_replace(
     s: *const std::ffi::c_char,

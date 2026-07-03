@@ -1650,7 +1650,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             None
         };
-        let function = self.module.add_function(&func.name, fn_type, linkage);
+        // Reuse the forward-declared function if it exists; otherwise
+        // emit a fresh declaration. `Module::add_function` in inkwell
+        // panics if a function with this name already exists with a
+        // mismatching type, so we always look it up first.
+        let function = if let Some(existing) = self.module.get_function(&func.name) {
+            existing
+        } else {
+            self.module.add_function(&func.name, fn_type, linkage)
+        };
         // Set calling convention for extern "C" / extern "stdcall" etc.
         if let Some(ref abi) = func.extern_abi {
             let cc = crate::ffi::abi_to_llvm_call_conv(abi);

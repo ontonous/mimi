@@ -309,7 +309,7 @@ pub func indent(s: string, n: i32) -> string {
     let prefix = str_repeat(" ", n)
     let mut indented: List<string> = []
     for line in lines(s) {
-        push(indented, prefix + line)
+        push(indented, str_join([prefix, line], ""))
     }
     str_join(indented, "\n")
 }

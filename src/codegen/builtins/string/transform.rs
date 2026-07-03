@@ -424,14 +424,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_join expects 2 arguments (list, delimiter)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_join: first arg must be list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.coerce_list_to_ptr(args[0], "str_join")?;
         let delim_ptr = self.extract_string_arg(&args[1], "str_join")?;
         let func = self.get_runtime_fn("mimi_str_join")?;
         let result_ptr = self

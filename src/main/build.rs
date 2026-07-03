@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::resolve_path;
+use mimi::ast::Item;
 use mimi::codegen;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::{lexer, loader, parser, verifier};
@@ -110,6 +111,21 @@ pub(crate) fn build(
     // Auto-merge standard library prelude unless --no-std
     if !no_std {
         loader::merge_prelude_into(&mut merged_file);
+    }
+
+    // Reorder so the entry `main` is the LAST item. After
+    // `merge_prelude_into` (which inserts prelude items at the front)
+    // and `merge_all` (which keeps `main` from the entry file first),
+    // `main` ends up before its callees from `use std::…`. Pushing
+    // `main` to the back guarantees every pub helper is compiled
+    // (and its LLVM symbol emitted) before `main` references it.
+    if let Some(main_idx) = merged_file
+        .items
+        .iter()
+        .position(|i| matches!(i, Item::Func(f) if f.name == "main"))
+    {
+        let main_item = merged_file.items.remove(main_idx);
+        merged_file.items.push(main_item);
     }
 
     // Map inline rule statements to structured contracts
@@ -257,16 +273,24 @@ pub(crate) fn build(
     for flag in target_linker_flags(target) {
         cmd.arg(flag);
     }
-    // Link stdlib dependencies when not building no_std
-    if !no_std {
-        cmd.arg("-lpthread").arg("-ldl").arg("-lm");
-    }
     let status = cmd
         .arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
         .arg(
             runtime_lib
                 .to_str()
                 .ok_or("runtime library path is not valid UTF-8")?,
+        )
+        // Link stdlib dependencies *after* the object files so that
+        // `--as-needed` (the modern ld default) does not drop them
+        // when no unresolved symbols have been seen yet.
+        .args(
+            if !no_std {
+                ["-lpthread", "-ldl", "-lm"]
+            } else {
+                ["-lpthread", "", ""]
+            }
+            .iter()
+            .filter(|s| !s.is_empty()),
         )
         .arg("-o")
         .arg(

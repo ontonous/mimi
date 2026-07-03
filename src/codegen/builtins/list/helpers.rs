@@ -78,6 +78,45 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(data_ptr)
     }
 
+    /// Materialize a list argument into a `*const MimiList` pointer.
+    ///
+    /// Builtin runtime helpers (`mimi_str_join`, `mimi_contains`, `mimi_push`,
+    /// …) uniformly take a `*const MimiList` pointer. Mimi list values at
+    /// the call site, however, are sometimes passed by value as an inline
+    /// `{i64, i8*}` StructValue (e.g. from a nested indexing or a literal)
+    /// and sometimes as a PointerValue to an existing list alloca. This
+    /// helper unifies the two: PointerValue is returned as-is, while
+    /// StructValue is copied into a fresh alloca and the alloca pointer
+    /// is returned.
+    pub(in crate::codegen) fn coerce_list_to_ptr(
+        &self,
+        arg: BasicMetadataValueEnum<'ctx>,
+        name: &str,
+    ) -> MimiResult<PointerValue<'ctx>> {
+        match arg {
+            BasicMetadataValueEnum::PointerValue(pv) => Ok(pv),
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let list_struct_ty = self.list_struct_type();
+                let alloca = self
+                    .builder
+                    .build_alloca(list_struct_ty, &format!("{}_arg_alloca", name))
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("list alloca error: {}", e))
+                    })?;
+                self.builder
+                    .build_store(alloca, sv)
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("list store error: {}", e))
+                    })?;
+                Ok(alloca)
+            }
+            _ => Err(CompileError::TypeMismatch(format!(
+                "{}: first arg must be list",
+                name
+            ))),
+        }
+    }
+
     /// Allocate a list result struct and populate it with `len` and `data` (`i8*`).
     pub(in crate::codegen) fn alloc_list_result(
         &self,

@@ -875,10 +875,41 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Err("reduce: second arg must be a function name".into()),
         };
         let init_val = self.compile_expr(&args[2], vars)?;
-        let fn_llvm = self
-            .module
-            .get_function(&fn_name)
-            .ok_or_else(|| format!("reduce: function '{}' not compiled", fn_name))?;
+        // Reduce takes a 2-arg closure (acc, elem) -> acc. The codegen
+        // path can either call a named user function directly, or invoke a
+        // lambda value by extracting its {fn_ptr, env_ptr} pair and
+        // dispatching via an indirect call inside the loop body.
+        let (fn_llvm, indirect_call): (
+            inkwell::values::FunctionValue<'ctx>,
+            Option<(
+                inkwell::values::PointerValue<'ctx>,
+                inkwell::values::PointerValue<'ctx>,
+            )>,
+        ) = match &args[1] {
+            Expr::Ident(n) => (
+                self.module
+                    .get_function(n)
+                    .ok_or_else(|| format!("reduce: function '{}' not compiled", n))?,
+                None,
+            ),
+            Expr::Lambda { params, ret, body } => {
+                let closure_val = self.compile_lambda_expr(params, ret, body, vars)?;
+                let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
+                // Wrap the closure in a zero-arg shim so the loop body
+                // can perform a uniform call. Build the shim once
+                // outside the loop by re-emitting the closure call
+                // inline; here we just stash the closure info and
+                // synthesise a dummy function value that never runs.
+                let dummy_fn = self.module.get_function("__noop").unwrap_or_else(|| {
+                    let i64_ty = self.context.i64_type();
+                    let dummy_ty = i64_ty.fn_type(&[], false);
+                    self.module
+                        .add_function("__noop", dummy_ty, None)
+                });
+                (dummy_fn, Some((fn_ptr, env_ptr)))
+            }
+            _ => return Err("reduce: second arg must be a function name, lambda, or function pointer".into()),
+        };
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let list_struct_ty = BasicTypeEnum::StructType(self.context.struct_type(

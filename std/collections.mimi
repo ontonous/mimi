@@ -393,8 +393,14 @@ pub func filter_list<T>(xs: List<T>, pred: func(T) -> bool) -> List<T> {
 }
 
 // reduce_list: Reduces xs with f and initial value init.
+// Hand-rolled loop to avoid `reduce`'s codegen restriction (it only
+// accepts function-name args, not lambda values).
 pub func reduce_list<T, U>(xs: List<T>, f: func(U, T) -> U, init: U) -> U {
-    xs.reduce(f, init)
+    let mut acc = init
+    for rl_x in xs {
+        acc = f(acc, rl_x)
+    }
+    acc
 }
 
 // min_index: Returns the index of the minimum element (-1 if empty).
