@@ -75,15 +75,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.find_variant_owner(name).and_then(|(owner, _)| {
                         self.type_defs.get(&owner).and_then(|td| {
                             if let TypeDefKind::Enum(variants) = &td.kind {
-                                variants
-                                    .iter()
-                                    .find(|v| v.name == *name)
-                                    .and_then(|v| match &v.payload {
+                                variants.iter().find(|v| v.name == *name).and_then(|v| {
+                                    match &v.payload {
                                         Some(VariantPayload::Tuple(ts)) if ts.len() > 1 => {
                                             Some(ts.clone())
                                         }
                                         _ => None,
-                                    })
+                                    }
+                                })
                             } else {
                                 None
                             }
@@ -140,25 +139,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // the corresponding field.
                     let payload_int = match payload {
                         BasicValueEnum::IntValue(iv) => iv,
-                        BasicValueEnum::PointerValue(pv) => {
-                            self.builder
-                                .build_ptr_to_int(
-                                    pv,
-                                    self.context.i64_type(),
-                                    "payload_int_recover",
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("ptr2int: {}", e))
-                                })?
-                        }
+                        BasicValueEnum::PointerValue(pv) => self
+                            .builder
+                            .build_ptr_to_int(pv, self.context.i64_type(), "payload_int_recover")
+                            .map_err(|e| CompileError::LlvmError(format!("ptr2int: {}", e)))?,
                         _ => {
-                            return Err(
-                                "multi-arg constructor pattern: expected int payload".into(),
-                            )
+                            return Err("multi-arg constructor pattern: expected int payload".into())
                         }
                     };
-                    let mut field_tys: Vec<BasicTypeEnum<'ctx>> =
-                        Vec::with_capacity(arg_tys.len());
+                    let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::with_capacity(arg_tys.len());
                     let mut all_known = true;
                     for t in &arg_tys {
                         if let Some(ty) = self.llvm_type_for(t) {
@@ -188,14 +177,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_load(packed_ty_enum, ptr, "multi_payload_struct")
                         .map_err(|e| {
-                            CompileError::LlvmError(format!(
-                                "load multi payload struct: {}",
-                                e
-                            ))
+                            CompileError::LlvmError(format!("load multi payload struct: {}", e))
                         })?
                         .into_struct_value();
-                    let payload_ptr =
-                        self.build_alloca(packed_ty_enum, "multi_payload_alloca")?;
+                    let payload_ptr = self.build_alloca(packed_ty_enum, "multi_payload_alloca")?;
                     self.build_store(payload_ptr, payload_sv)?;
                     for (j, inner_pat) in inner_patterns.iter().enumerate() {
                         if let Pattern::Variable(pname) = inner_pat {
@@ -204,9 +189,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             let elem_ty = packed_ty
                                 .get_field_type_at_index(j as u32)
-                                .unwrap_or(BasicTypeEnum::IntType(
-                                    self.context.i64_type(),
-                                ));
+                                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
                             let gep = self
                                 .gep()
                                 .build_struct_gep(
@@ -215,11 +198,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     j as u32,
                                     &format!("multi_el{}", j),
                                 )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("gep: {}", e))
-                                })?;
-                            let val =
-                                self.build_load(elem_ty, gep, &format!("multi_v{}", j))?;
+                                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                            let val = self.build_load(elem_ty, gep, &format!("multi_v{}", j))?;
                             self.bind_pattern_var(&mut local_vars, pname, val, elem_ty)?;
                         }
                     }
@@ -579,10 +559,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 if let Some(VariantPayload::Tuple(types)) = &v.payload {
                                     if types.len() == 1 {
                                         self.llvm_type_for(&types[0]).map(|t| {
-                                            (
-                                                matches!(t, BasicTypeEnum::StructType(_)),
-                                                Some(t),
-                                            )
+                                            (matches!(t, BasicTypeEnum::StructType(_)), Some(t))
                                         })
                                     } else {
                                         None
@@ -623,9 +600,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let decoded = self
                     .builder
                     .build_bit_cast(payload_val, natural_ty, "payload_bc_back")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("bitcast payload back: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast payload back: {}", e)))?;
                 Ok((decoded, natural_ty))
             }
         } else {

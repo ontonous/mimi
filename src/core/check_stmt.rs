@@ -549,7 +549,12 @@ impl<'a> Checker<'a> {
         // fields (future work).
         match stmt {
             Stmt::Let {
-                pat, init, mut_, ref_, ty, pos,
+                pat,
+                init,
+                mut_,
+                ref_,
+                ty,
+                pos,
             } => {
                 // P1-8: use the statement's recorded position for error spans.
                 self.set_pos(pos.0, pos.1);
@@ -1062,36 +1067,52 @@ impl<'a> Checker<'a> {
                         // xs[i] = val: check that xs is a mutable list and val matches element type
                         let obj_ty = self.infer_expr(obj, scopes);
                         self.infer_expr(idx, scopes);
-                        match &obj_ty {
+                        let list_elem_ty = match &obj_ty {
                             Type::Name(n, args) if n == "List" && args.len() == 1 => {
-                                let elem_ty = &args[0];
-                                if !same_type(&value_ty, elem_ty) {
-                                    self.errors.push(
-                                        Diagnostic::error_code(
-                                            crate::diagnostic::codes::E0209,
-                                            format!(
-                                                "cannot assign {} to list element of type {}",
-                                                fmt_type(&value_ty),
-                                                fmt_type(elem_ty)
-                                            ),
-                                            Span::single(self.current_line, self.current_col),
-                                        )
-                                        .with_help(
-                                            format!(
-                                                "the list contains elements of type '{}', not '{}'",
-                                                fmt_type(elem_ty),
-                                                fmt_type(&value_ty)
-                                            ),
-                                        ),
-                                    );
-                                }
+                                Some(args[0].clone())
                             }
-                            _ => {
+                            Type::RefMut(_, inner) => match inner.as_ref() {
+                                Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                                    Some(args[0].clone())
+                                }
+                                _ => None,
+                            },
+                            Type::Ref(_, _) => {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0218,
-                                    format!("cannot index-assign to {}", fmt_type(&obj_ty)),
+                                    format!(
+                                        "cannot index-assign through immutable reference {}",
+                                        fmt_type(&obj_ty)
+                                    ),
+                                );
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(elem_ty) = list_elem_ty {
+                            if !same_type(&value_ty, &elem_ty) {
+                                self.errors.push(
+                                    Diagnostic::error_code(
+                                        crate::diagnostic::codes::E0209,
+                                        format!(
+                                            "cannot assign {} to list element of type {}",
+                                            fmt_type(&value_ty),
+                                            fmt_type(&elem_ty)
+                                        ),
+                                        Span::single(self.current_line, self.current_col),
+                                    )
+                                    .with_help(format!(
+                                        "the list contains elements of type '{}', not '{}'",
+                                        fmt_type(&elem_ty),
+                                        fmt_type(&value_ty)
+                                    )),
                                 );
                             }
+                        } else if !matches!(obj_ty, Type::Ref(_, _)) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0218,
+                                format!("cannot index-assign to {}", fmt_type(&obj_ty)),
+                            );
                         }
                     }
                     _ => self.emit_code(

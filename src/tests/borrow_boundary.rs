@@ -425,3 +425,64 @@ func main() -> i32 {
         "NLL multi-block borrow should pass"
     );
 }
+
+// ── Borrowed index semantics (v0.28.24) ─────────────────────────
+
+#[test]
+fn borrow_index_mut_basic() {
+    let src = r#"
+func main() -> i32 {
+    let mut xs = [1, 2, 3];
+    let r = &mut xs[1];
+    *r = 99;
+    xs[1]
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(99));
+}
+
+#[test]
+fn borrow_index_imm_basic() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3];
+    let r = &xs[1];
+    *r
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(2));
+}
+
+#[test]
+fn borrow_index_mut_typecheck_rejects_imm() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3];
+    let r = &xs[1];
+    *r = 99;
+    xs[1]
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "assign through &xs[i] should be rejected"
+    );
+}
+
+#[test]
+fn borrow_index_mut_conflict_rejected() {
+    let src = r#"
+func main() -> i32 {
+    let mut xs = [1, 2, 3];
+    let r1 = &mut xs[1];
+    let r2 = &mut xs[1];
+    *r1 = 10;
+    *r2 = 20;
+    xs[1]
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "double &mut xs[i] should be rejected"
+    );
+}

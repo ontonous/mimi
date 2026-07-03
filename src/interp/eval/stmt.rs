@@ -511,6 +511,47 @@ impl<'a> Interpreter<'a> {
                     Value::LocalShared(rc) => {
                         *rc.lock().expect("local_shared lock not poisoned") = v;
                     }
+                    Value::IndexRefMut { owner, index } => {
+                        // Ensure the owner variable is mutable
+                        let is_mut = self
+                            .mut_vars
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(&owner))
+                            .copied()
+                            .unwrap_or(false);
+                        if !is_mut {
+                            return Err(InterpError::new(format!(
+                                "cannot assign through borrowed index into immutable variable '{}'",
+                                owner
+                            )));
+                        }
+                        let owner_val = self.lookup(&owner).ok_or_else(|| {
+                            InterpError::new(format!(
+                                "borrowed variable '{}' is no longer available",
+                                owner
+                            ))
+                        })?;
+                        match owner_val {
+                            Value::List(mut list) => {
+                                if index >= list.len() {
+                                    return Err(InterpError::index_out_of_bounds(format!(
+                                        "borrowed index {} out of bounds for list of length {}",
+                                        index,
+                                        list.len()
+                                    )));
+                                }
+                                list[index] = v;
+                                self.assign(&owner, Value::List(list))?;
+                            }
+                            _ => {
+                                return Err(InterpError::new(format!(
+                                    "cannot assign through borrowed index into {}",
+                                    type_name(&owner_val)
+                                )))
+                            }
+                        }
+                    }
                     _ => {
                         return Err(InterpError::new(format!(
                             "cannot assign through non-mutable reference (type: {})",
@@ -626,16 +667,25 @@ impl<'a> Interpreter<'a> {
                         )))
                     }
                 };
+                fn assign_list_index(
+                    items: &mut Vec<Value>,
+                    index: usize,
+                    v: Value,
+                ) -> Result<(), InterpError> {
+                    if index >= items.len() {
+                        return Err(InterpError::new(format!(
+                            "list index {} out of bounds (len {})",
+                            index,
+                            items.len()
+                        )));
+                    }
+                    items[index] = v;
+                    Ok(())
+                }
+
                 match list_val {
                     Value::List(mut items) => {
-                        if index >= items.len() {
-                            return Err(InterpError::new(format!(
-                                "list index {} out of bounds (len {})",
-                                index,
-                                items.len()
-                            )));
-                        }
-                        items[index] = v;
+                        assign_list_index(&mut items, index, v)?;
                         // Update the binding
                         if let Expr::Ident(name) = obj.as_ref() {
                             let mut found = false;
@@ -651,6 +701,34 @@ impl<'a> Interpreter<'a> {
                                     "variable '{}' not found",
                                     name
                                 )));
+                            }
+                        }
+                    }
+                    Value::RefMut(rc) => {
+                        let mut inner = rc.write().map_err(|e| {
+                            InterpError::lock_error(format!("write lock failed: {}", e))
+                        })?;
+                        match &mut *inner {
+                            Value::List(items) => assign_list_index(items, index, v)?,
+                            _ => {
+                                return Err(InterpError::new(format!(
+                                    "cannot index-assign through &mut reference to {}",
+                                    type_name(&inner)
+                                )))
+                            }
+                        }
+                    }
+                    Value::Shared(rc) => {
+                        let mut inner = rc.write().map_err(|e| {
+                            InterpError::lock_error(format!("shared write lock failed: {}", e))
+                        })?;
+                        match &mut *inner {
+                            Value::List(items) => assign_list_index(items, index, v)?,
+                            _ => {
+                                return Err(InterpError::new(format!(
+                                    "cannot index-assign through shared reference to {}",
+                                    type_name(&inner)
+                                )))
                             }
                         }
                     }

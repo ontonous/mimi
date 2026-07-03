@@ -285,7 +285,12 @@ impl crate::verifier::Verifier {
                 .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
                 .collect();
             let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-            self.check_callee_requires_in_block(&expanded_body, &mut vars, func.name.as_str(), &mut call_site_errors);
+            self.check_callee_requires_in_block(
+                &expanded_body,
+                &mut vars,
+                func.name.as_str(),
+                &mut call_site_errors,
+            );
             if !call_site_errors.is_empty() {
                 let (_, msg, _) = &call_site_errors[0];
                 return VerificationResult {
@@ -337,10 +342,7 @@ impl crate::verifier::Verifier {
             } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
                 // List parameters get a length variable for modeling sort() etc.
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
-                vars.insert_list_len(
-                    p.name.as_str(),
-                    Z3Int::new_const(format!("{}_len", p.name)),
-                );
+                vars.insert_list_len(p.name.as_str(), Z3Int::new_const(format!("{}_len", p.name)));
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -537,7 +539,12 @@ impl crate::verifier::Verifier {
         // call in the body, verify that the callee's requires (preconditions)
         // are satisfiable given the current symbolic state.
         let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-        self.check_callee_requires_in_block(&expanded_body, &mut vars, func.name.as_str(), &mut call_site_errors);
+        self.check_callee_requires_in_block(
+            &expanded_body,
+            &mut vars,
+            func.name.as_str(),
+            &mut call_site_errors,
+        );
 
         if !call_site_errors.is_empty() {
             let (_, msg, _) = &call_site_errors[0];
@@ -1514,12 +1521,12 @@ impl crate::verifier::Verifier {
         errors: &mut Vec<(String, String, crate::span::Span)>,
     ) {
         match stmt {
-            Stmt::Expr(e)
-            | Stmt::Return(Some(e))
-            | Stmt::Break(Some(e)) => {
+            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => {
                 self.check_callee_requires_in_expr(e, vars, caller_name, errors);
             }
-            Stmt::Let { init: Some(init), .. } => {
+            Stmt::Let {
+                init: Some(init), ..
+            } => {
                 self.check_callee_requires_in_expr(init, vars, caller_name, errors);
             }
             Stmt::If { cond, then_, else_ } => {
@@ -1558,10 +1565,8 @@ impl crate::verifier::Verifier {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     // Clone callee data to avoid borrow conflict with self.*
-                    let callee_data: Option<(Vec<crate::ast::Param>, Vec<Expr>)> = self
-                        .func_defs
-                        .get(name)
-                        .map(|f| {
+                    let callee_data: Option<(Vec<crate::ast::Param>, Vec<Expr>)> =
+                        self.func_defs.get(name).map(|f| {
                             let params = f.params.clone();
                             let requires: Vec<Expr> = f
                                 .body
@@ -1591,10 +1596,7 @@ impl crate::verifier::Verifier {
                                     self.solver_pop(1);
                                     errors.push((
                                         caller_name.to_string(),
-                                        format!(
-                                            "call to '{}' may violate precondition",
-                                            name
-                                        ),
+                                        format!("call to '{}' may violate precondition", name),
                                         crate::span::Span::single(0, 0),
                                     ));
                                     return;

@@ -437,8 +437,11 @@ pub fn merge_prelude_into(dest: &mut File) {
         return;
     }
     // Collect existing item names (owned strings to avoid borrow conflict)
-    let existing: std::collections::HashSet<String> =
-        dest.items.iter().filter_map(|i| item_name(i).map(String::from)).collect();
+    let existing: std::collections::HashSet<String> = dest
+        .items
+        .iter()
+        .filter_map(|i| item_name(i).map(String::from))
+        .collect();
     let mut new_items: Vec<Item> = Vec::new();
     for item in prelude_items {
         if let Some(name) = item_name(&item) {

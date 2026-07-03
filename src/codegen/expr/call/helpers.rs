@@ -168,9 +168,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .as_pointer_value(),
             )
         };
-        let make_string_value = |pv: inkwell::values::PointerValue<'ctx>| -> BasicValueEnum<'ctx> {
-            pv.into()
-        };
+        let make_string_value =
+            |pv: inkwell::values::PointerValue<'ctx>| -> BasicValueEnum<'ctx> { pv.into() };
         match expr {
             Expr::Literal(Lit::Bool(true)) => {
                 Some(make_string_value(build_global("true", "bool_true_lit")?))

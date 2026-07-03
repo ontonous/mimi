@@ -286,6 +286,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> String {
         match expr {
             Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => "string".to_string(),
+            Expr::Literal(Lit::Int(_)) => "i32".to_string(),
+            Expr::Literal(Lit::Float(_)) => "f64".to_string(),
+            Expr::Literal(Lit::Bool(_)) => "bool".to_string(),
+            Expr::Literal(Lit::Unit) => "unit".to_string(),
             Expr::Ident(name) => {
                 // Look up variable's type name from our tracking map
                 if let Some(ty_name) = self.var_type_names.get(name) {

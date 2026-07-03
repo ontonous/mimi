@@ -212,6 +212,16 @@ pub enum Value {
     Ref(Arc<RwLock<Value>>),
     /// Mutable reference: &mut T
     RefMut(Arc<RwLock<Value>>),
+    /// Borrowed immutable list element: &xs[i]
+    IndexRef {
+        owner: String,
+        index: usize,
+    },
+    /// Borrowed mutable list element: &mut xs[i]
+    IndexRefMut {
+        owner: String,
+        index: usize,
+    },
     /// Type descriptor for comptime reflection
     Type(String),
     /// Allocator type value
@@ -618,6 +628,8 @@ impl std::fmt::Display for Value {
                 let v = rc.read().map_err(|_| std::fmt::Error)?;
                 write!(f, "&mut {}", v)
             }
+            Value::IndexRef { owner, index } => write!(f, "&{}[{}]", owner, index),
+            Value::IndexRefMut { owner, index } => write!(f, "&mut {}[{}]", owner, index),
             Value::Type(name) => write!(f, "{}", name),
             Value::Allocator(kind) => write!(f, "Allocator({:?})", kind),
             Value::Array(vs) => {
@@ -962,6 +974,8 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::LocalShared(_) => "local_shared",
         Value::Ref(_) => "ref",
         Value::RefMut(_) => "ref_mut",
+        Value::IndexRef { .. } => "borrowed_index",
+        Value::IndexRefMut { .. } => "borrowed_index_mut",
         Value::Cap(_) => "cap",
         Value::Actor(_) => "actor",
         Value::Future(_) => "future",

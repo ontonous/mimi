@@ -106,8 +106,9 @@ impl Formatter {
                 }
                 '=' => {
                     // Space before `=` (unless already space or after `<>!`)
-                    if i == 0 || (chars[i - 1] != ' '
-                        && !matches!(chars.get(i - 1), Some('<' | '>' | '!' | '=')))
+                    if i == 0
+                        || (chars[i - 1] != ' '
+                            && !matches!(chars.get(i - 1), Some('<' | '>' | '!' | '=')))
                     {
                         out.push(' ');
                     }
@@ -132,14 +133,16 @@ impl Formatter {
                 }
                 '+' | '*' | '/' | '<' | '>' | '|' | '&' => {
                     // Space before operator (unless at start or preceded by space/punct)
-                    if i > 0 && chars[i - 1] != ' '
+                    if i > 0
+                        && chars[i - 1] != ' '
                         && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
                     {
                         out.push(' ');
                     }
                     out.push(c);
                     // Space after operator
-                    if i + 1 < chars.len() && chars[i + 1] != ' '
+                    if i + 1 < chars.len()
+                        && chars[i + 1] != ' '
                         && !matches!(chars.get(i + 1), Some(')' | ']' | '}' | ',' | ';'))
                     {
                         out.push(' ');

@@ -300,7 +300,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn emit_strtol(
         &self,
         s_ptr: PointerValue<'ctx>,
-    ) -> MimiResult<(inkwell::values::IntValue<'ctx>, inkwell::values::IntValue<'ctx>)> {
+    ) -> MimiResult<(
+        inkwell::values::IntValue<'ctx>,
+        inkwell::values::IntValue<'ctx>,
+    )> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let i8_ty = self.context.i8_type();
@@ -337,9 +340,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "strtol_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("strtol error: {}", e)))?;
-        let value = self
-            .expect_basic_value(&call, "strtol")?
-            .into_int_value();
+        let value = self.expect_basic_value(&call, "strtol")?.into_int_value();
         let endptr = self
             .builder
             .build_load(i8_ptr, endptr_alloca, "strtol_endptr_load")
@@ -491,7 +492,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn emit_strtod(
         &self,
         s_ptr: PointerValue<'ctx>,
-    ) -> MimiResult<(inkwell::values::IntValue<'ctx>, inkwell::values::FloatValue<'ctx>)> {
+    ) -> MimiResult<(
+        inkwell::values::IntValue<'ctx>,
+        inkwell::values::FloatValue<'ctx>,
+    )> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.context.i64_type();
         let i8_ty = self.context.i8_type();
@@ -527,9 +531,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "strtod_call",
             )
             .map_err(|e| CompileError::LlvmError(format!("strtod error: {}", e)))?;
-        let value = self
-            .expect_basic_value(&call, "strtod")?
-            .into_float_value();
+        let value = self.expect_basic_value(&call, "strtod")?.into_float_value();
         let endptr = self
             .builder
             .build_load(i8_ptr, endptr_alloca, "strtod_endptr_load")

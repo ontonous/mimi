@@ -190,9 +190,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         },
                     ) {
                         metadata_args[i] = match replaced {
-                            BasicValueEnum::IntValue(iv) => {
-                                BasicMetadataValueEnum::IntValue(iv)
-                            }
+                            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(iv),
                             BasicValueEnum::FloatValue(fv) => {
                                 BasicMetadataValueEnum::FloatValue(fv)
                             }

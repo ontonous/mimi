@@ -589,6 +589,8 @@ impl<'a> Interpreter<'a> {
             Value::LocalShared(_) => "local_shared".into(),
             Value::Ref(_) => "ref".into(),
             Value::RefMut(_) => "ref_mut".into(),
+            Value::IndexRef { .. } => "borrowed_index".into(),
+            Value::IndexRefMut { .. } => "borrowed_index_mut".into(),
             Value::Cap(_) => "cap".into(),
             Value::Actor(_) => "actor".into(),
             Value::Future(_) => "future".into(),

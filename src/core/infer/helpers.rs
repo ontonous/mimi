@@ -19,7 +19,9 @@ impl<'a> Checker<'a> {
                     result_type = self.infer_expr(e, scopes);
                     break;
                 }
-                Stmt::Let { pat, init: Some(e), .. } => {
+                Stmt::Let {
+                    pat, init: Some(e), ..
+                } => {
                     let ty = self.infer_expr(e, scopes);
                     // Bind let variable to scope so subsequent statements can reference it
                     Self::bind_pattern_to_scope(pat, &ty, scopes);
@@ -55,7 +57,9 @@ impl<'a> Checker<'a> {
                     result_type = self.check_expr(expected, e, scopes);
                     break;
                 }
-                Stmt::Let { pat, init: Some(e), .. } => {
+                Stmt::Let {
+                    pat, init: Some(e), ..
+                } => {
                     let ty = self.infer_expr(e, scopes);
                     Self::bind_pattern_to_scope(pat, &ty, scopes);
                     // Let statements do not determine block value.
@@ -283,11 +287,7 @@ impl<'a> Checker<'a> {
 
     /// Bind a pattern's variables to the current type-checking scope.
     /// Supports Variable, Tuple, and Wildcard patterns.
-    fn bind_pattern_to_scope(
-        pat: &Pattern,
-        ty: &Type,
-        scopes: &mut Vec<HashMap<String, Type>>,
-    ) {
+    fn bind_pattern_to_scope(pat: &Pattern, ty: &Type, scopes: &mut Vec<HashMap<String, Type>>) {
         match pat {
             Pattern::Variable(name) => {
                 if let Some(s) = scopes.last_mut() {

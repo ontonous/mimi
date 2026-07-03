@@ -28,10 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// described by [`PayloadKind`]. Multi-arg tuples and struct
     /// payloads share the `Packed` branch so the existing
     /// `decode_payload_struct` match-side path keeps working.
-    fn classify_variant_payload(
-        &self,
-        payload: &Option<VariantPayload>,
-    ) -> PayloadKind<'ctx> {
+    fn classify_variant_payload(&self, payload: &Option<VariantPayload>) -> PayloadKind<'ctx> {
         let Some(payload) = payload else {
             return PayloadKind::None;
         };
@@ -229,40 +226,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     // slot. The match side reads it as i64 and
                                     // bitcasts back when binding to f64.
                                     let payload_arg = ctor.get_nth_param(0).ok_or_else(|| {
-                                        CompileError::LlvmError(
-                                            "missing payload param".to_string(),
-                                        )
+                                        CompileError::LlvmError("missing payload param".to_string())
                                     })?;
-                                    let i64_payload = if *ty
-                                        == BasicTypeEnum::IntType(
-                                            self.context.i64_type(),
-                                        )
-                                    {
-                                        payload_arg
-                                    } else {
-                                        self.builder
-                                            .build_bit_cast(
-                                                payload_arg,
-                                                BasicTypeEnum::IntType(
-                                                    self.context.i64_type(),
-                                                ),
-                                                "payload_bc",
-                                            )
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "bitcast payload: {}",
-                                                    e
-                                                ))
-                                            })?
-                                    };
-                                    self.builder
-                                        .build_store(payload_gep, i64_payload)
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "store payload: {}",
-                                                e
-                                            ))
-                                        })?;
+                                    let i64_payload =
+                                        if *ty == BasicTypeEnum::IntType(self.context.i64_type()) {
+                                            payload_arg
+                                        } else {
+                                            self.builder
+                                                .build_bit_cast(
+                                                    payload_arg,
+                                                    BasicTypeEnum::IntType(self.context.i64_type()),
+                                                    "payload_bc",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "bitcast payload: {}",
+                                                        e
+                                                    ))
+                                                })?
+                                        };
+                                    self.builder.build_store(payload_gep, i64_payload).map_err(
+                                        |e| {
+                                            CompileError::LlvmError(format!("store payload: {}", e))
+                                        },
+                                    )?;
                                 }
                                 PayloadKind::Packed(packed_ty) => {
                                     let payload_arg = ctor.get_nth_param(0).ok_or_else(|| {
@@ -270,15 +257,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             "missing packed payload param".to_string(),
                                         )
                                     })?;
-                                    let payload_struct_ty =
-                                        BasicTypeEnum::StructType(*packed_ty);
-                                    let struct_size = payload_struct_ty.size_of().ok_or_else(
-                                        || {
+                                    let payload_struct_ty = BasicTypeEnum::StructType(*packed_ty);
+                                    let struct_size =
+                                        payload_struct_ty.size_of().ok_or_else(|| {
                                             CompileError::LlvmError(
                                                 "cannot get payload struct size".to_string(),
                                             )
-                                        },
-                                    )?;
+                                        })?;
                                     let malloc_fn = self
                                         .module
                                         .get_function("malloc")
@@ -305,21 +290,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .builder
                                         .build_pointer_cast(
                                             malloc_result,
-                                            self.context
-                                                .ptr_type(inkwell::AddressSpace::default()),
+                                            self.context.ptr_type(inkwell::AddressSpace::default()),
                                             "typed_ptr",
                                         )
                                         .map_err(|e| {
                                             CompileError::LlvmError(format!("ptr cast: {}", e))
                                         })?;
-                                    self.builder
-                                        .build_store(typed_ptr, payload_arg)
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "store packed: {}",
-                                                e
-                                            ))
-                                        })?;
+                                    self.builder.build_store(typed_ptr, payload_arg).map_err(
+                                        |e| CompileError::LlvmError(format!("store packed: {}", e)),
+                                    )?;
                                     let i8_ptr =
                                         self.context.ptr_type(inkwell::AddressSpace::default());
                                     let ptr_to_i8 = self

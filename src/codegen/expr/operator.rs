@@ -119,6 +119,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             UnOp::Ref | UnOp::RefMut => {
+                // Borrowed index: for scalar lists, return a pointer directly into
+                // the list's data slot rather than copying the element value.
+                if let Expr::Index(obj, idx_expr) = inner {
+                    let obj_type = self.infer_object_type(obj, vars);
+                    let is_scalar_list = obj_type
+                        .strip_prefix("List<")
+                        .and_then(|rest| rest.strip_suffix('>'))
+                        .map(|elem| matches!(elem, "i32" | "i64" | "bool"))
+                        .unwrap_or(false);
+                    if is_scalar_list {
+                        return self
+                            .compile_index_addr(obj, idx_expr, vars)
+                            .map(|p| p.into());
+                    }
+                }
                 let ty = v.get_type();
                 let alloca = self.build_alloca(ty, "ref")?;
                 self.build_store(alloca, v)?;

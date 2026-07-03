@@ -408,6 +408,16 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // Borrowed index: let r = &xs[i]
+                if let Expr::Index(obj, _) = inner.as_ref() {
+                    if let Expr::Ident(name) = obj.as_ref() {
+                        if name == borrowed_var {
+                            if let Pattern::Variable(ref_name) = pat {
+                                return Some(ref_name.clone());
+                            }
+                        }
+                    }
+                }
             }
             if let Stmt::Let {
                 pat,
@@ -419,6 +429,16 @@ impl<'a> Checker<'a> {
                     if name == borrowed_var {
                         if let Pattern::Variable(ref_name) = pat {
                             return Some(ref_name.clone());
+                        }
+                    }
+                }
+                // Borrowed mut index: let r = &mut xs[i]
+                if let Expr::Index(obj, _) = inner.as_ref() {
+                    if let Expr::Ident(name) = obj.as_ref() {
+                        if name == borrowed_var {
+                            if let Pattern::Variable(ref_name) = pat {
+                                return Some(ref_name.clone());
+                            }
                         }
                     }
                 }

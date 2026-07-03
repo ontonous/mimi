@@ -78,8 +78,22 @@ impl<'a> Interpreter<'a> {
                 _ => Err(InterpError::new(format!("cannot negate {}", type_name(&v)))),
             },
             UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
-            UnOp::Ref => Ok(Value::Ref(Arc::new(RwLock::new(v)))),
-            UnOp::RefMut => Ok(Value::RefMut(Arc::new(RwLock::new(v)))),
+            UnOp::Ref => {
+                if let Expr::Index(obj_expr, idx_expr) = e {
+                    if let Expr::Ident(owner) = obj_expr.as_ref() {
+                        return self.eval_borrowed_index(obj_expr, idx_expr, owner, false);
+                    }
+                }
+                Ok(Value::Ref(Arc::new(RwLock::new(v))))
+            }
+            UnOp::RefMut => {
+                if let Expr::Index(obj_expr, idx_expr) = e {
+                    if let Expr::Ident(owner) = obj_expr.as_ref() {
+                        return self.eval_borrowed_index(obj_expr, idx_expr, owner, true);
+                    }
+                }
+                Ok(Value::RefMut(Arc::new(RwLock::new(v))))
+            }
             UnOp::Deref => match v {
                 Value::Ref(rc) | Value::RefMut(rc) => Ok(rc
                     .read()
@@ -93,6 +107,27 @@ impl<'a> Interpreter<'a> {
                     .clone()),
                 Value::LocalShared(rc) => {
                     Ok(rc.lock().expect("local_shared lock not poisoned").clone())
+                }
+                Value::IndexRef { owner, index } | Value::IndexRefMut { owner, index } => {
+                    let owner_val = self.lookup(&owner).ok_or_else(|| {
+                        InterpError::new(format!(
+                            "borrowed variable '{}' is no longer available",
+                            owner
+                        ))
+                    })?;
+                    match owner_val {
+                        Value::List(list) => list.get(index).cloned().ok_or_else(|| {
+                            InterpError::index_out_of_bounds(format!(
+                                "borrowed index {} out of bounds for list of length {}",
+                                index,
+                                list.len()
+                            ))
+                        }),
+                        _ => Err(InterpError::new(format!(
+                            "cannot dereference borrowed index into {}",
+                            type_name(&owner_val)
+                        ))),
+                    }
                 }
                 _ => Err(InterpError::new(format!(
                     "cannot dereference {}",
@@ -876,6 +911,51 @@ impl<'a> Interpreter<'a> {
                 type_name(&obj),
                 type_name(&idx)
             ))),
+        }
+    }
+
+    /// Evaluate a borrowed list element reference: &xs[i] or &mut xs[i].
+    /// Returns a runtime reference that aliases the variable `owner` by name,
+    /// so reads/writes through the reference mutate the original list.
+    pub(in crate::interp) fn eval_borrowed_index(
+        &mut self,
+        obj_expr: &Expr,
+        idx_expr: &Expr,
+        owner: &str,
+        mutable: bool,
+    ) -> Result<Value, InterpError> {
+        let obj = self.eval_expr(obj_expr)?;
+        let idx = self.eval_expr(idx_expr)?;
+        let index = match (&obj, &idx) {
+            (Value::List(list), Value::Int(i)) => {
+                let len = list.len() as i64;
+                let i = if *i < 0 { len + *i } else { *i };
+                if i < 0 || i >= len {
+                    return Err(InterpError::index_out_of_bounds(format!(
+                        "borrowed index out of bounds: index {} is not valid for list of length {}",
+                        i, len
+                    )));
+                }
+                i as usize
+            }
+            _ => {
+                return Err(InterpError::new(format!(
+                    "cannot borrow index into {} with {}",
+                    type_name(&obj),
+                    type_name(&idx)
+                )))
+            }
+        };
+        if mutable {
+            Ok(Value::IndexRefMut {
+                owner: owner.to_string(),
+                index,
+            })
+        } else {
+            Ok(Value::IndexRef {
+                owner: owner.to_string(),
+                index,
+            })
         }
     }
 

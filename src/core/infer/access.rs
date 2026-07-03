@@ -253,6 +253,18 @@ impl<'a> Checker<'a> {
         match obj_ty {
             Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
             Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
+            // Support indexing through references: &List<T>, &mut List<T>, &string, &mut string
+            Type::Ref(_, ref inner) | Type::RefMut(_, ref inner) => match inner.as_ref() {
+                Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
+                Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
+                _ => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0218,
+                        format!("cannot index {}", fmt_type(&obj_ty)),
+                    );
+                    Type::Name("unknown".into(), vec![])
+                }
+            },
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0218,

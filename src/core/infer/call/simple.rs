@@ -1452,7 +1452,11 @@ impl<'a> Checker<'a> {
         // functions. Check scopes first before falling back to global function
         // signatures; otherwise a prelude parameter named `f` would incorrectly
         // resolve to a user-defined top-level function `f`.
-        if let Some(local_ty) = scopes.iter().rev().find_map(|scope| scope.get(name).cloned()) {
+        if let Some(local_ty) = scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+        {
             match local_ty {
                 Type::Func(param_types, ret_ty) => {
                     if args.len() != param_types.len() {

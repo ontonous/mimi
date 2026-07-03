@@ -4520,3 +4520,27 @@ fn e2e_set_to_list() {
     .expect("set to_list codegen failed");
     assert!(!stdout.trim().is_empty(), "to_list should produce output");
 }
+
+#[test]
+fn e2e_borrowed_index_mut() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        func main() -> i32 {
+            let mut xs = [10, 20, 30];
+            let r = &mut xs[0];
+            *r = xs[1];
+            let r2 = &mut xs[1];
+            *r2 = 10;
+            println(xs[0]);
+            println(xs[1]);
+            0
+        }
+        "#,
+    )
+    .expect("borrowed index mut codegen failed");
+    assert_eq!(stdout.trim(), "20\n10");
+}

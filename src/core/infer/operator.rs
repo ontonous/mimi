@@ -94,6 +94,36 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                    Expr::Index(obj, _) => {
+                        if let Expr::Ident(var) = obj.as_ref() {
+                            // Borrowed index: &xs[i] borrows the whole list (coarse)
+                            if let Some(BorrowState::BorrowedMut { span }) = self.lookup_borrow(var)
+                            {
+                                self.errors.push(
+                                    Diagnostic::error_code(
+                                        crate::diagnostic::codes::E0302,
+                                        format!("cannot borrow '{}' as immutable because it is already mutably borrowed", var),
+                                        Span::single(self.current_line, self.current_col),
+                                    ).with_note("mutable borrow occurs here", *span),
+                                );
+                            }
+                            if self.any_field_borrowed(var) {
+                                self.errors.push(
+                                    Diagnostic::error_code(
+                                        crate::diagnostic::codes::E0302,
+                                        format!("cannot borrow '{}' as immutable because a field is already mutably borrowed", var),
+                                        Span::single(self.current_line, self.current_col),
+                                    ),
+                                );
+                            }
+                            self.set_borrow(
+                                var,
+                                BorrowState::BorrowedImm {
+                                    span: Span::single(self.current_line, self.current_col),
+                                },
+                            );
+                        }
+                    }
                     _ => {}
                 }
                 Type::Ref(None, Box::new(t))
@@ -157,6 +187,49 @@ impl<'a> Checker<'a> {
                             self.set_field_borrow(
                                 var,
                                 field,
+                                BorrowState::BorrowedMut {
+                                    span: Span::single(self.current_line, self.current_col),
+                                },
+                            );
+                        }
+                    }
+                    Expr::Index(obj, _) => {
+                        if let Expr::Ident(var) = obj.as_ref() {
+                            // Borrowed mut index: &mut xs[i] borrows the whole list
+                            if let Some(state) = self.lookup_borrow(var) {
+                                match state {
+                                    BorrowState::Unborrowed => {}
+                                    BorrowState::BorrowedImm { span } => {
+                                        self.errors.push(
+                                            Diagnostic::error_code(
+                                                crate::diagnostic::codes::E0300,
+                                                format!("cannot borrow '{}' as mutable because it is already immutably borrowed", var),
+                                                Span::single(self.current_line, self.current_col),
+                                            ).with_note("immutable borrow occurs here", *span),
+                                        );
+                                    }
+                                    BorrowState::BorrowedMut { span } => {
+                                        self.errors.push(
+                                            Diagnostic::error_code(
+                                                crate::diagnostic::codes::E0301,
+                                                format!("cannot borrow '{}' as mutable because it is already mutably borrowed", var),
+                                                Span::single(self.current_line, self.current_col),
+                                            ).with_note("mutable borrow occurs here", *span),
+                                        );
+                                    }
+                                }
+                            }
+                            if self.any_field_borrowed(var) {
+                                self.errors.push(
+                                    Diagnostic::error_code(
+                                        crate::diagnostic::codes::E0300,
+                                        format!("cannot borrow '{}' as mutable because a field is already borrowed", var),
+                                        Span::single(self.current_line, self.current_col),
+                                    ),
+                                );
+                            }
+                            self.set_borrow(
+                                var,
                                 BorrowState::BorrowedMut {
                                     span: Span::single(self.current_line, self.current_col),
                                 },

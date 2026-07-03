@@ -357,6 +357,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
+    /// Compute the address of a list element as an i64* slot.
+    /// Used for borrowed index expressions (`&xs[i]` / `&mut xs[i]`).
+    pub(in crate::codegen) fn compile_index_addr(
+        &mut self,
+        obj: &Expr,
+        idx_expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let obj_val = self.compile_expr(obj, vars)?;
+        let idx_val = self.compile_expr(idx_expr, vars)?;
+        let idx_iv = require_int_index(idx_val)?;
+
+        let list_ptr = match obj_val {
+            BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::StructValue(sv) => {
+                let list_ty = self.standard_list_type();
+                let list_alloca = self.build_alloca(list_ty, "list_tmp")?;
+                self.build_store(list_alloca, sv)?;
+                list_alloca
+            }
+            _ => return Err("borrowed index requires a list value".into()),
+        };
+
+        self.check_list_bounds(list_ptr, idx_iv, "borrowed index")?;
+
+        let list_ty = self.standard_list_type();
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, list_ptr, 1, "list.data")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let data_ptr = self
+            .build_load(
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                data_gep,
+                "data",
+            )?
+            .into_pointer_value();
+        let data_ptr_i64 = self
+            .build_bit_cast(
+                data_ptr.into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+                "data_i64",
+            )?
+            .into_pointer_value();
+        self.build_in_bounds_gep(
+            self.context.i64_type(),
+            data_ptr_i64,
+            &[idx_iv],
+            "elem_addr",
+        )
+    }
+
     /// Load a list element as i64 from `{ len, data }`.
     fn load_list_element_i64(
         &self,
