@@ -1613,7 +1613,10 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "assignment type error inside block expr must be caught");
+    assert!(
+        result.is_err(),
+        "assignment type error inside block expr must be caught"
+    );
     let errors = result.unwrap_err();
     let has_assign_error = errors.iter().any(|e| {
         e.message.contains("cannot assign")
@@ -1642,7 +1645,10 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "non-bool while condition inside block expr must be caught");
+    assert!(
+        result.is_err(),
+        "non-bool while condition inside block expr must be caught"
+    );
     let errors = result.unwrap_err();
     let has_cond_error = errors
         .iter()
@@ -1669,7 +1675,10 @@ func main() -> i32 {
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "bad for iterable inside block expr must be caught");
+    assert!(
+        result.is_err(),
+        "bad for iterable inside block expr must be caught"
+    );
     let errors = result.unwrap_err();
     let has_for_error = errors
         .iter()
