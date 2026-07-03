@@ -136,11 +136,11 @@ pub func write_bytes(path: string, data: string) -> bool {
 // Returns the number of lines processed.
 // Example: read_lines_each("access.log", fn(line: string) -> i32 { 0 })
 pub func read_lines_each(path: string, callback: func(string) -> i32) -> i32 {
-    read_lines_each(path, callback)
+    read_lines_each_builtin(path, callback)
 }
 
 // read_lines_json: Reads file line-by-line and returns a JSON array of lines.
 // More memory-efficient than read_file + split for very large files.
 pub func read_lines_json(path: string) -> string {
-    read_lines_json(path)
+    read_lines_json_builtin(path)
 }
