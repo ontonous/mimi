@@ -54,6 +54,10 @@ impl Formatter {
 
     /// Normalize spacing around operators and punctuation.
     /// Handles: space before `{`, after `,`, around `:`, around `->`.
+    ///
+    /// String literals (`"..."`) and character literals (`'...'`) are copied
+    /// verbatim, including any escaped quotes, so formatter changes never alter
+    /// user string contents.
     fn normalize_spacing(line: &str) -> String {
         // Quick check: if no known punctuation needing normalization, skip
         if !line.contains(&['{', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&'][..]) {
@@ -62,9 +66,47 @@ impl Formatter {
         let mut out = String::with_capacity(line.len() + 8);
         let chars: Vec<char> = line.chars().collect();
         let mut i = 0;
+        let mut in_string = false;
+        let mut in_char = false;
         while i < chars.len() {
             let c = chars[i];
+
+            // Inside a string literal: copy verbatim and handle escapes so that
+            // escaped quotes do not terminate the literal early.
+            if in_string {
+                out.push(c);
+                if c == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 1;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Inside a character literal: same escape-aware verbatim copy.
+            if in_char {
+                out.push(c);
+                if c == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 1;
+                } else if c == '\'' {
+                    in_char = false;
+                }
+                i += 1;
+                continue;
+            }
+
             match c {
+                '"' => {
+                    in_string = true;
+                    out.push('"');
+                }
+                '\'' => {
+                    in_char = true;
+                    out.push('\'');
+                }
                 '{' => {
                     // Ensure space before `{` (unless at start or preceded by space)
                     if i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '(' {
