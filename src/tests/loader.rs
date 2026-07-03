@@ -351,3 +351,101 @@ func main() -> i64 {
     );
     cleanup(&dir);
 }
+
+// Regression for v0.28.25: `use pkgname::func` and `use pkgname` should both
+// resolve a path dependency's entry file (from mimi.toml) without requiring
+// the entry file name in the use path.
+#[test]
+fn loader_package_import_uses_entry_file() {
+    let root = temp_dir("pkg_import");
+    let lib_dir = root.join("mylib");
+    let app_dir = root.join("app");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+
+    fs::write(
+        lib_dir.join("mimi.toml"),
+        r#"[package]
+name = "mylib"
+version = "0.1.0"
+entry = "main.mimi"
+"#,
+    )
+    .expect("write lib mimi.toml");
+    fs::write(
+        lib_dir.join("main.mimi"),
+        r#"pub func factorial(n: i32) -> i32 {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+"#,
+    )
+    .expect("write lib main.mimi");
+
+    fs::write(
+        app_dir.join("mimi.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+
+[[dependencies]]
+name = "mylib"
+path = "../mylib"
+"#,
+    )
+    .expect("write app mimi.toml");
+
+    // Case 1: `use mylib::factorial` resolves to entry file and merges factorial.
+    let main_path = app_dir.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"use mylib::factorial
+
+func main() -> i32 {
+    factorial(5)
+}
+"#,
+    )
+    .expect("write app main case1");
+
+    let mut loader = crate::loader::ModuleLoader::new(app_dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("use mylib::factorial should resolve to entry file");
+    let merged = loader.merge_all().expect("merge should succeed");
+    let has_factorial = merged
+        .items
+        .iter()
+        .any(|item| matches!(item, crate::ast::Item::Func(f) if f.name == "factorial"));
+    assert!(
+        has_factorial,
+        "use mylib::factorial should bring factorial into scope"
+    );
+
+    // Case 2: `use mylib` resolves to entry file and merges all pub items.
+    fs::write(
+        &main_path,
+        r#"use mylib
+
+func main() -> i32 {
+    mylib::factorial(5)
+}
+"#,
+    )
+    .expect("write app main case2");
+
+    let mut loader2 = crate::loader::ModuleLoader::new(app_dir.clone());
+    loader2
+        .load_main(&main_path)
+        .expect("use mylib should resolve to entry file");
+    let merged2 = loader2.merge_all().expect("merge should succeed");
+    let has_factorial2 = merged2
+        .items
+        .iter()
+        .any(|item| matches!(item, crate::ast::Item::Func(f) if f.name == "factorial"));
+    assert!(
+        has_factorial2,
+        "use mylib should bring factorial into scope"
+    );
+
+    cleanup(&root);
+}

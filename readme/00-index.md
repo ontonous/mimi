@@ -104,9 +104,10 @@ actor Counter {
     func get() -> i32 { self.count }
 }
 
-// 7. 意图后缀
-func$$ critical_logic() { ... }   // 强锁定：AI 不得修改
-func? maybe_change() { ... }      // 不确定：AI 可审视
+// 7. 意图后缀（仅 MimiSpec .mms，不是 Mimi .mimi 语法）
+//    MimiSpec 示例：
+//    func$$ critical_logic() { ... }   // 强锁定：AI 不得修改
+//    func? maybe_change() { ... }      // 不确定：AI 可审视
 ```
 
 ---
@@ -131,7 +132,7 @@ func? maybe_change() { ... }      // 不确定：AI 可审视
 | `cap` 线性能力 | ✅ | `cap`, `.split()`, `drop()` |
 | `comptime` | ✅ | `comptime func`, `quote!` |
 | `mms {}` 块 | ✅ | MimiSpec 嵌入 |
-| 意图后缀 | ✅ | `$`, `$$`, `?`, `??` |
+| 意图后缀 | ✅（MimiSpec） | `$`, `$$`, `?`, `??`；仅 `.mms`，非 `.mimi` 语法 |
 | `extern "C"` | ✅ | FFI 块 + LLVM codegen |
 | `pub` 可见性 | ✅ | 函数、类型、Actor |
 | 列表推导 | ✅ | `[expr for x in list]` |

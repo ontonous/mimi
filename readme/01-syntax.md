@@ -608,9 +608,12 @@ func apply(f: func(i32) -> i32, x: i32) -> i32 {
 let result = apply(double, 5);  // 10
 ```
 
-### 9.10 意图后缀
+### 9.10 意图后缀（MimiSpec 专用，非 Mimi 语法）
 
-```mimi
+> ⚠️ 以下后缀是 **MimiSpec**（`.mms` 意图描述文件）的语法，用于在人类意图与 AI 生成之间建立契约。
+> **Mimi**（`.mimi` 生产代码）不支持这些后缀；在 `.mimi` 文件中写 `func$$` / `func?` 会报解析错误。
+
+```mms
 func$$ locked_func() { ... }     // 强锁定：AI 不得修改
 func$  semi_locked() { ... }     // 锁定：AI 不得修改
 func?  uncertain() { ... }       // 不确定：需要审视
@@ -849,7 +852,9 @@ payment-sdk = { path = "../payment-sdk" }
 
 ---
 
-## 15. 意图后缀（Commitment Suffix）
+## 15. 意图后缀（Commitment Suffix）— MimiSpec 专用
+
+> ⚠️ 意图后缀是 **MimiSpec**（`.mms`）的语法，不是 Mimi（`.mimi`）的语法。Mimi 编译器不识别 `func$` / `func?` / `func$$` 等后缀。
 
 后缀附加在关键字、标识符或字符串末尾，无空格：
 

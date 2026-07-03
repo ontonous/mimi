@@ -232,9 +232,9 @@ pub enum Pattern {
 /// Kind of shared ownership
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedKind {
-    /// Thread-safe atomic refcount (Arc<RwLock<T>>)
+    /// Thread-safe atomic refcount (`Arc<RwLock<T>>`)
     Shared,
-    /// Single-thread non-atomic (Rc<RefCell<T>>)
+    /// Single-thread non-atomic (`Rc<RefCell<T>>`)
     LocalShared,
     /// Weak reference (weak upgrade to Shared)
     Weak,
@@ -390,7 +390,7 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
     },
-    /// Turbofish: func_name::<Type>(args) — explicit type instantiation
+    /// Turbofish: `func_name::<Type>(args)` — explicit type instantiation
     Turbofish(String, Vec<Type>, Vec<Expr>),
     /// Numeric tuple field access: t.0, t.1, etc.
     TupleIndex(Box<Expr>, usize),
@@ -541,9 +541,9 @@ pub enum Type {
     Nothing,
     /// Allocator type for custom memory allocation
     Allocator,
-    /// Fixed-size array type: [T; n]
+    /// Fixed-size array type: `[T; n]`
     Array(Box<Type>, usize),
-    /// Slice type: &[T]
+    /// Slice type: `&[T]`
     Slice(Box<Type>),
     /// impl Trait return type — opaque type implementing listed traits
     ImplTrait(Vec<String>),

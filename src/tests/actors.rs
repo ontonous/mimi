@@ -154,11 +154,11 @@ func main() -> string {
     m.get_msg()
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String("hello".to_string()));
+    assert_eq!(run_source(src), interp::Value::String("hello".into()));
 }
 
 #[test]
-fn actor_multiple_fields() {
+fn actor_field_access() {
     let src = r#"
 actor Point {
     x: i32 = 3;
@@ -190,4 +190,36 @@ func main() -> i32 {
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(198));
+}
+
+// Regression test for v0.28.24 item 25: actor method calls must not be
+// shadowed by prelude functions of the same name (e.g. `increment`).
+// The test framework normally does not auto-load prelude, so we explicitly
+// merge it here to reproduce the CLI environment where the bug was observed.
+#[test]
+fn actor_method_not_shadowed_by_prelude() {
+    let src = r#"
+actor Counter {
+    mut count: i32 = 0;
+
+    func increment() {
+        self.count = self.count + 1;
+    }
+
+    func get_count() -> i32 {
+        return self.count;
+    }
+}
+
+func main() -> i32 {
+    let c = Counter.spawn();
+    println(c.get_count());
+    c.increment();
+    println(c.get_count());
+    c.increment();
+    println(c.get_count());
+    42
+}
+"#;
+    assert_eq!(run_with_stdlib("prelude.mimi", src), interp::Value::Int(42));
 }

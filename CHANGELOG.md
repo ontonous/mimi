@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v0.28.22-dev
+## [Unreleased] — v0.28.25-dev
 
 ### Fixed
 - **Match arm `let` 作用域** (`src/core/infer/helpers.rs`)：`infer_block_expr` 现在在推断 `let` 绑定表达式类型后，将变量名+类型注册到当前作用域。修复 `match x { Ok(v) => { let y = ...; println(y) } }` 报 undefined variable 的问题
@@ -15,6 +15,19 @@
 - **仓库 URL 统一**：`Cargo.toml`、`README.md`、`README.zh.md`、`CONTRIBUTING.md` 中所有 `ontos-hpc/mimi` 改为 `ontonous/mimi`
 - **`unused_mut` warning 消除** (`src/fmt.rs`)：移除不必要的 `mut` 关键字
 - **Error span 改进** (`src/core/check_stmt.rs`)：不再重置 current_line/col 为 (0,0)，错误至少指向正确的函数边界
+- **Actor 方法调用不再被 prelude 函数遮蔽** (`src/interp/eval/expr.rs`)：变量对象的方法调用（如 `c.increment()`）优先按值方法分派，避免错误匹配到 `prelude.mimi` 中同名的自由函数（例如 `increment(x: i32)`），修复 `examples/actor_full_test.mimi` 在 `mimi run` 下报 `undefined variable 'x'` 的问题
+- **Clippy 门禁修复**：
+  - `src/interp/eval/stmt.rs:671`：`&mut Vec<Value>` → `&mut [Value]`
+  - `src/verifier/func.rs:1366`：`&[expr.clone()]` → `std::slice::from_ref(expr)`
+
+### Tests
+- 新增 `actor_method_not_shadowed_by_prelude` 回归测试，显式加载 prelude 验证 actor 方法不被同名自由函数遮蔽
+- 新增 `loader_package_import_uses_entry_file` 回归测试，覆盖 `use mylib::factorial` 与 `use mylib` 自动解析到依赖 entry 文件
+
+### Docs
+- 清理 Mimi 文档中 MimiSpec 专用语法（`func$`/`func?`/`func$$` 意图后缀）的混淆：在 `readme/00-index.md`、`readme/01-syntax.md` 中明确标注为 `.mms` 专用，非 `.mimi` 语法
+- 统一 CLI help 与文档：`--strict` / `--extract-contracts` / `--verify-rules` 选项描述明确指向 MimiSpec
+- 修复 10 个 `cargo doc` 警告（`src/ast.rs`、`src/interp/value.rs`、`src/codegen/mod.rs` 中未闭合的 `<T>` / `<Type>` / `<Value>` HTML 标签）
 
 ## [v0.28.21] - 2026-07-02
 

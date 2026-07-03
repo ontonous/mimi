@@ -31,9 +31,9 @@ mimi check <file.mimi>
 
 | 选项 | 说明 |
 |------|------|
-| `--extract-contracts` | 提取并显示 mms 块中的契约 |
-| `--strict` | 强制 $$ 锁语义 |
-| `--verify-rules` | 验证 MMS rule 附着一致性 |
+| `--extract-contracts` | 提取并显示 `mms{}` 块中的 MimiSpec 契约 |
+| `--strict` | 对含 MimiSpec 意图后缀（`$$` 等）的文件强制锁语义 |
+| `--verify-rules` | 验证 `mms{}` 中 MimiSpec rule 附着一致性 |
 
 ### 示例
 

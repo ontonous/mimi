@@ -1363,7 +1363,7 @@ impl crate::verifier::Verifier {
                     if (name == "sort" || name == "reverse") && call_args.len() == 1 {
                         // len(sort(xs)) == len(xs)
                         if let Some(input_len) = self.resolve_list_len(&call_args[0], vars) {
-                            let len_key = self.call_var_key("len", &[expr.clone()]);
+                            let len_key = self.call_var_key("len", std::slice::from_ref(expr));
                             let output_len = vars.get_or_create_int(&len_key);
                             self.solver.assert(output_len.eq(&input_len));
                         }

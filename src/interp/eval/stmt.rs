@@ -668,7 +668,7 @@ impl<'a> Interpreter<'a> {
                     }
                 };
                 fn assign_list_index(
-                    items: &mut Vec<Value>,
+                    items: &mut [Value],
                     index: usize,
                     v: Value,
                 ) -> Result<(), InterpError> {

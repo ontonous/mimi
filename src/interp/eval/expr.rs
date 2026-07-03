@@ -504,6 +504,16 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
+                // If the object is a variable in scope, dispatch as a method call on
+                // that value. This prevents module-import fallbacks from shadowing
+                // actor/record method calls (e.g. prelude `increment` shadowing
+                // `c.increment()` on an actor instance).
+                if let Expr::Ident(name) = obj.as_ref() {
+                    if self.lookup(name).is_some() {
+                        let obj_val = self.eval_expr(obj)?;
+                        return self.call_method(&obj_val, method, vals);
+                    }
+                }
                 // Handle module-qualified function call: Module::func(args)
                 if let Some(qualified) = Self::build_qualified_path(obj, method) {
                     if let Some(f) = self.find_function(&qualified) {

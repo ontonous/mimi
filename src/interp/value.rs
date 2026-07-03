@@ -208,16 +208,16 @@ pub enum Value {
     WeakShared(ArcWeak<RwLock<Value>>),
     WeakLocal(WeakLocalInner),
     Cap(Vec<String>),
-    /// Immutable reference: &T
+    /// Immutable reference: `&T`
     Ref(Arc<RwLock<Value>>),
-    /// Mutable reference: &mut T
+    /// Mutable reference: `&mut T`
     RefMut(Arc<RwLock<Value>>),
-    /// Borrowed immutable list element: &xs[i]
+    /// Borrowed immutable list element: `&xs[i]`
     IndexRef {
         owner: String,
         index: usize,
     },
-    /// Borrowed mutable list element: &mut xs[i]
+    /// Borrowed mutable list element: `&mut xs[i]`
     IndexRefMut {
         owner: String,
         index: usize,
@@ -249,11 +249,11 @@ pub enum Value {
     },
 }
 
-/// Wrapper around Arc<Mutex<Value>> for LocalShared.
+/// Wrapper around `Arc<Mutex<Value>>` for LocalShared.
 /// The Mutex serializes access to the wrapped Value; the Arc allows sharing
 /// within a single thread (Mimi's type-checker rejects local_shared in
 /// parallel blocks via E0305). The type is nevertheless Send + Sync because
-/// Arc<Mutex<Value>> is thread-safe when Value is Send + Sync.
+/// `Arc<Mutex<Value>>` is thread-safe when Value is Send + Sync.
 #[derive(Debug, Clone)]
 pub struct LocalSharedInner(pub Arc<Mutex<Value>>);
 
@@ -286,7 +286,7 @@ impl LocalSharedInner {
     }
 }
 
-/// Wrapper around Arc<Mutex<Value>> weak reference for WeakLocal.
+/// Wrapper around `Arc<Mutex<Value>>` weak reference for WeakLocal.
 #[derive(Debug, Clone)]
 pub struct WeakLocalInner(pub ArcWeak<Mutex<Value>>);
 

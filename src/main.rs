@@ -70,7 +70,7 @@ enum Command {
         /// Extract and display contracts from mms blocks
         #[arg(long)]
         extract_contracts: bool,
-        /// Strict mode: enforce $$ lock semantics
+        /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
         #[arg(long)]
         strict: bool,
         /// Verify MMS rule attachment consistency
@@ -92,7 +92,7 @@ enum Command {
         /// Default allocator type: system, arena, or bump
         #[arg(long, default_value = "system")]
         allocator: String,
-        /// Strict mode: only compile $/$$ locked fragments
+        /// Strict mode: only compile MimiSpec $/$$ locked fragments
         #[arg(long)]
         strict: bool,
         /// Profile mode: track function call counts and durations
@@ -117,7 +117,7 @@ enum Command {
         /// Show verbose output for failed tests
         #[arg(long, short)]
         verbose: bool,
-        /// Strict mode: only execute $/$$ locked test functions
+        /// Strict mode: only execute MimiSpec $/$$ locked test functions
         #[arg(long)]
         strict: bool,
     },
@@ -193,7 +193,7 @@ enum Command {
         /// Emit LLVM IR instead of compiling
         #[arg(long)]
         emit_ir: bool,
-        /// Strict mode: only compile $/$$ locked fragments
+        /// Strict mode: only compile MimiSpec $/$$ locked fragments
         #[arg(long)]
         strict: bool,
         /// no_std mode: compile without libc (freestanding target)
