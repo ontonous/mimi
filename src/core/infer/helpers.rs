@@ -4,40 +4,79 @@ use crate::core::helpers::fmt_type;
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
+    /// Common scaffolding for block expressions: push/pop all needed scope
+    /// stacks and type-check every statement. The caller decides how to obtain
+    /// the result type from the last statement.
+    fn process_block_expr<F>(
+        &mut self,
+        block: &Block,
+        scopes: &mut Vec<HashMap<String, Type>>,
+        process_last: F,
+    ) -> Type
+    where
+        F: FnOnce(&mut Self, &Stmt, &mut Vec<HashMap<String, Type>>, &Type) -> Type,
+    {
+        if block.is_empty() {
+            return Type::Name("unit".into(), vec![]);
+        }
+        let ret = self
+            .current_ret
+            .clone()
+            .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+
+        // Mirror the scope setup used by check_block_with_implicit_return so
+        // that borrow tracking, cap tracking and shadowing detection are all
+        // active inside a block expression.
+        self.var_scopes.push(HashMap::new());
+        self.mut_vars.push(HashMap::new());
+        scopes.push(HashMap::new());
+        self.cap_vars.push(HashMap::new());
+        self.push_borrow_scope();
+
+        let last_idx = block.len() - 1;
+        for (i, stmt) in block.iter().enumerate() {
+            if i == last_idx {
+                break;
+            }
+            self.check_stmt(stmt, &ret, scopes);
+        }
+
+        let last = &block[last_idx];
+        let result_type = process_last(self, last, scopes, &ret);
+
+        self.check_unconsumed_caps();
+        self.pop_borrow_scope();
+        self.cap_vars.pop();
+        scopes.pop();
+        self.mut_vars.pop();
+        self.var_scopes.pop();
+        result_type
+    }
+
     pub(in crate::core) fn infer_block_expr(
         &mut self,
         block: &Block,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        scopes.push(HashMap::new());
-        let mut result_type = Type::Name("unit".into(), vec![]);
-        for (i, stmt) in block.iter().enumerate() {
-            let is_last = i == block.len() - 1;
-            match stmt {
-                Stmt::Expr(e) => result_type = self.infer_expr(e, scopes),
-                Stmt::Return(Some(e)) => {
-                    result_type = self.infer_expr(e, scopes);
-                    break;
-                }
-                Stmt::Let {
-                    pat, init: Some(e), ..
-                } => {
-                    let ty = self.infer_expr(e, scopes);
-                    // Bind let variable to scope so subsequent statements can reference it
-                    Self::bind_pattern_to_scope(pat, &ty, scopes);
-                    // A let statement is not the value of the block; only the
-                    // trailing expression/return determines the block type.
-                }
-                Stmt::If { cond, then_, else_ } if is_last => {
-                    // Parser may emit a trailing if as a statement; treat it as
-                    // the block's result expression.
-                    result_type = self.infer_if_expr(cond, then_, else_.as_ref(), scopes);
-                }
-                _ => {}
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last {
+            Stmt::Expr(e) => this.infer_expr(e, scopes),
+            Stmt::Return(Some(e)) => {
+                let t = this.infer_expr(e, scopes);
+                this.check_stmt(last, ret, scopes);
+                t
             }
-        }
-        scopes.pop();
-        result_type
+            Stmt::Return(None) => {
+                this.check_stmt(last, ret, scopes);
+                Type::Name("unit".into(), vec![])
+            }
+            Stmt::If { cond, then_, else_ } => {
+                this.infer_if_expr(cond, then_, else_.as_ref(), scopes)
+            }
+            _ => {
+                this.check_stmt(last, ret, scopes);
+                Type::Name("unit".into(), vec![])
+            }
+        })
     }
 
     /// C3: Bidirectional block checking — check the last expression against expected type.
@@ -47,36 +86,30 @@ impl<'a> Checker<'a> {
         expected: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        scopes.push(HashMap::new());
-        let mut result_type = Type::Name("unit".into(), vec![]);
-        for (i, stmt) in block.iter().enumerate() {
-            let is_last = i == block.len() - 1;
-            match stmt {
-                Stmt::Expr(e) => result_type = self.check_expr(expected, e, scopes),
-                Stmt::Return(Some(e)) => {
-                    result_type = self.check_expr(expected, e, scopes);
-                    break;
-                }
-                Stmt::Let {
-                    pat, init: Some(e), ..
-                } => {
-                    let ty = self.infer_expr(e, scopes);
-                    Self::bind_pattern_to_scope(pat, &ty, scopes);
-                    // Let statements do not determine block value.
-                }
-                Stmt::If { cond, then_, else_ } if is_last => {
-                    let if_expr = Expr::If {
-                        cond: Box::new(cond.clone()),
-                        then_: then_.clone(),
-                        else_: else_.clone(),
-                    };
-                    result_type = self.check_expr(expected, &if_expr, scopes);
-                }
-                _ => {}
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last {
+            Stmt::Expr(e) => this.check_expr(expected, e, scopes),
+            Stmt::Return(Some(e)) => {
+                let t = this.check_expr(expected, e, scopes);
+                this.check_stmt(last, ret, scopes);
+                t
             }
-        }
-        scopes.pop();
-        result_type
+            Stmt::Return(None) => {
+                this.check_stmt(last, ret, scopes);
+                Type::Name("unit".into(), vec![])
+            }
+            Stmt::If { cond, then_, else_ } => {
+                let if_expr = Expr::If {
+                    cond: Box::new(cond.clone()),
+                    then_: then_.clone(),
+                    else_: else_.clone(),
+                };
+                this.check_expr(expected, &if_expr, scopes)
+            }
+            _ => {
+                this.check_stmt(last, ret, scopes);
+                Type::Name("unit".into(), vec![])
+            }
+        })
     }
 
     pub(in crate::core) fn infer_if_expr(
@@ -287,6 +320,7 @@ impl<'a> Checker<'a> {
 
     /// Bind a pattern's variables to the current type-checking scope.
     /// Supports Variable, Tuple, and Wildcard patterns.
+    #[allow(dead_code)]
     fn bind_pattern_to_scope(pat: &Pattern, ty: &Type, scopes: &mut Vec<HashMap<String, Type>>) {
         match pat {
             Pattern::Variable(name) => {

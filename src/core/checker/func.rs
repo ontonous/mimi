@@ -16,6 +16,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|t| self.resolve_type(t))
             .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+        self.current_ret = Some(ret.clone());
         let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
         // Push function-level variable scope for shadowing detection
         self.var_scopes.push(HashMap::new());
@@ -114,6 +115,7 @@ impl<'a> Checker<'a> {
         self.available_effects.pop();
         self.var_scopes.pop();
         self.cap_vars.pop();
+        self.current_ret = None;
     }
 
     /// Check if a block returns on all paths

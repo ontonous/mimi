@@ -612,19 +612,23 @@ impl<'a> Interpreter<'a> {
         };
         let mut result = Vec::new();
         for item in items {
-            self.push_scope();
-            self.bind(var, item.clone())?;
-            let include = if let Some(g) = guard {
-                let cond = self.eval_expr(g)?;
-                is_truthy(&cond)
-            } else {
-                true
-            };
-            if include {
-                let val = self.eval_expr(expr)?;
-                result.push(val);
+            let val = self.with_scope(|this| {
+                this.bind(var, item.clone())?;
+                let include = if let Some(g) = guard {
+                    let cond = this.eval_expr(g)?;
+                    is_truthy(&cond)
+                } else {
+                    true
+                };
+                if include {
+                    this.eval_expr(expr).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })?;
+            if let Some(v) = val {
+                result.push(v);
             }
-            self.pop_scope();
         }
         Ok(Value::List(result))
     }
@@ -637,14 +641,10 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, InterpError> {
         let c = self.eval_expr(cond)?;
         if is_truthy(&c) {
-            self.push_scope();
-            let r = self.eval_block(then_);
-            self.pop_scope();
+            let r = self.with_scope(|this| this.eval_block(then_));
             r.map(|v| v.unwrap_or(Value::Unit))
         } else if let Some(eb) = else_ {
-            self.push_scope();
-            let r = self.eval_block(eb);
-            self.pop_scope();
+            let r = self.with_scope(|this| this.eval_block(eb));
             r.map(|v| v.unwrap_or(Value::Unit))
         } else {
             Ok(Value::Unit)
@@ -659,20 +659,22 @@ impl<'a> Interpreter<'a> {
         let val = self.eval_expr(subject)?;
         for arm in arms {
             if let Some(bindings) = self.match_pattern(&arm.pat, &val) {
-                self.push_scope();
-                for (name, v) in bindings {
-                    self.bind(&name, v)?;
-                }
-                if let Some(guard) = &arm.guard {
-                    let g = self.eval_expr(guard)?;
-                    if !is_truthy(&g) {
-                        self.pop_scope();
-                        continue;
+                let result = self.with_scope(|this| -> Result<Option<Value>, InterpError> {
+                    for (name, v) in bindings {
+                        this.bind(&name, v)?;
                     }
+                    if let Some(guard) = &arm.guard {
+                        let g = this.eval_expr(guard)?;
+                        if !is_truthy(&g) {
+                            return Ok(None);
+                        }
+                    }
+                    this.eval_expr(&arm.body).map(Some)
+                });
+                match result? {
+                    None => continue,
+                    Some(v) => return Ok(v),
                 }
-                let result = self.eval_expr(&arm.body);
-                self.pop_scope();
-                return result;
             }
         }
         Err(InterpError::new("non-exhaustive match"))

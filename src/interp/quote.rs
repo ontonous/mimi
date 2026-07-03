@@ -158,19 +158,23 @@ impl<'a> Interpreter<'a> {
                 };
                 let mut result = Vec::new();
                 for item in items {
-                    self.push_scope();
-                    self.bind(var, item.clone())?;
-                    let include = if let Some(g) = guard {
-                        let cond = self.eval_expr(g)?;
-                        is_truthy(&cond)
-                    } else {
-                        true
-                    };
-                    if include {
-                        let val = self.eval_expr(expr)?;
-                        result.push(val);
+                    let val = self.with_scope(|this| {
+                        this.bind(var, item.clone())?;
+                        let include = if let Some(g) = guard {
+                            let cond = this.eval_expr(g)?;
+                            is_truthy(&cond)
+                        } else {
+                            true
+                        };
+                        if include {
+                            this.eval_expr(expr).map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    })?;
+                    if let Some(v) = val {
+                        result.push(v);
                     }
-                    self.pop_scope();
                 }
                 Ok(QuotedAst::List(
                     result
@@ -571,15 +575,13 @@ impl<'a> Interpreter<'a> {
                 }
             }
             QuotedAst::Interpolate(v) => Ok(*v.clone()),
-            QuotedAst::Block(stmts) => {
-                self.push_scope();
+            QuotedAst::Block(stmts) => self.with_scope(|this| {
                 let mut result = Value::Unit;
                 for stmt in stmts {
-                    result = self.eval_quoted_ast(stmt)?;
+                    result = this.eval_quoted_ast(stmt)?;
                 }
-                self.pop_scope();
                 Ok(result)
-            }
+            }),
             QuotedAst::Let { name, value } => {
                 let v = self.eval_quoted_ast(value)?;
                 self.bind(name, v.clone())?;
@@ -698,12 +700,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Unit)
             }
-            QuotedAst::Arena(body) => {
-                self.push_scope();
-                let result = self.eval_quoted_ast(body);
-                self.pop_scope();
-                result
-            }
+            QuotedAst::Arena(body) => self.with_scope(|this| this.eval_quoted_ast(body)),
             QuotedAst::Unsafe(body) => self.eval_quoted_ast(body),
             QuotedAst::Drop(expr) => {
                 self.eval_quoted_ast(expr)?;
@@ -749,10 +746,7 @@ impl<'a> Interpreter<'a> {
             }
             QuotedAst::Alloc { kind: _, body } => {
                 // Alloc in quoted AST: simplified - just evaluate the body
-                self.push_scope();
-                let result = self.eval_quoted_ast(body);
-                self.pop_scope();
-                result
+                self.with_scope(|this| this.eval_quoted_ast(body))
             }
             QuotedAst::List(elems) => {
                 let vals: Result<Vec<_>, _> =

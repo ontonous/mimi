@@ -223,15 +223,15 @@ impl<'a> Interpreter<'a> {
                 args.len()
             )));
         }
-        self.push_scope();
-        for (n, v) in captured {
-            self.bind(n, v.clone())?;
-        }
-        for (param, arg) in params.iter().zip(args) {
-            self.bind(&param.name, arg)?;
-        }
-        let result = self.eval_block(body)?;
-        self.pop_scope();
+        let result = self.with_scope(|this| {
+            for (n, v) in captured {
+                this.bind(n, v.clone())?;
+            }
+            for (param, arg) in params.iter().zip(args) {
+                this.bind(&param.name, arg)?;
+            }
+            this.eval_block(body)
+        })?;
         if self.exited.is_some() {
             return Ok(result.unwrap_or(Value::Unit));
         }
@@ -874,6 +874,18 @@ impl<'a> Interpreter<'a> {
         self.env.pop();
         self.moved_vars.pop();
         self.mut_vars.pop();
+    }
+
+    /// Run a closure inside a freshly pushed scope, guaranteeing that the
+    /// scope is popped even if the closure returns an error.
+    fn with_scope<F, T>(&mut self, f: F) -> Result<T, InterpError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, InterpError>,
+    {
+        self.push_scope();
+        let result = f(self);
+        self.pop_scope();
+        result
     }
 
     fn push_call(&mut self, func_name: &str) {

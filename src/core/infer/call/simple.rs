@@ -181,16 +181,17 @@ impl<'a> Checker<'a> {
             "abs" => {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "abs expects 1 argument");
-                } else {
-                    let t = self.infer_expr(&args[0], scopes);
-                    if !is_numeric(&t) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            "abs expects a numeric argument",
-                        );
-                    }
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                let t = self.infer_expr(&args[0], scopes);
+                if !is_numeric(&t) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "abs expects a numeric argument",
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                return t;
             }
             "push" => {
                 if args.len() != 2 {

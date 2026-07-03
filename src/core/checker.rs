@@ -74,6 +74,9 @@ pub(crate) struct Checker<'a> {
     arena: TypeArena,
     /// Top-level constant types: name -> type
     pub(crate) const_types: HashMap<String, Type>,
+    /// Current function return type, used when type-checking block expressions
+    /// so that `return` statements inside them are validated correctly.
+    pub(crate) current_ret: Option<Type>,
 }
 
 #[allow(dead_code)]
@@ -114,6 +117,7 @@ impl<'a> Checker<'a> {
             unification: UnificationTable::new(),
             arena: TypeArena::new(),
             const_types: HashMap::new(),
+            current_ret: None,
         }
     }
 

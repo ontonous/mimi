@@ -163,15 +163,15 @@ impl<'a> Interpreter<'a> {
                             args.len()
                         )));
                     }
-                    self.push_scope();
-                    for (n, val) in &captured {
-                        self.bind(n, val.clone())?;
-                    }
-                    for (p, a) in params.iter().zip(args) {
-                        self.bind(&p.name, a)?;
-                    }
-                    let result = self.eval_block(&body);
-                    self.pop_scope();
+                    let result = self.with_scope(|this| {
+                        for (n, val) in &captured {
+                            this.bind(n, val.clone())?;
+                        }
+                        for (p, a) in params.iter().zip(args) {
+                            this.bind(&p.name, a)?;
+                        }
+                        this.eval_block(&body)
+                    });
                     if self.exited.is_some() {
                         return result.map(|v| v.unwrap_or(Value::Unit));
                     }
@@ -543,11 +543,10 @@ impl<'a> Interpreter<'a> {
                             let func = actor_methods.iter().find(|f| f.name == method).ok_or_else(
                                 || format!("actor {} has no method '{}'", actor_name, method),
                             )?;
-                            self.push_scope();
-                            self.bind("self", obj.clone())?;
-                            let result = self.call_func(func, args);
-                            self.pop_scope();
-                            result
+                            self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(func, args)
+                            })
                         } else {
                             // Mailbox dispatch: send message, wait for response
                             let (tx, rx) = std::sync::mpsc::channel();
@@ -581,16 +580,16 @@ impl<'a> Interpreter<'a> {
                             if let Some(func) = methods.iter().find(|f| f.name == method) {
                                 let func = func.clone();
                                 // Call the trait method with self = the concrete value
-                                self.push_scope();
-                                self.bind("self", *data.clone())?;
-                                // If the concrete value is a record, bind its fields too
-                                if let Value::Record(_, fields) = data.as_ref() {
-                                    for (field_name, field_value) in fields {
-                                        self.bind(field_name, field_value.clone())?;
+                                let result = self.with_scope(|this| {
+                                    this.bind("self", *data.clone())?;
+                                    // If the concrete value is a record, bind its fields too
+                                    if let Value::Record(_, fields) = data.as_ref() {
+                                        for (field_name, field_value) in fields {
+                                            this.bind(field_name, field_value.clone())?;
+                                        }
                                     }
-                                }
-                                let result = self.call_func(&func, args);
-                                self.pop_scope();
+                                    this.call_func(&func, args)
+                                });
                                 return result;
                             }
                         }
@@ -638,14 +637,14 @@ impl<'a> Interpreter<'a> {
                                 let func = func.clone();
                                 let fields = fields.clone();
                                 // Found trait method - call it with self = the record
-                                self.push_scope();
-                                self.bind("self", obj.clone())?;
-                                // Bind record fields to scope
-                                for (field_name, field_value) in &fields {
-                                    self.bind(field_name, field_value.clone())?;
-                                }
-                                let result = self.call_func(&func, args);
-                                self.pop_scope();
+                                let result = self.with_scope(|this| {
+                                    this.bind("self", obj.clone())?;
+                                    // Bind record fields to scope
+                                    for (field_name, field_value) in &fields {
+                                        this.bind(field_name, field_value.clone())?;
+                                    }
+                                    this.call_func(&func, args)
+                                });
                                 return result;
                             }
                         }
@@ -672,10 +671,10 @@ impl<'a> Interpreter<'a> {
                     for methods in impls.values() {
                         if let Some(func) = methods.iter().find(|f| f.name == method) {
                             let func = func.clone();
-                            self.push_scope();
-                            self.bind("self", obj.clone())?;
-                            let result = self.call_func(&func, args);
-                            self.pop_scope();
+                            let result = self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(&func, args)
+                            });
                             return result;
                         }
                     }
@@ -834,10 +833,10 @@ impl<'a> Interpreter<'a> {
                     for methods in impls.values() {
                         if let Some(func) = methods.iter().find(|f| f.name == method) {
                             let func = func.clone();
-                            self.push_scope();
-                            self.bind("self", obj.clone())?;
-                            let result = self.call_func(&func, args);
-                            self.pop_scope();
+                            let result = self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(&func, args)
+                            });
                             return result;
                         }
                     }
@@ -853,10 +852,10 @@ impl<'a> Interpreter<'a> {
                     for methods in impls.values() {
                         if let Some(func) = methods.iter().find(|f| f.name == method) {
                             let func = func.clone();
-                            self.push_scope();
-                            self.bind("self", obj.clone())?;
-                            let result = self.call_func(&func, args);
-                            self.pop_scope();
+                            let result = self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(&func, args)
+                            });
                             return result;
                         }
                     }
@@ -1041,10 +1040,10 @@ impl<'a> Interpreter<'a> {
                                 for methods in impls.values() {
                                     if let Some(func) = methods.iter().find(|f| f.name == method) {
                                         let func = func.clone();
-                                        self.push_scope();
-                                        self.bind("self", obj.clone())?;
-                                        let result = self.call_func(&func, args);
-                                        self.pop_scope();
+                                        let result = self.with_scope(|this| {
+                                            this.bind("self", obj.clone())?;
+                                            this.call_func(&func, args)
+                                        });
                                         return result;
                                     }
                                 }

@@ -32,14 +32,9 @@ impl<'a> Checker<'a> {
                 }
                 self.infer_expr(expr, scopes)
             }
-            // C3: block — check last expression against expected type
-            Expr::Block(block) => {
-                if let Some(Stmt::Expr(e)) = block.last() {
-                    self.check_expr(expected, e, scopes)
-                } else {
-                    self.infer_block_expr(block, scopes)
-                }
-            }
+            // C3: block — check last expression against expected type and
+            // ensure every intermediate statement is type-checked.
+            Expr::Block(block) => self.check_block_expr(block, expected, scopes),
             // C3: if — check both branches against expected type
             Expr::If { then_, else_, .. } => {
                 // Use check_block_expr to propagate expected type to branches
