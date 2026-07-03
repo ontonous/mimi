@@ -243,6 +243,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Lit::String(_) | Lit::FString(_) => Some(Type::Name("string".to_string(), vec![])),
                 _ => None,
             },
+            Expr::Call(callee, _args) => {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    self.func_defs
+                        .get(name)
+                        .and_then(|f| f.ret.clone())
+                        .map(|t| self.resolve_type(&t))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }

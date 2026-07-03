@@ -197,13 +197,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn is_string_list_iterable(
         &self,
         iterable: &Expr,
-        _vars: &HashMap<String, VarEntry<'ctx>>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> bool {
-        // Direct function call: listdir, walk_dir, str_split always return List<string>
+        // Direct function call: known List<string> producers
         if let Expr::Call(callee, _) = iterable {
             if let Expr::Ident(name) = callee.as_ref() {
                 match name.as_str() {
-                    "listdir" | "walk_dir" | "str_split" => return true,
+                    "listdir" | "walk_dir" | "str_split" | "words" | "lines" | "split" => {
+                        return true;
+                    }
                     _ => {}
                 }
             }
@@ -224,6 +226,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if tn == "List<string>" {
                     return true;
                 }
+            }
+        }
+        // General fallback: use the expression's inferred type.
+        if let Some(Type::Name(n, args)) = self.expr_type_of(iterable, vars) {
+            if n == "List" && !args.is_empty() {
+                return matches!(&args[0], Type::Name(inner, _) if inner == "string");
             }
         }
         false

@@ -1161,9 +1161,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                         }
-                                        // G-41: Track return types for builtins that return List<string>
+                                        // G-41: Track return types for builtins and std
+                                        // functions that return List<string>.
                                         match func_name.as_str() {
-                                            "listdir" | "walk_dir" | "str_split" => {
+                                            "listdir" | "walk_dir" | "str_split" | "words"
+                                            | "lines" | "split" | "sort_str" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),

@@ -118,14 +118,88 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(pv) => BasicValueEnum::PointerValue(pv),
             BasicMetadataValueEnum::StructValue(sv) => {
                 let sty = sv.get_type();
-                let alloca = self
-                    .builder
-                    .build_alloca(sty, "push_struct_tmp")
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-                self.builder
-                    .build_store(alloca, sv)
-                    .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                BasicValueEnum::PointerValue(alloca)
+                let fields = sty.get_field_types();
+                // Canonical string struct is { i8*, i64 }. For string lists the
+                // runtime expects the element slot to hold the data pointer, not
+                // a pointer to the struct. Other struct types (e.g. nested lists)
+                // are stored as pointers to a temporary alloca.
+                let is_string_struct = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                if is_string_struct {
+                    // String list elements must be owning C-string pointers.
+                    // Extract the source pointer, allocate a fresh copy, and
+                    // store the copy so the list remains valid after any
+                    // surrounding temporary string allocations are freed.
+                    let raw_ptr = self
+                        .builder
+                        .build_extract_value(sv, 0, "push_str_data")
+                        .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
+                        .into_pointer_value();
+                    let strlen_fn = self.get_runtime_fn("strlen")?;
+                    let len = self
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                            "push_strlen",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("strlen returned void")?
+                        .into_int_value();
+                    let alloc_size = self
+                        .builder
+                        .build_int_add(len, i64_ty.const_int(1, false), "push_str_alloc_size")
+                        .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                    let malloc_fn = self.get_runtime_fn("malloc")?;
+                    let buf = self
+                        .builder
+                        .build_call(
+                            malloc_fn,
+                            &[BasicMetadataValueEnum::IntValue(alloc_size)],
+                            "push_str_malloc",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("malloc returned void")?
+                        .into_pointer_value();
+                    let memcpy_fn = self.get_runtime_fn("memcpy")?;
+                    self.builder
+                        .build_call(
+                            memcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                BasicMetadataValueEnum::IntValue(len),
+                            ],
+                            "push_str_memcpy",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("memcpy error: {}", e)))?;
+                    let i8_int_ty = self.context.i8_type();
+                    let null_pos = self
+                        .gep()
+                        .build_in_bounds_gep(
+                            BasicTypeEnum::IntType(i8_int_ty),
+                            buf,
+                            &[len],
+                            "push_str_nul",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.builder
+                        .build_store(null_pos, i8_int_ty.const_int(0, false))
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    BasicValueEnum::PointerValue(buf)
+                } else {
+                    let alloca = self
+                        .builder
+                        .build_alloca(sty, "push_struct_tmp")
+                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                    self.builder
+                        .build_store(alloca, sv)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    BasicValueEnum::PointerValue(alloca)
+                }
             }
             _ => {
                 return Err(CompileError::TypeMismatch(

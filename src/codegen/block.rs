@@ -843,6 +843,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => {}
                             }
                         }
+                        // Track return types for calls that produce List<string>
+                        // (e.g. std::strings::words/lines/split).  The callee is a
+                        // function name, not a bare identifier, so it is not covered
+                        // by the branch above.
+                        if let Expr::Call(callee, _) = init {
+                            if let Expr::Ident(fn_name) = callee.as_ref() {
+                                match fn_name.as_str() {
+                                    "words" | "lines" | "split" | "str_split" | "listdir"
+                                    | "walk_dir" | "sort_str" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<string>".to_string());
+                                        self.var_types.insert(
+                                            name.clone(),
+                                            Type::Name(
+                                                "List".into(),
+                                                vec![Type::Name("string".into(), vec![])],
+                                            ),
+                                        );
+                                    }
+                                    "sort_f64" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<f64>".to_string());
+                                        self.var_types.insert(
+                                            name.clone(),
+                                            Type::Name(
+                                                "List".into(),
+                                                vec![Type::Name("f64".into(), vec![])],
+                                            ),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
                 Stmt::Assign {
