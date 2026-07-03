@@ -940,6 +940,35 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
     alloc_c_string(&parts.join(""))
 }
 
+/// Render a codegen `List<i32>` (layout `{i64 len, i8* data}` where data points
+/// to i64 slots) to a printable heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(", "));
+        }
+        // `lst.data` was bitcast from `*mut i64`; cast back and read element.
+        let item = unsafe { *(lst.data as *const i64).offset(i) };
+        parts.push(item.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_str_replace(
     s: *const std::ffi::c_char,

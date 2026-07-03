@@ -658,6 +658,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(v) => {
                 let adjusted = self.adjust_int_val(v, ret_type)?;
                 let adjusted = self.coerce_variant_value(adjusted, ret_type, ret_ty_ast)?;
+                let adjusted = self.load_return_value_if_needed(adjusted)?;
                 self.build_return(Some(&adjusted))?;
             }
             None => self.build_return(None)?,
@@ -851,6 +852,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.var_types.insert(param.name.clone(), resolved.clone());
                 }
                 if let Type::ImplTrait(_) = &resolved {
+                    self.var_type_names
+                        .insert(param.name.clone(), crate::core::fmt_type(&resolved));
+                    self.var_types.insert(param.name.clone(), resolved.clone());
+                }
+                if let Type::Func(_, _) | Type::ExternFunc(_, _) = &resolved {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
                     self.var_types.insert(param.name.clone(), resolved.clone());
@@ -1281,15 +1287,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 if let Some(&(alloca, BasicTypeEnum::StructType(st))) =
                                     vars.get(name)
                                 {
-                                    if st.get_field_types().len() == 2 {
-                                        if let Ok(data_gep) = self.gep().build_struct_gep(
-                                            st,
-                                            alloca,
-                                            0,
-                                            &format!("{}_str_data_gep", name),
-                                        ) {
-                                            self.register_heap_gep(data_gep);
-                                        }
+                                    if st.get_field_types().len() == 2
+                                        && self
+                                            .gep()
+                                            .build_struct_gep(
+                                                st,
+                                                alloca,
+                                                0,
+                                                &format!("{}_str_data_gep", name),
+                                            )
+                                            .is_ok()
+                                    {
+                                        self.register_heap_slot(alloca, st, 0);
                                     }
                                 }
                             }
@@ -1602,11 +1611,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         let last_val = self.adjust_int_val(last_val, ret_type)?;
+        let last_val = self.load_return_value_if_needed(last_val)?;
         self.build_return(Some(&last_val))?;
         Ok(())
     }
 
     pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
+        // Per-function variable type tracking must start fresh so that parameters
+        // with common names (e.g. `xs`) don't inherit types from other functions.
+        // Also clear the generic substitution map: non-generic functions must not
+        // carry over type substitutions from previously compiled generic functions.
+        self.var_types.clear();
+        self.var_type_names.clear();
+        self.list_elem_llvm_types.clear();
+        self.type_map.clear();
+
         // Delegate async funcs to compile_async_func
         if func.is_async {
             return self.compile_async_func(func);
@@ -1741,9 +1760,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         func: &FuncDef,
         type_map: &HashMap<String, crate::ast::Type>,
     ) -> MimiResult<()> {
+        // Per-function variable type tracking must start fresh.
+        self.var_types.clear();
+        self.var_type_names.clear();
+        self.list_elem_llvm_types.clear();
+
         // Save and set the type_map
         let prev_type_map = self.type_map.clone();
         self.type_map = type_map.clone();
+
+        // The caller may be in the middle of building another function (e.g.
+        // `sum` monomorphizing `reduce_list`). Save the insertion point and
+        // restore it before returning so the caller's codegen continues in the
+        // right basic block.
+        let saved_block = self.builder.get_insert_block();
 
         let mangled = Self::mangle_name(&func.name, type_map);
 
@@ -1755,7 +1785,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Delegate async generic funcs to compile_async_func
         if func.is_async {
-            return self.compile_async_func(func);
+            let result = self.compile_async_func(func);
+            self.type_map = prev_type_map;
+            if let Some(bb) = saved_block {
+                self.builder.position_at_end(bb);
+            }
+            return result;
         }
 
         // For impl Trait return types, determine the concrete type from the body
@@ -1823,6 +1858,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
         self.type_map = prev_type_map;
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
         Ok(())
     }
 }

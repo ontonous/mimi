@@ -16,14 +16,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "push expects 2 arguments".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "push requires a list pointer".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "push")?;
         let elem = args[1];
 
         let i64_ty = self.context.i64_type();
@@ -162,14 +155,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "pop expects 1 argument".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "pop requires a list pointer".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "pointer")?;
 
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -316,14 +302,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "reverse expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "reverse: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "reverse")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
@@ -439,14 +418,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "sort expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "sort: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "sort")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
@@ -457,6 +429,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let outer_body_bb = self.context.append_basic_block(function, "sort_outer_body");
         let inner_loop_bb = self.context.append_basic_block(function, "sort_inner_loop");
         let inner_body_bb = self.context.append_basic_block(function, "sort_inner_body");
+        let outer_incr_bb = self.context.append_basic_block(function, "sort_outer_incr");
         let done_bb = self.context.append_basic_block(function, "sort_done");
         let i_alloca = self
             .builder
@@ -536,7 +509,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         self.builder
-            .build_conditional_branch(inner_cmp, inner_body_bb, outer_loop_bb)
+            .build_conditional_branch(inner_cmp, inner_body_bb, outer_incr_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(inner_body_bb);
         // Load arr[j] and arr[j+1]
@@ -599,14 +572,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(inner_loop_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         // After inner loop ends (j >= n-i-1), increment i and continue outer
-        self.builder.position_at_end(outer_loop_bb);
+        self.builder.position_at_end(outer_incr_bb);
+        let i_val_incr = self
+            .builder
+            .build_load(i64_ty, i_alloca, "sort_i_val")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
         let i_next = self
             .builder
-            .build_int_add(i_val, i64_ty.const_int(1, false), "sort_i_next")
+            .build_int_add(i_val_incr, i64_ty.const_int(1, false), "sort_i_next")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
         self.builder
             .build_store(i_alloca, i_next)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(outer_loop_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         // Build result list (data is already sorted in-place via swaps)
         self.builder.position_at_end(done_bb);
         let data_void = self
@@ -631,14 +612,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "sort_f64 expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "sort_f64: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "sort_f64")?;
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
         // Call mimi_sort_f64_inplace(data, count)
@@ -673,14 +647,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "sort_str expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "sort_str: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "sort_str")?;
         let list_len = self.load_list_len(list_ptr)?;
         // For List<string>, data is *mut *mut c_char — load as i8* (raw).
         let data_ptr = self.load_list_data_raw(list_ptr)?;

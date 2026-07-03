@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::codegen::expr::call::helpers::infer_generic_args;
 use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CodeGenerator, VarEntry};
 use crate::error::CompileError;
@@ -37,7 +38,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             &format!("{}_closure", name),
                         )?;
                         let compiled_args = self.compile_arg_values(args, vars)?;
-                        return self.compile_closure_call(closure_val, &compiled_args);
+                        let ret_ty = self
+                            .var_types
+                            .get(name.as_str())
+                            .and_then(|ty| Self::closure_return_llvm_type(self, ty));
+                        return self.compile_closure_call(closure_val, &compiled_args, ret_ty);
                     }
                 }
 
@@ -130,7 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         i64_ty: inkwell::types::IntType<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match fn_ref {
-            BasicValueEnum::StructValue(_) => self.compile_closure_call(fn_ref, &[payload]),
+            BasicValueEnum::StructValue(_) => self.compile_closure_call(fn_ref, &[payload], None),
             BasicValueEnum::PointerValue(_) => {
                 if let Expr::Ident(fn_name) = arg_expr {
                     if let Some(func) = self.module.get_function(fn_name) {
@@ -143,9 +148,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false))));
                     }
                 }
-                self.compile_closure_call(fn_ref, &[payload])
+                self.compile_closure_call(fn_ref, &[payload], None)
             }
             _ => Err("function reference must be a closure or function pointer".into()),
+        }
+    }
+
+    /// Extract the LLVM return type of a closure-typed variable so that indirect
+    /// calls use the correct ABI (especially for tuple/struct/float returns).
+    fn closure_return_llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
+        match ty {
+            Type::Func(_, ret) | Type::ExternFunc(_, ret) => self.llvm_type_for(ret),
+            Type::Ref(_, inner) | Type::RefMut(_, inner) => self.closure_return_llvm_type(inner),
+            _ => None,
         }
     }
 
@@ -159,6 +174,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.maybe_convert_callback_args(name, &mut compiled_args)?;
         self.maybe_load_reprc_struct_args_for_extern(name, &mut compiled_args)?;
+        self.coerce_args_to_param_types(name, &mut compiled_args)?;
 
         let mut metadata_args: Vec<_> = compiled_args
             .iter()
@@ -168,7 +184,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "len" && args.len() == 1 {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
         }
-        if crate::codegen::builtins::is_builtin(name) {
+        if crate::codegen::builtins::is_builtin(name) && !self.func_defs.contains_key(name) {
             // P0-3: for the print/println/eprintln family only, convert
             // boolean args to "true"/"false" string pointers before
             // handing them to the builtin dispatch. Other builtins
@@ -413,30 +429,69 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         metadata_args: &[BasicMetadataValueEnum<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // For non-generic functions, use the symbol as-is if it already exists.
         if let Some(function) = self.module.get_function(name) {
             return self.emit_function_call(function, name, metadata_args);
         }
 
-        let mangled = if let Some(fdef) = self.func_defs.get(name) {
+        let (mangled, callee_map) = if let Some(fdef) = self.func_defs.get(name) {
             if !fdef.generics.is_empty() {
                 let mut callee_map: HashMap<String, Type> = HashMap::new();
+                let generic_names: Vec<String> =
+                    fdef.generics.iter().map(|gp| gp.name.clone()).collect();
+                for (i, param) in fdef.params.iter().enumerate() {
+                    if i >= args.len() {
+                        break;
+                    }
+                    if let Some(arg_type) = self.expr_type_of(&args[i], &HashMap::new()) {
+                        infer_generic_args(&param.ty, &arg_type, &generic_names, &mut callee_map);
+                    }
+                }
+                // Fallback for simple direct generic params (e.g. `identity<T>(x: T)`)
+                // when expr_type_of couldn't produce a type.
                 for gp in &fdef.generics {
-                    for (i, param) in fdef.params.iter().enumerate() {
-                        if i < args.len() && Self::type_references_generic(&param.ty, &gp.name) {
-                            if let Some(arg_type) = self.expr_type_of(&args[i], &HashMap::new()) {
-                                callee_map.insert(gp.name.clone(), arg_type);
+                    if !callee_map.contains_key(&gp.name) {
+                        for (i, param) in fdef.params.iter().enumerate() {
+                            if i >= args.len() {
                                 break;
+                            }
+                            if Self::type_references_generic(&param.ty, &gp.name) {
+                                if let Some(arg_type) = self.expr_type_of(&args[i], &HashMap::new())
+                                {
+                                    callee_map.insert(gp.name.clone(), arg_type);
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-                Self::mangle_name(name, &callee_map)
+                (Self::mangle_name(name, &callee_map), callee_map)
             } else {
-                Self::mangle_name(name, &self.type_map)
+                (
+                    Self::mangle_name(name, &self.type_map),
+                    self.type_map.clone(),
+                )
             }
         } else {
-            Self::mangle_name(name, &self.type_map)
+            (
+                Self::mangle_name(name, &self.type_map),
+                self.type_map.clone(),
+            )
         };
+
+        // Compile the specialized generic function on demand if it doesn't exist yet.
+        if self.module.get_function(&mangled).is_none() {
+            if let Some(fdef) = self.func_defs.get(name).cloned() {
+                if !fdef.generics.is_empty() {
+                    self.compile_generic_func(&fdef, &callee_map).map_err(|e| {
+                        CompileError::Generic(format!(
+                            "failed to monomorphize function '{}': {}",
+                            name, e
+                        ))
+                    })?;
+                }
+            }
+        }
 
         if let Some(function) = self.module.get_function(&mangled) {
             let call = self.build_call(function, metadata_args, "call")?;
@@ -528,16 +583,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !is_mimi_string_struct {
             return Ok(sv.into());
         }
-        // Allocate a slot for the struct, store into it, register the data
-        // GEP so the loader sees the latest value at free time. Return the
-        // loaded struct to the caller.
-        let slot = self.build_alloca(sty, "call_str_slot")?;
+        // Allocate a slot for the struct in the entry block, store into it,
+        // register the data slot so the loader sees the latest value at free
+        // time. Return the loaded struct to the caller.
+        let slot = self.build_entry_alloca(sty, "call_str_slot")?;
         self.build_store(slot, sv)?;
-        if let Ok(data_gep) = self
+        if self
             .gep()
             .build_struct_gep(sty, slot, 0, "call_str_data_gep")
+            .is_ok()
         {
-            self.register_heap_gep(data_gep);
+            self.register_heap_slot(slot, sty, 0);
         }
         let loaded = self.build_load(sty, slot, "call_str_load")?;
         Ok(loaded.into_struct_value().into())
@@ -594,6 +650,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         args.iter()
             .map(|arg| self.compile_expr(arg, vars))
             .collect()
+    }
+
+    /// Convert compiled arguments to the declared parameter types of a user-defined
+    /// function. This mirrors the interpreter's implicit numeric coercion, so
+    /// calls like `power(2, 10)` (where `power` expects `f64`) pass `2.0` and
+    /// `10.0` to the generated function.
+    fn coerce_args_to_param_types(
+        &self,
+        name: &str,
+        args: &mut [BasicValueEnum<'ctx>],
+    ) -> Result<(), CompileError> {
+        let fdef = if let Some(f) = self.func_defs.get(name) {
+            f.clone()
+        } else {
+            return Ok(());
+        };
+        for (i, param) in fdef.params.iter().enumerate() {
+            if i >= args.len() {
+                break;
+            }
+            if let Some(target) = self.llvm_type_for(&param.ty) {
+                args[i] = self.adjust_int_val(args[i], target)?;
+            }
+        }
+        Ok(())
     }
 
     /// Get or create a closure ABI wrapper for a named function.

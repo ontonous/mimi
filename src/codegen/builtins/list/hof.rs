@@ -13,14 +13,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "sum expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "sum: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "sum")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;
@@ -111,14 +104,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "flatten expects 1 argument (list of lists)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "flatten: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "flatten")?;
         let i64_ty = self.context.i64_type();
         let list_struct_ty = self.list_struct_type();
         let outer_len = self.load_list_len(list_ptr)?;
@@ -392,14 +378,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "enumerate expects 1 argument (list)".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "enumerate: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "enumerate")?;
         let i64_ty = self.context.i64_type();
         let list_len = self.load_list_len(list_ptr)?;
         let data_ptr = self.load_list_data_i64(list_ptr)?;

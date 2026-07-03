@@ -3,6 +3,10 @@
 ## [Unreleased] — v0.28.26-dev
 
 ### Fixed
+- **heap slot 清理 dominance 修复** (`src/codegen/mod.rs`, `src/codegen/expr/record.rs`, `src/codegen/builtins/string/` 等)：将拥有堆数据的结构体 alloca 改在函数 entry block 分配，`free_heap_allocs` 在清理点重新 emit GEP，避免跨 basic block 释放时触发 `Instruction does not dominate all uses` 或内存泄漏
+- **codegen 用户函数优先于同名内建函数** (`src/codegen/expr/call/simple.rs`)：`contains` 等名字若被 `use std::strings` 导入为用户函数，不再被内建 `contains` 抢占，修复 `real_world_strings_module` 的 `mimi build`
+- **codegen 用户函数调用隐式数值转换** (`src/codegen/expr/call/simple.rs`, `src/codegen/mod.rs`)：按被调函数参数类型对实数做 i32↔i64、int→float 转换，修复 `power(2, 10)` 等调用
+- **codegen 浮点数转字符串格式对齐解释器** (`src/codegen/builtins/string/format.rs`)：`to_string` 对 `f64` 使用 `%.15g` 而非 `%f`，`1024.0` 输出 `1024` 而非 `1024.000000`
 - **`mimi fmt` 不再破坏字符串字面量** (`src/fmt.rs`)：格式化器现在识别字符串/字符字面量边界，`normalize_spacing` 跳过字面量内部，避免修改含 `:`、`=`、`{` 等字符的字符串内容
 - **`mms{}` 解析超时不再泄露工作线程** (`src/parser/parse_stmt.rs`)：`try_parse_mimispec_with_timeout` 超时后通过 `JoinHandle::join` 等待子线程结束，避免后台线程堆积
 - **解析器错误恢复收集语句级错误** (`src/parser/mod.rs`, `src/parser/parse_stmt.rs`)：`parse_block_with_recovery` 把 `parse_stmt` 错误加入 `Parser::errors`，函数体内的语法错误不再被静默吞掉
@@ -23,6 +27,8 @@
 - **`#[no_panic]` 移除 sigsetjmp/siglongjmp UB** (`src/interp/ffi/call.rs`, `src/runtime/mod.rs`)：信号处理程序非局部跳回 Rust 属于 UB；解释器路径改用 fork 进程隔离，runtime 中相关 C ABI 符号保留为 no-op 以保持链接兼容
 
 ### Tests
+- `e2e_valgrind_list_ops` 内存泄漏修复；`golden_list_ops`  golden IR 已重生成
+- `real_world_strings_module` 与 `real_world_mymath_module` 现在 `mimi run` 与 `mimi build` 双后端均通过
 - 新增 formatter 回归测试（含字符串字面量保护）
 - 新增 parser / interpreter / borrow / loader / mms 回归套件
 - 新增 block 表达式类型检查回归测试

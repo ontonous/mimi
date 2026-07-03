@@ -617,6 +617,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.pop_cap_scope();
                 let mut val = self.compile_expr(expr, vars)?;
                 val = self.adjust_int_val(val, self.current_fn_ret_type())?;
+                val = self.load_return_value_if_needed(val)?;
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
@@ -902,6 +903,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
             }
             let last_val = self.adjust_int_val(last_val, ret_type)?;
+            let last_val = self.load_return_value_if_needed(last_val)?;
             self.build_return(Some(&last_val))?;
         }
         Ok(())

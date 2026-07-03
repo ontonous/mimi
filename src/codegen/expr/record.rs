@@ -204,7 +204,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         data_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let list_ty = self.list_struct_type();
-        let list_alloca = self.build_alloca(list_ty, "list")?;
+        let list_alloca = self.build_entry_alloca(list_ty, "list")?;
         let len_gep = self
             .gep()
             .build_struct_gep(list_ty, list_alloca, 0, "list_len")
@@ -222,7 +222,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "data_void",
         )?;
         self.build_store(data_gep, data_void_ptr)?;
-        self.register_heap_gep(data_gep);
+        self.register_heap_slot(list_alloca, list_ty, 1);
         Ok(list_alloca.into())
     }
 

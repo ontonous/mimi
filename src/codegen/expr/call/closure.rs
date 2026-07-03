@@ -54,12 +54,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build an indirect call to a closure function.
-    /// The closure ABI is: `fn(env_ptr: i8*, args...) -> i64`.
+    /// The closure ABI is: `fn(env_ptr: i8*, args...) -> ret_ty`.
+    /// `ret_ty` defaults to i64 when the caller cannot determine the closure's
+    /// return type; passing the concrete return type is required for tuple or
+    /// float returns.
     fn emit_closure_call(
         &self,
         fn_ptr: inkwell::values::PointerValue<'ctx>,
         env_ptr: inkwell::values::PointerValue<'ctx>,
         args: &[BasicValueEnum<'ctx>],
+        ret_ty: Option<BasicTypeEnum<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -78,7 +82,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::ScalableVectorValue(_) => BasicMetadataTypeEnum::IntType(i64_ty),
             });
         }
-        let indirect_fn_type = i64_ty.fn_type(&all_meta, false);
+        let indirect_fn_type = match ret_ty {
+            Some(BasicTypeEnum::IntType(t)) => t.fn_type(&all_meta, false),
+            Some(BasicTypeEnum::FloatType(t)) => t.fn_type(&all_meta, false),
+            Some(BasicTypeEnum::PointerType(t)) => t.fn_type(&all_meta, false),
+            Some(BasicTypeEnum::StructType(t)) => t.fn_type(&all_meta, false),
+            Some(BasicTypeEnum::ArrayType(t)) => t.fn_type(&all_meta, false),
+            None | Some(_) => i64_ty.fn_type(&all_meta, false),
+        };
         let fn_ptr_typed = self.build_bit_cast(
             BasicValueEnum::PointerValue(fn_ptr),
             BasicTypeEnum::PointerType(i8_ptr),
@@ -113,12 +124,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Call a closure value with the given arguments.
     /// `closure_val` can be a StructValue {fn_ptr, env_ptr} or a PointerValue to one.
+    /// `ret_ty` is the closure's concrete LLVM return type when known.
     pub(in crate::codegen) fn compile_closure_call(
         &self,
         closure_val: BasicValueEnum<'ctx>,
         args: &[BasicValueEnum<'ctx>],
+        ret_ty: Option<BasicTypeEnum<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
-        self.emit_closure_call(fn_ptr, env_ptr, args)
+        self.emit_closure_call(fn_ptr, env_ptr, args, ret_ty)
     }
 }

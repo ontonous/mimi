@@ -36,6 +36,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let mut val = self.compile_expr(expr, vars)?;
                     let ret_type = self.current_fn_ret_type();
                     val = self.adjust_int_val(val, ret_type)?;
+                    val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
                         let fn_name: String = self
@@ -774,6 +775,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // P0-4: heap-copy string returns so the caller
                     // doesn't later free() a .rodata literal pointer.
                     val = self.claim_string_return_value(val, ret_type, Some(e), vars)?;
+                    val = self.load_return_value_if_needed(val)?;
                     self.build_return(Some(&val))?;
                     return Ok(val);
                 }

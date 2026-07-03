@@ -61,10 +61,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ],
                     false,
                 );
-                let alloca = self
-                    .builder
-                    .build_alloca(str_ty, "str_result")
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                let alloca = self.build_entry_alloca(str_ty, "str_result")?;
                 let ptr_gep = self
                     .gep()
                     .build_struct_gep(str_ty, alloca, 0, "str_ptr")
@@ -72,7 +69,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, buf)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.register_heap_gep(ptr_gep);
+                self.register_heap_slot(alloca, str_ty, 0);
                 let strlen_fn = self
                     .module
                     .get_function("strlen")
@@ -120,7 +117,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 let fmt_global = self
                     .builder
-                    .build_global_string_ptr("%f", "float_fmt")
+                    .build_global_string_ptr("%.15g", "float_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                 let sprintf_fn = self
                     .module
@@ -147,10 +144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ],
                     false,
                 );
-                let alloca = self
-                    .builder
-                    .build_alloca(str_ty, "str_result")
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                let alloca = self.build_entry_alloca(str_ty, "str_result")?;
                 let ptr_gep = self
                     .gep()
                     .build_struct_gep(str_ty, alloca, 0, "str_ptr")
@@ -158,7 +152,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, buf)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.register_heap_gep(ptr_gep);
+                self.register_heap_slot(alloca, str_ty, 0);
                 let strlen_fn = self
                     .module
                     .get_function("strlen")
@@ -238,10 +232,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ],
                     false,
                 );
-                let alloca = self
-                    .builder
-                    .build_alloca(str_ty, "str_result")
-                    .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                let alloca = self.build_entry_alloca(str_ty, "str_result")?;
                 let ptr_gep = self
                     .gep()
                     .build_struct_gep(str_ty, alloca, 0, "str_ptr")
@@ -249,7 +240,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, buf)
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                self.register_heap_gep(ptr_gep);
+                self.register_heap_slot(alloca, str_ty, 0);
                 let len_gep = self
                     .gep()
                     .build_struct_gep(str_ty, alloca, 1, "str_len")
@@ -338,10 +329,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("strlen returned void")?
             .into_int_value();
-        let res_alloca = self
-            .builder
-            .build_alloca(str_ty, "vts_str_alloca")
-            .map_err(|e| CompileError::LlvmError(format!("vts str alloca: {}", e)))?;
+        let res_alloca = self.build_entry_alloca(str_ty, "vts_str_alloca")?;
         let ptr_gep = self
             .gep()
             .build_struct_gep(str_ty, res_alloca, 0, "vts_str_ptr")
@@ -349,7 +337,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(ptr_gep, raw)
             .map_err(|e| CompileError::LlvmError(format!("vts str store: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
+        self.register_heap_slot(res_alloca, str_ty, 0);
         let len_gep = self
             .gep()
             .build_struct_gep(str_ty, res_alloca, 1, "vts_str_len")
@@ -415,10 +403,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             false,
         );
-        let alloca = self
-            .builder
-            .build_alloca(str_ty, "str_result")
-            .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+        let alloca = self.build_entry_alloca(str_ty, "str_result")?;
         let ptr_gep = self
             .gep()
             .build_struct_gep(str_ty, alloca, 0, "str_ptr")
@@ -426,7 +411,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(ptr_gep, buf)
             .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-        self.register_heap_gep(ptr_gep);
+        self.register_heap_slot(alloca, str_ty, 0);
         let len_gep = self
             .gep()
             .build_struct_gep(str_ty, alloca, 1, "str_len")

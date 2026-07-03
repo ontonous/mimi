@@ -54,29 +54,33 @@ impl<T> ListExt<T> for List<T> {
         }, 0)
     }
     func dedup() -> List<T> {
-        reduce(self, fn(dd_acc: List<T>, dd_x: T) -> List<T> {
-            if !contains(dd_acc, dd_x) { push(dd_acc, dd_x) }
-            dd_acc
-        }, [])
+        let mut dd_result: List<T> = []
+        for dd_x in self {
+            if !contains(dd_result, dd_x) { push(dd_result, dd_x) }
+        }
+        dd_result
     }
     func concat(ys: List<T>) -> List<T> {
-        reduce(ys, fn(ct_acc: List<T>, ct_x: T) -> List<T> {
-            push(ct_acc, ct_x)
-            ct_acc
-        }, self)
+        let mut ct_result: List<T> = self
+        for ct_x in ys {
+            push(ct_result, ct_x)
+        }
+        ct_result
     }
     func reverse() -> List<T> { reverse(self) }
     func remove_at(index: i32) -> List<T> {
-        reduce(range(0, len(self)), fn(ra_acc: List<T>, ra_i: i32) -> List<T> {
-            if ra_i != index { push(ra_acc, self[ra_i]) }
-            ra_acc
-        }, [])
+        let mut ra_result: List<T> = []
+        for ra_i in range(0, len(self)) {
+            if ra_i != index { push(ra_result, self[ra_i]) }
+        }
+        ra_result
     }
     func remove(value: T) -> List<T> {
-        reduce(self, fn(rv_acc: List<T>, rv_x: T) -> List<T> {
-            if rv_x != value { push(rv_acc, rv_x) }
-            rv_acc
-        }, [])
+        let mut rv_result: List<T> = []
+        for rv_x in self {
+            if rv_x != value { push(rv_result, rv_x) }
+        }
+        rv_result
     }
     func any(pred: func(T) -> bool) -> bool {
         for a_x in self {
@@ -128,10 +132,11 @@ impl<T> ListExt<T> for List<T> {
         fl_res
     }
     func map<U>(f: func(T) -> U) -> List<U> {
-        reduce(self, fn(ml_acc: List<U>, ml_x: T) -> List<U> {
-            push(ml_acc, f(ml_x))
-            ml_acc
-        }, [])
+        let mut ml_result: List<U> = []
+        for ml_x in self {
+            push(ml_result, f(ml_x))
+        }
+        ml_result
     }
     func find_map<U>(f: func(T) -> (bool, U)) -> Option<U> {
         for fm_x in self {

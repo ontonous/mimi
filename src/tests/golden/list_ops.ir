@@ -339,6 +339,7 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 
 define i64 @main() {
 entry:
+  %list = alloca { i64, ptr }, align 8
   %malloc_call = call ptr @malloc(i64 24)
   %elem = getelementptr inbounds i64, ptr %malloc_call, i64 0
   store i64 1, ptr %elem, align 4
@@ -346,7 +347,6 @@ entry:
   store i64 2, ptr %elem1, align 4
   %elem2 = getelementptr inbounds i64, ptr %malloc_call, i64 2
   store i64 3, ptr %elem2, align 4
-  %list = alloca { i64, ptr }, align 8
   %list_len = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 0
   store i64 3, ptr %list_len, align 4
   %list_data = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
@@ -399,7 +399,8 @@ bounds_ok21:                                      ; preds = %bounds_fail22, %bou
   %elem26 = getelementptr inbounds i64, ptr %data25, i64 2
   %elem_val27 = load i64, ptr %elem26, align 4
   %add28 = add i64 %add, %elem_val27
-  %heap_slot = load ptr, ptr %list_data, align 8
+  %heap_slot_gep = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
+  %heap_slot = load ptr, ptr %heap_slot_gep, align 8
   call void @free(ptr %heap_slot)
   ret i64 %add28
 

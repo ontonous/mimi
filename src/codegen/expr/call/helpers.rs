@@ -224,8 +224,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         match expr {
             Expr::Ident(name) => {
                 if let Some(tn) = self.var_type_names.get(name) {
-                    let raw = Type::Name(tn.clone(), vec![]);
-                    Some(self.resolve_type(&raw))
+                    // Try to parse strings like "List<i32>" into proper AST types so
+                    // that generic monomorphization can extract element types.
+                    if let Some(parsed) = crate::codegen::expr::call::helpers::parse_type_str(tn) {
+                        Some(self.resolve_type(&parsed))
+                    } else {
+                        let raw = Type::Name(tn.clone(), vec![]);
+                        Some(self.resolve_type(&raw))
+                    }
                 } else {
                     None
                 }
@@ -593,6 +599,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         Err("values: expected record type".into())
     }
 
+    /// Ensure a compiled list value is available as a pointer. List values may
+    /// be passed by pointer (the common case) or as a loaded struct (e.g. `self`
+    /// inside a trait method). Store loaded structs into a fresh alloca so the
+    /// rest of the higher-order list code can use a consistent pointer.
+    fn list_value_to_ptr(
+        &self,
+        list_val: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        match list_val {
+            BasicValueEnum::PointerValue(pv) => Ok(pv),
+            BasicValueEnum::StructValue(sv) => {
+                let list_ty = BasicTypeEnum::StructType(sv.get_type());
+                let alloca = self
+                    .build_alloca(list_ty, "list_struct_arg")
+                    .map_err(|e| format!("list alloca: {}", e))?;
+                self.build_store(alloca, sv)
+                    .map_err(|e| format!("list store: {}", e))?;
+                Ok(alloca)
+            }
+            _ => Err("expected a list value".to_string()),
+        }
+    }
+
     /// `map(list, fn)` / `filter(list, fn)` -> compile-time higher-order list operation.
     fn compile_map_filter_intrinsic(
         &mut self,
@@ -603,10 +632,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_map = name == "map";
         // Compile the list expression
         let list_val = self.compile_expr(&args[0], vars)?;
-        let list_ptr = match list_val {
-            BasicValueEnum::PointerValue(pv) => pv,
-            _ => return Err("map/filter: first arg must be a list".into()),
-        };
+        let list_ptr = self.list_value_to_ptr(list_val).map_err(|e| {
+            CompileError::Generic(format!("map/filter: first arg must be a list: {}", e))
+        })?;
         // Resolve function from second arg (identifier, lambda, or variable)
         enum FnRef<'ctx> {
             Named(inkwell::values::FunctionValue<'ctx>),
@@ -866,10 +894,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // reduce(list, fn, init) - function reference version
         let list_val = self.compile_expr(&args[0], vars)?;
-        let list_ptr = match list_val {
-            BasicValueEnum::PointerValue(pv) => pv,
-            _ => return Err("reduce: first arg must be a list".into()),
-        };
+        let list_ptr = self.list_value_to_ptr(list_val).map_err(|e| {
+            CompileError::Generic(format!("reduce: first arg must be a list: {}", e))
+        })?;
         let init_val = self.compile_expr(&args[2], vars)?;
 
         // Reduce takes a 2-arg closure (acc, elem) -> acc. The codegen
@@ -1074,4 +1101,236 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => false,
         }
     }
+}
+
+// ============================================================
+// Generic type argument inference helpers (codegen monomorphization)
+// ============================================================
+
+/// Parse a type string produced by `fmt_type` back into an AST `Type`.
+///
+/// This is intentionally narrower than the full parser: it handles the shapes
+/// that appear in `var_type_names` (`List<i32>`, `Result<T, string>`, etc.)
+/// so that codegen can extract generic arguments during monomorphization.
+pub(crate) fn parse_type_str(s: &str) -> Option<Type> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Option<T>
+    if let Some(inner) = strip_balanced_suffix(s, "Option<") {
+        return Some(Type::Option(Box::new(parse_type_str(inner)?)));
+    }
+    // Result<T, E>
+    if let Some(inner) = strip_balanced_suffix(s, "Result<") {
+        let parts = split_top_level(inner, ',');
+        if parts.len() == 2 {
+            return Some(Type::Result(
+                Box::new(parse_type_str(parts[0])?),
+                Box::new(parse_type_str(parts[1])?),
+            ));
+        }
+    }
+    // Generic named type: Name<args>
+    if let Some(lt) = find_top_level(s, '<') {
+        let base = s[..lt].trim();
+        let rest = &s[lt + 1..];
+        let rest = strip_balanced_suffix(rest, "")?; // strip trailing '>'
+        let args = split_top_level(rest, ',')
+            .into_iter()
+            .map(parse_type_str)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(Type::Name(base.to_string(), args));
+    }
+    // Tuple types: (A, B, C)
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        let parts = split_top_level(inner, ',');
+        let elems = parts
+            .into_iter()
+            .map(parse_type_str)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(Type::Tuple(elems));
+    }
+
+    Some(Type::Name(s.to_string(), vec![]))
+}
+
+/// Find the index of `c` at the top level of a type string (not nested in
+/// generic brackets or parentheses).
+fn find_top_level(s: &str, c: char) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ if ch == c && depth == 1 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// If `s` is wrapped in `prefix`...`>` with balanced brackets, strip the
+/// wrapper and return the inner text. The empty prefix is used for generic
+/// named types like `List<...>` after the base name has been consumed.
+fn strip_balanced_suffix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if !prefix.is_empty() && !s.starts_with(prefix) {
+        return None;
+    }
+    if !s.ends_with('>') {
+        return None;
+    }
+    let inner_start = if prefix.is_empty() { 0 } else { prefix.len() };
+    let inner = &s[inner_start..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    Some(inner)
+}
+
+/// Split a string at top-level occurrences of `delim`.
+fn split_top_level(s: &str, delim: char) -> Vec<&str> {
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ if ch == delim && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+        .into_iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Extract generic argument substitutions from a param/arg type pair.
+///
+/// `generics` is the list of generic parameter names for the callee. This
+/// mirrors the inference performed by the type checker so that codegen can
+/// pick the correct monomorphization for non-turbofish generic calls.
+pub(crate) fn infer_generic_args(
+    param: &Type,
+    arg: &Type,
+    generics: &[String],
+    map: &mut HashMap<String, Type>,
+) {
+    let is_gen = |name: &str| generics.iter().any(|g| g == name);
+
+    match param {
+        Type::Name(p_name, p_args) if is_gen(p_name) => {
+            if !occurs_in(name_of_type(arg), p_name) {
+                map.entry(p_name.clone()).or_insert_with(|| arg.clone());
+            }
+        }
+        Type::Name(p_name, p_args) => {
+            if let Type::Name(a_name, a_args) = arg {
+                if p_name == a_name && p_args.len() == a_args.len() {
+                    for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                        infer_generic_args(pa, aa, generics, map);
+                    }
+                }
+            }
+        }
+        Type::Ref(_, p_inner) | Type::RefMut(_, p_inner) => {
+            if let Type::Ref(_, a_inner) | Type::RefMut(_, a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::Option(p_inner) => {
+            if let Type::Option(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::Result(p_ok, p_err) => {
+            if let Type::Result(a_ok, a_err) = arg {
+                infer_generic_args(p_ok, a_ok, generics, map);
+                infer_generic_args(p_err, a_err, generics, map);
+            }
+        }
+        Type::Tuple(p_elems) => {
+            if let Type::Tuple(a_elems) = arg {
+                if p_elems.len() == a_elems.len() {
+                    for (pe, ae) in p_elems.iter().zip(a_elems.iter()) {
+                        infer_generic_args(pe, ae, generics, map);
+                    }
+                }
+            }
+        }
+        Type::Func(p_args, p_ret) => {
+            if let Type::Func(a_args, a_ret) = arg {
+                if p_args.len() == a_args.len() {
+                    for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                        infer_generic_args(pa, aa, generics, map);
+                    }
+                    infer_generic_args(p_ret, a_ret, generics, map);
+                }
+            }
+        }
+        Type::Shared(p_inner) => {
+            if let Type::Shared(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::LocalShared(p_inner) => {
+            if let Type::LocalShared(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::Weak(p_inner) => {
+            if let Type::Weak(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::WeakLocal(p_inner) => {
+            if let Type::WeakLocal(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::Slice(p_inner) => {
+            if let Type::Slice(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::RawPtr(p_inner) => {
+            if let Type::RawPtr(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        Type::RawPtrMut(p_inner) => {
+            if let Type::RawPtrMut(a_inner) = arg {
+                infer_generic_args(p_inner, a_inner, generics, map);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn name_of_type(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Name(name, _) => Some(name),
+        _ => None,
+    }
+}
+
+fn occurs_in(arg_name: Option<&str>, generic_name: &str) -> bool {
+    arg_name == Some(generic_name)
 }

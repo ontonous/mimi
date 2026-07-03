@@ -695,7 +695,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let err_payload =
             self.build_load(BasicTypeEnum::IntType(i64_ty), err_gep, "err_payload")?;
-        let mapped = self.compile_closure_call(closure_val, &[err_payload])?;
+        let mapped = self.compile_closure_call(closure_val, &[err_payload], None)?;
         self.build_store(result_alloca, mapped)?;
         self.build_br(ok_bb)?;
         self.builder.position_at_end(ok_bb);

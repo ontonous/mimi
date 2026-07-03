@@ -98,10 +98,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
-        if let Some(trait_impls) = self.type_impls.get(&obj_type) {
+        // Impl blocks are keyed by the base type name (e.g. "List") even when the
+        // call site sees a concrete instantiation like "List<T>" or "List<i32>".
+        let base_obj_type = base_type_name(&obj_type);
+        if let Some(trait_impls) = self.type_impls.get(base_obj_type) {
             for (trait_name, methods) in trait_impls {
                 if methods.iter().any(|m| m.name == *method_name) {
-                    let mangled = format!("{}__{}__{}", obj_type, trait_name, method_name);
+                    let mangled = format!("{}__{}__{}", base_obj_type, trait_name, method_name);
                     if let Some(function) = self.module.get_function(&mangled) {
                         return self.compile_self_method_call(
                             obj,
@@ -1087,5 +1090,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_expr(expr, vars)
             }
         }
+    }
+}
+
+/// Strip generic arguments from a type string so that trait impl lookups use
+/// the base type name (e.g. "List<T>" and "List<i32>" both map to "List").
+fn base_type_name(type_str: &str) -> &str {
+    match type_str.find('<') {
+        Some(idx) => &type_str[..idx],
+        None => type_str,
     }
 }

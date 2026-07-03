@@ -118,6 +118,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(e)) => {
                     let v = self.compile_expr(e, lambda_vars)?;
+                    let v = self.load_return_value_if_needed(v)?;
                     self.build_return(Some(&v))?;
                     break;
                 }
@@ -140,6 +141,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         if !self.block_has_terminator() {
+            let last_val = self.load_return_value_if_needed(last_val)?;
             self.build_return(Some(&last_val))?;
         }
         Ok(())

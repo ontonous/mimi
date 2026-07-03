@@ -284,10 +284,17 @@ type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)
 
 /// Entries tracked for scope-exit heap cleanup.
 /// `Ptr` = raw pointer to free directly.
-/// `Slot` = address of an alloca/GEP holding the pointer; load it, then free the loaded value.
+/// `Slot(base, struct_ty, field)` = an alloca of type `struct_ty` (`base`) and
+/// the field index that holds the heap pointer. At cleanup a fresh GEP is
+/// emitted from `base` in the current block. `base` must dominate the cleanup
+/// point; call sites therefore allocate it in the function entry block.
 enum HeapEntry<'ctx> {
     Ptr(inkwell::values::PointerValue<'ctx>),
-    Slot(inkwell::values::PointerValue<'ctx>),
+    Slot(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::types::StructType<'ctx>,
+        u32,
+    ),
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -397,6 +404,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("alloca error ({}): {}", name, e)))
     }
 
+    /// Build an `alloca` in the function's entry block so it dominates all uses.
+    /// This is used for heap-owning struct slots that need to be freed at scope
+    /// exits that may live in a different basic block.
+    pub(super) fn build_entry_alloca<T: inkwell::types::BasicType<'ctx>>(
+        &self,
+        ty: T,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("alloca outside function".to_string()))?;
+        let entry_bb = function
+            .get_first_basic_block()
+            .ok_or_else(|| CompileError::LlvmError("function has no entry block".to_string()))?;
+        let saved = self.builder.get_insert_block();
+        if let Some(first_inst) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_inst);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        let alloca = self.builder.build_alloca(ty, name).map_err(|e| {
+            CompileError::LlvmError(format!("entry alloca error ({}): {}", name, e))
+        })?;
+        if let Some(saved_bb) = saved {
+            self.builder.position_at_end(saved_bb);
+        }
+        Ok(alloca)
+    }
+
     /// Build a `store` instruction.
     pub(super) fn build_store(
         &self,
@@ -465,6 +501,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(func, args, name)
             .map_err(|e| CompileError::LlvmError(format!("call error ({}): {}", name, e)))
+    }
+
+    /// If a function returns a struct by value but the value we have is a
+    /// pointer to that struct (e.g. a tuple/record alloca), load it so the
+    /// return instruction sees the correct type.
+    pub(super) fn load_return_value_if_needed(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if let BasicValueEnum::PointerValue(pv) = val {
+            let ret_type = self.current_fn_ret_type();
+            if let BasicTypeEnum::StructType(sty) = ret_type {
+                // Tuple/record/string allocas are emitted as pointers; a function
+                // returning the corresponding struct by value needs the loaded
+                // aggregate, not the alloca pointer.
+                let _ = sty;
+                return self.build_load(sty, pv, "ret_load");
+            }
+        }
+        Ok(val)
     }
 
     /// Build a `return` instruction with an optional value.
@@ -784,6 +840,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))
                 }
             }
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft)) => self
+                .builder
+                .build_signed_int_to_float(iv, ft, "sitofp")
+                .map(|v| v.into())
+                .map_err(|e| CompileError::LlvmError(format!("sitofp error: {}", e))),
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(ti)) => self
+                .builder
+                .build_float_to_signed_int(fv, ti, "fptosi")
+                .map(|v| v.into())
+                .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e))),
             _ => Ok(val),
         }
     }
@@ -821,12 +887,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Register a GEP/slot whose loaded value should be freed at scope exit.
-    /// At free time, the pointer is loaded from the slot, getting the latest
-    /// value after any reallocs.
-    pub(super) fn register_heap_gep(&self, gep: inkwell::values::PointerValue<'ctx>) {
+    /// Register an entry-alloca struct slot whose loaded value should be freed at
+    /// scope exit. `field` is the index of the pointer field inside the struct.
+    /// At free time, a fresh GEP is emitted from `base` in the current block,
+    /// avoiding dominance issues.
+    pub(super) fn register_heap_slot(
+        &self,
+        base: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        field: u32,
+    ) {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            stack.push(HeapEntry::Slot(gep));
+            stack.push(HeapEntry::Slot(base, struct_ty, field));
         }
     }
 
@@ -871,6 +943,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// G10: Pop scope level and emit `free(ptr)` for each registered heap allocation.
+    ///
+    /// For `Slot` entries the heap pointer is re-extracted from an entry-block
+    /// alloca in the current basic block, so the slot always dominates the cleanup
+    /// point. Raw `Ptr` entries are freed directly and are assumed to dominate the
+    /// cleanup point (they are normally produced by builtins in the same block).
     pub(super) fn free_heap_allocs(&mut self) -> Result<(), CompileError> {
         if let Some(scope) = self.heap_allocs.borrow_mut().pop() {
             let free_fn = self
@@ -880,15 +957,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             for entry in scope {
                 let ptr = match entry {
                     HeapEntry::Ptr(p) => p,
-                    HeapEntry::Slot(gep) => {
+                    HeapEntry::Slot(base, struct_ty, field) => {
+                        let gep = self
+                            .gep()
+                            .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot gep error: {}", e))
+                            })?;
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let loaded =
-                            self.builder
-                                .build_load(ptr_ty, gep, "heap_slot")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("heap slot load error: {}", e))
-                                })?;
-                        loaded.into_pointer_value()
+                        self.builder
+                            .build_load(ptr_ty, gep, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value()
                     }
                 };
                 self.builder

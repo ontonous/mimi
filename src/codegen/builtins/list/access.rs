@@ -76,14 +76,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "contains expects 2 arguments".to_string(),
             ));
         }
-        let list_ptr = match args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "contains: first arg must be a list".to_string(),
-                ))
-            }
-        };
+        let list_ptr = self.require_list_pointer(args[0], "contains")?;
         let elem_val = args[1];
         let i64_ty = self.context.i64_type();
         // Get list length and data

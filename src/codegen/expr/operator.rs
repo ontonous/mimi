@@ -108,11 +108,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             UnOp::Not => {
                 if let BasicValueEnum::IntValue(iv) = v {
-                    Ok(self
-                        .builder
-                        .build_not(iv, "not")
-                        .map_err(|e| CompileError::LlvmError(format!("not error: {}", e)))?
-                        .into())
+                    if iv.get_type().get_bit_width() == 1 {
+                        Ok(self
+                            .builder
+                            .build_not(iv, "not")
+                            .map_err(|e| CompileError::LlvmError(format!("not error: {}", e)))?
+                            .into())
+                    } else {
+                        // Some builtins (e.g. contains) return i64 for bool.
+                        // Normalize to i1 with `x == 0` so it can feed `if`.
+                        let zero = iv.get_type().const_int(0, false);
+                        Ok(self
+                            .builder
+                            .build_int_compare(inkwell::IntPredicate::EQ, iv, zero, "not")
+                            .map_err(|e| CompileError::LlvmError(format!("not error: {}", e)))?
+                            .into())
+                    }
                 } else {
                     let ty_desc = type_description(&v.get_type());
                     Err(format!("'not' requires bool, got {}", ty_desc).into())

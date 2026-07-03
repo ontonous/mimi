@@ -69,6 +69,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         _ => Ok((BasicMetadataValueEnum::StructValue(*sv), "%p".to_string())),
                     }
+                } else if num_fields == 2
+                    && matches!(fields[0], BasicTypeEnum::IntType(_))
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
+                {
+                    // Mimi list struct: {i64 len, ptr data}. Format via runtime helper.
+                    let str_ptr = self.emit_list_i32_to_string(*sv)?;
+                    Ok((
+                        BasicMetadataValueEnum::PointerValue(str_ptr),
+                        "%s".to_string(),
+                    ))
                 } else if num_fields >= 2 {
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
@@ -102,6 +112,39 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Ok((*arg, "%p".to_string())),
         }
+    }
+
+    /// Materialize a list struct value into an alloca and call the runtime
+    /// helper `mimi_list_i32_to_string` to get a printable C string.
+    fn emit_list_i32_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let list_struct_ty = self.list_struct_type();
+        let alloca = self.build_alloca(list_struct_ty, "print_list_alloca")?;
+        self.build_store(alloca, sv)?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+        let callee = self
+            .module
+            .get_function("mimi_list_i32_to_string")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_list_i32_to_string",
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let raw = self
+            .build_call(
+                callee,
+                &[BasicMetadataValueEnum::PointerValue(alloca)],
+                "list_i32_to_str",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_list_i32_to_string returned void")?
+            .into_pointer_value();
+        Ok(raw)
     }
 
     pub(super) fn compile_print(
