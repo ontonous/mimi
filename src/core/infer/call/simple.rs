@@ -936,7 +936,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i32".into(), vec![]);
             }
-            "read_lines_json" => {
+            "read_lines_json" | "read_lines_json_builtin" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,

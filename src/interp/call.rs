@@ -315,7 +315,7 @@ impl<'a> Interpreter<'a> {
             "read_file_bytes" => self.builtin_read_file_bytes(args),
             "write_file_bytes" => self.builtin_write_file_bytes(args),
             "read_lines_each" => self.builtin_read_lines_each(args),
-            "read_lines_json" => self.builtin_read_lines_json(args),
+            "read_lines_json" | "read_lines_json_builtin" => self.builtin_read_lines_json(args),
             "sha256" => self.builtin_sha256(args),
             "base64_encode" => self.builtin_base64_encode(args),
             "base64_decode" => self.builtin_base64_decode(args),

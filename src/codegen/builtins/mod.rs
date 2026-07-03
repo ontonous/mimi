@@ -1342,6 +1342,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "exec" | "file_stat" | "append_file" | "set_env"
         | "exec_pipe"
         | "read_file_partial" | "read_file_bytes" | "write_file_bytes" | "read_lines_json"
+        | "read_lines_json_builtin"
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
@@ -1474,7 +1475,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "read_file_partial" => self.compile_read_file_partial(args),
             "read_file_bytes" => self.compile_read_file_bytes(args),
             "write_file_bytes" => self.compile_write_file_bytes(args),
-            "read_lines_json" => self.compile_read_lines_json(args),
+            "read_lines_json" | "read_lines_json_builtin" => self.compile_read_lines_json(args),
             "sha256" => self.compile_sha256(args),
             "base64_encode" => self.compile_base64_encode(args),
             "base64_decode" => self.compile_base64_decode(args),
