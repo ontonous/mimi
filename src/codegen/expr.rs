@@ -3,6 +3,7 @@ use crate::codegen::call_try_basic_value;
 use crate::codegen::CallSiteValueExt;
 use crate::error::CompileError;
 
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue};
 use std::collections::HashMap;
 
@@ -293,21 +294,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Ident(name) => {
                 // Look up variable's type name from our tracking map
                 if let Some(ty_name) = self.var_type_names.get(name) {
-                    ty_name.clone()
-                } else {
-                    name.clone()
+                    return ty_name.clone();
                 }
+                // Fallback: derive a type name from the variable's LLVM slot type.
+                // This helps method dispatch on local variables whose type was not
+                // explicitly annotated (e.g. `let total_secs = self / MILLIS_PER_SECOND`).
+                if let Some(entry) = vars.get(name) {
+                    let llvm_ty = entry.1;
+                    if let Some(ty_name) = Self::llvm_type_to_object_name(&llvm_ty) {
+                        return ty_name;
+                    }
+                }
+                name.clone()
             }
             Expr::Record { ty: Some(name), .. } => name.clone(),
             Expr::Call(callee, _) => {
-                // constructor call like ActorName(args) -> return type is the name
                 if let Expr::Ident(name) = callee.as_ref() {
                     // Try to strip _new suffix used by our codegen constructors
                     if let Some(stripped) = name.strip_suffix("_new") {
-                        stripped.to_string()
-                    } else {
-                        name.clone()
+                        return stripped.to_string();
                     }
+                    if let Some(ret_name) = self.infer_call_return_type_name(name) {
+                        return ret_name;
+                    }
+                    name.clone()
                 } else {
                     String::new()
                 }
@@ -357,6 +367,92 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap_or_default(),
             _ => String::new(),
         }
+    }
+
+    /// Map a stored LLVM value type back to a coarse Mimi type name for method
+    /// dispatch. This is intentionally approximate: it only needs to distinguish
+    /// the builtin scalar types and common struct layouts (string, List, Option,
+    /// Result) when the variable was not explicitly annotated.
+    fn llvm_type_to_object_name(llvm_ty: &BasicTypeEnum<'ctx>) -> Option<String> {
+        match llvm_ty {
+            BasicTypeEnum::IntType(t) => {
+                let width = t.get_bit_width();
+                if width == 1 {
+                    Some("bool".to_string())
+                } else if width == 32 {
+                    Some("i32".to_string())
+                } else {
+                    Some("i64".to_string())
+                }
+            }
+            BasicTypeEnum::FloatType(_) => Some("f64".to_string()),
+            BasicTypeEnum::StructType(sty) => {
+                let fields = sty.get_field_types();
+                match fields.as_slice() {
+                    // Mimi string: {i8*, i64}
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                        if t.get_bit_width() == 64 =>
+                    {
+                        Some("string".to_string())
+                    }
+                    // Mimi List<T>: {i64 len, ptr}
+                    [BasicTypeEnum::IntType(t), BasicTypeEnum::PointerType(_)]
+                        if t.get_bit_width() == 64 =>
+                    {
+                        Some("List<unknown>".to_string())
+                    }
+                    // Option<T>: {i1 disc, T payload}; approximate as Option
+                    [BasicTypeEnum::IntType(t), _] if t.get_bit_width() == 1 => {
+                        Some("Option".to_string())
+                    }
+                    // Result<T,E>: {i1 disc, T ok, i64 err}; approximate as Result
+                    [BasicTypeEnum::IntType(t), _, BasicTypeEnum::IntType(e)]
+                        if t.get_bit_width() == 1 && e.get_bit_width() == 64 =>
+                    {
+                        Some("Result".to_string())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Map a function name to the Mimi type-name of its return value. This is
+    /// used by `infer_object_type` so that method calls on call expressions
+    /// (e.g. `str_index_of(...).unwrap_or(-1)`, `getenv(...).is_ok()`) can be
+    /// dispatched even when the result is not bound to a variable.
+    fn infer_call_return_type_name(&self, name: &str) -> Option<String> {
+        // Built-ins whose return type is not obvious from the name alone.
+        match name {
+            "getenv" | "base64_decode" => return Some("Result<string,string>".to_string()),
+            "str_index_of" => return Some("Option<i32>".to_string()),
+            "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
+            | "str_to_lower" | "str_repeat" | "to_string" | "int_to_string" | "float_to_string"
+            | "input" | "chr" | "read_file" | "type_name" | "c_str_to_string" | "from_json" => {
+                return Some("string".to_string())
+            }
+            "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
+                return Some("List<string>".to_string())
+            }
+            "sort_f64" => return Some("List<f64>".to_string()),
+            "exec" => return Some("ExecResult".to_string()),
+            "file_stat" => return Some("StatResult".to_string()),
+            _ => {}
+        }
+        // User-defined functions
+        if let Some(fdef) = self.func_defs.get(name) {
+            if let Some(ret_ty) = &fdef.ret {
+                return Some(crate::core::fmt_type(ret_ty));
+            }
+        }
+        // Extern functions
+        if let Some(ef) = self.extern_func_defs.get(name) {
+            if let Some(ret_ty) = &ef.ret {
+                return Some(crate::core::fmt_type(ret_ty));
+            }
+        }
+        None
     }
 
     /// Extract a raw C string pointer (i8*) from a Mimi string argument.

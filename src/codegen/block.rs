@@ -370,6 +370,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names
                                                     .insert(name.clone(), "bool".to_string());
                                             }
+                                            "getenv" | "base64_decode" => {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    "Result<string,string>".to_string(),
+                                                );
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "Result".into(),
+                                                        vec![
+                                                            Type::Name("string".into(), vec![]),
+                                                            Type::Name("string".into(), vec![]),
+                                                        ],
+                                                    ),
+                                                );
+                                            }
                                             _ => {}
                                         }
                                     }

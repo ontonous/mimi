@@ -48,7 +48,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             BasicMetadataValueEnum::StructValue(sv) => {
-                if self.pending_len_is_string {
+                let fields = sv.get_type().get_field_types();
+                // Distinguish string {i8*, i64} from list {i64, i8*} by field layout.
+                let is_string_struct = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                        if t.get_bit_width() == 64
+                );
+                if is_string_struct {
                     // String struct {i8*, i64} — field 1 is the length directly
                     self.builder
                         .build_extract_value(sv, 1, "str_len")

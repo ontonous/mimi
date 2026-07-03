@@ -21,7 +21,19 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Check if the list element type is a struct (stored as pointer to struct)
         if let Some(&BasicTypeEnum::StructType(sty)) = self.list_elem_llvm_types.get(var_name) {
+            let fields = sty.get_field_types();
+            // Mimi string is stored in list slots as the raw C-string pointer,
+            // even though its LLVM type is the {i8*, i64} string struct.
+            let is_string_struct = matches!(
+                fields.as_slice(),
+                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                    if t.get_bit_width() == 64
+            );
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            if is_string_struct {
+                let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
+                return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+            }
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
             let struct_val =
                 self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
@@ -54,6 +66,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(Type::Name(n, args)) = self.var_types.get(name) {
                 if n == "List" && args.len() == 1 {
                     let elem_ty = &args[0];
+                    // List<string> stores raw C-string pointers in its data slots,
+                    // not pointers to the {i8*, i64} string struct.
+                    if let Type::Name(elem_name, _) = elem_ty {
+                        if elem_name == "string" {
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let elem_ptr =
+                                self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
+                            return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
+                        }
+                    }
                     if let Some(BasicTypeEnum::StructType(sty)) =
                         types::mimi_type_to_llvm(self.context, elem_ty)
                     {

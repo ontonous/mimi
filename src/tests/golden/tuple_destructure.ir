@@ -127,6 +127,8 @@ declare void @mimi_args_init(i64, ptr)
 
 declare i64 @mimi_args_count()
 
+declare ptr @mimi_args_list()
+
 declare ptr @mimi_args_get(i64)
 
 declare i32 @mimi_is_valid_json(ptr)

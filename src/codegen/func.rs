@@ -1194,6 +1194,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 self.var_type_names
                                                     .insert(name.clone(), "bool".to_string());
                                             }
+                                            "getenv" | "base64_decode" => {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    "Result<string,string>".to_string(),
+                                                );
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "Result".into(),
+                                                        vec![
+                                                            Type::Name("string".into(), vec![]),
+                                                            Type::Name("string".into(), vec![]),
+                                                        ],
+                                                    ),
+                                                );
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -1618,33 +1634,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
-        // Per-function variable type tracking must start fresh so that parameters
-        // with common names (e.g. `xs`) don't inherit types from other functions.
-        // Also clear the generic substitution map: non-generic functions must not
-        // carry over type substitutions from previously compiled generic functions.
-        self.var_types.clear();
-        self.var_type_names.clear();
-        self.list_elem_llvm_types.clear();
-        self.type_map.clear();
-
-        // Delegate async funcs to compile_async_func
-        if func.is_async {
-            return self.compile_async_func(func);
-        }
-
-        // Exported extern functions get a C ABI wrapper around an internal body.
-        if func.extern_abi.is_some() && func.generics.is_empty() {
-            let body_name = format!("{}__mimi_export_body", func.name);
-            if self.module.get_function(&body_name).is_none() {
-                let mut body_func = func.clone();
-                body_func.name = body_name.clone();
-                body_func.extern_abi = None;
-                self.compile_func(&body_func)?;
-            }
-            return self.compile_export_wrapper(func, &body_name);
-        }
-
+    /// Forward-declare a non-extern, non-async user function in the LLVM module.
+    /// This allows functions defined later in the source (or in imported modules)
+    /// to be referenced by earlier callers without a "undefined function" error.
+    pub(super) fn declare_func(
+        &mut self,
+        func: &FuncDef,
+    ) -> MimiResult<(inkwell::values::FunctionValue<'ctx>, BasicTypeEnum<'ctx>)> {
         // For impl Trait return types, determine the concrete type from the body
         // so the function's LLVM signature uses the right type.
         let effective_ret_override = if let Some(Type::ImplTrait(_)) = &func.ret {
@@ -1682,20 +1678,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => self.context.i64_type().fn_type(&metadata_params, false),
         };
 
-        let linkage = if func.extern_abi.is_some() {
-            Some(inkwell::module::Linkage::External)
-        } else {
-            None
-        };
-        // Reuse the forward-declared function if it exists; otherwise
-        // emit a fresh declaration. `Module::add_function` in inkwell
-        // panics if a function with this name already exists with a
-        // mismatching type, so we always look it up first.
+        // Reuse an existing declaration if it already exists. `Module::add_function`
+        // panics if a function with this name exists with a mismatching type.
         let function = if let Some(existing) = self.module.get_function(&func.name) {
             existing
         } else {
-            self.module.add_function(&func.name, fn_type, linkage)
+            self.module.add_function(&func.name, fn_type, None)
         };
+        Ok((function, ret_type))
+    }
+
+    pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
+        // Per-function variable type tracking must start fresh so that parameters
+        // with common names (e.g. `xs`) don't inherit types from other functions.
+        // Also clear the generic substitution map: non-generic functions must not
+        // carry over type substitutions from previously compiled generic functions.
+        self.var_types.clear();
+        self.var_type_names.clear();
+        self.list_elem_llvm_types.clear();
+        self.type_map.clear();
+
+        // Delegate async funcs to compile_async_func
+        if func.is_async {
+            return self.compile_async_func(func);
+        }
+
+        // Exported extern functions get a C ABI wrapper around an internal body.
+        if func.extern_abi.is_some() && func.generics.is_empty() {
+            let body_name = format!("{}__mimi_export_body", func.name);
+            if self.module.get_function(&body_name).is_none() {
+                let mut body_func = func.clone();
+                body_func.name = body_name.clone();
+                body_func.extern_abi = None;
+                self.compile_func(&body_func)?;
+            }
+            return self.compile_export_wrapper(func, &body_name);
+        }
+
+        let (function, ret_type) = self.declare_func(func)?;
         // Set calling convention for extern "C" / extern "stdcall" etc.
         if let Some(ref abi) = func.extern_abi {
             let cc = crate::ffi::abi_to_llvm_call_conv(abi);

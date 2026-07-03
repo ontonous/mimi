@@ -29,19 +29,11 @@ pub func render(template: string, lookup: func(string) -> string) -> string {
     let mut n = len(result)
 
     while pos < n {
-        let start_opt = str_index_of(str_substring(result, pos, n), "{{")
-        let start_idx = match start_opt {
-            Some(idx) => idx
-            None => -1
-        }
+        let start_idx = str_index_of(str_substring(result, pos, n), "{{").unwrap_or(-1)
         if start_idx < 0 { break }
 
         let var_start = pos + start_idx + 2
-        let end_opt = str_index_of(str_substring(result, var_start, n), "}}")
-        let end_idx = match end_opt {
-            Some(idx) => idx
-            None => -1
-        }
+        let end_idx = str_index_of(str_substring(result, var_start, n), "}}").unwrap_or(-1)
         if end_idx < 0 { break }
 
         let var_end = var_start + end_idx
@@ -80,19 +72,11 @@ pub func render_with_defaults(template: string, vars: Record, default_val: strin
     let mut n = len(result)
 
     while pos < n {
-        let start_opt = str_index_of(str_substring(result, pos, n), "{{")
-        let start_idx = match start_opt {
-            Some(idx) => idx
-            None => -1
-        }
+        let start_idx = str_index_of(str_substring(result, pos, n), "{{").unwrap_or(-1)
         if start_idx < 0 { break }
 
         let var_start = pos + start_idx + 2
-        let end_opt = str_index_of(str_substring(result, var_start, n), "}}")
-        let end_idx = match end_opt {
-            Some(idx) => idx
-            None => -1
-        }
+        let end_idx = str_index_of(str_substring(result, var_start, n), "}}").unwrap_or(-1)
         if end_idx < 0 { break }
 
         let var_end = var_start + end_idx
@@ -112,7 +96,9 @@ pub func render_with_defaults(template: string, vars: Record, default_val: strin
 // render_csv: Renders CSV rows using {{col_0}}, {{col_1}}, etc.
 pub func render_csv(template: string, rows: List<List<string>>) -> string {
     let mut results = []
-    for row in rows {
+    let mut ri = 0
+    while ri < len(rows) {
+        let row = rows[ri]
         let mut vars = map_new()
         let mut ci = 0
         while ci < len(row) {
@@ -120,6 +106,7 @@ pub func render_csv(template: string, rows: List<List<string>>) -> string {
             ci = ci + 1
         }
         push(results, simple_render(template, vars))
+        ri = ri + 1
     }
     str_join(results, "\n")
 }

@@ -210,6 +210,9 @@ pub struct CodeGenerator<'ctx> {
     /// Flag: when true, the next `compile_len("len", ...)` call should use strlen (for strings).
     /// Set in compile_call before dispatching to builtins.
     pending_len_is_string: bool,
+    /// Inferred Mimi type names for arguments of the current `print`/`println` call.
+    /// Used to choose the correct runtime list-to-string helper (string vs i32 elements).
+    pending_print_arg_types: Vec<String>,
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
     optimize: bool,
@@ -355,6 +358,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             repr_c_record_names: std::collections::HashSet::new(),
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
+            pending_print_arg_types: Vec::new(),
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| v == "1" || v == "true")
                 .unwrap_or(false),

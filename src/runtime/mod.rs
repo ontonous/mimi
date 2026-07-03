@@ -1115,6 +1115,30 @@ pub extern "C" fn mimi_args_count() -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn mimi_args_list() -> *mut MimiList {
+    init_cli_args();
+    let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");
+    let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let count = if args.argc <= 1 {
+        0
+    } else {
+        (args.argc - 1) as usize
+    };
+    let mut items: Vec<*mut std::ffi::c_char> = Vec::with_capacity(count);
+    for i in 1..args.argc as usize {
+        items.push(args.argv[i] as *mut std::ffi::c_char);
+    }
+    let data_ptr = items.as_mut_ptr();
+    let len = items.len() as i64;
+    std::mem::forget(items);
+    Box::into_raw(Box::new(MimiList {
+        len,
+        data: data_ptr,
+        owns_data: false,
+    }))
+}
+
+#[no_mangle]
 pub extern "C" fn mimi_args_get(i: i64) -> *mut std::ffi::c_char {
     init_cli_args();
     let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");

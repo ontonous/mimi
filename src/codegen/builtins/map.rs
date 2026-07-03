@@ -193,6 +193,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("map_set: {}", e))?;
         let value_handle = match args[2] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, self.context.i64_type(), "map_set_val_ptr")?
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                // Assume a Mimi string struct {i8*, i64}; store the data pointer as the handle.
+                let ptr = self
+                    .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
+                    .into_pointer_value();
+                self.build_ptr_to_int(ptr, self.context.i64_type(), "map_set_val_ptr")?
+            }
             _ => return Err("map_set: third arg must be i64 value handle".into()),
         };
         let func = self

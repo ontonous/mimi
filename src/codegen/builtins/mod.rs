@@ -727,6 +727,12 @@ fn register_environment_cli_fns<'ctx>(
         i64.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_args_list() -> MimiList*
+    module.add_function(
+        "mimi_args_list",
+        i8_ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_args_get(i: i64) -> i8*
     module.add_function(
         "mimi_args_get",

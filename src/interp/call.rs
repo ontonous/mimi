@@ -847,58 +847,70 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::Set(set) => {
-                // Try trait method dispatch via type_impls first
-                if let Some(impls) = self.type_impls.get("Set") {
-                    for methods in impls.values() {
-                        if let Some(func) = methods.iter().find(|f| f.name == method) {
-                            let func = func.clone();
-                            let result = self.with_scope(|this| {
-                                this.bind("self", obj.clone())?;
-                                this.call_func(&func, args)
-                            });
-                            return result;
-                        }
-                    }
-                }
-                match method {
-                    "size" | "len" => Ok(Value::Int(set.len() as i64)),
-                    "is_empty" => Ok(Value::Bool(set.is_empty())),
+                // Built-in Set methods take precedence over trait impls. The std
+                // library's SetExt trait forwards to these same methods, so using
+                // trait dispatch first would infinite-loop on `self.size()` etc.
+                let builtin_result = match method {
+                    "size" | "len" => Some(Ok(Value::Int(set.len() as i64))),
+                    "is_empty" => Some(Ok(Value::Bool(set.is_empty()))),
                     "contains" => {
                         if args.len() != 1 {
-                            return Err(InterpError::new("set.contains expects 1 argument"));
+                            Some(Err(InterpError::new("set.contains expects 1 argument")))
+                        } else {
+                            Some(Ok(Value::Bool(
+                                set.iter().any(|e| values_equal(e, &args[0])),
+                            )))
                         }
-                        Ok(Value::Bool(set.iter().any(|e| values_equal(e, &args[0]))))
                     }
                     "insert" => {
                         if args.len() != 1 {
-                            return Err(InterpError::new("set.insert expects 1 argument"));
-                        }
-                        let v = &args[0];
-                        if set.iter().any(|e| values_equal(e, v)) {
-                            Ok(obj.clone())
+                            Some(Err(InterpError::new("set.insert expects 1 argument")))
                         } else {
-                            let mut new_set = set.clone();
-                            new_set.push(v.clone());
-                            Ok(Value::Set(new_set))
+                            let v = &args[0];
+                            Some(if set.iter().any(|e| values_equal(e, v)) {
+                                Ok(obj.clone())
+                            } else {
+                                let mut new_set = set.clone();
+                                new_set.push(v.clone());
+                                Ok(Value::Set(new_set))
+                            })
                         }
                     }
                     "remove" => {
                         if args.len() != 1 {
-                            return Err(InterpError::new("set.remove expects 1 argument"));
-                        }
-                        let v = &args[0];
-                        let pos = set.iter().position(|e| values_equal(e, v));
-                        if let Some(idx) = pos {
-                            let mut new_set = set.clone();
-                            new_set.remove(idx);
-                            Ok(Value::Set(new_set))
+                            Some(Err(InterpError::new("set.remove expects 1 argument")))
                         } else {
-                            Ok(obj.clone())
+                            let v = &args[0];
+                            Some(
+                                if let Some(idx) = set.iter().position(|e| values_equal(e, v)) {
+                                    let mut new_set = set.clone();
+                                    new_set.remove(idx);
+                                    Ok(Value::Set(new_set))
+                                } else {
+                                    Ok(obj.clone())
+                                },
+                            )
                         }
                     }
-                    "to_list" => Ok(Value::List(set.clone())),
-                    _ => Err(InterpError::new(format!("Set has no method '{}'", method))),
+                    "to_list" => Some(Ok(Value::List(set.clone()))),
+                    _ => None,
+                };
+                if let Some(result) = builtin_result {
+                    return result;
                 }
+                // Fallback: trait method dispatch via type_impls
+                if let Some(impls) = self.type_impls.get("Set") {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            return self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(&func, args)
+                            });
+                        }
+                    }
+                }
+                Err(InterpError::new(format!("Set has no method '{}'", method)))
             }
             Value::Variant(name, vals) => {
                 // Option/Result combinator methods on enum variants

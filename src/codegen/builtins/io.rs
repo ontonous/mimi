@@ -10,6 +10,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let arg_types: Vec<String> = self.pending_print_arg_types.clone();
         if args.is_empty() {
             return Err(CompileError::WrongArgCount(
                 "println expects at least 1 argument".to_string(),
@@ -33,7 +34,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             if i > 0 {
                 fmt_str.push(' ');
             }
-            let (print_arg, spec) = self.extract_print_arg(arg, i64_ty)?;
+            let arg_type = arg_types.get(i).cloned().unwrap_or_default();
+            let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
             print_args.push(print_arg);
             fmt_str.push_str(&spec);
         }
@@ -55,6 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         arg: &BasicMetadataValueEnum<'ctx>,
         i64_ty: inkwell::types::IntType<'ctx>,
+        arg_type: &str,
     ) -> MimiResult<(BasicMetadataValueEnum<'ctx>, String)> {
         match arg {
             BasicMetadataValueEnum::StructValue(sv) => {
@@ -74,7 +77,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     && matches!(fields[1], BasicTypeEnum::PointerType(_))
                 {
                     // Mimi list struct: {i64 len, ptr data}. Format via runtime helper.
-                    let str_ptr = self.emit_list_i32_to_string(*sv)?;
+                    let str_ptr =
+                        if arg_type == "List<string>" || arg_type.starts_with("List<string>") {
+                            self.emit_list_string_to_string(*sv)?
+                        } else {
+                            self.emit_list_i32_to_string(*sv)?
+                        };
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -147,6 +155,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(raw)
     }
 
+    /// Materialize a list struct value into an alloca and call the runtime
+    /// helper `mimi_list_to_string` to get a printable C string for string lists.
+    fn emit_list_string_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let list_struct_ty = self.list_struct_type();
+        let alloca = self.build_alloca(list_struct_ty, "print_str_list_alloca")?;
+        self.build_store(alloca, sv)?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+        let callee = self
+            .module
+            .get_function("mimi_list_to_string")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_list_to_string",
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let raw = self
+            .build_call(
+                callee,
+                &[BasicMetadataValueEnum::PointerValue(alloca)],
+                "list_to_str",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_list_to_string returned void")?
+            .into_pointer_value();
+        Ok(raw)
+    }
+
     pub(super) fn compile_print(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -157,7 +198,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let i64_ty = self.context.i64_type();
-        let (print_arg, fmt_spec) = self.extract_print_arg(&args[0], i64_ty)?;
+        let arg_type = self
+            .pending_print_arg_types
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let (print_arg, fmt_spec) = self.extract_print_arg(&args[0], i64_ty, &arg_type)?;
         let fmt_global = self
             .builder
             .build_global_string_ptr(&fmt_spec, "fmt")
@@ -181,7 +227,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let i64_ty = self.context.i64_type();
-        let (print_arg, mut fmt_spec) = self.extract_print_arg(&args[0], i64_ty)?;
+        let arg_type = self
+            .pending_print_arg_types
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let (print_arg, mut fmt_spec) = self.extract_print_arg(&args[0], i64_ty, &arg_type)?;
         fmt_spec.push('\n');
         let fmt_global = self
             .builder

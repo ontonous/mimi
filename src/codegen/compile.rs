@@ -121,6 +121,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(())
         })?;
+        // v0.28.26 — Forward-declare all non-extern, non-async, non-comptime
+        // user functions before any bodies are compiled. This lets functions
+        // (including those in imported modules) call later-defined functions.
+        // Iterate over file.items to keep declaration order deterministic and
+        // match the order used for the rest of codegen.
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                if f.is_comptime || f.is_async || f.extern_abi.is_some() {
+                    continue;
+                }
+                if matches!(f.ret, Some(Type::ImplTrait(_))) {
+                    continue;
+                }
+                self.declare_func(f)?;
+            }
+        }
+
         // Third pass: compile impl methods (needed before vtable construction)
         self.compile_impl_methods()?;
         // Fourth pass: compile vtables (needed before user function compilation)

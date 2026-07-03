@@ -378,7 +378,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_call(
             trap_fn,
             &[BasicMetadataValueEnum::IntValue(
-                ctx.payload.into_int_value(),
+                self.context.i64_type().const_int(0, false),
             )],
             "unwrap_trap",
         )?;

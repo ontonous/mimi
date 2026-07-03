@@ -193,6 +193,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             // (e.g. atomic_bool_new) legitimately expect an i64, so the
             // conversion must stay scoped to print sinks.
             if matches!(name, "println" | "print" | "eprintln" | "format") {
+                self.pending_print_arg_types = args
+                    .iter()
+                    .map(|a| self.infer_object_type(a, vars))
+                    .collect();
                 for (i, src) in args.iter().enumerate() {
                     if i >= metadata_args.len() {
                         break;
