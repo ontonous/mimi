@@ -229,6 +229,11 @@ pub fn subst_type_params(
 }
 
 pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
+    // `Any` is the dynamic/erased top type: any value can be passed where
+    // `Any` is expected and `Any` can be provided where any type is expected.
+    if matches!(a, Type::Name(n, _) if n == "Any") || matches!(b, Type::Name(n, _) if n == "Any") {
+        return true;
+    }
     // Internal inference placeholder "_" (e.g. bare `None`, `Ok`, `Err`) is
     // compatible with any concrete type so that contextual annotations can
     // resolve it. It is never produced by user-facing type annotations.

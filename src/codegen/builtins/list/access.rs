@@ -81,7 +81,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         // Get list length and data
         let list_len = self.load_list_len(list_ptr)?;
-        let data_ptr = self.load_list_data_i64(list_ptr)?;
+        // Determine whether we are comparing strings by looking at the element value.
+        let elem_basic = match elem_val {
+            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+            BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "contains: unsupported element type".to_string(),
+                ))
+            }
+        };
+        let target_str_ptr = self.extract_string_ptr(&elem_basic);
+        let is_string = target_str_ptr.is_some();
         // Loop through list elements
         let function = self
             .current_function()
@@ -114,24 +126,69 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(cmp, body_bb, done_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
         self.builder.position_at_end(body_bb);
-        let elem_ptr = {
-            self.gep()
-                .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "elem")
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let elem = self
-            .builder
-            .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        let eq = match (elem, elem_val) {
-            (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) => self
+        let eq = if is_string {
+            // String list: elements are `i8*` C-string pointers.
+            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let data_raw = self.load_list_data_raw(list_ptr)?;
+            let elem_ptr_ptr = self
+                .gep()
+                .build_in_bounds_gep(
+                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                    data_raw,
+                    &[idx],
+                    "elem_ptr_ptr",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let elem_str_ptr = self
                 .builder
-                .build_int_compare(inkwell::IntPredicate::EQ, a, b, "eq")
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "contains: element comparison only supports i64 for now".to_string(),
-                ))
+                .build_load(
+                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                    elem_ptr_ptr,
+                    "elem_str",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                .into_pointer_value();
+            let strcmp_fn = self.get_runtime_fn("strcmp")?;
+            let cmp_result = self
+                .build_call(
+                    strcmp_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(target_str_ptr.ok_or_else(|| {
+                            CompileError::TypeMismatch(
+                                "contains: missing string target pointer".to_string(),
+                            )
+                        })?),
+                        BasicMetadataValueEnum::PointerValue(elem_str_ptr),
+                    ],
+                    "strcmp_contains",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("strcmp returned void")?
+                .into_int_value();
+            let zero = self.context.i32_type().const_int(0, false);
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::EQ, cmp_result, zero, "streq")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+        } else {
+            let data_ptr = self.load_list_data_i64(list_ptr)?;
+            let elem_ptr = self
+                .gep()
+                .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "elem")
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            let elem = self
+                .builder
+                .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
+                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+            match (elem, elem_val) {
+                (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, a, b, "eq")
+                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?,
+                _ => {
+                    return Err(CompileError::TypeMismatch(
+                        "contains: element comparison only supports i64 for now".to_string(),
+                    ))
+                }
             }
         };
         let inc_bb = self.context.append_basic_block(function, "contains_inc");

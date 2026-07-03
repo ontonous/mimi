@@ -219,6 +219,9 @@ impl UnificationTable {
             // Name("_") — inference placeholder, compatible with anything
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
+            // `Any` is the dynamic top type: compatible with any concrete type.
+            (Type::Name(n, _), _) if n == "Any" => Ok(()),
+            (_, Type::Name(n, _)) if n == "Any" => Ok(()),
             // Type::Infer — inference placeholder, compatible with anything
             (Type::Infer, _) | (_, Type::Infer) => Ok(()),
 

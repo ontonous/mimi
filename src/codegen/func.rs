@@ -1165,7 +1165,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         // functions that return List<string>.
                                         match func_name.as_str() {
                                             "listdir" | "walk_dir" | "str_split" | "words"
-                                            | "lines" | "split" | "sort_str" => {
+                                            | "lines" | "split" | "sort_str" | "keys" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),

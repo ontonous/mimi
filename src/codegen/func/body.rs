@@ -203,7 +203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Expr::Call(callee, _) = iterable {
             if let Expr::Ident(name) = callee.as_ref() {
                 match name.as_str() {
-                    "listdir" | "walk_dir" | "str_split" | "words" | "lines" | "split" => {
+                    "listdir" | "walk_dir" | "str_split" | "words" | "lines" | "split" | "keys" => {
                         return true;
                     }
                     _ => {}

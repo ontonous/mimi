@@ -67,8 +67,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     impl_method.name = mangled;
                     // Prepend self param: self: &type_name (or self: type_name for value types)
                     let self_ty = match type_name.as_str() {
-                        "i32" | "i64" | "f64" | "bool" => {
-                            // Value types: pass self by value so arithmetic works
+                        // Scalar/value types: pass self by value.
+                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => {
                             crate::ast::Type::Name(type_name.clone(), vec![])
                         }
                         _ => {

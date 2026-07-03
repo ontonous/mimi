@@ -317,7 +317,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Track return types for builtins
                                         match func_name.as_str() {
-                                            "listdir" | "walk_dir" | "str_split" => {
+                                            "listdir" | "walk_dir" | "str_split" | "keys" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),
@@ -810,7 +810,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // element slot) instead of the proper struct/
                             // string pointer.
                             match fn_name.as_str() {
-                                "listdir" | "walk_dir" | "str_split" | "sort_str" => {
+                                "listdir" | "walk_dir" | "str_split" | "sort_str" | "keys" => {
                                     self.var_type_names
                                         .insert(name.clone(), "List<string>".to_string());
                                     self.var_types.insert(
@@ -851,7 +851,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if let Expr::Ident(fn_name) = callee.as_ref() {
                                 match fn_name.as_str() {
                                     "words" | "lines" | "split" | "str_split" | "listdir"
-                                    | "walk_dir" | "sort_str" => {
+                                    | "walk_dir" | "sort_str" | "keys" => {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
                                         self.var_types.insert(

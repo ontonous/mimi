@@ -6,6 +6,20 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// Extract a C-string pointer from a string argument passed to a map builtin.
+    fn extract_string_ptr_from_arg(
+        &self,
+        arg: BasicMetadataValueEnum<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let basic = match arg {
+            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+            _ => return Err("expected string pointer or Mimi string struct".into()),
+        };
+        self.extract_string_ptr(&basic)
+            .ok_or_else(|| "expected string pointer or Mimi string struct".into())
+    }
+
     pub(super) fn compile_map_new(
         &self,
         _args: &[BasicMetadataValueEnum<'ctx>],
@@ -58,10 +72,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("has_key: first arg must be i64 map handle".into()),
         };
-        let key_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => return Err("has_key: second arg must be string pointer".into()),
-        };
+        let key_ptr = self
+            .extract_string_ptr_from_arg(args[1])
+            .map_err(|e| format!("has_key: {}", e))?;
         let func = self
             .module
             .get_function("mimi_map_has_key")
@@ -94,10 +107,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("map_get: first arg must be i64 map handle".into()),
         };
-        let key_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => return Err("map_get: second arg must be string pointer".into()),
-        };
+        let key_ptr = self
+            .extract_string_ptr_from_arg(args[1])
+            .map_err(|e| format!("map_get: {}", e))?;
         let func = self
             .module
             .get_function("mimi_map_get")
@@ -176,10 +188,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("map_set: first arg must be i64 map handle".into()),
         };
-        let key_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => return Err("map_set: second arg must be string pointer".into()),
-        };
+        let key_ptr = self
+            .extract_string_ptr_from_arg(args[1])
+            .map_err(|e| format!("map_set: {}", e))?;
         let value_handle = match args[2] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("map_set: third arg must be i64 value handle".into()),
@@ -213,10 +224,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("map_remove: first arg must be i64 map handle".into()),
         };
-        let key_ptr = match args[1] {
-            BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => return Err("map_remove: second arg must be string pointer".into()),
-        };
+        let key_ptr = self
+            .extract_string_ptr_from_arg(args[1])
+            .map_err(|e| format!("map_remove: {}", e))?;
         let func = self
             .module
             .get_function("mimi_map_remove")
@@ -243,7 +253,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let list_ptr = match args[0] {
             BasicMetadataValueEnum::PointerValue(pv) => pv,
-            _ => return Err("map_from_list: first arg must be list pointer".into()),
+            BasicMetadataValueEnum::StructValue(sv) => {
+                // A List value passed by value: materialize it on the stack.
+                let list_struct_ty = sv.get_type();
+                let tmp = self.build_alloca(list_struct_ty, "map_from_list_tmp")?;
+                self.build_store(tmp, sv)?;
+                tmp
+            }
+            _ => return Err("map_from_list: first arg must be list pointer or struct".into()),
         };
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());

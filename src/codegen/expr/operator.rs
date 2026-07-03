@@ -50,7 +50,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Extract a string data pointer from a Mimi string value.
-    fn extract_string_ptr(&self, val: &BasicValueEnum<'ctx>) -> Option<PointerValue<'ctx>> {
+    pub(in crate::codegen) fn extract_string_ptr(
+        &self,
+        val: &BasicValueEnum<'ctx>,
+    ) -> Option<PointerValue<'ctx>> {
         match val {
             BasicValueEnum::PointerValue(pv) => Some(*pv),
             BasicValueEnum::StructValue(sv) => {
