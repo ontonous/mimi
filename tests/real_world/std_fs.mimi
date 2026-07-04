@@ -5,7 +5,8 @@ func main() -> i32 {
     // Read back and verify content
     match read_file(path) {
         Ok(content) => {
-            if len(content) == 11 { 0 } else { 2 }
+            if content != "hello world" { 2 }
+            else { 0 }
         }
         Err(_) => 1
     }

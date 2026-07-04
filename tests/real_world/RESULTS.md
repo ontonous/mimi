@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-04（from_json::<List<i32>> codegen + 4 个 string struct 解包修复）  
+**最后更新**：2026-07-04（from_json::<List<f64/bool>> codegen + std_fs 内容断言）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -42,7 +42,7 @@
 | std_csv.mimi | ✅ | ✅ | ✅ | CSV parse/get |
 | std_datetime.mimi | ✅ | ✅ | ✅ | datetime 工具 |
 | std_env.mimi | ✅ | ✅ | ✅ | env / cli args |
-| std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 读取内容 + match/len 断言 |
+| std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 读取内容 + 内容相等断言 |
 | std_io.mimi | ✅ | ✅ | ✅ | print_raw / print_line |
 | std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> + from_json::<List<i32>> |
 | std_maps.mimi | ✅ | ✅ | ✅ | map_new / set / get / has_key |
@@ -77,6 +77,8 @@
 3. **from_json::<List<i32>> codegen**（v0.28.26）：支持 `from_json::<List<i32>>("[1,2,3]")` 反序列化 JSON 数组为 Mimi List，使用 `json_array_length`/`json_get_element`/`mimi_json_as_i64` 运行时函数逐元素解析。
 4. **string struct 解包修复**（v0.28.26）：`compile_getenv`/`compile_lexer`/`compile_parse`/`compile_assert` 改用 `extract_raw_str_ptr` 支持 `{i8*, i64}` string struct。
 5. **compile_to_string StructValue**（v0.28.26）：`to_string` 接受 `StructValue` 直接返回（string 已是 string）。
+6. **from_json::<List<f64/bool>> codegen**（v0.28.26）：支持 `from_json::<List<f64>>` 和 `from_json::<List<bool>>`，f64 用 bitcast，bool 用 i64 0/1。
+7. **i1 零扩展修复**（v0.28.26）：`promote_binop_operands` 中将 i1 改为零扩展而非符号扩展，避免 `true`（i1 1）变成 -1。
 
 ## 仍绕过的 codegen 细节差距
 
