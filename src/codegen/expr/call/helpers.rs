@@ -1239,10 +1239,12 @@ pub(crate) fn parse_type_str(s: &str) -> Option<Type> {
 fn find_top_level(s: &str, c: char) -> Option<usize> {
     let mut depth = 0i32;
     for (i, ch) in s.char_indices() {
+        if ch == c && depth == 0 {
+            return Some(i);
+        }
         match ch {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
-            _ if ch == c && depth == 1 => return Some(i),
             _ => {}
         }
     }
