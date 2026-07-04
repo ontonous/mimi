@@ -50,3 +50,14 @@ devdocs/
 
 # MiMoCode agent workspace
 .mimocode/
+
+# Real-world suite generated binaries (kept by .mimi sources/scripts/docs)
+tests/real_world/**/*
+!tests/real_world/**/*.mimi
+!tests/real_world/**/*.py
+!tests/real_world/**/*.md
+!tests/real_world/**/*.toml
+!tests/real_world/projects/
+!tests/real_world/projects/*/
+!tests/real_world/projects/*/*.mimi
+!tests/real_world/projects/*/*.toml
