@@ -253,6 +253,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     None
                 }
             }
+            Expr::Lambda { params, ret, .. } => {
+                let ret_ty = ret.clone().unwrap_or(Type::Infer);
+                let param_tys: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
+                Some(Type::Func(param_tys, Box::new(self.resolve_type(&ret_ty))))
+            }
             _ => None,
         }
     }

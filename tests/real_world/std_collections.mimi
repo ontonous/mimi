@@ -20,5 +20,13 @@ func main() -> i32 {
     let mut sum = 0
     for v in mapped { sum = sum + v }
     if sum != 30 { return 5 }
+    // Test trait method dispatch with struct-typed elements
+    let flt = filter_list(items, fn(x: Item) -> bool { x.val > 15 })
+    if len(flt) != 1 { return 6 }
+    let mlt = map_list(items, fn(x: Item) -> i32 { x.val })
+    if len(mlt) != 2 { return 7 }
+    let mut sum2 = 0
+    for v in mlt { sum2 = sum2 + v }
+    if sum2 != 30 { return sum2 }
     0
 }
