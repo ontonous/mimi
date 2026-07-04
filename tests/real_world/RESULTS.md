@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-04（to_json List codegen + std_fs 内容断言）  
+**最后更新**：2026-07-04（reduce 类型推断 + builtin reduce/map/filter 测试）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -37,7 +37,7 @@
 | core_try_operator.mimi | ✅ | ✅ | ✅ | `?` 运算符 |
 | meta_comptime_quote.mimi | ✅ | ✅ | ✅ | comptime 函数求值 |
 | meta_contracts.mimi | ✅ | ✅ | ✅ | requires / ensures |
-| std_collections.mimi | ✅ | ✅ | ✅ | map / filter / reduce |
+| std_collections.mimi | ✅ | ✅ | ✅ | map_list/filter_list/reduce_list + 内置 reduce/map/filter lambda |
 | std_crypto.mimi | ✅ | ✅ | ✅ | hex 验证 |
 | std_csv.mimi | ✅ | ✅ | ✅ | CSV parse/get |
 | std_datetime.mimi | ✅ | ✅ | ✅ | datetime 工具 |
@@ -79,7 +79,8 @@
 5. **compile_to_string StructValue**（v0.28.26）：`to_string` 接受 `StructValue` 直接返回（string 已是 string）。
 6. **from_json::<List<f64/bool>> codegen**（v0.28.26）：支持 `from_json::<List<f64>>` 和 `from_json::<List<bool>>`，f64 用 bitcast，bool 用 i64 0/1。
 7. **i1 零扩展修复**（v0.28.26）：`promote_binop_operands` 中将 i1 改为零扩展而非符号扩展，避免 `true`（i1 1）变成 -1。
-8. **to_json List<T> codegen**（v0.28.26）：新增 `mimi_list_i64_to_json` / `mimi_list_f64_to_json` / `mimi_list_bool_to_json` / `mimi_list_str_to_json` 四个运行时函数，类型感知的 `to_json` 分发（`compile_call` 中通过 `infer_object_type` 判断 List 元素类型）。覆盖 `i32`/`i64`/`f64`/`bool`/`string` 元素，以及标量 `to_json`（int/bool/string）。
+8. **to_json List<T> codegen**（v0.28.26）：新增 `mimi_list_i64_to_json` / `mimi_list_f64_to_json` / `mimi_list_bool_to_json` / `mimi_list_str_to_json` 四个运行时函数，类型感知的 `to_json` 分发覆盖 `i32`/`i64`/`f64`/`bool`/`string` 元素。
+9. **reduce 类型推断**（v0.28.26）：`core/infer/call/simple.rs` 中的 `reduce` 分支改为推断并返回初始值类型，不再返回 `unknown`。内置 `reduce(nums, fn(a, e) { a + e }, 0)` 现在通过类型检查。
 
 ## 仍绕过的 codegen 细节差距
 

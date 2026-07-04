@@ -443,7 +443,8 @@ impl<'a> Checker<'a> {
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
-                    self.infer_expr(&args[2], scopes);
+                    let init_ty = self.infer_expr(&args[2], scopes);
+                    return init_ty;
                 }
                 return Type::Name("unknown".into(), vec![]);
             }
