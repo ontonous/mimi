@@ -999,6 +999,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let path_ptr = self.extract_raw_str_ptr(&args[0])?;
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let i32_ty = self.context.i32_type();
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        // Result<string, string> layout: {i1 disc, string ok, i64 err}
+        let result_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::StructType(string_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        let str_alloca = self
+            .builder
+            .build_alloca(string_ty, "read_str")
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+        let result_alloca = self
+            .builder
+            .build_alloca(result_ty, "read_result")
+            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+
+        // Compute GEPs for string struct fields (used in Ok branch only)
+        let str_ptr_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let str_len_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        // Compute GEPs for Result struct fields (used in both branches)
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 0, "res_disc")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let ok_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 1, "res_ok")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let err_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 2, "res_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
         // fopen(path, "r")
         let mode_str = self
             .builder
@@ -1030,14 +1082,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("fopen returned void")?
             .into_pointer_value();
+
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function".to_string())?;
+        let fopen_ok_bb = self.context.append_basic_block(function, "fopen_ok");
+        let fopen_null_bb = self.context.append_basic_block(function, "fopen_null");
+        let merge_bb = self.context.append_basic_block(function, "read_merge");
+
+        let is_null = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, file, i8_ptr_ty.const_zero(), "fopen_null")
+            .map_err(|e| CompileError::LlvmError(format!("null compare error: {}", e)))?;
+        self.build_cond_br(is_null, fopen_null_bb, fopen_ok_bb)?;
+
+        // ── Ok branch: fopen succeeded ──
+        self.builder.position_at_end(fopen_ok_bb);
+
         // fseek(file, 0, SEEK_END)
-        let i32_ty = self.context.i32_type();
         let fseek_fn = self.module.get_function("fseek").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let ty = i32_ty.fn_type(
                 &[
-                    BasicMetadataTypeEnum::PointerType(i8_ptr),
-                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
                     BasicMetadataTypeEnum::IntType(i32_ty),
                 ],
                 false,
@@ -1051,7 +1118,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 fseek_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(file),
-                    BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
                     BasicMetadataValueEnum::IntValue(i32_ty.const_int(2, false)), // SEEK_END
                 ],
                 "fseek_call",
@@ -1060,7 +1127,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("fseek returned void")?
             .into_int_value();
-        // fseek returns 0 on success, non-zero on failure; guard against negative ftell result
         let fseek_ok = self
             .builder
             .build_int_compare(
@@ -1069,14 +1135,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 i32_ty.const_int(0, false),
                 "fseek_ok",
             )
-            .map_err(|e| CompileError::LlvmError(format!("fseek compare error: {}", e)))?;
-        // ftell(file) -> file size (may be -1 if fseek failed)
+            .map_err(|e| CompileError::LlvmError(format!("fseek compare: {}", e)))?;
+        // ftell(file) -> file size
         let ftell_fn = self.module.get_function("ftell").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = self
-                .context
-                .i64_type()
-                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+            let ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
             self.module
                 .add_function("ftell", ty, Some(inkwell::module::Linkage::External))
         });
@@ -1091,20 +1153,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("ftell returned void")?
             .into_int_value();
-        // If fseek failed, clamp file_size to 0 to avoid negative malloc size
-        let zero = self.context.i64_type().const_int(0, false);
-        let neg_one = self.context.i64_type().const_int(u64::MAX, false); // -1 in two's complement
+        // Clamp negative file_size to 0
+        let zero = i64_ty.const_int(0, false);
+        let neg_one = i64_ty.const_int(u64::MAX, false);
         let is_neg_one = self
             .builder
             .build_int_compare(IntPredicate::EQ, file_size, neg_one, "is_neg_one")
-            .map_err(|e| CompileError::LlvmError(format!("neg_one compare error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("neg_one compare: {}", e)))?;
         let fseek_failed = self
             .builder
-            .build_xor(
-                fseek_ok,
-                self.context.bool_type().const_int(1, false),
-                "fseek_failed",
-            )
+            .build_xor(fseek_ok, bool_ty.const_int(1, false), "fseek_failed")
             .map_err(|e| CompileError::LlvmError(format!("xor error: {}", e)))?;
         let clamp_cond = self
             .builder
@@ -1117,11 +1175,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
         // rewind(file)
         let rewind_fn = self.module.get_function("rewind").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let ty = self
                 .context
                 .void_type()
-                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
             self.module
                 .add_function("rewind", ty, Some(inkwell::module::Linkage::External))
         });
@@ -1131,7 +1188,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "rewind_call",
         )?;
         // malloc(file_size + 1)
-        let one = self.context.i64_type().const_int(1, false);
+        let one = i64_ty.const_int(1, false);
         let alloc_size = self
             .builder
             .build_int_add(file_size, one, "alloc_size")
@@ -1151,16 +1208,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("malloc returned void")?
             .into_pointer_value();
-        // NOTE: not registered — returned value owns the allocation
         // fread(buf, 1, file_size, file)
         let fread_fn = self.module.get_function("fread").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = self.context.i64_type().fn_type(
+            let ty = i64_ty.fn_type(
                 &[
-                    BasicMetadataTypeEnum::PointerType(i8_ptr),
-                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
                 ],
                 false,
             );
@@ -1171,27 +1226,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             fread_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(self.context.i64_type().const_int(1, false)),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
                 BasicMetadataValueEnum::IntValue(file_size),
                 BasicMetadataValueEnum::PointerValue(file),
             ],
             "fread_call",
         )?;
         // Null-terminate
-        let null_gep = {
-            self.build_in_bounds_gep(
+        let null_gep = self
+            .build_in_bounds_gep(
                 BasicTypeEnum::IntType(self.context.i8_type()),
                 buf,
                 &[file_size],
                 "null_byte",
             )
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.build_store(null_gep, self.context.i8_type().const_int(0, false))?;
         // fclose(file)
         let fclose_fn = self.module.get_function("fclose").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = i32_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+            let ty = i32_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
             self.module
                 .add_function("fclose", ty, Some(inkwell::module::Linkage::External))
         });
@@ -1200,29 +1253,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[BasicMetadataValueEnum::PointerValue(file)],
             "fclose_call",
         )?;
-        // Build string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr_ty),
-                BasicTypeEnum::IntType(self.context.i64_type()),
-            ],
-            false,
-        );
-        let str_alloca = self
+
+        // Build string struct {i8*, i64} and store into Ok
+        self.build_store(str_ptr_gep, buf)?;
+        self.build_store(str_len_gep, file_size)?;
+
+        self.build_store(disc_gep, bool_ty.const_int(1, false))?;
+        let str_val = self.build_load(string_ty, str_alloca, "str_val")?;
+        self.build_store(ok_gep, str_val)?;
+        self.build_store(err_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+
+        // ── Err branch: fopen returned NULL ──
+        self.builder.position_at_end(fopen_null_bb);
+        let err_msg = self
             .builder
-            .build_alloca(string_ty, "read_str")
-            .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(ptr_gep, buf)?;
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(len_gep, file_size)?;
-        Ok(str_alloca.into())
+            .build_global_string_ptr("read_file: fopen failed", "read_file_err_msg")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.build_store(disc_gep, bool_ty.const_int(0, false))?;
+        self.build_store(ok_gep, string_ty.const_zero())?;
+        let err_ptr_int =
+            self.build_ptr_to_int(err_msg.as_pointer_value(), i64_ty, "err_ptr_int")?;
+        self.build_store(err_gep, err_ptr_int)?;
+        self.build_br(merge_bb)?;
+
+        // ── Merge ──
+        self.builder.position_at_end(merge_bb);
+        self.build_load(result_ty, result_alloca, "read_file_loaded")
     }
 
     pub(super) fn compile_write_file(

@@ -2,6 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
+**最后更新**：2026-07-04（修复 read_file codegen 返回 Result 类型）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -41,7 +42,7 @@
 | std_csv.mimi | ✅ | ✅ | ✅ | CSV parse/get |
 | std_datetime.mimi | ✅ | ✅ | ✅ | datetime 工具 |
 | std_env.mimi | ✅ | ✅ | ✅ | env / cli args |
-| std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 存在性检查 |
+| std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 读取内容 + match/len 断言 |
 | std_io.mimi | ✅ | ✅ | ✅ | print_raw / print_line |
 | std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> |
 | std_maps.mimi | ✅ | ✅ | ✅ | map_new / set / get / has_key |
@@ -69,19 +70,21 @@
 - `src/core/infer/access.rs`：字段访问时，根据对象类型的类型实参替换字段类型中的类型参数。
 - `src/core/unification.rs`：将 `occurs_in` 暴露为 `pub(crate)`，供 record 构造使用。
 
+## 已关闭的 codegen 差距
+
+1. **std_fs.mimi**（v0.28.26）：`compile_read_file` 重构为返回 `Result<string, string>` 类型结构，支持 `match read_file(path) { Ok(content) => len(content) }`。包含错误处理（fopen 失败返回 Err）。
+2. **std_crypto.mimi**（v0.28.26）：`hex_encode` codegen 段错误已修复（`hex_digit` 改用 `str_substring`，字符串字面量改为正规化 struct 表示）。
+
 ## 仍绕过的 codegen 细节差距
 
 为了让 suite 全绿，下列测试在真实用法上做了折中。这些不是崩溃性问题，而是特定 codegen 路径尚未完全对齐：
 
-1. **std_fs.mimi**：只测 `write_file` + `file_exists`，未读取文件内容。`read_file` 返回的 `Result<string, string>` 在 codegen match 绑定后 `len(s)` 会失败。
-2. **std_template.mimi**：只调用 `simple_render`，未断言输出内容。codegen 下 `Any` 值 `to_string` 会输出 handle 数字。
-3. **std_crypto.mimi**：只测 `is_valid_hex`，未调用 `hex_encode`。`hex_encode` 在 codegen 下会段错误。
-
-这些差距需要在 v0.28.27 的 codegen 可用性冲刺中关闭。
+1. **std_template.mimi**：只调用 `simple_render`，未断言输出内容。codegen 下 `Any` 值 `to_string` 会输出 handle 数字（Record/Any 在 codegen 中无运行时类型信息）。
 
 ## 结论
 
 - 解释器路径：35/35 通过，已具备日常可用性。
 - codegen 路径：35/35 通过，核心语言、标准库、并发、Actor、包导入等均已可用。
 - 本次评估发现并修复了 **CLI 类型检查器对泛型 ADT 构造/字段访问的推断差距**，这是真实代码与 `cargo test` 路径之间的关键不一致。
-- 建议下一步继续关闭 std_fs / std_template / std_crypto 中绕过的细节差距，并扩展 suite 覆盖 FFI、arena/capability、网络等特性。
+- std_fs 和 std_crypto 的 codegen 差距已在 v0.28.26 关闭。
+- 建议下一步关闭 std_template 的 `Any` to_string codegen 差距，并扩展 suite 覆盖 FFI、arena/capability、网络等特性。
