@@ -437,6 +437,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Some(decl_ty) = &ty {
                             self.register_list_elem_type(name, decl_ty);
                         }
+                        // Track standalone turbofish type (e.g. from_json::<List<f64>>("..."))
+                        if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
+                            if let Some(ta) = turbo_type_args.first() {
+                                if let Type::Name(tn, args) = ta {
+                                    if tn == "List" && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        }
+                                    } else {
+                                        self.var_type_names.insert(name.clone(), tn.clone());
+                                    }
+                                }
+                            }
+                        }
                     }
                     let val = self.normalize_string_value(val, init)?;
                     self.compile_pattern_bind(pat, val, vars)?;

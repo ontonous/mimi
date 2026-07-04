@@ -18,5 +18,18 @@ func main() -> i32 {
     let items = from_json::<List<string>>("[\"hello\",\"world\"]")
     if items[0] != "hello" || items[1] != "world" { return 4 }
 
+    // Float list
+    let floats = from_json::<List<f64>>("[1.5, 2.5, 3.5]")
+    if floats[0] != 1.5 || floats[1] != 2.5 || floats[2] != 3.5 { return 5 }
+
+    // Bool list
+    let bools = from_json::<List<bool>>("[true, false, true]")
+    if bools[0] != true || bools[1] != false || bools[2] != true { return 6 }
+
+    // Mixed: string list with bool-like check
+    if len(items) != 2 { return 7 }
+    if len(floats) != 3 { return 8 }
+    if len(bools) != 3 { return 9 }
+
     0
 }

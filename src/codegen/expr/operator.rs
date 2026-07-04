@@ -215,20 +215,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if lw == rw {
                     Ok((lhs, rhs))
                 } else if lw < rw {
-                    let ext = self
-                        .builder
-                        .build_int_s_extend(l, r.get_type(), "promote")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("int promote error: {}", e))
-                        })?;
+                    // i1 (bool) values must be zero-extended so `true` stays 1,
+                    // not sign-extended which would produce -1 (all 1s).
+                    let ext = if lw == 1 {
+                        self.builder.build_int_z_extend(l, r.get_type(), "promote")
+                    } else {
+                        self.builder.build_int_s_extend(l, r.get_type(), "promote")
+                    }
+                    .map_err(|e| CompileError::LlvmError(format!("int promote error: {}", e)))?;
                     Ok((ext.into(), rhs))
                 } else {
-                    let ext = self
-                        .builder
-                        .build_int_s_extend(r, l.get_type(), "promote")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("int promote error: {}", e))
-                        })?;
+                    let ext = if rw == 1 {
+                        self.builder.build_int_z_extend(r, l.get_type(), "promote")
+                    } else {
+                        self.builder.build_int_s_extend(r, l.get_type(), "promote")
+                    }
+                    .map_err(|e| CompileError::LlvmError(format!("int promote error: {}", e)))?;
                     Ok((lhs, ext.into()))
                 }
             }

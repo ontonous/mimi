@@ -951,6 +951,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // convention used by mimi_list_free.
                         self.build_ptr_to_int(elem_json, i64_ty, "elem_as_i64")?
                     }
+                    Type::Name(n, _) if n == "f32" || n == "f64" => {
+                        let parser = self.get_runtime_fn("mimi_json_as_f64")?;
+                        let val = self
+                            .build_call(
+                                parser,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                "elem_val",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_json_as_f64 returned void")?
+                            .into_float_value();
+                        // bitcast f64 → i64 for list storage
+                        self.build_bit_cast(
+                            BasicValueEnum::FloatValue(val),
+                            BasicTypeEnum::IntType(i64_ty),
+                            "f64_to_i64",
+                        )?
+                        .into_int_value()
+                    }
+                    Type::Name(n, _) if n == "bool" => {
+                        let parser = self.get_runtime_fn("mimi_json_as_bool")?;
+                        let val = self
+                            .build_call(
+                                parser,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                "elem_val",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_json_as_bool returned void")?
+                            .into_int_value();
+                        val
+                    }
                     _ => {
                         return Err(CompileError::Generic(format!(
                             "from_json::<List<T>>: unsupported element type {:?}",

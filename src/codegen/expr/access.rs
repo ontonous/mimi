@@ -75,6 +75,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
                             return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
                         }
+                        if elem_name == "bool" {
+                            // bool is stored as i64 0/1 — no conversion needed
+                            return Ok(Some(BasicValueEnum::IntValue(elem_int)));
+                        }
+                        if elem_name == "f32" || elem_name == "f64" {
+                            let fv = self
+                                .build_bit_cast(
+                                    BasicValueEnum::IntValue(elem_int),
+                                    BasicTypeEnum::FloatType(self.context.f64_type()),
+                                    "i64_to_f64",
+                                )?
+                                .into_float_value();
+                            return Ok(Some(BasicValueEnum::FloatValue(fv)));
+                        }
                     }
                     if let Some(BasicTypeEnum::StructType(sty)) =
                         types::mimi_type_to_llvm(self.context, elem_ty)
@@ -105,6 +119,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(Some(BasicValueEnum::PointerValue(elem_ptr)));
         }
 
+        // Handle bool — stored as i64 0/1, no conversion needed
+        if obj_type == "bool" {
+            return Ok(Some(BasicValueEnum::IntValue(elem_int)));
+        }
+
+        // Handle f32/f64 — stored as bitcast f64→i64, need to convert back
+        if obj_type == "f64" || obj_type == "f32" {
+            let fv = self
+                .build_bit_cast(
+                    BasicValueEnum::IntValue(elem_int),
+                    BasicTypeEnum::FloatType(self.context.f64_type()),
+                    "i64_to_f64",
+                )?
+                .into_float_value();
+            return Ok(Some(BasicValueEnum::FloatValue(fv)));
+        }
+
         if let Some(elem_ty) = crate::codegen::extract_list_elem_type(&obj_type) {
             let llvm_ty = if let Type::Name(name, _) = &elem_ty {
                 self.type_llvm
@@ -114,12 +145,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 types::mimi_type_to_llvm(self.context, &elem_ty)
             };
-            if let Some(BasicTypeEnum::StructType(sty)) = llvm_ty {
-                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
-                let struct_val =
-                    self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
-                return Ok(Some(struct_val));
+            match llvm_ty {
+                Some(BasicTypeEnum::StructType(sty)) => {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                    let struct_val =
+                        self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "elem_struct")?;
+                    return Ok(Some(struct_val));
+                }
+                Some(BasicTypeEnum::FloatType(_)) => {
+                    let fv = self.build_bit_cast(
+                        BasicValueEnum::IntValue(elem_int),
+                        BasicTypeEnum::FloatType(self.context.f64_type()),
+                        "i64_to_f64",
+                    )?;
+                    return Ok(Some(fv));
+                }
+                _ => {
+                    // i32, bool, i64: stored directly as i64, no conversion needed
+                    return Ok(Some(BasicValueEnum::IntValue(elem_int)));
+                }
             }
         }
 
