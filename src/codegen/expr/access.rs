@@ -517,7 +517,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Try to convert a loaded i64 list element into its real struct/string form.
-    fn try_convert_list_element(
+    pub(in crate::codegen) fn try_convert_list_element(
         &self,
         elem_int: inkwell::values::IntValue<'ctx>,
         obj: &Expr,

@@ -779,19 +779,42 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         self.build_cond_br(loop_cmp, body_bb, done_bb)?;
         self.builder.position_at_end(body_bb);
-        // Load element
+        // Load element (as i64 from the data array)
         let elem_ptr = {
             self.gep()
                 .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "elem")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let elem = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
+        let elem_i64 = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
+        // Try to convert i64 element to struct type for user-defined record elements
+        let elem = if let Some(converted) = self.try_convert_list_element(
+            elem_i64.into_int_value(), &args[0], vars,
+        )? {
+            converted
+        } else {
+            elem_i64
+        };
+        // Build metadata type from the actual element type
+        let elem_meta = match &elem {
+            BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
+            BasicValueEnum::StructValue(sv) => BasicMetadataTypeEnum::StructType(sv.get_type()),
+            BasicValueEnum::PointerValue(pv) => BasicMetadataTypeEnum::PointerType(pv.get_type()),
+            BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
+            _ => BasicMetadataTypeEnum::IntType(i64_ty),
+        };
+        let elem_meta_for_store = match &elem {
+            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+            BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+            BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+            _ => BasicMetadataValueEnum::IntValue(elem_i64.into_int_value()),
+        };
         // Call the function: fn(elem) or fn(env_ptr, elem)
         let result = match &fn_ref {
             FnRef::Named(fn_llvm) => {
                 let fn_call = self.build_call(
                     *fn_llvm,
-                    &[BasicMetadataValueEnum::IntValue(elem.into_int_value())],
+                    &[elem_meta_for_store],
                     "fn_call",
                 )?;
                 call_try_basic_value(&fn_call).ok_or("function returned void")?
@@ -801,7 +824,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let indirect_fn_type = i64_ty.fn_type(
                     &[
                         BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::IntType(i64_ty),
+                        elem_meta,
                     ],
                     false,
                 );
@@ -814,7 +837,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 let call_args = vec![
                     BasicMetadataValueEnum::PointerValue(*env_ptr),
-                    BasicMetadataValueEnum::IntValue(elem.into_int_value()),
+                    elem_meta_for_store,
                 ];
                 let fn_call = self
                     .builder
