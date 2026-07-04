@@ -184,6 +184,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "len" && args.len() == 1 {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
         }
+        if name == "to_string" && args.len() == 1 {
+            let arg_type = self.infer_object_type(&args[0], vars);
+            self.pending_to_string_is_any = arg_type == "Any" || arg_type == "any";
+        }
         if name == "push" && args.len() == 2 {
             let list_type = self.infer_object_type(&args[0], vars);
             if let Some(elem_type) = Self::strip_list_element_type(&list_type) {

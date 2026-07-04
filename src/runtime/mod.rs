@@ -111,6 +111,8 @@ mod libc {
         pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
         pub fn free(ptr: *mut c_void);
         pub fn atexit(func: extern "C" fn()) -> i32;
+        pub fn sprintf(buf: *mut i8, fmt: *const i8, ...) -> i32;
+        pub fn strlen(s: *const i8) -> usize;
     }
 }
 
@@ -729,6 +731,55 @@ pub extern "C" fn mimi_map_set(
     unsafe {
         (*map_from_handle(handle)).inner.insert(s, value);
     }
+}
+
+/// Format an `Any` value (a raw i64 handle) to a heap-allocated C string.
+/// Uses a heuristic: if the handle looks like a valid C string pointer
+/// (address in typical heap/mmap range), treats it as a C string and
+/// copies it. Otherwise formats as a decimal integer with `%ld`.
+/// The caller must `free` the returned pointer with `mimi_string_free`.
+#[no_mangle]
+pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
+    // Heuristic: typical user-space heap addresses are >= 0x10000 and
+    // < 0x8000_0000_0000_0000 on x86-64 Linux. Small integers (including
+    // 0, negative overflow) are below this range.
+    let is_likely_ptr = (0x10000usize..0x7fff_ffff_ffff_fffe).contains(&value);
+    if !is_likely_ptr {
+        // Format as integer: sprintf(buf, "%ld", (i64)value)
+        let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
+        if buf.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe {
+            libc::sprintf(buf, b"%ld\0".as_ptr() as *const _, value as i64);
+        }
+        return buf;
+    }
+    // Treat as a C string pointer. Copy the string so the caller can
+    // own it (the original pointer may be to a string literal or a
+    // runtime string that goes out of scope).
+    let ptr = value as *const std::ffi::c_char;
+    if ptr.is_null() {
+        let buf = unsafe { libc::malloc(1) as *mut std::ffi::c_char };
+        if !buf.is_null() {
+            unsafe { *buf = 0 };
+        }
+        return buf;
+    }
+    // SAFETY: ptr is non-null and we assume it's a valid C string.
+    // The caller must ensure the value came from a map set with a string.
+    let len = unsafe { libc::strlen(ptr) };
+    let buf = unsafe { libc::malloc(len + 1) as *mut u8 };
+    if buf.is_null() {
+        return std::ptr::null_mut();
+    }
+    if len > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr as *const u8, buf, len);
+        }
+    }
+    unsafe { *buf.add(len) = 0 };
+    buf as *mut std::ffi::c_char
 }
 
 #[no_mangle]

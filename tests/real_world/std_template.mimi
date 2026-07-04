@@ -4,6 +4,6 @@ func main() -> i32 {
     let vars = map_new()
     let vars2 = map_set(vars, "name", "Mimi")
     let result = simple_render("Hello {{name}}!", vars2)
-    // Verify the function runs and returns a non-empty result
-    if len(result) > 0 { 0 } else { 1 }
+    // Verify the function returns the correct rendered string
+    if result == "Hello Mimi!" { 0 } else { 1 }
 }

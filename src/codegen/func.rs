@@ -1147,6 +1147,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             } else if let Expr::Ident(func_name) = callee.as_ref() {
                                 match func_name.as_str() {
+                                    "values" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<Any>".to_string());
+                                    }
+                                    "keys" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<string>".to_string());
+                                    }
                                     "Ok" | "Err" => {
                                         self.var_type_names
                                             .insert(name.clone(), "Result".to_string());

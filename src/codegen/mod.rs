@@ -220,6 +220,7 @@ pub struct CodeGenerator<'ctx> {
     /// Used so that nested lists and other struct elements are heap-copied before
     /// their pointer is stored, preventing stack-use-after-return.
     pending_push_elem_type: Option<String>,
+    pending_to_string_is_any: bool,
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
     optimize: bool,
@@ -368,6 +369,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_len_is_string: false,
             pending_print_arg_types: Vec::new(),
             pending_push_elem_type: None,
+            pending_to_string_is_any: false,
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| v == "1" || v == "true")
                 .unwrap_or(false),
