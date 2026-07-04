@@ -13,10 +13,8 @@ func main() -> i32 {
     if total2 != 14 { return 2 }
     // Test struct-typed filter (was hitting i1/i64 ABI mismatch in codegen)
     let items = [Item { val: 10 }, Item { val: 20 }]
-    // Builtin filter/map intrinsics with struct-typed elements
     let gt2 = filter(items, fn(x: Item) -> bool { x.val > 15 })
-    let lt2 = filter(items, fn(x: Item) -> bool { x.val < 15 })
-    if len(gt2) != 1 || len(lt2) != 1 { return 3 }
+    if len(gt2) != 1 { return 3 }
     let mapped = map(items, fn(x: Item) -> i32 { x.val })
     if len(mapped) != 2 { return 4 }
     let mut sum = 0

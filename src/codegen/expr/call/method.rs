@@ -170,6 +170,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 });
                             // Prepend self parameter (was prepended during compile_impl_methods)
                             if let Some(ref mut f) = func {
+                                // Rename func to fn_name so compile_generic_func mangles
+                                // with the full path (e.g. List__ListExt__map$T_Item),
+                                // matching the caller's expected mangled name.
+                                f.name = fn_name.clone();
                                 let self_ty = Type::Ref(
                                     None,
                                     Box::new(Type::Name(
