@@ -31,10 +31,19 @@ func main() -> i32 {
     let rec = JsonRecord { name: "hi", value: 7, flag: true }
     if to_json(rec) != "{\"flag\":true,\"name\":\"hi\",\"value\":7}" { return 19 }
 
+    // List of records (from_json::<List<RecordType>>)
+    let rec_list = from_json::<List<JsonRecord>>("[{\"name\":\"x\",\"value\":10,\"flag\":true},{\"name\":\"y\",\"value\":20,\"flag\":false}]")
+    if len(rec_list) != 2 { return 7 }
+    if rec_list[0].name != "x" || rec_list[0].value != 10 || rec_list[0].flag != true { return 8 }
+    if rec_list[1].name != "y" || rec_list[1].value != 20 || rec_list[1].flag != false { return 9 }
+    // Empty list of records
+    let empty_rec = from_json::<List<JsonRecord>>("[]")
+    if len(empty_rec) != 0 { return 70 }
+
     // Mixed: string list with bool-like check
-    if len(items) != 2 { return 7 }
-    if len(floats) != 3 { return 8 }
-    if len(bools) != 3 { return 9 }
+    if len(items) != 2 { return 11 }
+    if len(floats) != 3 { return 12 }
+    if len(bools) != 3 { return 13 }
 
     // --- to_json ---
     // Scalar to_json

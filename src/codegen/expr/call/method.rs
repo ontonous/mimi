@@ -1076,6 +1076,91 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_int_value();
                         val
                     }
+                    Type::Name(inner_n, _) => {
+                        // Record type: deserialize each JSON element into a heap-allocated struct
+                        let fields_opt =
+                            self.type_defs.get(inner_n).and_then(|td| match &td.kind {
+                                crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
+                                _ => None,
+                            });
+                        if let Some(fields) = fields_opt {
+                            let llvm_ty = *self.type_llvm.get(inner_n).ok_or_else(|| {
+                                CompileError::Generic(format!("type '{}' not registered", inner_n))
+                            })?;
+                            let BasicTypeEnum::StructType(sty) = llvm_ty else {
+                                return Err(CompileError::Generic(format!(
+                                    "type '{}' is not a struct",
+                                    inner_n
+                                )));
+                            };
+                            let struct_size =
+                                self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                            let malloc_fn = self.get_runtime_fn("malloc")?;
+                            let size_val = i64_ty.const_int(struct_size, false);
+                            let heap_ptr = self
+                                .build_call(
+                                    malloc_fn,
+                                    &[BasicMetadataValueEnum::IntValue(size_val)],
+                                    "malloc_record",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("malloc returned void")?
+                                .into_pointer_value();
+                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let typed_ptr = self
+                                .build_bit_cast(
+                                    heap_ptr.into(),
+                                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    "typed_ptr",
+                                )?
+                                .into_pointer_value();
+                            let json_get_fn = self.get_runtime_fn("json_get_string")?;
+                            let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                            let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                            let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                            for (i, field) in fields.iter().enumerate() {
+                                let key_global = self
+                                    .builder
+                                    .build_global_string_ptr(&field.name, "field_key")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("global str: {}", e))
+                                    })?;
+                                let raw_val = self
+                                    .build_call(
+                                        json_get_fn,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(elem_json),
+                                            BasicMetadataValueEnum::PointerValue(
+                                                key_global.as_pointer_value(),
+                                            ),
+                                        ],
+                                        "json_field",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("json_get_string returned void")?
+                                    .into_pointer_value();
+                                let gep = self
+                                    .gep()
+                                    .build_struct_gep(sty, typed_ptr, i as u32, &field.name)
+                                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                                let field_val = self.compile_json_scalar_field(
+                                    inner_n,
+                                    field,
+                                    raw_val,
+                                    json_as_i64_fn,
+                                    json_as_f64_fn,
+                                    json_as_bool_fn,
+                                )?;
+                                self.build_store(gep, field_val)?;
+                            }
+                            self.build_ptr_to_int(typed_ptr, i64_ty, "record_as_i64")?
+                        } else {
+                            return Err(CompileError::Generic(format!(
+                                "from_json::<List<T>>: type '{}' is not a record",
+                                inner_n
+                            )));
+                        }
+                    }
                     _ => {
                         return Err(CompileError::Generic(format!(
                             "from_json::<List<T>>: unsupported element type {:?}",
