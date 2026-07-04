@@ -17,12 +17,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let i64_ty = self.context.i64_type();
-        // Single string pointer: use puts (which appends newline automatically)
+        // Single string pointer: use puts (which appends newline automatically).
+        // Skip this fast path for list pointers, which need struct formatting.
         if args.len() == 1 {
             if let BasicMetadataValueEnum::PointerValue(_) = args[0] {
-                let puts = self.get_runtime_fn("puts")?;
-                self.build_call(puts, args, "puts_call")?;
-                return Ok(i64_ty.const_int(0, false).into());
+                let is_list = arg_types
+                    .first()
+                    .map(|t| t.starts_with("List"))
+                    .unwrap_or(false);
+                if !is_list {
+                    let puts = self.get_runtime_fn("puts")?;
+                    self.build_call(puts, args, "puts_call")?;
+                    return Ok(i64_ty.const_int(0, false).into());
+                }
             }
         }
         // Build format and arg list, handling struct/enum values by extracting the payload
@@ -80,6 +87,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let str_ptr =
                         if arg_type == "List<string>" || arg_type.starts_with("List<string>") {
                             self.emit_list_string_to_string(*sv)?
+                        } else if let Some(inner) = arg_type
+                            .strip_prefix("List<List<")
+                            .and_then(|s| s.strip_suffix(">>"))
+                        {
+                            let inner_fn = match inner {
+                                "string" => "mimi_list_to_string",
+                                "i32" | "i64" => "mimi_list_i32_to_string",
+                                _ => "mimi_list_i32_to_string",
+                            };
+                            self.emit_list_list_to_string(*sv, inner_fn)?
                         } else {
                             self.emit_list_i32_to_string(*sv)?
                         };
@@ -107,7 +124,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             BasicMetadataValueEnum::PointerValue(pv) => {
-                Ok((BasicMetadataValueEnum::PointerValue(*pv), "%s".to_string()))
+                let pv = *pv;
+                if arg_type.starts_with("List") {
+                    // The pointer points to a list struct alloca; load it and
+                    // reuse the struct formatting path above.
+                    let list_struct_ty = self.list_struct_type();
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(list_struct_ty),
+                            pv,
+                            "print_list_ptr_load",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    return self.extract_print_arg(
+                        &BasicMetadataValueEnum::StructValue(loaded.into_struct_value()),
+                        i64_ty,
+                        arg_type,
+                    );
+                }
+                Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string()))
             }
             BasicMetadataValueEnum::IntValue(iv) => {
                 Ok((BasicMetadataValueEnum::IntValue(*iv), "%ld".to_string()))
@@ -151,6 +187,59 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("mimi_list_i32_to_string returned void")?
+            .into_pointer_value();
+        Ok(raw)
+    }
+
+    /// Materialize a `List<List<T>>` struct value into an alloca and call
+    /// `mimi_list_list_to_string` with the appropriate inner-list formatter.
+    fn emit_list_list_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        inner_fn_name: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let list_struct_ty = self.list_struct_type();
+        let alloca = self.build_alloca(list_struct_ty, "print_list_list_alloca")?;
+        self.build_store(alloca, sv)?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let callback_fn_ty =
+            i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+        let inner_fn = self.module.get_function(inner_fn_name).unwrap_or_else(|| {
+            self.module.add_function(
+                inner_fn_name,
+                callback_fn_ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let callback = inner_fn.as_global_value().as_pointer_value();
+        let fn_ty = i8_ptr_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+            ],
+            false,
+        );
+        let callee = self
+            .module
+            .get_function("mimi_list_list_to_string")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_list_list_to_string",
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let raw = self
+            .build_call(
+                callee,
+                &[
+                    BasicMetadataValueEnum::PointerValue(alloca),
+                    BasicMetadataValueEnum::PointerValue(callback),
+                ],
+                "list_list_to_str",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_list_list_to_string returned void")?
             .into_pointer_value();
         Ok(raw)
     }

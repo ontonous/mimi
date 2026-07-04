@@ -1,6 +1,6 @@
 mod r#async;
 mod closure;
 mod constructor;
-mod helpers;
+pub(in crate::codegen) mod helpers;
 mod method;
 mod simple;

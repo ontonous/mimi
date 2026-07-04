@@ -809,17 +809,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             let resolved = self.resolve_type(&param.ty);
             if let Some(ty) = self.llvm_type_for(&resolved) {
                 let alloca = self.build_alloca(ty, &param.name)?;
-                self.build_store(
-                    alloca,
-                    function.get_nth_param(i as u32).ok_or_else(|| {
-                        CompileError::LlvmError(format!(
-                            "param index {} out of range for function '{}' with {} params",
-                            i,
-                            func.name,
-                            function.count_params()
-                        ))
-                    })?,
-                )?;
+                let mut param_val = function.get_nth_param(i as u32).ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "param index {} out of range for function '{}' with {} params",
+                        i,
+                        func.name,
+                        function.count_params()
+                    ))
+                })?;
+                // String parameters may be passed as raw i8* pointers (e.g. string
+                // literals or list indexing). Wrap them in the canonical
+                // {i8*, i64} struct so the rest of the function body sees a
+                // well-formed Mimi string.
+                if let Type::Name(tn, _) = &resolved {
+                    if tn == "string" {
+                        if let BasicValueEnum::PointerValue(pv) = param_val {
+                            let strlen_fn = self.get_runtime_fn("strlen")?;
+                            let len = self
+                                .build_call(
+                                    strlen_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(pv)],
+                                    "param_strlen",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("strlen returned void")?
+                                .into_int_value();
+                            param_val = self.build_string_struct(pv, len)?;
+                        }
+                    }
+                }
+                self.build_store(alloca, param_val)?;
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
@@ -1148,8 +1167,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         );
                                                     }
                                                     Type::Name(tn, _) => {
+                                                        let type_name = if let Some(full) =
+                                                            self.get_full_type_name(ret_ty)
+                                                        {
+                                                            full
+                                                        } else {
+                                                            tn.clone()
+                                                        };
                                                         self.var_type_names
-                                                            .insert(name.clone(), tn.clone());
+                                                            .insert(name.clone(), type_name);
+                                                        self.var_types
+                                                            .insert(name.clone(), ret_ty.clone());
                                                     }
                                                     _ => {}
                                                 }

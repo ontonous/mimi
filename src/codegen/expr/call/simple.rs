@@ -184,6 +184,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name == "len" && args.len() == 1 {
             self.pending_len_is_string = self.expr_is_string(&args[0]);
         }
+        if name == "push" && args.len() == 2 {
+            let list_type = self.infer_object_type(&args[0], vars);
+            if let Some(elem_type) = Self::strip_list_element_type(&list_type) {
+                self.pending_push_elem_type = Some(elem_type);
+            }
+        }
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {

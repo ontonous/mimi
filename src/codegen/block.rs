@@ -202,6 +202,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
+                        // v0.28.26: list-returning builtins hand back a pointer to a
+                        // list struct alloca. Load the struct value so that list
+                        // variables hold the struct by value, matching how other
+                        // list operations expect to receive them.
+                        if let crate::ast::Type::Name(tn, _) = decl_ty {
+                            if tn == "List" {
+                                if let BasicValueEnum::PointerValue(pv) = val {
+                                    let loaded = self
+                                        .builder
+                                        .build_load(target, pv, "list_var_load")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "list var load error: {}",
+                                                e
+                                            ))
+                                        })?;
+                                    val = loaded;
+                                }
+                            }
+                        }
                     }
                     // For simple Variable patterns, track type info
                     if let Pattern::Variable(name) = pat {
@@ -292,8 +312,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         );
                                                     }
                                                     Type::Name(tn, _) => {
+                                                        let type_name = if let Some(full) =
+                                                            self.get_full_type_name(ret_ty)
+                                                        {
+                                                            full
+                                                        } else {
+                                                            tn.clone()
+                                                        };
                                                         self.var_type_names
-                                                            .insert(name.clone(), tn.clone());
+                                                            .insert(name.clone(), type_name);
                                                     }
                                                     #[allow(unreachable_patterns)]
                                                     _ => {}
@@ -865,6 +892,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // by the branch above.
                         if let Expr::Call(callee, _) = init {
                             if let Expr::Ident(fn_name) = callee.as_ref() {
+                                // General user-function return-type tracking (e.g. std::csv::parse
+                                // returns List<List<string>>). This lets downstream indexing and
+                                // printing recover the concrete element type.
+                                if let Some(fdef) = self.func_defs.get(fn_name.as_str()) {
+                                    if let Some(ret_ty) = &fdef.ret {
+                                        if let Some(full) = self.get_full_type_name(ret_ty) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        }
+                                        self.var_types.insert(name.clone(), ret_ty.clone());
+                                    }
+                                }
                                 match fn_name.as_str() {
                                     "words" | "lines" | "split" | "str_split" | "listdir"
                                     | "walk_dir" | "sort_str" | "keys" => {

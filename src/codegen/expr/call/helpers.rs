@@ -1086,7 +1086,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         };
         let param_types: Vec<Type> = fdef.params.iter().map(|p| p.ty.clone()).collect();
-        for (i, (arg_expr, compiled)) in arg_exprs.iter().zip(compiled_args.iter_mut()).enumerate()
+        for (i, (_arg_expr, compiled)) in arg_exprs.iter().zip(compiled_args.iter_mut()).enumerate()
         {
             if i >= param_types.len() {
                 break;
@@ -1094,9 +1094,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             if !Self::is_string_type(&param_types[i]) {
                 continue;
             }
-            if !self.expr_is_string(arg_expr) {
-                continue;
-            }
+            // Any raw pointer argument passed to a `string` parameter must be
+            // wrapped into the canonical {i8*, i64} struct. This covers string
+            // literals, format strings, and list-element indexing like
+            // `row[i]`, which returns a raw C-string pointer.
             if let BasicValueEnum::PointerValue(pv) = *compiled {
                 *compiled = self.wrap_raw_string_ptr(pv)?;
             }

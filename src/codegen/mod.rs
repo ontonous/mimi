@@ -213,6 +213,10 @@ pub struct CodeGenerator<'ctx> {
     /// Inferred Mimi type names for arguments of the current `print`/`println` call.
     /// Used to choose the correct runtime list-to-string helper (string vs i32 elements).
     pending_print_arg_types: Vec<String>,
+    /// Inferred Mimi element type name for the current `push(list, elem)` call.
+    /// Used so that nested lists and other struct elements are heap-copied before
+    /// their pointer is stored, preventing stack-use-after-return.
+    pending_push_elem_type: Option<String>,
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
     optimize: bool,
@@ -359,6 +363,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             tuple_type_stack: Vec::new(),
             pending_len_is_string: false,
             pending_print_arg_types: Vec::new(),
+            pending_push_elem_type: None,
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| v == "1" || v == "true")
                 .unwrap_or(false),

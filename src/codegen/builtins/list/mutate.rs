@@ -6,7 +6,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn compile_push(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         // push(list, elem) — realloc data array and append element.
@@ -115,7 +115,61 @@ impl<'ctx> CodeGenerator<'ctx> {
         let elem_val = match elem {
             BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(iv),
             BasicMetadataValueEnum::FloatValue(fv) => BasicValueEnum::FloatValue(fv),
-            BasicMetadataValueEnum::PointerValue(pv) => BasicValueEnum::PointerValue(pv),
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                // If we know the list element type and it is a non-scalar, non-string
+                // struct (e.g. List<string> or a record), heap-copy the pointed-to
+                // struct so the list element outlives the current stack frame.
+                let needs_struct_copy = self
+                    .pending_push_elem_type
+                    .as_ref()
+                    .map(|et| {
+                        !matches!(et.as_str(), "i32" | "i64" | "f64" | "bool" | "string")
+                            && !et.is_empty()
+                    })
+                    .unwrap_or(false);
+                if needs_struct_copy {
+                    if let Some(elem_ty) = self
+                        .pending_push_elem_type
+                        .as_ref()
+                        .and_then(|et| crate::codegen::expr::call::helpers::parse_type_str(et))
+                        .and_then(|ty| self.llvm_type_for(&ty))
+                    {
+                        if let BasicTypeEnum::StructType(_sty) = elem_ty {
+                            let size = self.llvm_type_size_bytes(elem_ty);
+                            let size_val = i64_ty.const_int(size, false);
+                            let malloc_fn = self.get_runtime_fn("malloc")?;
+                            let heap_ptr = self
+                                .builder
+                                .build_call(
+                                    malloc_fn,
+                                    &[BasicMetadataValueEnum::IntValue(size_val)],
+                                    "push_struct_malloc",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("malloc error: {}", e))
+                                })?
+                                .try_as_basic_value_opt()
+                                .ok_or("malloc returned void")?
+                                .into_pointer_value();
+                            let loaded = self
+                                .builder
+                                .build_load(elem_ty, pv, "push_struct_load")
+                                .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+                                .into_struct_value();
+                            self.builder.build_store(heap_ptr, loaded).map_err(|e| {
+                                CompileError::LlvmError(format!("store error: {}", e))
+                            })?;
+                            BasicValueEnum::PointerValue(heap_ptr)
+                        } else {
+                            BasicValueEnum::PointerValue(pv)
+                        }
+                    } else {
+                        BasicValueEnum::PointerValue(pv)
+                    }
+                } else {
+                    BasicValueEnum::PointerValue(pv)
+                }
+            }
             BasicMetadataValueEnum::StructValue(sv) => {
                 let sty = sv.get_type();
                 let fields = sty.get_field_types();
@@ -191,14 +245,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
                     BasicValueEnum::PointerValue(buf)
                 } else {
-                    let alloca = self
+                    // Heap-copy the struct so the list element remains valid
+                    // after the current stack frame is torn down.
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                    let size_val = i64_ty.const_int(size, false);
+                    let malloc_fn = self.get_runtime_fn("malloc")?;
+                    let heap_ptr = self
                         .builder
-                        .build_alloca(sty, "push_struct_tmp")
-                        .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                        .build_call(
+                            malloc_fn,
+                            &[BasicMetadataValueEnum::IntValue(size_val)],
+                            "push_struct_malloc",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("malloc returned void")?
+                        .into_pointer_value();
                     self.builder
-                        .build_store(alloca, sv)
+                        .build_store(heap_ptr, sv)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    BasicValueEnum::PointerValue(alloca)
+                    BasicValueEnum::PointerValue(heap_ptr)
                 }
             }
             _ => {
@@ -216,6 +282,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(len_gep, new_len)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
+        self.pending_push_elem_type = None;
         Ok(BasicValueEnum::PointerValue(list_ptr))
     }
 

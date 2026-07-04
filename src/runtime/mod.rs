@@ -969,6 +969,51 @@ pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ff
     alloc_c_string(&parts.join(""))
 }
 
+/// Render a codegen `List<List<T>>` by using `elem_to_string` for each element.
+/// The caller provides the appropriate inner-list formatter
+/// (`mimi_list_to_string` for `List<string>`, `mimi_list_i32_to_string` for
+/// `List<i32>`, etc.). Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_list_to_string(
+    list: *const MimiList,
+    elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(", "));
+        }
+        // `lst.data` points to inner list pointers (`*const MimiList`).
+        let inner = unsafe { *lst.data.offset(i) as *const MimiList };
+        if inner.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            let inner_str = elem_to_string(inner);
+            let s = unsafe { cstr_to_string(inner_str) };
+            // The inner formatter returns a heap-allocated string that we now own.
+            if !inner_str.is_null() {
+                // SAFETY: `inner_str` was allocated by `alloc_c_string` in the inner formatter.
+                unsafe { libc::free(inner_str as *mut std::ffi::c_void) };
+            }
+            parts.push(s);
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_str_replace(
     s: *const std::ffi::c_char,

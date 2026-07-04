@@ -324,3 +324,23 @@ fn real_world_multiple_std_modules() {
         "15\n[2, 4]\nyes\n1024\n6",
     );
 }
+
+// ===================== Standard library: csv =====================
+
+#[test]
+fn real_world_csv_module() {
+    run_both(
+        r#"
+        use std::csv
+
+        func main() -> i32 {
+            let rows = parse("a,b\nc,d")
+            println(rows)
+            println(get(rows, 0, 1))
+            println(get(rows, 1, 0))
+            0
+        }
+    "#,
+        "[[a, b], [c, d]]\nb\nc",
+    );
+}

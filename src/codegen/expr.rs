@@ -369,6 +369,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Strip one level of `List<...>` from a type name, respecting nested
+    /// generic brackets. Returns `None` if `s` does not start with `List<`.
+    pub(super) fn strip_list_element_type(s: &str) -> Option<String> {
+        let inner = s.strip_prefix("List<")?;
+        let mut depth = 0u32;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        return Some(inner[..i].trim().to_string());
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        Some(inner.trim().to_string())
+    }
+
     /// Map a stored LLVM value type back to a coarse Mimi type name for method
     /// dispatch. This is intentionally approximate: it only needs to distinguish
     /// the builtin scalar types and common struct layouts (string, List, Option,
@@ -1248,7 +1268,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 }
 
 mod access;
-mod call;
+pub(super) mod call;
 mod control;
 mod lambda;
 mod literal;
