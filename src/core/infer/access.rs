@@ -5,6 +5,79 @@ use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
 
+/// Replace type parameters in `ty` according to `subst`.
+fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
+            subst[name].clone()
+        }
+        Type::Name(name, args) => Type::Name(
+            name.clone(),
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+        ),
+        Type::Option(inner) => Type::Option(Box::new(substitute_type_params(inner, subst))),
+        Type::Result(ok, err) => Type::Result(
+            Box::new(substitute_type_params(ok, subst)),
+            Box::new(substitute_type_params(err, subst)),
+        ),
+        Type::Tuple(elems) => Type::Tuple(
+            elems
+                .iter()
+                .map(|e| substitute_type_params(e, subst))
+                .collect(),
+        ),
+        Type::Func(args, ret) => Type::Func(
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+            Box::new(substitute_type_params(ret, subst)),
+        ),
+        Type::ExternFunc(args, ret) => Type::ExternFunc(
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+            Box::new(substitute_type_params(ret, subst)),
+        ),
+        Type::Ref(lt, inner) => {
+            Type::Ref(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::RefMut(lt, inner) => {
+            Type::RefMut(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::Shared(inner) => Type::Shared(Box::new(substitute_type_params(inner, subst))),
+        Type::LocalShared(inner) => {
+            Type::LocalShared(Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::Weak(inner) => Type::Weak(Box::new(substitute_type_params(inner, subst))),
+        Type::WeakLocal(inner) => Type::WeakLocal(Box::new(substitute_type_params(inner, subst))),
+        Type::RawPtr(inner) => Type::RawPtr(Box::new(substitute_type_params(inner, subst))),
+        Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(substitute_type_params(inner, subst))),
+        Type::CShared(inner) => Type::CShared(Box::new(substitute_type_params(inner, subst))),
+        Type::CBorrow(inner) => Type::CBorrow(Box::new(substitute_type_params(inner, subst))),
+        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(substitute_type_params(inner, subst))),
+        Type::CBuffer(inner) => Type::CBuffer(Box::new(substitute_type_params(inner, subst))),
+        Type::Array(inner, n) => Type::Array(Box::new(substitute_type_params(inner, subst)), *n),
+        Type::Slice(inner) => Type::Slice(Box::new(substitute_type_params(inner, subst))),
+        Type::Newtype(name, inner) => {
+            Type::Newtype(name.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::ForAll(params, body) => Type::ForAll(
+            params.clone(),
+            Box::new(substitute_type_params(body, subst)),
+        ),
+        Type::TypeVar(id) => Type::TypeVar(*id),
+        Type::Infer
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString
+        | Type::Cap(_)
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_) => ty.clone(),
+    }
+}
+
 impl<'a> Checker<'a> {
     pub(in crate::core) fn infer_field_access(
         &mut self,
@@ -60,7 +133,22 @@ impl<'a> Checker<'a> {
                     match &tdef.kind {
                         TypeDefKind::Record(fields) => {
                             if let Some(f) = fields.iter().find(|f| f.name == field) {
-                                return self.resolve_type(&f.ty);
+                                let resolved = self.resolve_type(&f.ty);
+                                // If the object type carries concrete type arguments,
+                                // instantiate the field type by substituting the type
+                                // parameters with those arguments.
+                                if let Type::Name(_, args) = obj_ty {
+                                    if !args.is_empty() && tdef.generics.len() == args.len() {
+                                        let subst: HashMap<String, Type> = tdef
+                                            .generics
+                                            .iter()
+                                            .zip(args.iter())
+                                            .map(|(gp, arg)| (gp.name.clone(), arg.clone()))
+                                            .collect();
+                                        return substitute_type_params(&resolved, &subst);
+                                    }
+                                }
+                                return resolved;
                             }
                             if let Some(methods) = self.type_methods.get(name) {
                                 if let Some((trait_name, _)) =

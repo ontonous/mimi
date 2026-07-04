@@ -81,7 +81,7 @@ impl UnificationTable {
     /// Type::Name is a separate string-based namespace used for user-written type
     /// parameters; it does not interact with TypeVar (integer) ID space.
     /// Type::ForAll body uses TypeVar(i) for bound parameters, not Name(i).
-    fn occurs_in(var: u32, ty: &Type) -> bool {
+    pub(crate) fn occurs_in(var: u32, ty: &Type) -> bool {
         match ty {
             Type::TypeVar(id) => *id == var,
             Type::ForAll(_, body) => Self::occurs_in(var, body),

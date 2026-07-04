@@ -3,6 +3,83 @@ use crate::core::checker::Checker;
 use crate::core::helpers::{fmt_type, same_type};
 use std::collections::HashMap;
 
+/// Replace type parameters in `ty` according to `subst`.
+fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
+            subst[name].clone()
+        }
+        Type::Name(name, args) => Type::Name(
+            name.clone(),
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+        ),
+        Type::Option(inner) => Type::Option(Box::new(substitute_type_params(inner, subst))),
+        Type::Result(ok, err) => Type::Result(
+            Box::new(substitute_type_params(ok, subst)),
+            Box::new(substitute_type_params(err, subst)),
+        ),
+        Type::Tuple(elems) => Type::Tuple(
+            elems
+                .iter()
+                .map(|e| substitute_type_params(e, subst))
+                .collect(),
+        ),
+        Type::Func(args, ret) => Type::Func(
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+            Box::new(substitute_type_params(ret, subst)),
+        ),
+        Type::ExternFunc(args, ret) => Type::ExternFunc(
+            args.iter()
+                .map(|a| substitute_type_params(a, subst))
+                .collect(),
+            Box::new(substitute_type_params(ret, subst)),
+        ),
+        Type::Ref(lt, inner) => {
+            Type::Ref(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::RefMut(lt, inner) => {
+            Type::RefMut(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::Shared(inner) => Type::Shared(Box::new(substitute_type_params(inner, subst))),
+        Type::LocalShared(inner) => {
+            Type::LocalShared(Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::Weak(inner) => Type::Weak(Box::new(substitute_type_params(inner, subst))),
+        Type::WeakLocal(inner) => Type::WeakLocal(Box::new(substitute_type_params(inner, subst))),
+        Type::RawPtr(inner) => Type::RawPtr(Box::new(substitute_type_params(inner, subst))),
+        Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(substitute_type_params(inner, subst))),
+        Type::CShared(inner) => Type::CShared(Box::new(substitute_type_params(inner, subst))),
+        Type::CBorrow(inner) => Type::CBorrow(Box::new(substitute_type_params(inner, subst))),
+        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(substitute_type_params(inner, subst))),
+        Type::CBuffer(inner) => Type::CBuffer(Box::new(substitute_type_params(inner, subst))),
+        Type::Array(inner, n) => Type::Array(Box::new(substitute_type_params(inner, subst)), *n),
+        Type::Slice(inner) => Type::Slice(Box::new(substitute_type_params(inner, subst))),
+        Type::Newtype(name, inner) => {
+            Type::Newtype(name.clone(), Box::new(substitute_type_params(inner, subst)))
+        }
+        Type::ForAll(params, body) => Type::ForAll(
+            params.clone(),
+            Box::new(substitute_type_params(body, subst)),
+        ),
+        Type::TypeVar(id) => {
+            // TypeVars are not substituted by name parameters.
+            Type::TypeVar(*id)
+        }
+        // Leaf / inference placeholders — no parameters inside.
+        Type::Infer
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString
+        | Type::Cap(_)
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_) => ty.clone(),
+    }
+}
+
 impl<'a> Checker<'a> {
     pub(in crate::core) fn infer_record_expr(
         &mut self,
@@ -14,15 +91,56 @@ impl<'a> Checker<'a> {
         match tdef {
             Some(tdef) => match &tdef.kind {
                 TypeDefKind::Record(expected_fields) => {
+                    // Build a substitution for generic parameters when constructing
+                    // a generic ADT. Each parameter is mapped to a fresh unification
+                    // variable so that field values can infer the concrete types.
+                    let mut subst: HashMap<String, Type> = HashMap::new();
+                    let mut type_args: Vec<Type> = Vec::new();
+                    for gp in &tdef.generics {
+                        let var = Type::TypeVar(self.unification.fresh_var());
+                        subst.insert(gp.name.clone(), var.clone());
+                        type_args.push(var);
+                    }
+
                     let expected: HashMap<String, Type> = expected_fields
                         .iter()
-                        .map(|f| (f.name.clone(), self.resolve_type(&f.ty)))
+                        .map(|f| {
+                            let resolved = self.resolve_type(&f.ty);
+                            let instantiated = substitute_type_params(&resolved, &subst);
+                            (f.name.clone(), instantiated)
+                        })
                         .collect();
+
                     for (name, value) in fields.iter().map(|f| (&f.name, &f.value)) {
                         if let Some(expected_ty) = expected.get(name) {
                             // Use check_expr to propagate expected type (enables empty list inference)
                             let actual_ty = self.check_expr(expected_ty, value, scopes);
-                            if !same_type(expected_ty, &actual_ty) {
+                            // For concrete (non-generic) fields, retain the original
+                            // same_type check to keep diagnostics unchanged. For fields
+                            // that involve type parameters, use unification so the
+                            // parameter can be inferred from the value.
+                            let uses_param = subst.values().any(|v| match v {
+                                Type::TypeVar(id) => {
+                                    crate::core::unification::UnificationTable::occurs_in(
+                                        *id,
+                                        expected_ty,
+                                    )
+                                }
+                                _ => false,
+                            });
+                            if uses_param {
+                                if self.unification.unify(expected_ty, &actual_ty).is_err() {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0247,
+                                        format!(
+                                            "field '{}' expected {}, found {}",
+                                            name,
+                                            fmt_type(expected_ty),
+                                            fmt_type(&actual_ty)
+                                        ),
+                                    );
+                                }
+                            } else if !same_type(expected_ty, &actual_ty) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0247,
                                     format!(
@@ -48,7 +166,9 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    Type::Name(tdef.name.clone(), vec![])
+
+                    let ret = Type::Name(tdef.name.clone(), type_args);
+                    self.unification.resolve(&ret)
                 }
                 _ => {
                     self.emit_code(
