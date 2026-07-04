@@ -785,7 +785,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // uppercase letter (generic placeholder from trait method self type).
         let concrete_ty = match &elem_ty {
             Type::Name(inner, _)
-                if inner.len() == 1 && inner.chars().next().map_or(false, |c| c.is_uppercase()) =>
+                if inner.len() == 1 && inner.chars().next().is_some_and(|c| c.is_uppercase()) =>
             {
                 let resolved = self.type_map.get(inner.as_str()).cloned();
                 resolved.unwrap_or_else(|| elem_ty.clone())
@@ -841,17 +841,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Fallback: parse infer_object_type result (e.g. "List<User>" -> User)
         let obj_type = self.infer_object_type(iterable, vars);
-        let inner = obj_type.strip_prefix("List<").and_then(|s| {
+        let inner = obj_type.strip_prefix("List<").map(|s| {
             let mut depth = 0u32;
             for (i, ch) in s.char_indices() {
                 match ch {
                     '<' => depth += 1,
-                    '>' if depth == 0 => return Some(s[..i].trim().to_string()),
+                    '>' if depth == 0 => return s[..i].trim().to_string(),
                     '>' => depth -= 1,
                     _ => {}
                 }
             }
-            Some(s.trim().to_string())
+            s.trim().to_string()
         })?;
         Some(Type::Name(inner, vec![]))
     }

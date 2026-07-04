@@ -196,6 +196,22 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
     }
 }
 
+/// Build an LLVM function type from a return type and parameter metadata types.
+pub fn build_fn_type_for<'ctx>(
+    ctx: &'ctx Context,
+    ret_type: BasicTypeEnum<'ctx>,
+    param_types: &[BasicMetadataTypeEnum<'ctx>],
+) -> inkwell::types::FunctionType<'ctx> {
+    match ret_type {
+        BasicTypeEnum::IntType(t) => t.fn_type(param_types, false),
+        BasicTypeEnum::FloatType(t) => t.fn_type(param_types, false),
+        BasicTypeEnum::PointerType(t) => t.fn_type(param_types, false),
+        BasicTypeEnum::StructType(t) => t.fn_type(param_types, false),
+        BasicTypeEnum::ArrayType(t) => t.fn_type(param_types, false),
+        _ => ctx.i64_type().fn_type(param_types, false),
+    }
+}
+
 pub fn basic_to_metadata<'ctx>(
     ctx: &'ctx Context,
     ty: BasicTypeEnum<'ctx>,

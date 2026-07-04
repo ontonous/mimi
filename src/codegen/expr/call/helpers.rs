@@ -645,12 +645,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_ptr = self.list_value_to_ptr(list_val).map_err(|e| {
             CompileError::Generic(format!("map/filter: first arg must be a list: {}", e))
         })?;
-        // Resolve function from second arg (identifier, lambda, or variable)
+        // Resolve function from second arg (identifier, lambda, or variable).
+        // Track the declared return type for indirect calls so the LLVM call
+        // type matches the actual function (avoiding i1-i64 ABI mismatches).
         enum FnRef<'ctx> {
             Named(inkwell::values::FunctionValue<'ctx>),
             Indirect {
                 fn_ptr: inkwell::values::PointerValue<'ctx>,
                 env_ptr: inkwell::values::PointerValue<'ctx>,
+                ret_type: Option<Box<Type>>,
             },
         }
         let fn_ref = match &args[1] {
@@ -664,7 +667,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Lambda { params, ret, body } => {
                 let closure_val = self.compile_lambda_expr(params, ret, body, vars)?;
                 let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
-                FnRef::Indirect { fn_ptr, env_ptr }
+                FnRef::Indirect {
+                    fn_ptr,
+                    env_ptr,
+                    ret_type: ret.clone().map(Box::new),
+                }
             }
             _ => {
                 let val = self.compile_expr(&args[1], vars)?;
@@ -677,6 +684,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         FnRef::Indirect {
                             fn_ptr: fp,
                             env_ptr: null_env,
+                            ret_type: None,
                         }
                     }
                     _ => {
@@ -786,48 +794,53 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let elem_i64 = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
-        // Try to convert i64 element to struct type for user-defined record elements
-        let elem = if let Some(converted) = self.try_convert_list_element(
-            elem_i64.into_int_value(), &args[0], vars,
-        )? {
-            converted
-        } else {
-            elem_i64
-        };
-        // Build metadata type from the actual element type
-        let elem_meta = match &elem {
+        let elem_i64_int = elem_i64.into_int_value();
+        // Try to convert i64 element to struct type for user-defined record elements.
+        // Keep the original i64 handle (elem_i64_int) for storage back to the output
+        // array; the converted struct is used only for passing to the closure.
+        let (elem_for_call, is_converted) =
+            if let Some(converted) = self.try_convert_list_element(elem_i64_int, &args[0], vars)? {
+                (converted, true)
+            } else {
+                (elem_i64, false)
+            };
+        // Build metadata type from the actual call argument type
+        let elem_meta = match &elem_for_call {
             BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
             BasicValueEnum::StructValue(sv) => BasicMetadataTypeEnum::StructType(sv.get_type()),
             BasicValueEnum::PointerValue(pv) => BasicMetadataTypeEnum::PointerType(pv.get_type()),
             BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
             _ => BasicMetadataTypeEnum::IntType(i64_ty),
         };
-        let elem_meta_for_store = match &elem {
+        let elem_meta_for_store = match &elem_for_call {
             BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
             BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
             BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
             BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
-            _ => BasicMetadataValueEnum::IntValue(elem_i64.into_int_value()),
+            _ => BasicMetadataValueEnum::IntValue(elem_i64_int),
         };
         // Call the function: fn(elem) or fn(env_ptr, elem)
         let result = match &fn_ref {
             FnRef::Named(fn_llvm) => {
-                let fn_call = self.build_call(
-                    *fn_llvm,
-                    &[elem_meta_for_store],
-                    "fn_call",
-                )?;
+                let fn_call = self.build_call(*fn_llvm, &[elem_meta_for_store], "fn_call")?;
                 call_try_basic_value(&fn_call).ok_or("function returned void")?
             }
-            FnRef::Indirect { fn_ptr, env_ptr } => {
+            FnRef::Indirect {
+                fn_ptr,
+                env_ptr,
+                ret_type,
+            } => {
                 let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let indirect_fn_type = i64_ty.fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        elem_meta,
-                    ],
-                    false,
-                );
+                // Use the declared return type for the indirect call so LLVM
+                // reads the value with the correct ABI width. Fall back to i64
+                // when the return type is not known.
+                let ret_llvm = ret_type
+                    .as_ref()
+                    .and_then(|rt| types::mimi_type_to_llvm(self.context, rt))
+                    .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+                let metadata_params = [BasicMetadataTypeEnum::PointerType(i8_ptr), elem_meta];
+                let indirect_fn_type =
+                    types::build_fn_type_for(self.context, ret_llvm, &metadata_params);
                 let fn_ptr_typed = self
                     .build_bit_cast(
                         BasicValueEnum::PointerValue(*fn_ptr),
@@ -878,7 +891,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_in_bounds_gep(i64_ty, out_i64, &[wi], "out_elem")
             }
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            self.build_store(out_elem_ptr, elem)?;
+            // Store original i64 handle (not the converted struct) because the
+            // output array stores i64 values (ptr-to-int handles).
+            let stored_val: BasicValueEnum<'ctx> = if is_converted {
+                BasicValueEnum::IntValue(elem_i64_int)
+            } else {
+                elem_for_call
+            };
+            self.build_store(out_elem_ptr, stored_val)?;
             let next_wi = self
                 .builder
                 .build_int_add(wi, i64_ty.const_int(1, false), "next_wi")

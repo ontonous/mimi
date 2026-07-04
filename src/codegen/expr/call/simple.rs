@@ -662,7 +662,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_generic = self
             .func_defs
             .get(name)
-            .map_or(false, |f| !f.generics.is_empty());
+            .is_some_and(|f| !f.generics.is_empty());
         if !is_generic {
             if let Some(function) = self.module.get_function(name) {
                 return self.emit_function_call(function, name, metadata_args);
