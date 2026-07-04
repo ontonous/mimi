@@ -895,19 +895,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Build list struct {i64 len, i8* data}
                 let list_alloca = self.alloc_list_result(len_val, data_ptr)?;
 
-                // Determine element parser based on inner type
-                let elem_parser = match inner_ty {
-                    Type::Name(n, _) if n == "i32" || n == "i64" => {
-                        self.get_runtime_fn("mimi_json_as_i64")?
-                    }
-                    _ => {
-                        return Err(CompileError::Generic(format!(
-                            "from_json::<List<T>>: unsupported element type {:?}",
-                            inner_ty
-                        )))
-                    }
-                };
-
                 // Build loop: for i = 0; i < len; i++
                 let function = self
                     .current_function()
@@ -943,22 +930,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("json_get_element returned void")?
                     .into_pointer_value();
 
-                // Parse element
-                let elem_val = self
-                    .build_call(
-                        elem_parser,
-                        &[BasicMetadataValueEnum::PointerValue(elem_json)],
-                        "elem_val",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("mimi_json_as_i64 returned void")?;
+                // Parse element and store based on inner type
+                let elem_i64 = match inner_ty {
+                    Type::Name(n, _) if n == "i32" || n == "i64" => {
+                        let parser = self.get_runtime_fn("mimi_json_as_i64")?;
+                        let val = self
+                            .build_call(
+                                parser,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                "elem_val",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_json_as_i64 returned void")?;
+                        val.into_int_value()
+                    }
+                    Type::Name(n, _) if n == "string" => {
+                        // json_get_element already returns a heap-allocated C-string.
+                        // List<string> stores elements as bare C-string pointers (i8*)
+                        // in the data array (ptrtoint'd to i64). This matches the
+                        // convention used by mimi_list_free.
+                        self.build_ptr_to_int(elem_json, i64_ty, "elem_as_i64")?
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(format!(
+                            "from_json::<List<T>>: unsupported element type {:?}",
+                            inner_ty
+                        )))
+                    }
+                };
 
-                // Store to data[i]
+                // Store i64 to data[i]
                 let elem_gep = self
                     .gep()
                     .build_in_bounds_gep(i64_ty, data_i64_ptr, &[idx], "elem_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                self.build_store(elem_gep, elem_val)?;
+                self.build_store(elem_gep, elem_i64)?;
 
                 // Increment and loop
                 let next = self

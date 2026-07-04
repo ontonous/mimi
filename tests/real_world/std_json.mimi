@@ -14,5 +14,9 @@ func main() -> i32 {
     let empty = from_json::<List<i32>>("[]")
     if len(empty) != 0 { return 3 }
 
+    // String list
+    let items = from_json::<List<string>>("[\"hello\",\"world\"]")
+    if items[0] != "hello" || items[1] != "world" { return 4 }
+
     0
 }
