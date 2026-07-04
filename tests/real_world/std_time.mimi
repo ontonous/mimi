@@ -1,0 +1,9 @@
+use std::time
+
+func main() -> i32 {
+    let t1 = timestamp_ms()
+    sleep_ms(10)
+    let t2 = timestamp_ms()
+    let e = elapsed(t1)
+    if t2 >= t1 && e >= 0 { 0 } else { 1 }
+}

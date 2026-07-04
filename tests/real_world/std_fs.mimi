@@ -1,0 +1,5 @@
+func main() -> i32 {
+    let path = "/tmp/mimi_rw_test.txt"
+    let _ = write_file(path, "hello")
+    if file_exists(path) { 0 } else { 1 }
+}

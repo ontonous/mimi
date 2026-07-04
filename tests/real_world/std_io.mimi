@@ -1,0 +1,7 @@
+use std::io
+
+func main() -> i32 {
+    print_raw("io test")
+    print_line(" ok")
+    0
+}

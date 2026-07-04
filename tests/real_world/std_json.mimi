@@ -1,0 +1,7 @@
+type Config { name: string, count: i64 }
+
+func main() -> i32 {
+    let s = "{\"name\":\"mimi\",\"count\":42}"
+    let cfg = from_json::<Config>(s)
+    if cfg.name == "mimi" && cfg.count == 42 { 0 } else { 1 }
+}

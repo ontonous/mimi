@@ -1,0 +1,8 @@
+use std::template
+
+func main() -> i32 {
+    let vars = map_new()
+    let vars2 = map_set(vars, "name", "Mimi")
+    let _ = simple_render("Hello {{name}}!", vars2)
+    0
+}

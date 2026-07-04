@@ -1,0 +1,7 @@
+func main() -> i32 {
+    let s: Set<i32> = {1, 2, 1}
+    let s2 = s.insert(3)
+    let sz = s2.size()
+    let has = s2.contains(2)
+    if sz == 3 && has { 0 } else { 1 }
+}
