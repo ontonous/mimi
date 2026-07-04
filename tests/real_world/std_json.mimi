@@ -1,4 +1,5 @@
 type Config { name: string, count: i64 }
+type JsonRecord { name: string, value: i32, flag: bool }
 
 func main() -> i32 {
     // Record deserialization
@@ -25,6 +26,10 @@ func main() -> i32 {
     // Bool list
     let bools = from_json::<List<bool>>("[true, false, true]")
     if bools[0] != true || bools[1] != false || bools[2] != true { return 6 }
+
+    // Record to_json
+    let rec = JsonRecord { name: "hi", value: 7, flag: true }
+    if to_json(rec) != "{\"flag\":true,\"name\":\"hi\",\"value\":7}" { return 19 }
 
     // Mixed: string list with bool-like check
     if len(items) != 2 { return 7 }

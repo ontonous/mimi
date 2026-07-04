@@ -254,6 +254,159 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
+                // Check for Record type — serialize to JSON object via sprintf
+                if let Some(type_def) = self.type_defs.get(&obj_type) {
+                    if let TypeDefKind::Record(fields) = &type_def.kind {
+                        let struct_ptr = match &metadata_args[0] {
+                            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+                            _ => {
+                                return Err(CompileError::Generic(
+                                    "to_json: record value must be a pointer".into(),
+                                ))
+                            }
+                        };
+                        let llvm_ty = *self.type_llvm.get(&obj_type).ok_or_else(|| {
+                            CompileError::LlvmError(format!("no LLVM type for record {}", obj_type))
+                        })?;
+                        let BasicTypeEnum::StructType(sty) = llvm_ty else {
+                            return Err(CompileError::LlvmError(format!(
+                                "record type {} is not a struct",
+                                obj_type
+                            )));
+                        };
+                        let i64_ty = self.context.i64_type();
+                        // Sort fields alphabetically to match interpreter
+                        let mut idx_map: Vec<(usize, &Field)> = fields.iter().enumerate().collect();
+                        idx_map.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+                        let mut fmt = String::from("{");
+                        let mut sprintf_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+                        for (pos, (i, field)) in idx_map.iter().enumerate() {
+                            if pos > 0 {
+                                fmt.push(',');
+                            }
+                            let gep = self
+                                .gep()
+                                .build_struct_gep(sty, struct_ptr, *i as u32, &field.name)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let ft = sty.get_field_type_at_index(*i as u32).ok_or_else(|| {
+                                CompileError::LlvmError("missing field type".into())
+                            })?;
+                            let field_val =
+                                self.build_load(ft, gep, &format!("load_{}", field.name))?;
+                            match &field.ty {
+                                Type::Name(n, _) if n == "string" => {
+                                    fmt.push_str(&format!("\"{}\":\"%s\"", field.name));
+                                    let sv = field_val.into_struct_value();
+                                    let dp = self
+                                        .builder
+                                        .build_extract_value(
+                                            inkwell::values::AggregateValueEnum::StructValue(sv),
+                                            0,
+                                            &format!("{}_data", field.name),
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                        .into_pointer_value();
+                                    sprintf_args.push(BasicMetadataValueEnum::PointerValue(dp));
+                                }
+                                Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64") => {
+                                    let is32 = n == "i32";
+                                    if is32 {
+                                        fmt.push_str(&format!("\"{}\":%d", field.name));
+                                    } else {
+                                        fmt.push_str(&format!("\"{}\":%ld", field.name));
+                                    }
+                                    sprintf_args.push(BasicMetadataValueEnum::IntValue(
+                                        field_val.into_int_value(),
+                                    ));
+                                }
+                                Type::Name(n, _) if n == "bool" => {
+                                    fmt.push_str(&format!("\"{}\":%s", field.name));
+                                    let iv = field_val.into_int_value();
+                                    let true_global = self
+                                        .builder
+                                        .build_global_string_ptr(
+                                            "true",
+                                            &format!("{}_true", field.name),
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    let false_global = self
+                                        .builder
+                                        .build_global_string_ptr(
+                                            "false",
+                                            &format!("{}_false", field.name),
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    let zero = self.context.bool_type().const_int(0, false);
+                                    let is_true = self
+                                        .builder
+                                        .build_int_compare(
+                                            inkwell::IntPredicate::NE,
+                                            iv,
+                                            zero,
+                                            &format!("{}_is_true", field.name),
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    let true_ptr = true_global.as_pointer_value();
+                                    let false_ptr = false_global.as_pointer_value();
+                                    let selected = self
+                                        .builder
+                                        .build_select(
+                                            is_true,
+                                            true_ptr,
+                                            false_ptr,
+                                            &format!("{}_json", field.name),
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    sprintf_args.push(BasicMetadataValueEnum::PointerValue(
+                                        selected.into_pointer_value(),
+                                    ));
+                                }
+                                Type::Name(n, _) if n == "f64" => {
+                                    fmt.push_str(&format!("\"{}\":%g", field.name));
+                                    sprintf_args.push(BasicMetadataValueEnum::FloatValue(
+                                        field_val.into_float_value(),
+                                    ));
+                                }
+                                _ => {
+                                    return Err(CompileError::Generic(format!(
+                                        "to_json: unsupported record field type for '{}' in {}",
+                                        field.name, obj_type
+                                    )))
+                                }
+                            }
+                        }
+                        fmt.push('}');
+                        let malloc_fn = self
+                            .module
+                            .get_function("malloc")
+                            .ok_or_else(|| CompileError::LlvmError("malloc not declared".into()))?;
+                        let buf_size = i64_ty.const_int(4096, false);
+                        let buf = self
+                            .build_call(
+                                malloc_fn,
+                                &[BasicMetadataValueEnum::IntValue(buf_size)],
+                                "record_json_malloc",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("malloc returned void")?
+                            .into_pointer_value();
+                        let fmt_ptr = self
+                            .builder
+                            .build_global_string_ptr(&fmt, "record_json_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let mut all_args = vec![BasicMetadataValueEnum::PointerValue(buf)];
+                        all_args.push(BasicMetadataValueEnum::PointerValue(
+                            fmt_ptr.as_pointer_value(),
+                        ));
+                        all_args.extend(sprintf_args);
+                        let sprintf_fn = self.module.get_function("sprintf").ok_or_else(|| {
+                            CompileError::LlvmError("sprintf not declared".into())
+                        })?;
+                        self.build_call(sprintf_fn, &all_args, "record_json_sprintf")?;
+                        self.register_heap_alloc(buf);
+                        return self.wrap_c_string(buf);
+                    }
+                }
             }
             // P0-3: for the print/println/eprintln family only, convert
             // boolean args to "true"/"false" string pointers before
