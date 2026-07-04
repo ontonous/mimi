@@ -100,21 +100,110 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
         // Impl blocks are keyed by the base type name (e.g. "List") even when the
         // call site sees a concrete instantiation like "List<T>" or "List<i32>".
+        // For generic impls called with concrete types, monomorphize on-demand.
         let base_obj_type = base_type_name(&obj_type);
-        if let Some(trait_impls) = self.type_impls.get(base_obj_type) {
-            for (trait_name, methods) in trait_impls {
-                if methods.iter().any(|m| m.name == *method_name) {
-                    let mangled = format!("{}__{}__{}", base_obj_type, trait_name, method_name);
-                    if let Some(function) = self.module.get_function(&mangled) {
-                        return self.compile_self_method_call(
-                            obj,
-                            args,
-                            vars,
-                            function,
-                            "trait_call",
-                        );
+        // Find the trait method and fn_name (need immutable borrow first)
+        let trait_method_info: Option<(String, bool, Vec<Type>)> =
+            self.type_impls.get(base_obj_type).and_then(|trait_impls| {
+                trait_impls.iter().find_map(|(trait_name, methods)| {
+                    if !methods.iter().any(|m| m.name == *method_name) {
+                        return None;
+                    }
+                    let fn_name = format!("{}__{}__{}", base_obj_type, trait_name, method_name);
+                    let impl_type_args = self
+                        .impl_type_args
+                        .get(base_obj_type)
+                        .cloned()
+                        .unwrap_or_default();
+                    let is_generic_call = impl_type_args.iter().any(|ta| {
+                        if let Type::Name(tn, _) = ta {
+                            obj_type.contains(&format!("<{}>", tn))
+                        } else {
+                            false
+                        }
+                    });
+                    Some((fn_name, !is_generic_call, impl_type_args))
+                })
+            });
+        if let Some((fn_name, is_concrete_call, impl_type_args)) = trait_method_info {
+            // Try monomorphized version for concrete types
+            if is_concrete_call && !impl_type_args.is_empty() {
+                let inner = obj_type.strip_prefix("List<").and_then(|s| {
+                    let mut depth = 1u32;
+                    let mut end = 0;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' => depth += 1,
+                            '>' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if end > 0 {
+                        Some(&s[..end])
+                    } else {
+                        None
+                    }
+                });
+                if let Some(inner) = inner {
+                    let concrete_types: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                    if concrete_types.len() == impl_type_args.len() {
+                        let mut type_map: HashMap<String, Type> = HashMap::new();
+                        for (ta, ct) in impl_type_args.iter().zip(concrete_types.iter()) {
+                            if let Type::Name(tn, _) = ta {
+                                type_map.insert(tn.clone(), Type::Name(ct.to_string(), vec![]));
+                            }
+                        }
+                        let mangled = Self::mangle_name(&fn_name, &type_map);
+                        if self.module.get_function(&mangled).is_none() {
+                            // Clone the func def from type_impls (no borrow conflict)
+                            let mut func =
+                                self.type_impls.get(base_obj_type).and_then(|trait_impls| {
+                                    trait_impls.values().find_map(|methods| {
+                                        methods.iter().find(|m| m.name == *method_name).cloned()
+                                    })
+                                });
+                            // Prepend self parameter (was prepended during compile_impl_methods)
+                            if let Some(ref mut f) = func {
+                                let self_ty = Type::Ref(
+                                    None,
+                                    Box::new(Type::Name(
+                                        base_obj_type.to_string(),
+                                        impl_type_args.clone(),
+                                    )),
+                                );
+                                f.params.insert(
+                                    0,
+                                    crate::ast::Param {
+                                        name: "self".into(),
+                                        ty: self_ty,
+                                        mut_: false,
+                                        default_value: None,
+                                    },
+                                );
+                                self.compile_generic_func(f, &type_map)?;
+                            }
+                        }
+                        if let Some(function) = self.module.get_function(&mangled) {
+                            return self.compile_self_method_call(
+                                obj,
+                                args,
+                                vars,
+                                function,
+                                "trait_call",
+                            );
+                        }
                     }
                 }
+            }
+            // Fallback: use the generic (non-monomorphized) version
+            if let Some(function) = self.module.get_function(&fn_name) {
+                return self.compile_self_method_call(obj, args, vars, function, "trait_call");
             }
         }
 

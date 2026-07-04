@@ -99,6 +99,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .entry(imp.type_name.clone())
                         .or_default()
                         .insert(imp.trait_name.clone(), imp.methods.clone());
+                    if !imp.type_args.is_empty() {
+                        self.impl_type_args
+                            .entry(imp.type_name.clone())
+                            .or_insert_with(|| imp.type_args.clone());
+                    }
                 }
                 Item::Const { name, value, .. } => {
                     // Store const for later reference

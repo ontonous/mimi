@@ -480,7 +480,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if self.extern_func_defs.contains_key(name) {
             self.generate_extern_fn(name)?;
         }
-        self.emit_named_call(name, args, &metadata_args)
+        self.emit_named_call(name, args, &metadata_args, vars)
     }
 
     /// G1b: Convert closure struct args to thunk pointers for extern callback params.
@@ -655,10 +655,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         args: &[Expr],
         metadata_args: &[BasicMetadataValueEnum<'ctx>],
+        vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // For non-generic functions, use the symbol as-is if it already exists.
-        if let Some(function) = self.module.get_function(name) {
-            return self.emit_function_call(function, name, metadata_args);
+        // Generic functions must go through compile_generic_func for monomorphization.
+        let is_generic = self
+            .func_defs
+            .get(name)
+            .map_or(false, |f| !f.generics.is_empty());
+        if !is_generic {
+            if let Some(function) = self.module.get_function(name) {
+                return self.emit_function_call(function, name, metadata_args);
+            }
         }
 
         let (mangled, callee_map) = if let Some(fdef) = self.func_defs.get(name) {
@@ -670,7 +678,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if i >= args.len() {
                         break;
                     }
-                    if let Some(arg_type) = self.expr_type_of(&args[i], &HashMap::new()) {
+                    if let Some(arg_type) = self.expr_type_of(&args[i], vars) {
                         infer_generic_args(&param.ty, &arg_type, &generic_names, &mut callee_map);
                     }
                 }
@@ -683,8 +691,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 break;
                             }
                             if Self::type_references_generic(&param.ty, &gp.name) {
-                                if let Some(arg_type) = self.expr_type_of(&args[i], &HashMap::new())
-                                {
+                                if let Some(arg_type) = self.expr_type_of(&args[i], vars) {
                                     callee_map.insert(gp.name.clone(), arg_type);
                                     break;
                                 }
@@ -707,6 +714,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         // Compile the specialized generic function on demand if it doesn't exist yet.
+        if !callee_map.is_empty() {
+            self.type_map = callee_map.clone();
+        }
         if self.module.get_function(&mangled).is_none() {
             if let Some(fdef) = self.func_defs.get(name).cloned() {
                 if !fdef.generics.is_empty() {

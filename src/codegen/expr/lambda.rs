@@ -21,7 +21,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.collect_free_vars(body, &param_names, vars, &mut free_vars);
 
         let ret_type = lambda_ret_type(self.context, ret);
-        let param_types_llvm = lambda_param_types(self.context, params);
+        let param_types_llvm = self.lambda_param_types(params);
         let fn_type = lambda_fn_type(self.context, ret_type, &param_types_llvm);
 
         let lambda_name = format!("__lambda_{}_{}", self.spawn_counter, body.len());
@@ -84,14 +84,15 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Store regular lambda parameters into stack allocas.
     fn bind_lambda_params(
-        &self,
+        &mut self,
         params: &[Param],
         lambda_fn: inkwell::values::FunctionValue<'ctx>,
         lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
         for (i, p) in params.iter().enumerate() {
             let param_idx = i as u32 + 1;
-            let ty = types::mimi_type_to_llvm(self.context, &p.ty)
+            let ty = self
+                .llvm_type_for(&p.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
             let alloca = self.build_alloca(ty, &p.name)?;
             let param_val = lambda_fn
@@ -99,6 +100,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .ok_or_else(|| "codegen: lambda param index out of range".to_string())?;
             self.build_store(alloca, param_val)?;
             lambda_vars.insert(p.name.clone(), (alloca, ty));
+            // Track type name for field access and method dispatch
+            if let Type::Name(tn, _) = &p.ty {
+                self.var_type_names.insert(p.name.clone(), tn.clone());
+                self.var_types.insert(p.name.clone(), p.ty.clone());
+            }
         }
         Ok(())
     }
@@ -427,6 +433,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => {}
         }
     }
+
+    /// Determine LLVM parameter types for a lambda function (env_ptr + params),
+    /// using self.type_llvm so user-defined record types are resolved correctly.
+    fn lambda_param_types(&self, params: &[Param]) -> Vec<BasicTypeEnum<'ctx>> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let mut result = vec![BasicTypeEnum::PointerType(i8_ptr)];
+        for p in params {
+            result.push(
+                self.llvm_type_for(&p.ty)
+                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
+            );
+        }
+        result
+    }
 }
 
 fn lambda_ret_type<'ctx>(
@@ -438,21 +458,6 @@ fn lambda_ret_type<'ctx>(
             .unwrap_or(BasicTypeEnum::IntType(context.i64_type())),
         None => BasicTypeEnum::IntType(context.i64_type()),
     }
-}
-
-fn lambda_param_types<'ctx>(
-    context: &'ctx inkwell::context::Context,
-    params: &[Param],
-) -> Vec<BasicTypeEnum<'ctx>> {
-    let i8_ptr = context.ptr_type(inkwell::AddressSpace::default());
-    let mut result = vec![BasicTypeEnum::PointerType(i8_ptr)];
-    for p in params {
-        result.push(
-            types::mimi_type_to_llvm(context, &p.ty)
-                .unwrap_or(BasicTypeEnum::IntType(context.i64_type())),
-        );
-    }
-    result
 }
 
 fn lambda_fn_type<'ctx>(

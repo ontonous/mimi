@@ -179,7 +179,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             |slf, vs| {
                 let idx_val = slf.build_load(i64_ty, idx_alloca, "idx")?;
                 let idx_iv = Self::expect_int_value(idx_val, "index must be i64")?;
-                slf.bind_for_list_element(var, list_ptr, idx_iv, elem_is_string, vs)?;
+                slf.bind_for_list_element(var, list_ptr, idx_iv, elem_is_string, iterable, vs)?;
                 Ok(())
             },
             |slf, vs| {
@@ -665,13 +665,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Extract the current list element (string or non-string) and bind it to
-    /// the loop variable.
+    /// the loop variable. For struct-typed list elements (User, Config, etc.),
+    /// converts from the stored i64 pointer back to the struct via inttoptr+load.
     fn bind_for_list_element(
         &mut self,
         var: &str,
         list_ptr: PointerValue<'ctx>,
         idx_iv: IntValue<'ctx>,
         elem_is_string: bool,
+        iterable: &Expr,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -724,11 +726,134 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_in_bounds_gep(i64_ty, data_pv, &[idx_iv], "elem")
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             let elem = self.build_load(i64_ty, elem_ptr, "elem_val")?;
-            let elem_alloca = self.build_alloca(i64_ty, var)?;
-            self.build_store(elem_alloca, elem)?;
-            vars.insert(var.to_string(), (elem_alloca, i64_ty));
+            // Try to convert i64 element to proper struct type (e.g. User struct)
+            let converted_elem =
+                self.try_convert_loop_elem(elem.into_int_value(), iterable, vars)?;
+            if let Some(converted) = converted_elem {
+                let elem_ty = converted.get_type();
+                let elem_alloca = self.build_alloca(elem_ty, var)?;
+                self.build_store(elem_alloca, converted)?;
+                vars.insert(var.to_string(), (elem_alloca, elem_ty));
+                // Track type name for field access
+                if let Some(tn) = self
+                    .infer_object_type(iterable, vars)
+                    .strip_prefix("List<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .map(|s| s.to_string())
+                {
+                    if !matches!(
+                        tn.as_str(),
+                        "i32" | "i64" | "f32" | "f64" | "bool" | "string"
+                    ) {
+                        self.var_type_names.insert(var.to_string(), tn);
+                    }
+                }
+            } else {
+                let elem_alloca = self.build_alloca(i64_ty, var)?;
+                self.build_store(elem_alloca, elem)?;
+                vars.insert(var.to_string(), (elem_alloca, i64_ty));
+            }
         }
         Ok(())
+    }
+
+    /// Try to convert a for-loop element from i64 to its proper struct type.
+    /// For `for x in list`, if `list` is `List<User>`, each element is stored
+    /// as a ptrtoint i64 in the data array. This method reconstructs the struct
+    /// via inttoptr + load.
+    fn try_convert_loop_elem(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        iterable: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<Option<BasicValueEnum<'ctx>>> {
+        // Resolve the list element type from either var_types or var_type_names.
+        let elem_ty = self.resolve_loop_elem_type(iterable, vars);
+        let Some(elem_ty) = elem_ty else {
+            return Ok(None);
+        };
+        // Skip conversion for known scalar element types
+        if let Type::Name(inner, _) = &elem_ty {
+            if matches!(
+                inner.as_str(),
+                "i32" | "i64" | "f32" | "f64" | "bool" | "string"
+            ) {
+                return Ok(None);
+            }
+        }
+        // Resolve generic param (e.g., T→Item) via type_map if elem is a single
+        // uppercase letter (generic placeholder from trait method self type).
+        let concrete_ty = match &elem_ty {
+            Type::Name(inner, _)
+                if inner.len() == 1 && inner.chars().next().map_or(false, |c| c.is_uppercase()) =>
+            {
+                let resolved = self.type_map.get(inner.as_str()).cloned();
+                resolved.unwrap_or_else(|| elem_ty.clone())
+            }
+            _ => elem_ty.clone(),
+        };
+        if let Some(BasicTypeEnum::StructType(sty)) = self.llvm_type_for(&concrete_ty) {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "loop_elem_ptr")?;
+            let struct_val =
+                self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "loop_elem_struct")?;
+            return Ok(Some(struct_val));
+        }
+        Ok(None)
+    }
+
+    /// Resolve the element type of a list expression, handling both generic
+    /// trait methods (self: &List<T>) via var_types and concrete types via
+    /// infer_object_type.
+    fn resolve_loop_elem_type(
+        &self,
+        iterable: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Option<Type> {
+        // Check var_types first (handles Type::Ref for generic trait method self)
+        if let Expr::Ident(name) = iterable {
+            if let Some(ty) = self.var_types.get(name) {
+                let inner = match ty {
+                    Type::Name(n, args) if n == "List" && args.len() == 1 => Some(&args[0]),
+                    Type::Ref(_, ref_inner) | Type::RefMut(_, ref_inner) => {
+                        if let Type::Name(n, args) = ref_inner.as_ref() {
+                            if n == "List" && args.len() == 1 {
+                                Some(&args[0])
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(elem) = inner {
+                    // Try to resolve generic param (e.g., T → Item) via type_map
+                    if let Type::Name(elem_name, _) = elem {
+                        if let Some(resolved) = self.type_map.get(elem_name) {
+                            return Some(resolved.clone());
+                        }
+                    }
+                    return Some(elem.clone());
+                }
+            }
+        }
+        // Fallback: parse infer_object_type result (e.g. "List<User>" -> User)
+        let obj_type = self.infer_object_type(iterable, vars);
+        let inner = obj_type.strip_prefix("List<").and_then(|s| {
+            let mut depth = 0u32;
+            for (i, ch) in s.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' if depth == 0 => return Some(s[..i].trim().to_string()),
+                    '>' => depth -= 1,
+                    _ => {}
+                }
+            }
+            Some(s.trim().to_string())
+        })?;
+        Some(Type::Name(inner, vec![]))
     }
 
     /// Extract an `IntValue` from a `BasicValueEnum`, failing with

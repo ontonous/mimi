@@ -302,9 +302,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);
-                                        } else if let Some(fdef) = self.func_defs.get(func_name) {
-                                            if let Some(ret_ty) = &fdef.ret {
-                                                match ret_ty {
+                                        } else if let Some((ret_ty, is_async)) = self
+                                            .func_defs
+                                            .get(func_name)
+                                            .map(|fdef| (fdef.ret.clone(), fdef.is_async))
+                                        {
+                                            eprintln!("DBG let-binding: found func '{}' with ret_ty={:?} type_map={:?}", func_name, ret_ty, self.type_map);
+                                            if let Some(ret_ty) = ret_ty {
+                                                match &ret_ty {
                                                     Type::ImplTrait(traits) => {
                                                         self.var_type_names.insert(
                                                             name.clone(),
@@ -312,8 +317,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         );
                                                     }
                                                     Type::Name(tn, _) => {
+                                                        // Resolve generic type params (e.g. T→User) from the
+                                                        // calling context's type_map before computing the full name.
+                                                        let resolved =
+                                                            self.substitute_type_params(&ret_ty);
                                                         let type_name = if let Some(full) =
-                                                            self.get_full_type_name(ret_ty)
+                                                            self.get_full_type_name(&resolved)
                                                         {
                                                             full
                                                         } else {
@@ -321,14 +330,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         };
                                                         self.var_type_names
                                                             .insert(name.clone(), type_name);
+                                                        // Register list element LLVM type for list-typed results
+                                                        // so index access can reconstruct struct-typed elements.
+                                                        self.register_list_elem_type(
+                                                            name, &resolved,
+                                                        );
                                                     }
                                                     #[allow(unreachable_patterns)]
                                                     _ => {}
                                                 }
                                                 // For async functions, track the inner result type for await.
-                                                if fdef.is_async {
+                                                if is_async {
                                                     if let Some(llvm_ret) =
-                                                        self.llvm_type_for(ret_ty)
+                                                        self.llvm_type_for(&ret_ty)
                                                     {
                                                         self.async_var_inner_types
                                                             .insert(name.clone(), llvm_ret);

@@ -182,6 +182,9 @@ pub struct CodeGenerator<'ctx> {
     comptime_file: Option<std::rc::Rc<crate::ast::File>>,
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
+    /// Generic type arguments for each type that has trait impls.
+    /// For `impl<T> ListExt<T> for List<T>`, this stores `"List" → [T]`.
+    impl_type_args: HashMap<String, Vec<crate::ast::Type>>,
     vtable_globals: HashMap<String, inkwell::values::GlobalValue<'ctx>>,
     vtable_types: HashMap<String, inkwell::types::StructType<'ctx>>,
     /// G1b: Parameter types for each extern function (by wrapper name).
@@ -349,6 +352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             parasteps_future_ptrs: Vec::new(),
             trait_defs: HashMap::new(),
             type_impls: HashMap::new(),
+            impl_type_args: HashMap::new(),
             vtable_globals: HashMap::new(),
             vtable_types: HashMap::new(),
             extern_param_types: HashMap::new(),
@@ -1054,6 +1058,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         } else {
             None
+        }
+    }
+
+    /// Resolve generic type parameters (e.g., `T` → `User`) using the active
+    /// `type_map` from the calling context (populated by monomorphization).
+    pub(super) fn substitute_type_params(&self, ty: &crate::ast::Type) -> crate::ast::Type {
+        use crate::ast::Type;
+        match ty {
+            Type::Name(name, args) => {
+                if args.is_empty() {
+                    if let Some(resolved) = self.type_map.get(name) {
+                        return resolved.clone();
+                    }
+                    Type::Name(name.clone(), vec![])
+                } else {
+                    let new_args: Vec<Type> = args
+                        .iter()
+                        .map(|a| self.substitute_type_params(a))
+                        .collect();
+                    Type::Name(name.clone(), new_args)
+                }
+            }
+            _ => ty.clone(),
         }
     }
 

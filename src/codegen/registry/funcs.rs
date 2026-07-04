@@ -1,5 +1,5 @@
 use super::helpers::elem_type_tag;
-use crate::ast::{Field, TypeDefKind};
+use crate::ast::{Field, Type, TypeDefKind};
 use crate::codegen::types;
 use crate::codegen::{
     call_try_basic_value, CallSiteValueExt, CallbackThunkEntry, CodeGenerator, VarEntry,
@@ -65,18 +65,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Build function: prepend self: &type_name as first param
                     let mut impl_method = method.clone();
                     impl_method.name = mangled;
+                    // Include generic type args from the impl block so monomorphization
+                    // can resolve e.g. List<T> → List<Item> when T=Item inside for loops.
+                    let type_args_for_self = self
+                        .impl_type_args
+                        .get(&type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let self_type_name = if type_args_for_self.is_empty() {
+                        Type::Name(type_name.clone(), vec![])
+                    } else {
+                        Type::Name(type_name.clone(), type_args_for_self.clone())
+                    };
                     // Prepend self param: self: &type_name (or self: type_name for value types)
                     let self_ty = match type_name.as_str() {
                         // Scalar/value types: pass self by value.
-                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => {
-                            crate::ast::Type::Name(type_name.clone(), vec![])
-                        }
+                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => self_type_name,
                         _ => {
                             // Compound types: pass self by reference
-                            crate::ast::Type::Ref(
-                                None,
-                                Box::new(crate::ast::Type::Name(type_name.clone(), vec![])),
-                            )
+                            crate::ast::Type::Ref(None, Box::new(self_type_name))
                         }
                     };
                     impl_method.params.insert(
@@ -88,7 +95,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             default_value: None,
                         },
                     );
+                    // Set type_map to identity so compile_func can resolve type params
+                    // in self (e.g., &List<T> → T resolves to T in type_map).
+                    // This is later overridden by compile_generic_func for monomorphization.
+                    let saved_type_map = self.type_map.clone();
+                    if !type_args_for_self.is_empty() {
+                        let mut identity_map: HashMap<String, Type> = HashMap::new();
+                        for ta in &type_args_for_self {
+                            if let Type::Name(tn, _) = ta {
+                                identity_map.insert(tn.clone(), ta.clone());
+                            }
+                        }
+                        // Only set when identity_map has entries and current type_map is empty
+                        if !identity_map.is_empty() && self.type_map.is_empty() {
+                            self.type_map.extend(identity_map);
+                        }
+                    }
                     self.compile_func(&impl_method)?;
+                    self.type_map = saved_type_map;
                 }
             }
         }

@@ -1160,9 +1160,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);
-                                        } else if let Some(fdef) = self.func_defs.get(func_name) {
-                                            if let Some(ret_ty) = &fdef.ret {
-                                                match ret_ty {
+                                        } else if let Some((ret_ty, _is_async)) = self
+                                            .func_defs
+                                            .get(func_name)
+                                            .map(|fdef| (fdef.ret.clone(), fdef.is_async))
+                                        {
+                                            if let Some(ret_ty) = ret_ty {
+                                                match &ret_ty {
                                                     Type::ImplTrait(traits) => {
                                                         self.var_type_names.insert(
                                                             name.clone(),
@@ -1170,8 +1174,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         );
                                                     }
                                                     Type::Name(tn, _) => {
+                                                        let resolved =
+                                                            self.substitute_type_params(&ret_ty);
                                                         let type_name = if let Some(full) =
-                                                            self.get_full_type_name(ret_ty)
+                                                            self.get_full_type_name(&resolved)
                                                         {
                                                             full
                                                         } else {
@@ -1181,6 +1187,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             .insert(name.clone(), type_name);
                                                         self.var_types
                                                             .insert(name.clone(), ret_ty.clone());
+                                                        self.register_list_elem_type(
+                                                            name, &resolved,
+                                                        );
                                                     }
                                                     _ => {}
                                                 }
