@@ -398,8 +398,8 @@ pub func filter_list<T>(xs: List<T>, pred: func(T) -> bool) -> List<T> {
 }
 
 // reduce_list: Reduces xs with f and initial value init.
-// Hand-rolled loop to avoid `reduce`'s codegen restriction (it only
-// accepts function-name args, not lambda values).
+// Generic over any element type T (unlike builtin `reduce` which
+// only supports i64 elements in codegen).
 pub func reduce_list<T, U>(xs: List<T>, f: func(U, T) -> U, init: U) -> U {
     let mut acc = init
     for rl_x in xs {
