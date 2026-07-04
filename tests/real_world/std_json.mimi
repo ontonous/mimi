@@ -39,6 +39,12 @@ func main() -> i32 {
     // Empty list of records
     let empty_rec = from_json::<List<JsonRecord>>("[]")
     if len(empty_rec) != 0 { return 70 }
+    // to_json of List<RecordType>
+    let rec_json = to_json(rec_list)
+    if rec_json != "[{\"flag\":true,\"name\":\"x\",\"value\":10},{\"flag\":false,\"name\":\"y\",\"value\":20}]" { return 71 }
+    // to_json of empty record list
+    let empty_rec_json = to_json(empty_rec)
+    if empty_rec_json != "[]" { return 72 }
 
     // Mixed: string list with bool-like check
     if len(items) != 2 { return 11 }

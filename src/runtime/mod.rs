@@ -1210,6 +1210,49 @@ pub extern "C" fn mimi_list_list_to_string(
     alloc_c_string(&parts.join(""))
 }
 
+/// Render a codegen `List<RecordType>` (data array holds ptrtoint heap struct pointers)
+/// to a JSON array string. Each element is serialized by calling `elem_to_json(ptr)` which
+/// returns a heap-allocated C string of the JSON representation of that record.
+/// Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_record_to_json(
+    list: *const MimiList,
+    elem_to_json: extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let elem_ptr = unsafe { *(lst.data as *const *const std::ffi::c_void).offset(i) };
+        if elem_ptr.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            let elem_json = elem_to_json(elem_ptr);
+            let s = unsafe { cstr_to_string(elem_json) };
+            if !elem_json.is_null() {
+                // SAFETY: `elem_json` was allocated by `alloc_c_string` in the callback.
+                unsafe { libc::free(elem_json as *mut std::ffi::c_void) };
+            }
+            parts.push(s);
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_str_replace(
     s: *const std::ffi::c_char,

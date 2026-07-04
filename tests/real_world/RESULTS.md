@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-04（to_json Record 类型 codegen）  
+**最后更新**：2026-07-05（from_json::<List<RecordType>> codegen）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -82,12 +82,8 @@
 8. **to_json List<T> codegen**（v0.28.26）：新增 `mimi_list_i64_to_json` / `mimi_list_f64_to_json` / `mimi_list_bool_to_json` / `mimi_list_str_to_json` 四个运行时函数，类型感知的 `to_json` 分发覆盖 `i32`/`i64`/`f64`/`bool`/`string` 元素。
 9. **reduce 类型推断**（v0.28.26）：`core/infer/call/simple.rs` 中的 `reduce` 分支改为推断并返回初始值类型，不再返回 `unknown`。内置 `reduce(nums, fn(a, e) { a + e }, 0)` 现在通过类型检查。
 10. **to_json Record type codegen**（v0.28.26）：在 `compile_call`（simple.rs）中添加 Record 类型检测，通过 `sprintf` 逐字段序列化为 JSON 对象。支持 `string`、`i32`/`i64`、`bool`、`f64` 字段类型。字段按字母序排列，与解释器 `serde_json::Map` 一致。
-
-## 仍绕过的 codegen 细节差距
-
-为了让 suite 全绿，下列测试在真实用法上做了折中。这些不是崩溃性问题，而是特定 codegen 路径尚未完全对齐：
-
-1. **std_template.mimi**：只调用 `simple_render`，未断言输出内容。codegen 下 `Any` 值 `to_string` 会输出 handle 数字（Record/Any 在 codegen 中无运行时类型信息）。
+11. **from_json::<List<RecordType>> codegen**（v0.28.26）：支持 JSON 对象数组反序列化为 `List<T>`，`T` 为 record 类型。每个元素堆分配 struct 并通过 `ptrtoint(i64)` 存储在列表 data 数组中。
+12. **std_template any_to_string codegen**（v0.28.26）：`mimi_any_to_string` 运行时 helper 启发式判断 `ValueHandle` 是指针还是整数，支持 `Any` 类型的 `to_string`。
 
 ## 结论
 

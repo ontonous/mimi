@@ -205,12 +205,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .strip_prefix("List<")
                     .and_then(|s| s.strip_suffix('>'))
                 {
-                    let rt_fn_name = match inner {
-                        "string" => "mimi_list_str_to_json",
-                        "f64" => "mimi_list_f64_to_json",
-                        "bool" => "mimi_list_bool_to_json",
-                        _ => "mimi_list_i64_to_json",
-                    };
                     let list_struct_ty = self.list_struct_type();
                     let alloca = self.build_alloca(list_struct_ty, "to_json_list_alloca")?;
                     match &metadata_args[0] {
@@ -236,6 +230,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )))
                         }
                     }
+                    // Check for record element type — needs callback-based serialization
+                    let is_record = self
+                        .type_defs
+                        .get(inner)
+                        .map(|td| matches!(td.kind, TypeDefKind::Record(_)))
+                        .unwrap_or(false);
+                    if is_record {
+                        if let Some(td) = self.type_defs.get(inner) {
+                            if let TypeDefKind::Record(fields) = &td.kind {
+                                let fields_clone = fields.clone();
+                                return self.compile_record_list_to_json(
+                                    inner,
+                                    &fields_clone,
+                                    &alloca,
+                                );
+                            }
+                        }
+                    }
+                    let rt_fn_name = match inner {
+                        "string" => "mimi_list_str_to_json",
+                        "f64" => "mimi_list_f64_to_json",
+                        "bool" => "mimi_list_bool_to_json",
+                        _ => "mimi_list_i64_to_json",
+                    };
                     let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let fn_ty =
                         i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
@@ -1015,6 +1033,224 @@ impl<'ctx> CodeGenerator<'ctx> {
         let wrapper_ptr = wrapper_fn.as_global_value().as_pointer_value();
         self.closure_wrappers.insert(name.to_string(), wrapper_ptr);
         Ok(wrapper_ptr)
+    }
+
+    /// Serialize a `List<RecordType>` to JSON by generating a per-type element
+    /// serializer function and calling `mimi_list_record_to_json` with a callback.
+    pub(in crate::codegen) fn compile_record_list_to_json(
+        &mut self,
+        type_name: &str,
+        fields: &[crate::ast::Field],
+        list_alloca: &inkwell::values::PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+
+        // Create or reuse the element serializer function: i8*(i8*)
+        let fn_name = format!("{}_to_json_elem", type_name);
+        let elem_fn = if let Some(f) = self.module.get_function(&fn_name) {
+            f
+        } else {
+            let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+            let func =
+                self.module
+                    .add_function(&fn_name, fn_ty, Some(inkwell::module::Linkage::Internal));
+            // Set up the function body
+            let entry_bb = self.context.append_basic_block(func, "entry");
+            // Save the current position
+            let saved_block = self.builder.get_insert_block();
+            self.builder.position_at_end(entry_bb);
+
+            // Cast the input pointer to the struct type
+            let llvm_ty = self.type_llvm[type_name];
+            let BasicTypeEnum::StructType(sty) = llvm_ty else {
+                panic!("type '{}' is not a struct", type_name)
+            };
+            let typed_ptr = self
+                .builder
+                .build_bit_cast(
+                    func.get_nth_param(0)
+                        .ok_or_else(|| CompileError::Generic("elem fn missing param 0".into()))?
+                        .into_pointer_value(),
+                    i8_ptr_ty,
+                    "typed_ptr",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                .into_pointer_value();
+
+            // Load the struct value
+            let struct_val = self
+                .builder
+                .build_load(BasicTypeEnum::StructType(sty), typed_ptr, "elem_val")
+                .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?
+                .into_struct_value();
+
+            // Get runtime functions
+            let malloc_fn = self.get_runtime_fn("malloc")?;
+            let sprintf_fn = self.get_runtime_fn("sprintf")?;
+
+            // Sort fields alphabetically
+            let mut idx_map: Vec<(usize, &crate::ast::Field)> = fields.iter().enumerate().collect();
+            idx_map.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+
+            // Build format string and args
+            let mut fmt = String::from("{");
+            let mut sprintf_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+            for (pos, (i, field)) in idx_map.iter().enumerate() {
+                if pos > 0 {
+                    fmt.push(',');
+                }
+                let field_val = self
+                    .builder
+                    .build_extract_value(
+                        inkwell::values::AggregateValueEnum::StructValue(struct_val),
+                        *i as u32,
+                        &field.name,
+                    )
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("extract field {}: {}", field.name, e))
+                    })?;
+                match &field.ty {
+                    Type::Name(n, _) if n == "string" => {
+                        fmt.push_str(&format!("\"{}\":\"%s\"", field.name));
+                        let sv = field_val.into_struct_value();
+                        let dp = self
+                            .builder
+                            .build_extract_value(
+                                inkwell::values::AggregateValueEnum::StructValue(sv),
+                                0,
+                                &format!("{}_data", field.name),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("extract str: {}", e)))?
+                            .into_pointer_value();
+                        sprintf_args.push(BasicMetadataValueEnum::PointerValue(dp));
+                    }
+                    Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64") => {
+                        fmt.push_str(&format!("\"{}\":%ld", field.name));
+                        let iv = field_val.into_int_value();
+                        if n == "i32" {
+                            let ext = self
+                                .builder
+                                .build_int_z_extend(iv, i64_ty, &format!("{}_ext", field.name))
+                                .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?;
+                            sprintf_args.push(BasicMetadataValueEnum::IntValue(ext));
+                        } else {
+                            sprintf_args.push(BasicMetadataValueEnum::IntValue(iv));
+                        }
+                    }
+                    Type::Name(n, _) if n == "bool" => {
+                        fmt.push_str(&format!("\"{}\":%s", field.name));
+                        let iv = field_val.into_int_value();
+                        let true_global = self
+                            .builder
+                            .build_global_string_ptr("true", &format!("{}_true", field.name))
+                            .map_err(|e| CompileError::LlvmError(format!("true: {}", e)))?;
+                        let false_global = self
+                            .builder
+                            .build_global_string_ptr("false", &format!("{}_false", field.name))
+                            .map_err(|e| CompileError::LlvmError(format!("false: {}", e)))?;
+                        let zero = self.context.bool_type().const_int(0, false);
+                        let is_true = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                iv,
+                                zero,
+                                &format!("{}_is_true", field.name),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                        let selected = self
+                            .builder
+                            .build_select(
+                                is_true,
+                                true_global.as_pointer_value(),
+                                false_global.as_pointer_value(),
+                                &format!("{}_json", field.name),
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("select: {}", e)))?;
+                        sprintf_args.push(BasicMetadataValueEnum::PointerValue(
+                            selected.into_pointer_value(),
+                        ));
+                    }
+                    Type::Name(n, _) if n == "f64" => {
+                        fmt.push_str(&format!("\"{}\":%g", field.name));
+                        sprintf_args.push(BasicMetadataValueEnum::FloatValue(
+                            field_val.into_float_value(),
+                        ));
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(format!(
+                            "unsupported field type {:?} for to_json",
+                            field.ty
+                        )));
+                    }
+                }
+            }
+            fmt.push('}');
+
+            // Allocate buffer and sprintf
+            let buf_size = i64_ty.const_int(4096, false);
+            let buf = self
+                .build_call(
+                    malloc_fn,
+                    &[BasicMetadataValueEnum::IntValue(buf_size)],
+                    "elem_json_malloc",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("malloc returned void")?
+                .into_pointer_value();
+            let fmt_ptr = self
+                .builder
+                .build_global_string_ptr(&fmt, "elem_json_fmt")
+                .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
+            let mut all_args = vec![BasicMetadataValueEnum::PointerValue(buf)];
+            all_args.push(BasicMetadataValueEnum::PointerValue(
+                fmt_ptr.as_pointer_value(),
+            ));
+            all_args.extend(sprintf_args);
+            self.build_call(sprintf_fn, &all_args, "elem_json_sprintf")?;
+            // Return the buffer pointer
+            let ret_val: BasicValueEnum<'ctx> = buf.into();
+            self.builder
+                .build_return(Some(&ret_val))
+                .map_err(|e| CompileError::LlvmError(format!("ret: {}", e)))?;
+
+            // Restore the saved position
+            if let Some(bb) = saved_block {
+                self.builder.position_at_end(bb);
+            }
+
+            func
+        };
+
+        // Call mimi_list_record_to_json(list_alloca, elem_fn)
+        let helper_name = "mimi_list_record_to_json";
+        let helper_fn = self.module.get_function(helper_name).unwrap_or_else(|| {
+            let fn_ty = i8_ptr_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                ],
+                false,
+            );
+            self.module
+                .add_function(helper_name, fn_ty, Some(inkwell::module::Linkage::External))
+        });
+        let elem_fn_ptr = elem_fn.as_global_value().as_pointer_value();
+        let raw = self
+            .build_call(
+                helper_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(*list_alloca),
+                    BasicMetadataValueEnum::PointerValue(elem_fn_ptr),
+                ],
+                "to_json_record_list",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_list_record_to_json returned void")?
+            .into_pointer_value();
+        self.register_heap_alloc(raw);
+        self.wrap_c_string(raw)
     }
 
     /// Find a FuncDef by name from the codegen's stored func_defs
