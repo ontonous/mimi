@@ -160,6 +160,27 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
     ptr as *mut std::ffi::c_char
 }
 
+/// JSON-escape a string: wrap in double quotes, escape `"`, `\`, and control chars.
+fn json_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// v0.28.13: Allocate a MimiList data array with hidden capacity header at data[-8].
 /// The header uses bit 63 as a magic marker: `(i64::MIN | cap)`.
 /// Returns the data pointer (header is at data[-8]). Null on failure.
@@ -964,6 +985,130 @@ pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ff
         // `lst.data` was bitcast from `*mut i64`; cast back and read element.
         let item = unsafe { *(lst.data as *const i64).offset(i) };
         parts.push(item.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render a codegen `List<bool>` (layout `{i64 len, i8* data}` where data points
+/// to i64 slots containing 0 or 1) to a JSON array string. Each element is
+/// formatted as `true` or `false`. Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_bool_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let item = unsafe { *(lst.data as *const i64).offset(i) };
+        parts.push(if item == 0 {
+            String::from("false")
+        } else {
+            String::from("true")
+        });
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render a codegen `List<i32/i64>` (layout `{i64 len, i8* data}` where data
+/// points to i64 slots) to a JSON array string. Each i64 element is formatted
+/// as a JSON number. Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let item = unsafe { *(lst.data as *const i64).offset(i) };
+        parts.push(item.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render a codegen `List<f64>` (layout `{i64 len, i8* data}` where data points
+/// to i64 slots containing bitcast f64 values) to a JSON array string.
+/// Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_f64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let bits = unsafe { *(lst.data as *const i64).offset(i) };
+        let fv = f64::from_bits(bits as u64);
+        parts.push(fv.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render a codegen `List<string>` (layout `{i64 len, i8* data}` where data
+/// points to i64 slots containing C-string pointers) to a JSON array string.
+/// Each element is quoted and JSON-escaped. Returns a heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn mimi_list_str_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let item_ptr = unsafe { *(lst.data as *const *mut std::ffi::c_char).offset(i) };
+        if item_ptr.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            let s = unsafe { cstr_to_string(item_ptr) };
+            // JSON-escape the string: wrap in quotes, escape backslash, quotes, and control chars
+            let escaped = json_escape_string(&s);
+            parts.push(escaped);
+        }
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))

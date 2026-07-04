@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-04（from_json::<List<f64/bool>> codegen + std_fs 内容断言）  
+**最后更新**：2026-07-04（to_json List codegen + std_fs 内容断言）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -44,7 +44,7 @@
 | std_env.mimi | ✅ | ✅ | ✅ | env / cli args |
 | std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 读取内容 + 内容相等断言 |
 | std_io.mimi | ✅ | ✅ | ✅ | print_raw / print_line |
-| std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> + from_json::<List<i32>> |
+| std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> + List<i32/f64/bool/string> + to_json 标量/List |
 | std_maps.mimi | ✅ | ✅ | ✅ | map_new / set / get / has_key |
 | std_mymath.mimi | ✅ | ✅ | ✅ | math 函数 + -lm |
 | std_prelude.mimi | ✅ | ✅ | ✅ | prelude 自动加载函数 |
@@ -79,6 +79,7 @@
 5. **compile_to_string StructValue**（v0.28.26）：`to_string` 接受 `StructValue` 直接返回（string 已是 string）。
 6. **from_json::<List<f64/bool>> codegen**（v0.28.26）：支持 `from_json::<List<f64>>` 和 `from_json::<List<bool>>`，f64 用 bitcast，bool 用 i64 0/1。
 7. **i1 零扩展修复**（v0.28.26）：`promote_binop_operands` 中将 i1 改为零扩展而非符号扩展，避免 `true`（i1 1）变成 -1。
+8. **to_json List<T> codegen**（v0.28.26）：新增 `mimi_list_i64_to_json` / `mimi_list_f64_to_json` / `mimi_list_bool_to_json` / `mimi_list_str_to_json` 四个运行时函数，类型感知的 `to_json` 分发（`compile_call` 中通过 `infer_object_type` 判断 List 元素类型）。覆盖 `i32`/`i64`/`f64`/`bool`/`string` 元素，以及标量 `to_json`（int/bool/string）。
 
 ## 仍绕过的 codegen 细节差距
 

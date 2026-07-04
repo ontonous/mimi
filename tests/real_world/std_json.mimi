@@ -31,5 +31,25 @@ func main() -> i32 {
     if len(floats) != 3 { return 8 }
     if len(bools) != 3 { return 9 }
 
+    // --- to_json ---
+    // Scalar to_json
+    if to_json(42) != "42" { return 10 }
+    if to_json(true) != "true" { return 11 }
+    if to_json(false) != "false" { return 12 }
+    if to_json("hello") != "\"hello\"" { return 14 }
+
+    // List to_json
+    let list_to_json = from_json::<List<i32>>("[1, 2, 3]")
+    if to_json(list_to_json) != "[1,2,3]" { return 15 }
+
+    let str_list = from_json::<List<string>>("[\"a\",\"b\"]")
+    if to_json(str_list) != "[\"a\",\"b\"]" { return 16 }
+
+    let f64_list = from_json::<List<f64>>("[1.5, 2.5]")
+    if to_json(f64_list) != "[1.5,2.5]" { return 17 }
+
+    let bool_list = from_json::<List<bool>>("[true, false]")
+    if to_json(bool_list) != "[true,false]" { return 18 }
+
     0
 }

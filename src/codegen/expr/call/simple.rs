@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::codegen::expr::call::helpers::infer_generic_args;
 use crate::codegen::types;
-use crate::codegen::{call_try_basic_value, CodeGenerator, VarEntry};
+use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
@@ -193,6 +193,68 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builtin_available = crate::codegen::builtins::is_builtin(name);
         let user_func_matches = self.user_func_signature_matches(name, args);
         if builtin_available && !user_func_matches {
+            // Special case: `to_json(obj)` where obj is a List<T> — dispatch
+            // to the appropriate mimi_list_*_to_json runtime helper.
+            if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
+                let obj_type = self.infer_object_type(&args[0], vars);
+                if let Some(inner) = obj_type
+                    .strip_prefix("List<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    let rt_fn_name = match inner {
+                        "string" => "mimi_list_str_to_json",
+                        "f64" => "mimi_list_f64_to_json",
+                        "bool" => "mimi_list_bool_to_json",
+                        _ => "mimi_list_i64_to_json",
+                    };
+                    let list_struct_ty = self.list_struct_type();
+                    let alloca = self.build_alloca(list_struct_ty, "to_json_list_alloca")?;
+                    match &metadata_args[0] {
+                        BasicMetadataValueEnum::StructValue(sv) => {
+                            self.build_store(alloca, *sv)?;
+                        }
+                        BasicMetadataValueEnum::PointerValue(pv) => {
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(list_struct_ty),
+                                    *pv,
+                                    "to_json_list_load",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                .into_struct_value();
+                            self.build_store(alloca, loaded)?;
+                        }
+                        _ => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json: unexpected List argument kind for {}",
+                                obj_type
+                            )))
+                        }
+                    }
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let fn_ty =
+                        i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                    let callee = self.module.get_function(rt_fn_name).unwrap_or_else(|| {
+                        self.module.add_function(
+                            rt_fn_name,
+                            fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                    let raw = self
+                        .build_call(
+                            callee,
+                            &[BasicMetadataValueEnum::PointerValue(alloca)],
+                            "to_json_list",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("to_json list helper returned void")?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return self.wrap_c_string(raw);
+                }
+            }
             // P0-3: for the print/println/eprintln family only, convert
             // boolean args to "true"/"false" string pointers before
             // handing them to the builtin dispatch. Other builtins
