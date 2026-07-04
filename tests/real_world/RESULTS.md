@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-05（from_json::<List<RecordType>> codegen）  
+**最后更新**：2026-07-05（all gaps closed: Any to_string, from_json/to_json List<RecordType>）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -87,8 +87,7 @@
 
 ## 结论
 
-- 解释器路径：35/35 通过，已具备日常可用性。
-- codegen 路径：35/35 通过，核心语言、标准库、并发、Actor、包导入等均已可用。
-- 本次评估发现并修复了 **CLI 类型检查器对泛型 ADT 构造/字段访问的推断差距**，这是真实代码与 `cargo test` 路径之间的关键不一致。
-- std_fs 和 std_crypto 的 codegen 差距已在 v0.28.26 关闭。
-- 建议下一步关闭 std_template 的 `Any` to_string codegen 差距，并扩展 suite 覆盖 FFI、arena/capability、网络等特性。
+- 解释器路径：35/35 通过，可运行 500–1000 行级真实程序（mimi-log、mimi-httpd、mimi-markdown）。
+- codegen 路径：35/35 通过，但大程序（>~200 行）仍有 P0 阻塞点。
+- **test suite 内所有已知 codegen 差距已关闭**：Any to_string、from_json/to_json List<RecordType>、std_fs/crypto/template、泛型 ADT/newtype/trait self/包导入。
+- 下一步应修复大程序 codegen P0 阻塞点（Result<string> 方法分发、LLVM physreg、ADT/SEGFAULT），使 mimi-kv/mimi-httpd/mimi-log 可编译。

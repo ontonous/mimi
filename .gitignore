@@ -18,6 +18,19 @@ build/
 # Golden test diff artifacts
 **/golden/*.diff.ir
 
+# Mimi compiled executables and object files
+*.o
+examples/*
+demos/*
+!examples/*.mimi
+!demos/*.mimi
+projects/*/src/main
+projects/*/main
+tests/real_world/*_mimi
+!tests/real_world/*.mimi
+!tests/real_world/*.py
+!tests/real_world/*.md
+
 # Transient null rlib produced by LLVM/no_std experiments
 libnull.rlib
 
