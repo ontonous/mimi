@@ -1,0 +1,14 @@
+use mylib::double
+use mylib::greet
+use mylib::factorial
+
+func main() -> i32 {
+    let a = double(11)
+    let msg = greet("Mimi")
+    let f = factorial(5)
+    if a == 22 && msg == "Hello, Mimi!" && f == 120 {
+        0
+    } else {
+        1
+    }
+}
