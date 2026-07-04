@@ -181,9 +181,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
                 Ok(result)
             }
-            BasicMetadataValueEnum::StructValue(_) => Err(CompileError::TypeMismatch(
-                "to_string: struct/List in codegen path not yet supported".to_string(),
-            )),
+            BasicMetadataValueEnum::StructValue(sv) => {
+                // String values are {i8*, i64} structs in codegen.
+                // Return as-is since to_string on a string is identity.
+                Ok(BasicValueEnum::StructValue(sv))
+            }
             BasicMetadataValueEnum::PointerValue(_) => {
                 // Treat a stray pointer (e.g. typed reference) as a C string.
                 let pv = if let BasicMetadataValueEnum::PointerValue(p) = args[0] {

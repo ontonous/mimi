@@ -2,7 +2,7 @@
 
 **评估时间**：2026-07-04  
 **Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-04（修复 read_file codegen 返回 Result 类型）  
+**最后更新**：2026-07-04（from_json::<List<i32>> codegen + 4 个 string struct 解包修复）  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
@@ -44,7 +44,7 @@
 | std_env.mimi | ✅ | ✅ | ✅ | env / cli args |
 | std_fs.mimi | ✅ | ✅ | ✅ | 文件写入 + 读取内容 + match/len 断言 |
 | std_io.mimi | ✅ | ✅ | ✅ | print_raw / print_line |
-| std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> |
+| std_json.mimi | ✅ | ✅ | ✅ | from_json::<Record> + from_json::<List<i32>> |
 | std_maps.mimi | ✅ | ✅ | ✅ | map_new / set / get / has_key |
 | std_mymath.mimi | ✅ | ✅ | ✅ | math 函数 + -lm |
 | std_prelude.mimi | ✅ | ✅ | ✅ | prelude 自动加载函数 |
@@ -74,6 +74,9 @@
 
 1. **std_fs.mimi**（v0.28.26）：`compile_read_file` 重构为返回 `Result<string, string>` 类型结构，支持 `match read_file(path) { Ok(content) => len(content) }`。包含错误处理（fopen 失败返回 Err）。
 2. **std_crypto.mimi**（v0.28.26）：`hex_encode` codegen 段错误已修复（`hex_digit` 改用 `str_substring`，字符串字面量改为正规化 struct 表示）。
+3. **from_json::<List<i32>> codegen**（v0.28.26）：支持 `from_json::<List<i32>>("[1,2,3]")` 反序列化 JSON 数组为 Mimi List，使用 `json_array_length`/`json_get_element`/`mimi_json_as_i64` 运行时函数逐元素解析。
+4. **string struct 解包修复**（v0.28.26）：`compile_getenv`/`compile_lexer`/`compile_parse`/`compile_assert` 改用 `extract_raw_str_ptr` 支持 `{i8*, i64}` string struct。
+5. **compile_to_string StructValue**（v0.28.26）：`to_string` 接受 `StructValue` 直接返回（string 已是 string）。
 
 ## 仍绕过的 codegen 细节差距
 

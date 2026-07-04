@@ -1,7 +1,18 @@
 type Config { name: string, count: i64 }
 
 func main() -> i32 {
+    // Record deserialization
     let s = "{\"name\":\"mimi\",\"count\":42}"
     let cfg = from_json::<Config>(s)
-    if cfg.name == "mimi" && cfg.count == 42 { 0 } else { 1 }
+    if cfg.name != "mimi" || cfg.count != 42 { return 1 }
+
+    // List deserialization
+    let nums = from_json::<List<i32>>("[10, 20, 30]")
+    if nums[0] != 10 || nums[1] != 20 || nums[2] != 30 { return 2 }
+
+    // Empty list
+    let empty = from_json::<List<i32>>("[]")
+    if len(empty) != 0 { return 3 }
+
+    0
 }

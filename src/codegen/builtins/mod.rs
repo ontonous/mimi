@@ -1682,14 +1682,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "lexer expects 1 argument (source string)".to_string(),
             ));
         }
-        let source_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "lexer: first arg must be a string".to_string(),
-                ))
-            }
-        };
+        let source_ptr = self.extract_raw_str_ptr(&args[0]).map_err(|_| {
+            CompileError::TypeMismatch("lexer: first arg must be a string".to_string())
+        })?;
         let func = self
             .module
             .get_function("mimi_lexer_tokenize")
@@ -1716,14 +1711,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "parse expects 1 argument (source string)".to_string(),
             ));
         }
-        let source_ptr = match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => *pv,
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "parse: first arg must be a string".to_string(),
-                ))
-            }
-        };
+        let source_ptr = self.extract_raw_str_ptr(&args[0]).map_err(|_| {
+            CompileError::TypeMismatch("parse: first arg must be a string".to_string())
+        })?;
         let func = self
             .module
             .get_function("mimi_parse_source")

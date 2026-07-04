@@ -845,6 +845,134 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_int_value();
                 self.build_string_struct(pv, len)
             }
+            Type::Name(n, type_params) if n == "List" => {
+                // from_json::<List<T>>(s): deserialize JSON array into Mimi list
+                if type_params.len() != 1 {
+                    return Err(CompileError::Generic(
+                        "List expects 1 type parameter".into(),
+                    ));
+                }
+                let inner_ty = &type_params[0];
+                let i64_ty = self.context.i64_type();
+                let malloc_fn = self.get_runtime_fn("malloc")?;
+                let json_arr_len_fn = self.get_runtime_fn("json_array_length")?;
+                let json_get_elem_fn = self.get_runtime_fn("json_get_element")?;
+
+                // Get array length
+                let len_val = self
+                    .build_call(
+                        json_arr_len_fn,
+                        &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                        "json_arr_len",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("json_array_length returned void")?
+                    .into_int_value();
+
+                // Allocate data buffer: len * 8 bytes
+                let sizeof_i64 = i64_ty.const_int(8, false);
+                let alloc_size = self
+                    .builder
+                    .build_int_mul(len_val, sizeof_i64, "alloc_size")
+                    .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+                let data_ptr = self
+                    .build_call(
+                        malloc_fn,
+                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
+                        "malloc_data",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("malloc returned void")?
+                    .into_pointer_value();
+
+                // Cast to i64* for element access
+                let data_i64_ptr = self.build_pointer_cast(
+                    data_ptr,
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "data_i64",
+                )?;
+
+                // Build list struct {i64 len, i8* data}
+                let list_alloca = self.alloc_list_result(len_val, data_ptr)?;
+
+                // Determine element parser based on inner type
+                let elem_parser = match inner_ty {
+                    Type::Name(n, _) if n == "i32" || n == "i64" => {
+                        self.get_runtime_fn("mimi_json_as_i64")?
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(format!(
+                            "from_json::<List<T>>: unsupported element type {:?}",
+                            inner_ty
+                        )))
+                    }
+                };
+
+                // Build loop: for i = 0; i < len; i++
+                let function = self
+                    .current_function()
+                    .ok_or_else(|| "codegen: no current function".to_string())?;
+                let loop_bb = self.context.append_basic_block(function, "json_list_loop");
+                let body_bb = self.context.append_basic_block(function, "json_list_body");
+                let done_bb = self.context.append_basic_block(function, "json_list_done");
+                let idx_alloca = self.build_alloca(i64_ty, "idx")?;
+                self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+                self.build_br(loop_bb)?;
+                self.builder.position_at_end(loop_bb);
+                let idx = self
+                    .build_load(BasicTypeEnum::IntType(i64_ty), idx_alloca, "idx")?
+                    .into_int_value();
+                let cond = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SLT, idx, len_val, "cmp")
+                    .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                self.build_cond_br(cond, body_bb, done_bb)?;
+                self.builder.position_at_end(body_bb);
+
+                // Get element JSON fragment
+                let elem_json = self
+                    .build_call(
+                        json_get_elem_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                            BasicMetadataValueEnum::IntValue(idx),
+                        ],
+                        "elem_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("json_get_element returned void")?
+                    .into_pointer_value();
+
+                // Parse element
+                let elem_val = self
+                    .build_call(
+                        elem_parser,
+                        &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                        "elem_val",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_json_as_i64 returned void")?;
+
+                // Store to data[i]
+                let elem_gep = self
+                    .gep()
+                    .build_in_bounds_gep(i64_ty, data_i64_ptr, &[idx], "elem_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                self.build_store(elem_gep, elem_val)?;
+
+                // Increment and loop
+                let next = self
+                    .builder
+                    .build_int_add(idx, i64_ty.const_int(1, false), "next")
+                    .map_err(|e| CompileError::LlvmError(format!("add: {}", e)))?;
+                self.build_store(idx_alloca, next)?;
+                self.build_br(loop_bb)?;
+                self.builder.position_at_end(done_bb);
+
+                // Load and return list struct
+                let list_ty = self.list_struct_type();
+                self.build_load(BasicTypeEnum::StructType(list_ty), list_alloca, "list")
+            }
             Type::Name(type_name, _) => {
                 // Record type: deserialize JSON object into struct fields
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {

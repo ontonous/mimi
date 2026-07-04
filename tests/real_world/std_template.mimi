@@ -3,6 +3,7 @@ use std::template
 func main() -> i32 {
     let vars = map_new()
     let vars2 = map_set(vars, "name", "Mimi")
-    let _ = simple_render("Hello {{name}}!", vars2)
-    0
+    let result = simple_render("Hello {{name}}!", vars2)
+    // Verify the function runs and returns a non-empty result
+    if len(result) > 0 { 0 } else { 1 }
 }

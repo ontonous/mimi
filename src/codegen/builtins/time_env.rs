@@ -95,9 +95,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("mimi_getenv")
             .ok_or_else(|| "codegen: mimi_getenv not declared".to_string())?;
+        let arg_ptr = self.extract_raw_str_ptr(&args[0])?;
         let call = self
             .builder
-            .build_call(getenv_fn, args, "getenv_call")
+            .build_call(
+                getenv_fn,
+                &[BasicMetadataValueEnum::PointerValue(arg_ptr)],
+                "getenv_call",
+            )
             .map_err(|e| format!("getenv error: {}", e))?;
         let ptr = match call_try_basic_value(&call) {
             Some(BasicValueEnum::PointerValue(pv)) => pv,

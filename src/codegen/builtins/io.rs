@@ -370,14 +370,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| "printf not declared".to_string())?;
         if args.len() == 2 {
             // Use custom message
-            let msg_ptr = match args[1] {
-                BasicMetadataValueEnum::PointerValue(pv) => pv,
-                _ => {
-                    return Err(CompileError::TypeMismatch(
-                        "assert message argument must be a string pointer".to_string(),
-                    ))
-                }
-            };
+            let msg_ptr = self.extract_raw_str_ptr(&args[1]).map_err(|_| {
+                CompileError::TypeMismatch(
+                    "assert message argument must be a string pointer".to_string(),
+                )
+            })?;
             self.build_call(
                 printf,
                 &[BasicMetadataValueEnum::PointerValue(msg_ptr)],
