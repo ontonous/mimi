@@ -50,11 +50,6 @@ pub func hex_encode(s: string) -> string {
 }
 
 func hex_digit(n: i64) -> string {
-    if n < 10 { to_string(n) }
-    else if n == 10 { "a" }
-    else if n == 11 { "b" }
-    else if n == 12 { "c" }
-    else if n == 13 { "d" }
-    else if n == 14 { "e" }
-    else { "f" }
+    let digits = "0123456789abcdef"
+    str_substring(digits, n, n + 1)
 }

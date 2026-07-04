@@ -1080,6 +1080,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
                     }
+                    // Normalize string values: wrap raw pointers into canonical
+                    // {i8*, i64} struct so variable allocas have consistent type.
+                    val = self.normalize_string_value(val, init)?;
                     // Track type info for simple Variable patterns
                     if let Pattern::Variable(name) = pat {
                         if let Some(ty_ref) = &ty {

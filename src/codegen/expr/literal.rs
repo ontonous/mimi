@@ -40,7 +40,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_global_string_ptr("", "fstr_empty")
                 .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-            return Ok(global.as_pointer_value().into());
+            let ptr = global.as_pointer_value();
+            let len = self.context.i64_type().const_int(0, false);
+            return self.build_string_struct(ptr, len);
         }
 
         // Optimization: if all parts are text, return a single global string
@@ -56,7 +58,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_global_string_ptr(&text, "fstr_literal")
                 .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-            return Ok(global.as_pointer_value().into());
+            let ptr = global.as_pointer_value();
+            let len = self.context.i64_type().const_int(text.len() as u64, false);
+            return self.build_string_struct(ptr, len);
         }
 
         // For f-strings with interpolation: dynamically compute buffer size, then fill
@@ -225,6 +229,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 })?;
                             compiled_parts.push(CompiledPart::InterpStr(val));
                         }
+                        BasicValueEnum::StructValue(sv) => {
+                            // String struct {i8*, i64} — extract data pointer for strcat
+                            let data_ptr = self
+                                .build_extract_value(sv.into(), 0, "fstr_str_data")?
+                                .into_pointer_value();
+                            let len = self
+                                .build_extract_value(sv.into(), 1, "fstr_str_len")?
+                                .into_int_value();
+                            total_size = self
+                                .builder
+                                .build_int_add(total_size, len, &format!("fstr_isz_{}", i))
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("add error: {}", e))
+                                })?;
+                            compiled_parts.push(CompiledPart::InterpStr(data_ptr.into()));
+                        }
                         _ => {
                             let unknown = self
                                 .builder
@@ -325,6 +345,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        Ok(buf.into())
+        // Phase 3: Wrap heap-allocated buffer into canonical {i8*, i64} struct
+        let len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(buf)],
+                "fstr_len",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .into_int_value();
+        self.build_string_struct(buf, len)
     }
 }

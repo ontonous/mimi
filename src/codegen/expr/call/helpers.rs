@@ -1072,6 +1072,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_string_struct(ptr, len)
     }
 
+    /// Normalize a string value to its canonical {i8*, i64} struct form.
+    /// If the value is already a struct, return as-is. If it's a raw pointer
+    /// and the expression is typed as string, wrap it into the canonical struct.
+    /// This ensures string values use a consistent LLVM representation in
+    /// variable allocas, avoiding type mismatch between literal initializers
+    /// (raw i8*) and subsequent stores (e.g. from `+` which returns {i8*, i64}).
+    pub(in crate::codegen) fn normalize_string_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        expr: &Expr,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match val {
+            BasicValueEnum::PointerValue(pv) => {
+                if self.expr_is_string(expr) {
+                    self.wrap_raw_string_ptr(pv)
+                } else {
+                    Ok(val)
+                }
+            }
+            _ => Ok(val),
+        }
+    }
+
     /// For direct calls to user-defined functions whose parameter is typed as
     /// `string`, wrap raw string-pointer arguments (string literals, format
     /// strings, etc.) into the Mimi string struct so the callee ABI matches.

@@ -2011,21 +2011,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             i64_ty.const_int((args.len() - 1) as u64, false),
         ));
         // Second arg: template string
-        match &args[0] {
-            BasicMetadataValueEnum::PointerValue(pv) => {
-                call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
-            }
+        // Unwrap StructValue {i8*, i64} to PointerValue(i8*) if needed
+        let template_val = match &args[0] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 0, "template_ptr")
+                .map_err(|e| {
+                    CompileError::LlvmError(format!("extract format template ptr: {}", e))
+                })?
+                .into_pointer_value(),
             _ => {
                 return Err(CompileError::TypeMismatch(
                     "format: first arg must be a string template".to_string(),
                 ))
             }
-        }
+        };
+        call_args.push(BasicMetadataValueEnum::PointerValue(template_val));
         // Remaining args: convert to string pointers (up to 8)
         for i in 1..args.len().min(9) {
             match &args[i] {
                 BasicMetadataValueEnum::PointerValue(pv) => {
                     call_args.push(BasicMetadataValueEnum::PointerValue(*pv));
+                }
+                BasicMetadataValueEnum::StructValue(sv) => {
+                    let data_ptr = self
+                        .builder
+                        .build_extract_value(*sv, 0, "fmt_str_data")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("format extract str data: {}", e))
+                        })?
+                        .into_pointer_value();
+                    call_args.push(BasicMetadataValueEnum::PointerValue(data_ptr));
                 }
                 BasicMetadataValueEnum::IntValue(iv) => {
                     let to_i64_fn = self.get_runtime_fn("mimi_to_string_i64")?;
@@ -2065,12 +2082,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             call_args.push(BasicMetadataValueEnum::PointerValue(i8_ptr.const_null()));
         }
         let format_fn = self.get_runtime_fn("mimi_str_format")?;
-        let result = self
+        let result_ptr = self
             .build_call(format_fn, &call_args, "format_call")
             .map_err(|e| CompileError::LlvmError(format!("format error: {}", e)))?
             .try_as_basic_value_opt()
-            .ok_or("mimi_str_format returned void")?;
-        Ok(result)
+            .ok_or("mimi_str_format returned void")?
+            .into_pointer_value();
+        // Wrap into canonical string struct {i8*, i64}
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(result_ptr)],
+                "fmt_strlen",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("format strlen: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("strlen returned void")?
+            .into_int_value();
+        self.build_string_struct(result_ptr, len)
     }
 
     // === Binary I/O & streaming line reading (codegen) ===

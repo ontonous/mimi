@@ -945,6 +945,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Register a heap slot in the root (function-level) scope so that it
+    /// survives intermediate scope exits (e.g. loop body blocks). Used for
+    /// string variable assignments where the heap allocation must outlive the
+    /// current block scope.
+    pub(super) fn register_heap_slot_root(
+        &self,
+        base: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        field: u32,
+    ) {
+        if let Some(scopes) = self.heap_allocs.borrow_mut().first_mut() {
+            scopes.push(HeapEntry::Slot(base, struct_ty, field));
+        }
+    }
+
     /// G10: Push a new scope level for heap allocations.
     /// Takes &self (not &mut self) because builtins use &self.
     pub(super) fn push_heap_scope(&self) {

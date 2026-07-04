@@ -247,7 +247,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         match target {
             Expr::Ident(name) => {
                 let val = self.compile_expr(value, vars)?;
+                let val = self.normalize_string_value(val, value)?;
                 if let Some(&(alloca, ty)) = vars.get(name) {
+                    let is_string_val = self
+                        .var_type_names
+                        .get(name)
+                        .map(|t| t == "string")
+                        .unwrap_or(false);
+                    let is_temp = matches!(
+                        value,
+                        Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
+                    );
+                    if is_string_val && is_temp {
+                        self.pop_last_heap_ptr();
+                        if let BasicTypeEnum::StructType(st) = ty {
+                            if st.get_field_types().len() == 2 {
+                                self.register_heap_slot_root(alloca, st, 0);
+                            }
+                        }
+                    }
                     self.assign_to_var(name, val, alloca, ty)?;
                 }
             }

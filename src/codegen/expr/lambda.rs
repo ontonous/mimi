@@ -132,6 +132,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     let val = self.compile_expr(init, lambda_vars)?;
+                    let val = self.normalize_string_value(val, init)?;
                     self.compile_pattern_bind(pat, val, lambda_vars)
                         .map_err(|e| {
                             CompileError::LlvmError(format!("pattern bind error: {}", e))

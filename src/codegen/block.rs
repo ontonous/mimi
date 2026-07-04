@@ -438,6 +438,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_list_elem_type(name, decl_ty);
                         }
                     }
+                    let val = self.normalize_string_value(val, init)?;
                     self.compile_pattern_bind(pat, val, vars)?;
                     if let Pattern::Variable(name) = pat {
                         if let Expr::Ident(fn_name) = init {
@@ -832,6 +833,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     let val = self.compile_expr(init, vars)?;
+                    let val = self.normalize_string_value(val, init)?;
                     self.compile_pattern_bind(pat, val, vars)?;
                     if let Pattern::Variable(name) = pat {
                         if self.expr_is_string(init) {
@@ -938,7 +940,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                     value,
                 } => {
                     let val = self.compile_expr(value, vars)?;
+                    // Normalize string values for consistent alloca types
+                    let val = self.normalize_string_value(val, value)?;
                     if let Some(&(alloca, ty)) = vars.get(name) {
+                        // Transfer ownership: for string concat/fstring results,
+                        // pop the heap registration and register the variable
+                        // slot so the data is not freed at end of scope.
+                        let is_string_val = self
+                            .var_type_names
+                            .get(name)
+                            .map(|t| t == "string")
+                            .unwrap_or(false);
+                        let is_temp = matches!(
+                            value,
+                            Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
+                        );
+                        if is_string_val && is_temp {
+                            self.pop_last_heap_ptr();
+                            if let BasicTypeEnum::StructType(st) = ty {
+                                if st.get_field_types().len() == 2 {
+                                    self.register_heap_slot_root(alloca, st, 0);
+                                }
+                            }
+                        }
                         self.assign_to_var(name, val, alloca, ty)?;
                         last_val = val;
                     }

@@ -675,6 +675,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .unwrap_or_else(|| val.get_type());
                     val = self.adjust_int_val(val, target)?;
                 }
+                val = self.normalize_string_value(val, init)?;
                 if let Pattern::Variable(name) = pat {
                     if let Expr::Record { ty: Some(tn), .. } = init {
                         self.var_type_names.insert(name.clone(), tn.clone());
