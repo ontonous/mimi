@@ -238,7 +238,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
-                        } else if let Expr::Record { ty: Some(_), .. } = init {
+                        } else if let Expr::Record { ty: None, .. } = init {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
                         } else if let Expr::Record { ty: Some(tn), .. } = init {
@@ -734,9 +734,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Merge branch-local variables back into the outer scope when compiling a statement.
         if merge_vars {
-            for (k, v) in then_vars {
-                vars.entry(k).or_insert(v);
+            // Remove outer variables shadowed by either branch, then insert
+            // branch-local bindings. For keys defined in both branches,
+            // then_vars takes priority (or_insert).
+            for k in then_vars.keys() {
+                vars.remove(k);
             }
+            vars.extend(then_vars);
             if else_.is_some() {
                 for (k, v) in else_vars {
                     vars.entry(k).or_insert(v);
@@ -1079,6 +1083,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     body,
                 } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
+                }
+                Stmt::Block(block) => {
+                    let inner_vars = &mut vars.clone();
+                    last_val = self.compile_block_last_val(block, inner_vars)?;
+                    // Merge inner variable bindings back to outer scope
+                    vars.extend(std::mem::take(inner_vars));
                 }
                 _ => {}
             }

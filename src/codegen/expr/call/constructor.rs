@@ -36,8 +36,26 @@ fn variant_payload_type_name(type_str: &str) -> Option<String> {
                 .to_string(),
         )
     } else if let Some(inner) = type_str.strip_prefix("Option<") {
-        let inner = inner.trim_end_matches('>');
-        Some(inner.to_string())
+        let mut depth = 0u32;
+        let mut end_pos = None;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        end_pos = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        Some(
+            end_pos
+                .map(|pos| inner[..pos].to_string())
+                .unwrap_or_else(|| inner.to_string()),
+        )
     } else {
         None
     }
@@ -905,30 +923,100 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let closure_val = self.compile_expr_or_func_ref(&args[0], vars)?;
         let ok_bb = self.context.append_basic_block(ctx.function, "map_err_ok");
-        let done_bb = self
+        let err_bb = self.context.append_basic_block(ctx.function, "map_err_err");
+        let merge_bb = self
             .context
-            .append_basic_block(ctx.function, "map_err_done");
+            .append_basic_block(ctx.function, "map_err_merge");
+        let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
-        let result_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "map_err_result")?;
-        self.build_store(result_alloca, ctx.payload)?;
-        self.build_cond_br(ctx.disc, ok_bb, done_bb)?;
-        self.builder.position_at_end(done_bb);
-        let err_gep = self
+        let result_sty = ctx.variant_sty;
+        let result_alloca =
+            self.build_alloca(BasicTypeEnum::StructType(result_sty), "map_err_result")?;
+        self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
+        // Ok path: disc=1, payload unchanged, err=0
+        self.builder.position_at_end(ok_bb);
+        let d_gep = self
             .gep()
             .build_struct_gep(
-                BasicTypeEnum::StructType(ctx.variant_sty),
-                ctx.pv,
-                2,
-                "err_gep",
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                0,
+                "d_gep",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let err_payload =
-            self.build_load(BasicTypeEnum::IntType(i64_ty), err_gep, "err_payload")?;
-        let mapped = self.compile_closure_call(closure_val, &[err_payload], None)?;
-        self.build_store(result_alloca, mapped)?;
-        self.build_br(ok_bb)?;
-        self.builder.position_at_end(ok_bb);
-        self.build_load(BasicTypeEnum::IntType(i64_ty), result_alloca, "map_err_val")
+        self.build_store(d_gep, i1_ty.const_int(1, false))?;
+        let p_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                1,
+                "p_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(p_gep, ctx.payload)?;
+        let e_pad_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                2,
+                "e_pad_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(e_pad_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+        // Err path: disc=0, payload=zero, err=mapped from original
+        self.builder.position_at_end(err_bb);
+        let d_gep2 = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                0,
+                "d_gep2",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(d_gep2, i1_ty.const_int(0, false))?;
+        let p_pad_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                1,
+                "p_pad_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let zero_payload = Self::zero_value_for_type(result_sty.get_field_types()[1], i64_ty);
+        self.build_store(p_pad_gep, zero_payload)?;
+        let src_err_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                ctx.pv,
+                2,
+                "src_err_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let err_val = self.build_load(BasicTypeEnum::IntType(i64_ty), src_err_gep, "err_val")?;
+        let mapped = self.compile_closure_call(closure_val, &[err_val], None)?;
+        let dst_err_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(result_sty),
+                result_alloca,
+                2,
+                "dst_err_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(dst_err_gep, mapped)?;
+        self.build_br(merge_bb)?;
+        self.builder.position_at_end(merge_bb);
+        self.build_load(
+            BasicTypeEnum::StructType(result_sty),
+            result_alloca,
+            "map_err_val",
+        )
     }
 
     pub(in crate::codegen) fn emit_variant_err_path(

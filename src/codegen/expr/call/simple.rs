@@ -1096,7 +1096,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Cast the input pointer to the struct type
             let llvm_ty = self.type_llvm[type_name];
             let BasicTypeEnum::StructType(sty) = llvm_ty else {
-                panic!("type '{}' is not a struct", type_name)
+                return Err(CompileError::Generic(format!(
+                    "type '{}' is not a struct; cannot create element function for list operation",
+                    type_name
+                )));
             };
             let typed_ptr = self
                 .builder
