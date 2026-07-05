@@ -460,7 +460,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "contains" | "starts_with" | "ends_with" => "bool".to_string(),
             "len" => "i32".to_string(),
             "split" => "List<string>".to_string(),
-            "parse_int" => "Result<i32,string>".to_string(),
+            "parse_int" => "Result<i64,string>".to_string(),
             "parse_float" => "Result<f64,string>".to_string(),
             _ => String::new(),
         }
