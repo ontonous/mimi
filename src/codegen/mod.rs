@@ -294,13 +294,16 @@ pub struct CodeGenerator<'ctx> {
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
 
 /// Entries tracked for scope-exit heap cleanup.
-/// `Ptr` = raw pointer to free directly.
+/// `PtrSlot(alloca)` = a pointer-typed alloca in the function entry block.
+///   At registration, both a null (for safe free on untaken paths) and the
+///   actual pointer are stored. At cleanup, the alloca is loaded and freed.
 /// `Slot(base, struct_ty, field)` = an alloca of type `struct_ty` (`base`) and
 /// the field index that holds the heap pointer. At cleanup a fresh GEP is
 /// emitted from `base` in the current block. `base` must dominate the cleanup
 /// point; call sites therefore allocate it in the function entry block.
+/// The struct's ptr field is also null-initialized at the entry block.
 enum HeapEntry<'ctx> {
-    Ptr(inkwell::values::PointerValue<'ctx>),
+    PtrSlot(inkwell::values::PointerValue<'ctx>),
     Slot(
         inkwell::values::PointerValue<'ctx>,
         inkwell::types::StructType<'ctx>,
@@ -895,10 +898,58 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// G10: Register a heap pointer (from builtins) for scope-exit free.
+    /// Creates an entry-block alloca, immediately null-initializes it (before
+    /// any stores), and stores the actual ptr at the call site.  At cleanup,
+    /// loading the slot on a never-allocated path returns the null from the
+    /// entry-block initialisation, making `free(null)` a safe no-op.
     /// Takes &self (not &mut self) because builtins use &self.
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot = self
+            .build_entry_alloca(ptr_ty, "heap_slot")
+            .expect("register_heap_alloc: alloca failed");
+        // Null-initialise the slot in the entry block, immediately after the
+        // alloca (this must happen before the caller's stores to the slot).
+        self.emit_null_store_after_alloca(slot);
+        // Store the actual pointer at the call site.
+        self.builder
+            .build_store(slot, ptr)
+            .expect("register_heap_alloc: store failed");
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            stack.push(HeapEntry::Ptr(ptr));
+            stack.push(HeapEntry::PtrSlot(slot));
+        }
+    }
+
+    /// Null-initialise a pointer-typed alloca in the entry block, right after
+    /// the alloca instruction so that later stores (from conditional paths)
+    /// take precedence at cleanup time.
+    fn emit_null_store_after_alloca(&self, slot: inkwell::values::PointerValue<'ctx>) {
+        let saved = self.builder.get_insert_block();
+        if let Some(f) = self.current_function() {
+            if let Some(entry_bb) = f.get_first_basic_block() {
+                let null_val = self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null();
+                // Find the slot's own alloca instruction and insert after it.
+                if let Some(alloca_inst) = entry_bb.get_first_instruction() {
+                    self.builder.position_before(&alloca_inst);
+                    // First store right after the alloca. Since position_before
+                    // puts us before `alloca_inst`, the store goes *before* it.
+                    // We need to position *after* the alloca. Use next instruction.
+                    if let Some(next) = alloca_inst.get_next_instruction() {
+                        self.builder.position_before(&next);
+                    } else {
+                        self.builder.position_at_end(entry_bb);
+                    }
+                } else {
+                    self.builder.position_at_end(entry_bb);
+                }
+                self.builder.build_store(slot, null_val).ok();
+            }
+        }
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
         }
     }
 
@@ -906,6 +957,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// scope exit. `field` is the index of the pointer field inside the struct.
     /// At free time, a fresh GEP is emitted from `base` in the current block,
     /// avoiding dominance issues.
+    /// NOTE: null-initialisation is NOT done here — the slot must have been
+    /// stored to (or covered by `register_heap_alloc`) **before** registration
+    /// for all paths that reach this registration.  Scope-local cleanup runs
+    /// inside the block (before merge), so the stored value is always valid.
     pub(super) fn register_heap_slot(
         &self,
         base: inkwell::values::PointerValue<'ctx>,
@@ -917,14 +972,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Remove and return the most recently registered raw heap pointer from
+    /// Remove and return the most recently registered heap pointer from
     /// the current scope. Used to transfer ownership of a string expression
     /// result into a local variable slot.
+    /// For `PtrSlot` entries, loads and returns the original pointer from the slot.
     pub(super) fn pop_last_heap_ptr(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
             while let Some(entry) = stack.pop() {
-                if let HeapEntry::Ptr(p) = entry {
-                    return Some(p);
+                match entry {
+                    HeapEntry::PtrSlot(slot) => {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        return self
+                            .builder
+                            .build_load(ptr_ty, slot, "pop_heap_slot")
+                            .ok()
+                            .map(|v| v.into_pointer_value());
+                    }
+                    HeapEntry::Slot(..) => {}
                 }
             }
         }
@@ -974,10 +1038,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// G10: Pop scope level and emit `free(ptr)` for each registered heap allocation.
     ///
-    /// For `Slot` entries the heap pointer is re-extracted from an entry-block
-    /// alloca in the current basic block, so the slot always dominates the cleanup
-    /// point. Raw `Ptr` entries are freed directly and are assumed to dominate the
-    /// cleanup point (they are normally produced by builtins in the same block).
+    /// For all entry types the heap pointer is loaded from an entry-block alloca
+    /// (null-initialized at the entry block), so the slot always dominates the
+    /// cleanup point. The null guarantee ensures that `free` on a never-allocated
+    /// path calls free(null), which is a C-library no-op.
     pub(super) fn free_heap_allocs(&mut self) -> Result<(), CompileError> {
         if let Some(scope) = self.heap_allocs.borrow_mut().pop() {
             let free_fn = self
@@ -986,7 +1050,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
             for entry in scope {
                 let ptr = match entry {
-                    HeapEntry::Ptr(p) => p,
+                    HeapEntry::PtrSlot(slot) => {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        self.builder
+                            .build_load(ptr_ty, slot, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value()
+                    }
                     HeapEntry::Slot(base, struct_ty, field) => {
                         let gep = self
                             .gep()

@@ -139,15 +139,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_ptr_to_int(pv, i64_ty, "err_to_i64")?.into()
             }
             BasicValueEnum::StructValue(sv) => {
-                // Custom enum values are {i32 tag, i64 payload}; Result stores
-                // only the tag in its error slot.
-                let tag = self
-                    .build_extract_value(sv.into(), 0, "enum_tag")?
-                    .into_int_value();
-                self.builder
-                    .build_int_cast(tag, i64_ty, "err_tag_ext")
-                    .map_err(|e| CompileError::LlvmError(format!("int cast error: {}", e)))?
-                    .into()
+                // Check if this is a Mimi string struct {ptr, i64} (from string literal).
+                // If so, extract the raw pointer and convert to i64.
+                let sv_fields = sv.get_type().get_field_types();
+                let is_mimi_string = sv_fields.len() == 2
+                    && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if is_mimi_string {
+                    let str_ptr = self
+                        .build_extract_value(sv.into(), 0, "err_str_ptr")?
+                        .into_pointer_value();
+                    self.build_ptr_to_int(str_ptr, i64_ty, "err_str_i64")?
+                        .into()
+                } else {
+                    // Custom enum values are {i32 tag, i64 payload}; Result stores
+                    // only the tag in its error slot.
+                    let tag = self
+                        .build_extract_value(sv.into(), 0, "enum_tag")?
+                        .into_int_value();
+                    self.builder
+                        .build_int_cast(tag, i64_ty, "err_tag_ext")
+                        .map_err(|e| CompileError::LlvmError(format!("int cast error: {}", e)))?
+                        .into()
+                }
             }
             _ => return Err("Err: unsupported error value type".into()),
         };

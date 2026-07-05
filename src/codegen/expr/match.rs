@@ -979,8 +979,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|(v, bb)| (v as &dyn inkwell::values::BasicValue, *bb))
             .collect();
         // Add the unreachable else block with a dummy value so every
-        // predecessor of merge_bb has a phi entry.
-        let dummy_val = self.context.i64_type().const_int(0, false);
+        // predecessor of merge_bb has a phi entry.  Use the correct LLVM
+        // type for the dummy (use `undef` for struct types, i64 0 for
+        // ints/pointers — but always match `ty`).
+        let dummy_val: inkwell::values::BasicValueEnum<'ctx> = match ty {
+            inkwell::types::BasicTypeEnum::IntType(it) => it.const_zero().into(),
+            inkwell::types::BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+            inkwell::types::BasicTypeEnum::StructType(st) => st.get_undef().into(),
+            _ => self.context.i64_type().const_zero().into(),
+        };
         phi_incoming.push((&dummy_val as &dyn inkwell::values::BasicValue, else_bb));
         phi.add_incoming(&phi_incoming);
         Ok(phi.as_basic_value())

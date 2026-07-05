@@ -1636,14 +1636,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.wrap_c_string(pv)?
                 } else {
                     let loaded = self.build_load(BasicTypeEnum::StructType(st), pv, "ret_load")?;
-                    // Null out field at index 1 (data pointer) to prevent free_heap_allocs from freeing
+                    // Null out pointer-typed fields to prevent free_heap_allocs from freeing
                     // the heap data that's now owned by the caller via the returned struct value.
-                    if field_types.len() > 1 {
-                        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                        if let Ok(data_gep) =
-                            self.gep().build_struct_gep(st, pv, 1, "ret_data_null")
-                        {
-                            let _ = self.builder.build_store(data_gep, null_ptr);
+                    // Only pointer-typed fields can contain heap data; integer fields
+                    // (discriminators, lengths, payloads) are left untouched to avoid
+                    // ptr→i64 type mismatches in LLVM's backend (physreg COPY error).
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    for (fi, ft) in field_types.iter().enumerate() {
+                        if matches!(ft, BasicTypeEnum::PointerType(_)) {
+                            if let Ok(fp) =
+                                self.gep()
+                                    .build_struct_gep(st, pv, fi as u32, "ret_data_null")
+                            {
+                                let _ = self.builder.build_store(fp, null_ptr);
+                            }
                         }
                     }
                     loaded

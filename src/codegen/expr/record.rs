@@ -158,6 +158,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_i64")
             }
             BasicValueEnum::StructValue(sv) => {
+                // Mimi string struct {ptr, i64}: extract the raw C string
+                // pointer and store it directly (no malloc).
+                let sv_fields = sv.get_type().get_field_types();
+                if sv_fields.len() == 2
+                    && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                {
+                    let raw_ptr = self
+                        .build_extract_value(sv.into(), 0, "str_ptr")?
+                        .into_pointer_value();
+                    return self.build_ptr_to_int(raw_ptr, self.context.i64_type(), "str_to_i64");
+                }
                 let struct_ty = sv.get_type();
                 let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
                 let malloc_fn = self.malloc_fn();

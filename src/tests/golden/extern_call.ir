@@ -339,7 +339,7 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 
 define i64 @main() {
 entry:
-  %call = call i64 @strlen(ptr @str)
+  %call = call i64 @strlen({ ptr, i64 } { ptr @str, i64 2 })
   ret i64 %call
 }
 
