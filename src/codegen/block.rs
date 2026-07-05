@@ -858,10 +858,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Let {
                     pat,
                     init: Some(init),
-                    ..
+                    ty,
+                    mut_: _,
+                    ref_: _,
+                    pos: _,
                 } => {
                     let val = self.compile_expr(init, vars)?;
                     let val = self.normalize_string_value(val, init)?;
+                    let val = if let Some(decl_ty) = &ty {
+                        // Populate var_type_names from the type annotation so that
+                        // infer_object_type can return e.g. "Option<string>" instead
+                        // of just "Option" for generic variant types.
+                        if let Some(full) = self.get_full_type_name(decl_ty) {
+                            if let Pattern::Variable(name) = pat {
+                                self.var_type_names.insert(name.clone(), full.clone());
+                            }
+                        }
+                        self.inflate_variant_struct(val, decl_ty)?
+                    } else {
+                        val
+                    };
                     self.compile_pattern_bind(pat, val, vars)?;
                     if let Pattern::Variable(name) = pat {
                         if self.expr_is_string(init) {
@@ -970,6 +986,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let val = self.compile_expr(value, vars)?;
                     // Normalize string values for consistent alloca types
                     let val = self.normalize_string_value(val, value)?;
+                    // Inflate narrow variant structs (from Err/None) to match the
+                    // variable's declared struct layout (e.g. {i1,i64,i64} → {i1,{ptr,i64},i64}).
+                    let val = if let Some(decl_ty) = self.var_types.get(name) {
+                        self.inflate_variant_struct(val, decl_ty)?
+                    } else {
+                        val
+                    };
                     if let Some(&(alloca, ty)) = vars.get(name) {
                         // Transfer ownership: for string concat/fstring results,
                         // pop the heap registration and register the variable

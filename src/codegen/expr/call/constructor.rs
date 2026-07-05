@@ -7,6 +7,42 @@ use inkwell::values::{
 };
 use std::collections::HashMap;
 
+/// Parse a concrete Result<T,E> or Option<T> type string and return
+/// the inner payload type's name. Returns None for non-variant types.
+fn variant_payload_type_name(type_str: &str) -> Option<String> {
+    if let Some(inner) = type_str.strip_prefix("Result<") {
+        let mut depth = 0u32;
+        let mut comma_pos = None;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => {
+                    comma_pos = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Some(
+            comma_pos
+                .map(|pos| inner[..pos].trim())
+                .unwrap_or("i64")
+                .to_string(),
+        )
+    } else if let Some(inner) = type_str.strip_prefix("Option<") {
+        let inner = inner.trim_end_matches('>');
+        Some(inner.to_string())
+    } else {
+        None
+    }
+}
+
 /// Shared context for compiling a method call on an Option/Result-like value.
 #[derive(Clone)]
 struct VariantMethodCtx<'ctx> {
@@ -223,6 +259,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_load(struct_ty, alloca, "loaded")
     }
 
+    /// Given a type string like `"Result<string, i64>"` or `"Option<string>"`,
+    /// parse the payload type name and build the correct LLVM struct layout.
+    /// Returns `None` when the type string cannot be parsed (e.g. raw
+    /// `"Result"` or `"Option"` without generics).
+    fn compute_variant_struct_type(&self, type_str: &str) -> Option<BasicTypeEnum<'ctx>> {
+        let payload_name = variant_payload_type_name(type_str)?;
+        let i1_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
+        let payload_ty = Type::Name(payload_name, vec![]);
+        let payload_llvm = self.llvm_type_for(&payload_ty)?;
+        if type_str.starts_with("Result<") {
+            Some(BasicTypeEnum::StructType(self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(i1_ty),
+                    payload_llvm,
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            )))
+        } else {
+            Some(BasicTypeEnum::StructType(self.context.struct_type(
+                &[BasicTypeEnum::IntType(i1_ty), payload_llvm],
+                false,
+            )))
+        }
+    }
+
     pub(in crate::codegen) fn compile_variant_method(
         &mut self,
         obj: &Expr,
@@ -242,37 +305,46 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Layout: Result<T,E> = {i1 disc, T ok, i64 err}, Option<T> = {i1 disc, T payload}
         let disc_idx: u32 = 0;
         let payload_idx: u32 = 1;
-        let variant_sty = if is_result {
-            self.context.struct_type(
-                &[
-                    BasicTypeEnum::IntType(i1_ty),
-                    BasicTypeEnum::IntType(i64_ty),
-                    BasicTypeEnum::IntType(i64_ty),
-                ],
-                false,
-            )
-        } else {
-            self.context.struct_type(
-                &[
-                    BasicTypeEnum::IntType(i1_ty),
-                    BasicTypeEnum::IntType(i64_ty),
-                ],
-                false,
-            )
-        };
 
-        // Convert StructValue to PointerValue for uniform handling,
-        // and determine the actual struct type for correct GEP offsets.
-        // The actual struct layout depends on the payload type T,
-        // e.g. {i1, i32, i64} for Result<i32,string> vs {i1, i64, i64} for Result<i64,string>.
+        // Compute the CORRECT struct layout from the Mimi-level type string
+        // (e.g. "Result<string, i64>" → {i1, {ptr,i64}, i64}).
+        // This is needed because constructors (Err/None) may create structs
+        // with narrower layouts ({i1,i64,i64}) when the payload is string.
+        let inferred_sty_enum = self
+            .compute_variant_struct_type(&obj_type)
+            .unwrap_or_else(|| {
+                if is_result {
+                    BasicTypeEnum::StructType(self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(i1_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ))
+                } else {
+                    BasicTypeEnum::StructType(self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(i1_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    ))
+                }
+            });
+
+        // Convert StructValue to PointerValue for uniform handling.
+        // Use the INFERRED struct type for correct GEP offsets even when
+        // the runtime value has a narrower layout (e.g. Err constructor
+        // creates {i1,i64,i64} instead of {i1,{ptr,i64},i64}).
         let (pv, actual_sty_enum) = match obj_val {
             BasicValueEnum::PointerValue(pv) => {
                 let sty = if let Expr::Ident(name) = obj {
                     vars.get(name.as_str())
                         .map(|entry| entry.1)
-                        .unwrap_or(BasicTypeEnum::StructType(variant_sty))
+                        .unwrap_or(inferred_sty_enum)
                 } else {
-                    BasicTypeEnum::StructType(variant_sty)
+                    inferred_sty_enum
                 };
                 (pv, sty)
             }
@@ -292,7 +364,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        // Extract the actual payload type from the struct's field types
+        // Extract the payload type from the struct's field types.
         let payload_ty = if let BasicTypeEnum::StructType(st) = actual_sty_enum {
             let fields = st.get_field_types();
             if (payload_idx as usize) < fields.len() {
@@ -328,7 +400,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             payload,
             payload_ty,
             pv,
-            variant_sty,
+            variant_sty: match inferred_sty_enum {
+                BasicTypeEnum::StructType(st) => st,
+                _ if is_result => self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                ),
+                _ => self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                ),
+            },
             is_result,
             obj_name,
         };
@@ -451,20 +540,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("unwrap_or requires a default value".into());
         }
         let default_val = self.compile_expr(&args[0], vars)?;
+        // Use the default value's type for the alloca — this is the authoritative
+        // type (enforced by the type checker). For Ok(payload) payload has the
+        // same type; for Err/None with narrow structs, the payload type may be i64
+        // while default is {ptr,i64}, but we only store the default in that branch.
+        let alloca_ty = default_val.get_type();
         let ok_bb = self
             .context
             .append_basic_block(ctx.function, "unwrap_or_ok");
-        let done_bb = self
+        let err_bb = self
+            .context
+            .append_basic_block(ctx.function, "unwrap_or_err");
+        let merge_bb = self
             .context
             .append_basic_block(ctx.function, "unwrap_or_done");
-        let result_alloca = self.build_alloca(ctx.payload_ty, "unwrap_or_result")?;
-        self.build_store(result_alloca, ctx.payload)?;
-        self.build_cond_br(ctx.disc, ok_bb, done_bb)?;
-        self.builder.position_at_end(done_bb);
-        self.build_store(result_alloca, default_val)?;
-        self.build_br(ok_bb)?;
+        let result_alloca = self.build_alloca(alloca_ty, "unwrap_or_result")?;
+        self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
+
         self.builder.position_at_end(ok_bb);
-        self.build_load(ctx.payload_ty, result_alloca, "unwrap_or_val")
+        // Ok branch: store the payload (always the correct type for real Ok values)
+        self.build_store(result_alloca, ctx.payload)?;
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(err_bb);
+        // Err branch: store the default value
+        self.build_store(result_alloca, default_val)?;
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(merge_bb);
+        self.build_load(alloca_ty, result_alloca, "unwrap_or_val")
     }
 
     /// Compiles `.ok_or(err)` for Option-like values.
@@ -483,11 +587,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         let merge_bb = self.context.append_basic_block(ctx.function, "ok_or_merge");
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
-        // Build Result<T,E> with the actual payload type for field 1.
+        // Use the inferred payload type from ctx.variant_sty (the correct struct
+        // layout from compute_variant_struct_type) rather than ctx.payload_ty
+        // (which is narrow i64 when the Option was created by None).
+        let expected_fields = ctx.variant_sty.get_field_types();
+        let real_payload_ty = if expected_fields.len() > 1 {
+            expected_fields[1]
+        } else {
+            ctx.payload_ty
+        };
+        // Build Result<T,E> with the correct payload type for field 1.
         let result_sty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(i1_ty),
-                ctx.payload_ty,
+                real_payload_ty,
                 BasicTypeEnum::IntType(i64_ty),
             ],
             false,
@@ -901,5 +1014,94 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         None
+    }
+
+    /// Widen a narrow variant struct (created by Err/None constructors)
+    /// to match the declared type's expected struct layout.
+    /// For example, `Err(42)` produces `{i1,i64,i64}` but when the declared
+    /// type is `Result<string,i64>`, it should be `{i1,{ptr,i64},i64}`.
+    pub(in crate::codegen) fn inflate_variant_struct(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        declared_ty: &Type,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let actual_sty = match val {
+            BasicValueEnum::StructValue(sv) => sv.get_type(),
+            _ => return Ok(val),
+        };
+        let actual_fields = actual_sty.get_field_types();
+        let actual_len = actual_fields.len();
+        if actual_len < 2 {
+            return Ok(val);
+        }
+        // Get the expected struct type from the type annotation
+        let type_str = self.get_full_type_name(declared_ty).unwrap_or_default();
+        let expected = self.compute_variant_struct_type(&type_str);
+        let Some(BasicTypeEnum::StructType(expected_sty)) = expected else {
+            return Ok(val);
+        };
+        let expected_fields = expected_sty.get_field_types();
+        if expected_fields.len() != actual_len {
+            return Ok(val);
+        }
+        // Check if field 1 (payload/ok-pad) type matches
+        if expected_fields[1] == actual_fields[1] {
+            return Ok(val); // already the correct layout
+        }
+        // Inflation needed: rebuild the struct with the correct field 1 type.
+        // Use alloca + GEP + store to construct the value.
+        // Allocate and zero-initialize the wide struct
+        let wide_alloca = self.build_alloca(BasicTypeEnum::StructType(expected_sty), "inflated")?;
+        let zero_init = self.const_zero_for_type(expected_sty.into());
+        self.build_store(wide_alloca, zero_init)?;
+        // Field 0: discriminant — extract from the narrow value
+        let agg_val = match val {
+            BasicValueEnum::StructValue(sv) => inkwell::values::AggregateValueEnum::StructValue(sv),
+            _ => return Ok(val),
+        };
+        let disc = self.build_extract_value(agg_val, 0, "disc")?;
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(
+                BasicTypeEnum::StructType(expected_sty),
+                wide_alloca,
+                0,
+                "disc_gep",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(disc_gep, disc)?;
+        // Field 1 (ok/payload pad) — already zero-initialized from const_zero
+        // Field 2 (if Result/3-field): extract error value from narrow value
+        if actual_len == 3 {
+            let err_val = self.build_extract_value(agg_val, 2, "err_val")?;
+            let err_gep = self
+                .gep()
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(expected_sty),
+                    wide_alloca,
+                    2,
+                    "err_gep",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+            self.build_store(err_gep, err_val)?;
+        }
+        // Load the inflated struct
+        self.build_load(
+            BasicTypeEnum::StructType(expected_sty),
+            wide_alloca,
+            "inflated_val",
+        )
+    }
+
+    /// Return a zero-initialised `BasicValueEnum` for a given `BasicTypeEnum`.
+    fn const_zero_for_type(&self, ty: BasicTypeEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        match ty {
+            BasicTypeEnum::IntType(it) => it.const_zero().into(),
+            BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),
+            BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+            BasicTypeEnum::StructType(st) => st.const_zero().into(),
+            BasicTypeEnum::ArrayType(at) => at.get_undef().into(),
+            _ => self.context.i64_type().const_zero().into(),
+        }
     }
 }

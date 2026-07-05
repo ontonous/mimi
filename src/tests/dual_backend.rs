@@ -4454,6 +4454,124 @@ fn dual_result_and_then() {
     );
 }
 
+// ─── 36b. Result<string,E>/Option<string> string-payload methods ──
+
+#[test]
+fn dual_result_string_payload_two_prints() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ok: Result<string, i64> = Ok("hello");
+            let err: Result<string, i64> = Err(42);
+            println(ok.unwrap_or("default"))
+            println(err.unwrap_or("fallback"))
+            0
+        }
+    "#,
+        "hello\nfallback"
+    );
+}
+
+#[test]
+fn dual_result_string_payload_only_ok() {
+    if !can_link() {
+        return;
+    }
+    // Ok with string payload only (same struct layout)
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ok: Result<string, i64> = Ok("hello");
+            println(ok.unwrap_or("default"))
+            0
+        }
+    "#,
+        "hello"
+    );
+}
+
+#[test]
+fn dual_result_string_payload_only_err() {
+    if !can_link() {
+        return;
+    }
+    // Err with string Ok payload (tests inflation at let)
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let err: Result<string, i64> = Err(42);
+            println(err.unwrap_or("fallback"))
+            0
+        }
+    "#,
+        "fallback"
+    );
+}
+
+#[test]
+fn dual_option_string_payload_unwrap_or() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let some: Option<string> = Some("world");
+            let none: Option<string> = None;
+            println(some.unwrap_or("x"))
+            println(none.unwrap_or("y"))
+            0
+        }
+    "#,
+        "world\ny"
+    );
+}
+
+#[test]
+fn dual_result_string_payload_ok_or() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let some: Option<string> = Some("val");
+            let none: Option<string> = None;
+            let r1: Result<string, string> = some.ok_or("err");
+            let r2: Result<string, string> = none.ok_or("err_default");
+            // Ok.val → "val", Err → unwrap_or shows "?"
+            println(r1.unwrap_or("?"))
+            println("|")
+            println(r2.unwrap_or("?"))
+            0
+        }
+    "#,
+        "val\n|\n?"
+    );
+}
+
+#[test]
+fn dual_result_string_payload_assign_typed() {
+    if !can_link() {
+        return;
+    }
+    // Assigning a narrow Err value to a typed variable must inflate.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut r: Result<string, i64> = Ok("init");
+            r = Err(99);
+            println(r.unwrap_or("assigned"))
+            0
+        }
+    "#,
+        "assigned"
+    );
+}
+
 // ─── 36. v0.22: List<List<T>> generic nesting ────────────────────
 
 #[test]
