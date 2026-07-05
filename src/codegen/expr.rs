@@ -318,6 +318,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return ret_name;
                     }
                     name.clone()
+                } else if let Expr::Field(obj, method) = callee.as_ref() {
+                    // Method call result: infer the return type of string methods
+                    // so that chained calls like s.trim().to_upper() work.
+                    let obj_type = self.infer_object_type(obj, vars);
+                    if obj_type == "string" {
+                        self.infer_string_method_return_type(method)
+                    } else {
+                        String::new()
+                    }
                 } else {
                     String::new()
                 }
@@ -442,6 +451,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// used by `infer_object_type` so that method calls on call expressions
     /// (e.g. `str_index_of(...).unwrap_or(-1)`, `getenv(...).is_ok()`) can be
     /// dispatched even when the result is not bound to a variable.
+    /// Infer the return type of a string method for use in method chain resolution.
+    fn infer_string_method_return_type(&self, method: &str) -> String {
+        match method {
+            "trim" | "to_upper" | "to_lower" | "repeat" | "replace" | "char_at" | "substring" => {
+                "string".to_string()
+            }
+            "contains" | "starts_with" | "ends_with" => "bool".to_string(),
+            "len" => "i32".to_string(),
+            "split" => "List<string>".to_string(),
+            "parse_int" => "Result<i32,string>".to_string(),
+            "parse_float" => "Result<f64,string>".to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn infer_call_return_type_name(&self, name: &str) -> Option<String> {
         // Built-ins whose return type is not obvious from the name alone.
         match name {

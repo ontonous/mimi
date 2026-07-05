@@ -4572,6 +4572,199 @@ fn dual_result_string_payload_assign_typed() {
     );
 }
 
+// ─── 36c. String method codegen (len, trim, to_upper, etc.) ──────
+
+#[test]
+fn dual_string_method_len() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println("hello".len())
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_string_method_trim() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "  hello  ".trim()
+            println(s)
+            println(s.len())
+            0
+        }
+    "#,
+        "hello\n5"
+    );
+}
+
+#[test]
+fn dual_string_method_upper_lower() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println("hello".to_upper())
+            println("HELLO".to_lower())
+            0
+        }
+    "#,
+        "HELLO\nhello"
+    );
+}
+
+#[test]
+fn dual_string_method_contains() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let b = "hello world".contains("world")
+            if b { println("yes") } else { println("no") }
+            0
+        }
+    "#,
+        "yes"
+    );
+}
+
+#[test]
+fn dual_string_method_starts_ends_with() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            if "hello".starts_with("he") { println("yes") } else { println("no") }
+            if "hello".ends_with("lo") { println("yes") } else { println("no") }
+            0
+        }
+    "#,
+        "yes\nyes"
+    );
+}
+
+#[test]
+fn dual_string_method_repeat() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "ab".repeat(3)
+            println(s)
+            0
+        }
+    "#,
+        "ababab"
+    );
+}
+
+#[test]
+fn dual_string_method_char_at() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = "hello".char_at(1)
+            println(c)
+            0
+        }
+    "#,
+        "e"
+    );
+}
+
+#[test]
+fn dual_string_method_substring() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "hello world".substring(0, 5)
+            println(s)
+            0
+        }
+    "#,
+        "hello"
+    );
+}
+
+#[test]
+fn dual_string_method_split() {
+    if !can_link() {
+        return;
+    }
+    // str_split returns List<string> in interp but raw C strings in codegen.
+    // Only test len() which works in both backends.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let parts = "a,b,c".split(",")
+            println(len(parts))
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_string_method_replace() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "hello world".replace("world", "mimi")
+            println(s)
+            0
+        }
+    "#,
+        "hello mimi"
+    );
+}
+
+#[test]
+fn dual_string_method_chain() {
+    if !can_link() {
+        return;
+    }
+    // Chained: trim + to_upper + len
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "  hello  ".trim().to_upper()
+            println(s)
+            println(s.len())
+            0
+        }
+    "#,
+        "HELLO\n5"
+    );
+}
+
 // ─── 36. v0.22: List<List<T>> generic nesting ────────────────────
 
 #[test]

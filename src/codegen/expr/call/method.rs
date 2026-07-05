@@ -256,6 +256,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_set_method(obj, method_name, args, vars);
         }
 
+        // 5b. Builtin string method fallback: s.trim() → str_trim(s)
+        //     Mirrors the interpreter's hardcoded string methods (interp/call.rs:704-769).
+        if obj_type == "string" {
+            if method_name == "len" {
+                // len needs pending_len_is_string set before compile_call checks it.
+                self.pending_len_is_string = true;
+                let obj_expr = obj.clone();
+                let call_expr =
+                    Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
+                return self.compile_expr(&call_expr, vars);
+            }
+            if let Some(builtin_name) = string_method_to_builtin(method_name) {
+                let obj_expr = obj.clone();
+                let mut all_args = vec![obj_expr];
+                all_args.extend(args.iter().cloned());
+                let call_expr =
+                    Expr::Call(Box::new(Expr::Ident(builtin_name.to_string())), all_args);
+                return self.compile_expr(&call_expr, vars);
+            }
+        }
+
         Err(CompileError::Generic(format!(
             "method '{}' not compiled for type '{}' (missing crate?)",
             method_name, obj_type
@@ -1444,5 +1465,26 @@ fn base_type_name(type_str: &str) -> &str {
     match type_str.find('<') {
         Some(idx) => &type_str[..idx],
         None => type_str,
+    }
+}
+
+/// Map a string method name to the corresponding `str_*` builtin function name.
+/// Used by `compile_method_call` as a fallback when no trait provides the method.
+fn string_method_to_builtin(method: &str) -> Option<&'static str> {
+    match method {
+        "trim" => Some("str_trim"),
+        "to_upper" => Some("str_to_upper"),
+        "to_lower" => Some("str_to_lower"),
+        "contains" => Some("str_contains"),
+        "starts_with" => Some("str_starts_with"),
+        "ends_with" => Some("str_ends_with"),
+        "split" => Some("str_split"),
+        "replace" => Some("str_replace"),
+        "char_at" => Some("str_char_at"),
+        "substring" => Some("str_substring"),
+        "parse_int" => Some("str_parse_int"),
+        "parse_float" => Some("str_parse_float"),
+        "repeat" => Some("str_repeat"),
+        _ => None,
     }
 }

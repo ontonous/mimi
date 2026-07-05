@@ -110,6 +110,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             | "from_json"
                             | "c_str_to_string"
                     )
+                } else if let Expr::Field(_, method) = callee.as_ref() {
+                    matches!(
+                        method.as_str(),
+                        "to_string"
+                            | "trim"
+                            | "to_upper"
+                            | "to_lower"
+                            | "repeat"
+                            | "replace"
+                            | "char_at"
+                            | "substring"
+                    )
                 } else {
                     false
                 }
