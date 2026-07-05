@@ -428,6 +428,7 @@ impl<'a> Interpreter<'a> {
                     if *gen != *generation {
                         // Stale ArenaRef from before a reset — treat as invalid
                         self.arena_depth -= 1;
+                        self.pop_scope();
                         self.arenas.pop();
                         return Err(InterpError::new("arena: use-after-reset detected"));
                     }

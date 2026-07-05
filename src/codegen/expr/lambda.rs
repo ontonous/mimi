@@ -116,20 +116,32 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
+        self.push_heap_scope();
         let mut last_val = default_ret_value(self.context, ret_type);
+        let mut last_expr: Option<&Expr> = None;
+        let mut returned = false;
         for stmt in body {
             match stmt {
                 Stmt::Expr(e) => {
                     last_val = self.compile_expr(e, lambda_vars)?;
+                    last_expr = Some(e);
                 }
                 Stmt::Return(Some(e)) => {
                     let v = self.compile_expr(e, lambda_vars)?;
                     let v = self.load_return_value_if_needed(v)?;
-                    self.build_return(Some(&v))?;
+                    // Claim string/tuple return values so free_heap_allocs
+                    // doesn't free them before the caller receives them.
+                    let claimed =
+                        self.claim_string_return_value(v, ret_type, Some(e), lambda_vars)?;
+                    self.free_heap_allocs()?;
+                    self.build_return(Some(&claimed))?;
+                    returned = true;
                     break;
                 }
                 Stmt::Return(None) => {
+                    self.free_heap_allocs()?;
                     self.build_return(None)?;
+                    returned = true;
                     break;
                 }
                 Stmt::Let {
@@ -147,9 +159,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {}
             }
         }
-        if !self.block_has_terminator() {
+        if !returned && !self.block_has_terminator() {
             let last_val = self.load_return_value_if_needed(last_val)?;
-            self.build_return(Some(&last_val))?;
+            let claimed =
+                self.claim_string_return_value(last_val, ret_type, last_expr, lambda_vars)?;
+            self.free_heap_allocs()?;
+            self.build_return(Some(&claimed))?;
+        } else if !returned {
+            // block_has_terminator but not via return (e.g. panic macro)
+            // Still need to pop the heap scope
+            let _ = self.heap_allocs.borrow_mut().pop();
         }
         Ok(())
     }

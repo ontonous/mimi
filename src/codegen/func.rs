@@ -420,6 +420,38 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// via the struct's data pointer. For expressions that already own heap
     /// allocations (concat, f-string, builtin raw returns) we pop the most
     /// recent registration as before.
+    /// Check if a BasicTypeEnum is a Mimi `string` struct ({ptr,i64}).
+    fn is_string_llvm_type(ty: BasicTypeEnum<'ctx>) -> bool {
+        match ty {
+            BasicTypeEnum::StructType(st) => {
+                let fields = st.get_field_types();
+                fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(_))
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if an expression produces a heap-allocated string whose allocation
+    /// is tracked by `heap_allocs`.  Such expressions need their heap pointer
+    /// popped from the tracking stack before `free_heap_allocs` runs, otherwise
+    /// the string data gets freed before the caller can use it.
+    fn is_string_temp_expr(expr: &Expr, val: &BasicValueEnum<'ctx>) -> bool {
+        match expr {
+            Expr::Binary(BinOp::Add, _, _) => true,
+            Expr::Literal(Lit::FString(_)) => true,
+            Expr::Call(callee, _) => {
+                matches!(val, BasicValueEnum::PointerValue(_))
+                    || matches!(
+                        callee.as_ref(),
+                        Expr::Ident(name) if name.starts_with("str_") || name == "to_string"
+                    )
+            }
+            _ => false,
+        }
+    }
+
     pub(in crate::codegen) fn claim_string_return_value(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -437,6 +469,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => false,
         };
         if !is_string_struct {
+            // Check for variant struct (Option/Result) whose payload is a string.
+            // E.g. `Ok(s + "-wrapped")` returns `Result<string, ...>` – the inner
+            // string concat's heap allocation must survive free_heap_allocs.
+            let is_variant_with_string_payload = match ret_type {
+                BasicTypeEnum::StructType(st) => {
+                    let fields = st.get_field_types();
+                    if fields.len() >= 2 {
+                        matches!(fields[0], BasicTypeEnum::IntType(it) if it.get_bit_width() == 1)
+                            && Self::is_string_llvm_type(fields[1])
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if is_variant_with_string_payload {
+                // Check if the expression is a constructor wrapping a string temp,
+                // e.g. `Ok(s + "-wrapped")`.  The inner string temp's heap pointer
+                // must be popped so free_heap_allocs doesn't free it before return.
+                if let Some(Expr::Call(callee, args)) = expr {
+                    if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
+                        if let Expr::Ident(name) = callee.as_ref() {
+                            if matches!(name.as_str(), "Ok" | "Err" | "Some" | "None") {
+                                let _ = self.pop_last_heap_ptr();
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(val);
         }
 

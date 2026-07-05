@@ -1090,16 +1090,22 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns `None` when the type cannot be determined (fall back to
     /// `ctx.payload_ty`).
     fn infer_fn_return_llvm_type(&self, fn_expr: &Expr) -> Option<BasicTypeEnum<'ctx>> {
-        if let Expr::Ident(name) = fn_expr {
-            if let Some(ty) = self.var_types.get(name) {
-                let ret = match ty {
-                    Type::Func(_, ret) | Type::ExternFunc(_, ret) => Some(ret.as_ref()),
-                    _ => None,
-                };
-                if let Some(ret) = ret {
-                    return self.llvm_type_for(ret);
+        match fn_expr {
+            Expr::Ident(name) => {
+                if let Some(ty) = self.var_types.get(name) {
+                    let ret = match ty {
+                        Type::Func(_, ret) | Type::ExternFunc(_, ret) => Some(ret.as_ref()),
+                        _ => None,
+                    };
+                    if let Some(ret) = ret {
+                        return self.llvm_type_for(ret);
+                    }
                 }
             }
+            Expr::Lambda {
+                ret: Some(ret_ty), ..
+            } => return self.llvm_type_for(ret_ty),
+            _ => {}
         }
         None
     }
