@@ -127,33 +127,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.emit_direct_call(function, &compiled_args, "enum_ctor")
     }
 
-    pub(in crate::codegen) fn compile_call_fn_ref(
-        &mut self,
-        fn_ref: BasicValueEnum<'ctx>,
-        arg_expr: &Expr,
-        payload: BasicValueEnum<'ctx>,
-        i64_ty: inkwell::types::IntType<'ctx>,
-    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match fn_ref {
-            BasicValueEnum::StructValue(_) => self.compile_closure_call(fn_ref, &[payload], None),
-            BasicValueEnum::PointerValue(_) => {
-                if let Expr::Ident(fn_name) = arg_expr {
-                    if let Some(func) = self.module.get_function(fn_name) {
-                        let call = self.build_call(
-                            func,
-                            &[BasicMetadataValueEnum::IntValue(payload.into_int_value())],
-                            "fn_call",
-                        )?;
-                        return Ok(call_try_basic_value(&call)
-                            .unwrap_or(BasicValueEnum::IntValue(i64_ty.const_int(0, false))));
-                    }
-                }
-                self.compile_closure_call(fn_ref, &[payload], None)
-            }
-            _ => Err("function reference must be a closure or function pointer".into()),
-        }
-    }
-
     /// Extract the LLVM return type of a closure-typed variable so that indirect
     /// calls use the correct ABI (especially for tuple/struct/float returns).
     fn closure_return_llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {

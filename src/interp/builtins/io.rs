@@ -541,9 +541,17 @@ impl<'a> Interpreter<'a> {
                                     if !params.is_empty() {
                                         self.push_scope();
                                         for (n, v) in captured {
-                                            self.bind(n, v.clone())?;
+                                            if let Err(e) = self.bind(n, v.clone()) {
+                                                self.pop_scope();
+                                                return Err(e);
+                                            }
                                         }
-                                        self.bind(&params[0].name, Value::String(line))?;
+                                        if let Err(e) =
+                                            self.bind(&params[0].name, Value::String(line))
+                                        {
+                                            self.pop_scope();
+                                            return Err(e);
+                                        }
                                         let _ = self.eval_block(body);
                                         self.pop_scope();
                                     }

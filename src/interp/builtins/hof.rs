@@ -25,10 +25,22 @@ impl<'a> Interpreter<'a> {
                     }
                     self.push_scope();
                     for (n, v) in captured {
-                        self.bind(n, v.clone())?;
+                        if let Err(e) = self.bind(n, v.clone()) {
+                            self.pop_scope();
+                            return Err(e);
+                        }
                     }
-                    self.bind(&params[0].name, item.clone())?;
-                    let val = self.eval_block(body)?;
+                    if let Err(e) = self.bind(&params[0].name, item.clone()) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
+                    let val = match self.eval_block(body) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.pop_scope();
+                            return Err(e);
+                        }
+                    };
                     self.pop_scope();
                     if self.early_return.is_some() {
                         break;
@@ -67,10 +79,22 @@ impl<'a> Interpreter<'a> {
                     }
                     self.push_scope();
                     for (n, v) in captured {
-                        self.bind(n, v.clone())?;
+                        if let Err(e) = self.bind(n, v.clone()) {
+                            self.pop_scope();
+                            return Err(e);
+                        }
                     }
-                    self.bind(&params[0].name, item.clone())?;
-                    let val = self.eval_block(body)?;
+                    if let Err(e) = self.bind(&params[0].name, item.clone()) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
+                    let val = match self.eval_block(body) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.pop_scope();
+                            return Err(e);
+                        }
+                    };
                     self.pop_scope();
                     if self.early_return.is_some() {
                         break;
@@ -113,11 +137,26 @@ impl<'a> Interpreter<'a> {
                     }
                     self.push_scope();
                     for (n, v) in captured {
-                        self.bind(n, v.clone())?;
+                        if let Err(e) = self.bind(n, v.clone()) {
+                            self.pop_scope();
+                            return Err(e);
+                        }
                     }
-                    self.bind(&params[0].name, acc.clone())?;
-                    self.bind(&params[1].name, item.clone())?;
-                    let val = self.eval_block(body)?;
+                    if let Err(e) = self.bind(&params[0].name, acc.clone()) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
+                    if let Err(e) = self.bind(&params[1].name, item.clone()) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
+                    let val = match self.eval_block(body) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.pop_scope();
+                            return Err(e);
+                        }
+                    };
                     self.pop_scope();
                     if self.early_return.is_some() {
                         break;

@@ -72,6 +72,7 @@ impl<'a> Checker<'a> {
             Stmt::If { cond, then_, else_ } => {
                 this.infer_if_expr(cond, then_, else_.as_ref(), scopes)
             }
+            Stmt::Block(inner) => this.infer_block_expr(inner, scopes),
             _ => {
                 this.check_stmt(last, ret, scopes);
                 Type::Name("unit".into(), vec![])
@@ -105,6 +106,7 @@ impl<'a> Checker<'a> {
                 };
                 this.check_expr(expected, &if_expr, scopes)
             }
+            Stmt::Block(inner) => this.check_block_expr(inner, expected, scopes),
             _ => {
                 this.check_stmt(last, ret, scopes);
                 Type::Name("unit".into(), vec![])

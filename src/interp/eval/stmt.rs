@@ -202,18 +202,31 @@ impl<'a> Interpreter<'a> {
             if let Some(bindings) = bindings {
                 self.push_scope();
                 for (name, v) in &bindings {
-                    self.bind(name, v.clone())?;
+                    if let Err(e) = self.bind(name, v.clone()) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
                 }
                 if self.early_return.is_some() {
                     self.pop_scope();
                     break;
                 }
-                self.check_invariants(body)?;
-                if let Some(v) = self.eval_block(body)? {
-                    // See eval_while: trailing Unit must not terminate the loop.
-                    if v != Value::Unit {
+                if let Err(e) = self.check_invariants(body) {
+                    self.pop_scope();
+                    return Err(e);
+                }
+                match self.eval_block(body) {
+                    Ok(Some(v)) => {
+                        // See eval_while: trailing Unit must not terminate the loop.
+                        if v != Value::Unit {
+                            self.pop_scope();
+                            return Ok(Some(v));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
                         self.pop_scope();
-                        return Ok(Some(v));
+                        return Err(e);
                     }
                 }
                 if self.early_return.is_some() {

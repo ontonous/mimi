@@ -64,10 +64,15 @@ impl<'a> Interpreter<'a> {
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
         for (p, a) in func.params.iter().zip(filled_args) {
             old_snapshots.insert(p.name.clone(), a.clone());
-            if p.mut_ {
-                self.bind_mut(&p.name, a)?;
+            let r = if p.mut_ {
+                self.bind_mut(&p.name, a)
             } else {
-                self.bind(&p.name, a)?;
+                self.bind(&p.name, a)
+            };
+            if let Err(e) = r {
+                self.pop_scope();
+                self.pop_call();
+                return Err(e);
             }
         }
 
@@ -75,7 +80,14 @@ impl<'a> Interpreter<'a> {
         if self.verify_contracts {
             for stmt in &func.body {
                 if let Stmt::Requires(expr, _) = stmt {
-                    let cond = self.eval_expr(expr)?;
+                    let cond = match self.eval_expr(expr) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.pop_scope();
+                            self.pop_call();
+                            return Err(e);
+                        }
+                    };
                     if !is_truthy(&cond) {
                         self.pop_scope();
                         self.pop_call();
@@ -106,10 +118,20 @@ impl<'a> Interpreter<'a> {
         if self.verify_contracts {
             if let Ok(Some(ref rv)) = result {
                 self.push_scope();
-                self.bind("result", rv.clone())?;
+                if let Err(e) = self.bind("result", rv.clone()) {
+                    self.pop_scope(); // pop ensures scope
+                    self.pop_scope(); // pop function scope
+                    self.pop_call();
+                    return Err(e);
+                }
                 // Bind old snapshots for old(x) access
                 for (name, val) in &old_snapshots {
-                    self.bind(&format!("old_{}", name), val.clone())?;
+                    if let Err(e) = self.bind(&format!("old_{}", name), val.clone()) {
+                        self.pop_scope(); // pop ensures scope
+                        self.pop_scope(); // pop function scope
+                        self.pop_call();
+                        return Err(e);
+                    }
                 }
                 let ensures_ok = (|| {
                     for stmt in &func.body {

@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::codegen::{CodeGenerator, VarEntry};
+use crate::codegen::{call_try_basic_value, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{
@@ -483,10 +483,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let merge_bb = self.context.append_basic_block(ctx.function, "ok_or_merge");
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
+        // Build Result<T,E> with the actual payload type for field 1.
         let result_sty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(i1_ty),
-                BasicTypeEnum::IntType(i64_ty),
+                ctx.payload_ty,
                 BasicTypeEnum::IntType(i64_ty),
             ],
             false,
@@ -527,7 +528,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         self.build_store(err_pad_gep, i64_ty.const_int(0, false))?;
         self.build_br(merge_bb)?;
-        // Err path: disc=0, ok=0, err=err_val
+        // Err path: disc=0, ok=zero/undef, err=err_val
         self.builder.position_at_end(err_bb);
         let disc_gep2 = self
             .gep()
@@ -548,7 +549,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "ok_pad_gep",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(ok_pad_gep, i64_ty.const_int(0, false))?;
+        let zero_payload = Self::zero_value_for_type(ctx.payload_ty, i64_ty);
+        self.build_store(ok_pad_gep, zero_payload)?;
         let err_gep = self
             .gep()
             .build_struct_gep(
@@ -579,6 +581,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("map requires a function argument".into());
         }
         let closure_val = self.compile_expr_or_func_ref(&args[0], vars)?;
+        let mapped_ty = self
+            .infer_fn_return_llvm_type(&args[0])
+            .unwrap_or(ctx.payload_ty);
+        let i1_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
+        let result_sty = if ctx.is_result {
+            self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(i1_ty),
+                    mapped_ty,
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            )
+        } else {
+            self.context
+                .struct_type(&[BasicTypeEnum::IntType(i1_ty), mapped_ty], false)
+        };
         let ok_bb = self
             .context
             .append_basic_block(ctx.function, "variant_map_ok");
@@ -588,23 +608,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let merge_bb = self
             .context
             .append_basic_block(ctx.function, "variant_map_merge");
-        let result_alloca = self.build_alloca(
-            BasicTypeEnum::StructType(ctx.variant_sty),
-            "variant_map_result",
-        )?;
+        let result_alloca =
+            self.build_alloca(BasicTypeEnum::StructType(result_sty), "variant_map_result")?;
         self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
-        // Err path: write Err variant {disc=0, ok=0, err=copy_from_source}
+        // Err path: write Err variant {disc=0, ok=undef, err=copy_from_source}
         self.builder.position_at_end(err_bb);
-        self.emit_variant_err_path(ctx.is_result, ctx.variant_sty, ctx.pv, result_alloca)?;
+        self.emit_variant_err_path(ctx.is_result, result_sty, ctx.pv, result_alloca)?;
         self.build_br(merge_bb)?;
         // Ok path: call fn(payload), write Ok variant {disc=1, ok=mapped}
         self.builder.position_at_end(ok_bb);
         let mapped =
-            self.compile_call_fn_ref(closure_val, &args[0], ctx.payload, self.context.i64_type())?;
+            self.compile_map_closure_call(closure_val, &args[0], ctx.payload, mapped_ty)?;
         let d_gep_o = self
             .gep()
             .build_struct_gep(
-                BasicTypeEnum::StructType(ctx.variant_sty),
+                BasicTypeEnum::StructType(result_sty),
                 result_alloca,
                 0,
                 "d_gep_o",
@@ -614,7 +632,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let o_gep_o = self
             .gep()
             .build_struct_gep(
-                BasicTypeEnum::StructType(ctx.variant_sty),
+                BasicTypeEnum::StructType(result_sty),
                 result_alloca,
                 1,
                 "o_gep_o",
@@ -624,10 +642,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_br(merge_bb)?;
         self.builder.position_at_end(merge_bb);
         self.build_load(
-            BasicTypeEnum::StructType(ctx.variant_sty),
+            BasicTypeEnum::StructType(result_sty),
             result_alloca,
             "variant_map_val",
         )
+    }
+
+    /// Call a function/closure value that takes a single payload argument and
+    /// returns a value of type `ret_ty`.  Handles both named functions (via
+    /// `build_call`) and closure/function-pointer values (via
+    /// `compile_closure_call`).
+    fn compile_map_closure_call(
+        &mut self,
+        fn_val: BasicValueEnum<'ctx>,
+        fn_expr: &Expr,
+        payload: BasicValueEnum<'ctx>,
+        ret_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match fn_val {
+            BasicValueEnum::PointerValue(_) => {
+                if let Expr::Ident(name) = fn_expr {
+                    if let Some(func) = self.module.get_function(name) {
+                        let meta = crate::codegen::types::basic_value_to_metadata_value(
+                            &payload,
+                            self.context.i64_type(),
+                        );
+                        let call = self
+                            .builder
+                            .build_call(func, &[meta], "map_call")
+                            .map_err(|e| CompileError::LlvmError(format!("map call: {}", e)))?;
+                        return Ok(call_try_basic_value(&call).unwrap_or(
+                            BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
+                        ));
+                    }
+                }
+                self.compile_closure_call(fn_val, &[payload], Some(ret_ty))
+            }
+            BasicValueEnum::StructValue(_) => {
+                self.compile_closure_call(fn_val, &[payload], Some(ret_ty))
+            }
+            _ => Err("map: expected a closure or function reference".into()),
+        }
     }
 
     /// Compiles `.and_then(fn)` for Option/Result-like values.
@@ -640,7 +695,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         if args.is_empty() {
             return Err("and_then requires a function argument".into());
         }
-        let closure_val = self.compile_expr_or_func_ref(&args[0], vars)?;
+        let fn_val = self.compile_expr_or_func_ref(&args[0], vars)?;
+        let fn_ret_llvm = self.infer_fn_return_llvm_type(&args[0]);
+        let result_sty = fn_ret_llvm
+            .and_then(|rt| {
+                if let BasicTypeEnum::StructType(st) = rt {
+                    Some(st)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ctx.variant_sty);
         let ok_bb = self
             .context
             .append_basic_block(ctx.function, "variant_and_then_ok");
@@ -651,18 +716,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .context
             .append_basic_block(ctx.function, "variant_and_then_merge");
         let result_alloca = self.build_alloca(
-            BasicTypeEnum::StructType(ctx.variant_sty),
+            BasicTypeEnum::StructType(result_sty),
             "variant_and_then_result",
         )?;
         self.build_cond_br(ctx.disc, ok_bb, err_bb)?;
-        // Err path: write Err variant {disc=0, ok=0, err=copy_from_source}
+        // Err path: write Err variant {disc=0, ok=undef, err=copy_from_source}
         self.builder.position_at_end(err_bb);
-        self.emit_variant_err_path(ctx.is_result, ctx.variant_sty, ctx.pv, result_alloca)?;
+        self.emit_variant_err_path(ctx.is_result, result_sty, ctx.pv, result_alloca)?;
         self.build_br(merge_bb)?;
         // Ok path: call fn(payload), store resulting variant into result_alloca
         self.builder.position_at_end(ok_bb);
         let fn_result =
-            self.compile_call_fn_ref(closure_val, &args[0], ctx.payload, self.context.i64_type())?;
+            self.compile_and_then_closure_call(fn_val, &args[0], ctx.payload, fn_ret_llvm)?;
         match fn_result {
             BasicValueEnum::StructValue(sv) => {
                 self.build_store(result_alloca, sv)?;
@@ -672,10 +737,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_br(merge_bb)?;
         self.builder.position_at_end(merge_bb);
         self.build_load(
-            BasicTypeEnum::StructType(ctx.variant_sty),
+            BasicTypeEnum::StructType(result_sty),
             result_alloca,
             "variant_and_then_val",
         )
+    }
+
+    /// Call a function/closure that takes a single payload argument and returns
+    /// a variant struct (used by `and_then`).  Handles both named functions
+    /// (via `build_call`) and closure/function-pointer values (via
+    /// `compile_closure_call`).
+    fn compile_and_then_closure_call(
+        &mut self,
+        fn_val: BasicValueEnum<'ctx>,
+        fn_expr: &Expr,
+        payload: BasicValueEnum<'ctx>,
+        ret_ty: Option<BasicTypeEnum<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match fn_val {
+            BasicValueEnum::PointerValue(_) => {
+                if let Expr::Ident(name) = fn_expr {
+                    if let Some(func) = self.module.get_function(name) {
+                        let meta = crate::codegen::types::basic_value_to_metadata_value(
+                            &payload,
+                            self.context.i64_type(),
+                        );
+                        let call = self
+                            .builder
+                            .build_call(func, &[meta], "and_then_call")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("and_then call: {}", e))
+                            })?;
+                        return Ok(call_try_basic_value(&call).unwrap_or(
+                            BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
+                        ));
+                    }
+                }
+                self.compile_closure_call(fn_val, &[payload], ret_ty)
+            }
+            BasicValueEnum::StructValue(_) => self.compile_closure_call(fn_val, &[payload], ret_ty),
+            _ => Err("and_then: expected a closure or function reference".into()),
+        }
     }
 
     /// Compiles `.map_err(fn)` for Result-like values.
@@ -725,6 +827,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CompileError> {
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
+        let fields = variant_sty.get_field_types();
         let d_gep_e = self
             .gep()
             .build_struct_gep(
@@ -744,7 +847,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "o_gep_e",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(o_gep_e, i64_ty.const_int(0, false))?;
+        let zero_payload = Self::zero_value_for_type(fields[1], i64_ty);
+        self.build_store(o_gep_e, zero_payload)?;
         if is_result {
             let src_err_gep = self
                 .gep()
@@ -764,5 +868,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(dst_err_gep, err_val)?;
         }
         Ok(())
+    }
+
+    /// Create a zero/null/undef value appropriate for the given LLVM type.
+    fn zero_value_for_type(
+        ty: BasicTypeEnum<'ctx>,
+        i64_ty: inkwell::types::IntType<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match ty {
+            BasicTypeEnum::IntType(it) => it.const_zero().into(),
+            BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+            BasicTypeEnum::StructType(st) => st.get_undef().into(),
+            BasicTypeEnum::ArrayType(at) => at.get_undef().into(),
+            _ => i64_ty.const_zero().into(),
+        }
+    }
+
+    /// Infer the LLVM return type of a function/closure expression used as
+    /// the argument to `map` / `and_then` from the Mimi type system.
+    /// Returns `None` when the type cannot be determined (fall back to
+    /// `ctx.payload_ty`).
+    fn infer_fn_return_llvm_type(&self, fn_expr: &Expr) -> Option<BasicTypeEnum<'ctx>> {
+        if let Expr::Ident(name) = fn_expr {
+            if let Some(ty) = self.var_types.get(name) {
+                let ret = match ty {
+                    Type::Func(_, ret) | Type::ExternFunc(_, ret) => Some(ret.as_ref()),
+                    _ => None,
+                };
+                if let Some(ret) = ret {
+                    return self.llvm_type_for(ret);
+                }
+            }
+        }
+        None
     }
 }
