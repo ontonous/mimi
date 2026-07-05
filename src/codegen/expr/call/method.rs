@@ -644,7 +644,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         for arg in args {
             compiled_args.push(self.compile_expr(arg, vars)?);
         }
-        let metadata_args = self.values_to_metadata(&compiled_args);
+        let call_args = CodeGenerator::maybe_pack_enum_ctor_args(self, &compiled_args, function)?;
+        let metadata_args = self.values_to_metadata(&call_args);
         let call = self.build_call(function, &metadata_args, "enum_ctor")?;
         Ok(call_try_basic_value(&call)
             .unwrap_or(self.context.i64_type().const_int(0, false).into()))

@@ -124,7 +124,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_function(&ctor_name)
             .ok_or_else(|| format!("enum constructor '{}' not registered", ctor_name))?;
         let compiled_args = self.compile_arg_values(args, vars)?;
-        self.emit_direct_call(function, &compiled_args, "enum_ctor")
+        let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
+        self.emit_direct_call(function, &call_args, "enum_ctor")
+    }
+
+    /// If an enum constructor expects a single packed struct (multi-field variant),
+    /// pack the individual arguments into that struct. Otherwise return the args unchanged.
+    pub(in crate::codegen) fn maybe_pack_enum_ctor_args(
+        &mut self,
+        compiled_args: &[BasicValueEnum<'ctx>],
+        function: inkwell::values::FunctionValue<'ctx>,
+    ) -> Result<Vec<BasicValueEnum<'ctx>>, CompileError> {
+        if compiled_args.len() > 1 && function.count_params() == 1 {
+            let param = function
+                .get_nth_param(0)
+                .ok_or_else(|| CompileError::LlvmError("expected at least one param".into()))?;
+            if let BasicValueEnum::StructValue(first_sv) = param {
+                let struct_ty = first_sv.get_type();
+                let mut struct_val = struct_ty.get_undef();
+                for (i, arg) in compiled_args.iter().enumerate() {
+                    let agg = self
+                        .builder
+                        .build_insert_value(struct_val, *arg, i as u32, "packed_field")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("pack enum ctor arg {}: {}", i, e))
+                        })?;
+                    struct_val = agg.into_struct_value();
+                }
+                return Ok(vec![BasicValueEnum::StructValue(struct_val)]);
+            }
+        }
+        Ok(compiled_args.to_vec())
     }
 
     /// Extract the LLVM return type of a closure-typed variable so that indirect
@@ -451,7 +481,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some((type_name, _ordinal)) = self.find_variant_owner(name) {
             let ctor_name = format!("{}_{}", type_name, name);
             if let Some(function) = self.module.get_function(&ctor_name) {
-                let call = self.build_call(function, &metadata_args, "call")?;
+                let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
+                let packed_meta: Vec<_> = call_args
+                    .iter()
+                    .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
+                    .collect();
+                let call = self.build_call(function, &packed_meta, "call")?;
                 return Ok(call_try_basic_value(&call)
                     .unwrap_or(self.context.i64_type().const_int(0, false).into()));
             }

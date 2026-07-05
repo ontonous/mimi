@@ -342,6 +342,8 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 define i64 @main() {
 entry:
   %list = alloca { i64, ptr }, align 8
+  %heap_slot_null_init = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
+  store ptr null, ptr %heap_slot_null_init, align 8
   %malloc_call = call ptr @malloc(i64 24)
   %elem = getelementptr inbounds i64, ptr %malloc_call, i64 0
   store i64 1, ptr %elem, align 4

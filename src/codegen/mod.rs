@@ -967,6 +967,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         struct_ty: inkwell::types::StructType<'ctx>,
         field: u32,
     ) {
+        // Null-initialise the pointer field in the entry block so that
+        // free_heap_allocs on a never-allocated path is a safe no-op free(null).
+        self.emit_null_field_store_at_entry(base, struct_ty, field);
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
             stack.push(HeapEntry::Slot(base, struct_ty, field));
         }
@@ -1027,6 +1030,47 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) {
         if let Some(scopes) = self.heap_allocs.borrow_mut().first_mut() {
             scopes.push(HeapEntry::Slot(base, struct_ty, field));
+        }
+    }
+
+    /// Null-initialise a struct field (pointer-typed) in the entry block,
+    /// immediately after the struct alloca.  This guarantees that field loads
+    /// in the matchcont cleanup block see null when the allocating arm was
+    /// never taken, making free(null) a safe no-op.
+    fn emit_null_field_store_at_entry(
+        &self,
+        base: inkwell::values::PointerValue<'ctx>,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        field: u32,
+    ) {
+        let saved = self.builder.get_insert_block();
+        if let Some(f) = self.current_function() {
+            if let Some(entry_bb) = f.get_first_basic_block() {
+                let null_ptr = self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null();
+                if let Some(alloca_inst) = entry_bb.get_first_instruction() {
+                    self.builder.position_before(&alloca_inst);
+                    if let Some(next) = alloca_inst.get_next_instruction() {
+                        self.builder.position_before(&next);
+                    } else {
+                        self.builder.position_at_end(entry_bb);
+                    }
+                } else {
+                    self.builder.position_at_end(entry_bb);
+                }
+                let gep = self
+                    .gep()
+                    .build_struct_gep(struct_ty, base, field, "heap_slot_null_init")
+                    .ok();
+                if let Some(gep_val) = gep {
+                    let _ = self.builder.build_store(gep_val, null_ptr);
+                }
+                if let Some(saved_bb) = saved {
+                    self.builder.position_at_end(saved_bb);
+                }
+            }
         }
     }
 
