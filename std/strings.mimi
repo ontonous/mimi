@@ -108,7 +108,7 @@ pub func index_of(s: string, sub: string) -> Option<i32> {
 }
 
 // parse_int: Parses s as integer. Returns (true, val) on success.
-pub func parse_int(s: string) -> (bool, i32) {
+pub func parse_int(s: string) -> (bool, i64) {
     str_parse_int(s)
 }
 

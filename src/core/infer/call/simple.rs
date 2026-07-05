@@ -1188,7 +1188,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Tuple(vec![
                     Type::Name("bool".into(), vec![]),
-                    Type::Name("i32".into(), vec![]),
+                    Type::Name("i64".into(), vec![]),
                 ]);
             }
             "str_parse_float" => {

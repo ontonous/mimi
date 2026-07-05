@@ -81,7 +81,7 @@ func main() -> i32 {
 '''
 
 tests["core_try_operator.mimi"] = r'''
-type Res { Ok(i32) | Err(string) }
+type Res { Ok(i64) | Err(string) }
 
 func parse_pos(s: string) -> Res {
     let p = str_parse_int(s)
@@ -99,7 +99,7 @@ func half_of(s: string) -> Res {
 
 func main() -> i32 {
     match half_of("20") {
-        Ok(10) => 0,
+        Ok(n) => if n == 10 { 0 } else { 1 },
         _ => 1
     }
 }
