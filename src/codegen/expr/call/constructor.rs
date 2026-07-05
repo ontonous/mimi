@@ -1094,7 +1094,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Return a zero-initialised `BasicValueEnum` for a given `BasicTypeEnum`.
-    fn const_zero_for_type(&self, ty: BasicTypeEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    pub(in crate::codegen) fn const_zero_for_type(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         match ty {
             BasicTypeEnum::IntType(it) => it.const_zero().into(),
             BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),

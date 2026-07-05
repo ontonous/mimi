@@ -748,9 +748,20 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Value mode: build a phi of the values produced by each reaching branch.
         self.builder.position_at_end(merge_bb);
-        let default_val = self.context.i64_type().const_int(0, false).into();
-        let then_val = then_val.unwrap_or(default_val);
-        let else_val = else_val.unwrap_or(default_val);
+        let default_i64 = self.context.i64_type().const_int(0, false).into();
+        let then_val = then_val.unwrap_or(default_i64);
+        let else_val = else_val.unwrap_or(default_i64);
+        // Determine the authoritative phi type from the then branch's value.
+        let phi_type = then_val.get_type();
+        // If the else branch's value has a different type (e.g. then is a struct
+        // but else fell through with i64 0 because there was no else block),
+        // promote the else value to a zero of the phi type to avoid LLVM
+        // physreg COPY errors from type-mismatched phi nodes.
+        let else_val = if else_val.get_type() != phi_type {
+            self.const_zero_for_type(phi_type)
+        } else {
+            else_val
+        };
         let mut incoming: Vec<(
             &dyn inkwell::values::BasicValue<'ctx>,
             inkwell::basic_block::BasicBlock<'ctx>,
@@ -764,7 +775,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !incoming.is_empty() {
             let phi = self
                 .builder
-                .build_phi(then_val.get_type(), "if_lastval")
+                .build_phi(phi_type, "if_lastval")
                 .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
             phi.add_incoming(&incoming);
             Ok(Some(phi.as_basic_value()))

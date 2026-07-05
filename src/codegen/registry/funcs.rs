@@ -752,11 +752,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(retain_fn) = self.module.get_function("mimi_shared_retain") {
                     let param_i64 = match param {
                         BasicValueEnum::IntValue(iv) => iv,
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_{}", i))
-                            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                            .into_int_value(),
+                        BasicValueEnum::PointerValue(pv) => {
+                            self.build_ptr_to_int(pv, i64_ty, &format!("ptr_to_i64_{}", i))?
+                        }
                         _ => {
                             return Err(CompileError::TypeMismatch(format!(
                                 "c_shared/c_borrow param {} must be pointer or int",
@@ -1506,11 +1504,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
                 let param_i64 = match orig_param {
                     BasicValueEnum::IntValue(iv) => iv,
-                    BasicValueEnum::PointerValue(pv) => self
-                        .builder
-                        .build_bit_cast(pv, i64_ty, &format!("ptr_to_i64_rel_{}", i))
-                        .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-                        .into_int_value(),
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.build_ptr_to_int(pv, i64_ty, &format!("ptr_to_i64_rel_{}", i))?
+                    }
                     _ => {
                         return Err(CompileError::TypeMismatch(format!(
                             "c_shared/c_borrow param {} must be pointer or int",
