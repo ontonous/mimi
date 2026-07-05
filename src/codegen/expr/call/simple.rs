@@ -938,7 +938,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 break;
             }
             if let Some(target) = self.llvm_type_for(&param.ty) {
-                args[i] = self.adjust_int_val(args[i], target)?;
+                // When a pointer to a struct is passed where a struct by value
+                // is expected, load the struct from the pointer. This happens
+                // when record/tuple expressions (which compile to alloca
+                // pointers) are passed as function call arguments. Without this
+                // load, LLVM receives a pointer value but treats its bytes as
+                // the struct fields, producing garbage output.
+                //
+                // Skip the load when the parameter has a function type (func(..)):
+                // the argument is a function pointer (e.g. @sum_first_two) which
+                // points to machine code, not to a {ptr, ptr} closure struct.
+                if let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(sty)) =
+                    (args[i], target)
+                {
+                    if !matches!(&param.ty, Type::Func(..) | Type::ExternFunc(..)) {
+                        args[i] = self.build_load(
+                            BasicTypeEnum::StructType(sty),
+                            pv,
+                            &format!("{}_arg_load", param.name),
+                        )?;
+                    } else {
+                        args[i] = self.adjust_int_val(args[i], target)?;
+                    }
+                } else {
+                    args[i] = self.adjust_int_val(args[i], target)?;
+                }
             }
         }
         Ok(())

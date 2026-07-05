@@ -223,22 +223,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Pattern::Tuple(inner_pats) => {
                 // For tuple patterns, bind inner variables by loading from struct.
-                // Use the tuple type stack to obtain the real element types.
-                let struct_ty = *self.tuple_type_stack.last().ok_or_else(|| {
-                    CompileError::LlvmError(
-                        "tuple_type_stack empty for tuple pattern bind".to_string(),
-                    )
-                })?;
-                let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
-                let scrutinee_ptr = match scrutinee_val {
-                    BasicValueEnum::PointerValue(pv) => pv,
+                // Prefer the actual struct type from the scrutinee value when available,
+                // falling back to tuple_type_stack only for PointerValue scrutinees.
+                let (struct_ty, scrutinee_ptr) = match scrutinee_val {
                     BasicValueEnum::StructValue(sv) => {
-                        let alloca = self.build_alloca(struct_ty, "tuple_alloca")?;
+                        let actual_ty = sv.get_type();
+                        let alloca = self.build_alloca(actual_ty, "tuple_alloca")?;
                         self.build_store(alloca, sv)?;
-                        alloca
+                        (actual_ty, alloca)
+                    }
+                    BasicValueEnum::PointerValue(pv) => {
+                        let stack_ty = *self.tuple_type_stack.last().ok_or_else(|| {
+                            CompileError::LlvmError(
+                                "tuple_type_stack empty for tuple pattern bind".to_string(),
+                            )
+                        })?;
+                        (stack_ty, pv)
                     }
                     _ => return Ok(local_vars),
                 };
+                let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
                     if let Pattern::Variable(name) = inner_pat {
                         let elem_ty = struct_ty
