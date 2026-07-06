@@ -307,7 +307,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .get(func_name)
                                             .map(|fdef| (fdef.ret.clone(), fdef.is_async))
                                         {
-                                            eprintln!("DBG let-binding: found func '{}' with ret_ty={:?} type_map={:?}", func_name, ret_ty, self.type_map);
                                             if let Some(ret_ty) = ret_ty {
                                                 match &ret_ty {
                                                     Type::ImplTrait(traits) => {

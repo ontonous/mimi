@@ -606,25 +606,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| {
                         CompileError::LlvmError(format!("comptime string global: {}", e))
                     })?;
-                let ptr = global.as_pointer_value();
-                let len = self.context.i64_type().const_int(s.len() as u64, false);
-                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let str_ty = self.context.struct_type(
-                    &[
-                        inkwell::types::BasicTypeEnum::PointerType(i8_ptr_ty),
-                        inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
-                    ],
-                    false,
-                );
-                let sv = self
-                    .builder
-                    .build_insert_value(str_ty.get_undef(), ptr, 0, "cs_str_data")
-                    .map_err(|e| CompileError::LlvmError(format!("insert cs str ptr: {}", e)))?;
-                let sv = self
-                    .builder
-                    .build_insert_value(sv, len, 1, "cs_str_len")
-                    .map_err(|e| CompileError::LlvmError(format!("insert cs str len: {}", e)))?;
-                Ok(sv.into_struct_value().into())
+                Ok(BasicValueEnum::PointerValue(global.as_pointer_value()))
             }
             other => Err(CompileError::Generic(format!(
                 "comptime fold: unsupported runtime value type {:?}; \
@@ -885,25 +867,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Lit::Bool(v) => Some(self.context.bool_type().const_int(*v as u64, false).into()),
             Lit::String(s) => {
                 let global = self.builder.build_global_string_ptr(s, "str").ok()?;
-                let ptr = global.as_pointer_value();
-                let len = self.context.i64_type().const_int(s.len() as u64, false);
-                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let str_ty = self.context.struct_type(
-                    &[
-                        inkwell::types::BasicTypeEnum::PointerType(i8_ptr_ty),
-                        inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
-                    ],
-                    false,
-                );
-                let sv = self
-                    .builder
-                    .build_insert_value(str_ty.get_undef(), ptr, 0, "c_str_data")
-                    .ok()?;
-                let sv = self
-                    .builder
-                    .build_insert_value(sv, len, 1, "c_str_len")
-                    .ok()?;
-                Some(sv.into_struct_value().into())
+                Some(global.as_pointer_value().into())
             }
             Lit::Unit => Some(self.context.i64_type().const_int(0, false).into()),
             Lit::FString(_) => None,
@@ -980,12 +944,24 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Convert any basic value to an i64 ValueHandle for map storage.
+    /// Integers are tagged with bit 0 = 1 (encoded as (val << 1) | 1).
+    /// Pointers are stored directly (bit 0 = 0, since pointers are aligned).
+    /// The tag allows `mimi_any_to_string` to distinguish int from pointer.
     fn any_value_to_handle(
         &self,
         val: BasicValueEnum<'ctx>,
     ) -> Result<IntValue<'ctx>, CompileError> {
         Ok(match val {
-            BasicValueEnum::IntValue(iv) => iv,
+            BasicValueEnum::IntValue(iv) => {
+                let i64_ty = self.context.i64_type();
+                let shifted = self
+                    .builder
+                    .build_left_shift(iv, i64_ty.const_int(1, false), "tag_shift")
+                    .map_err(|e| CompileError::LlvmError(format!("tag shift: {}", e)))?;
+                self.builder
+                    .build_or(shifted, i64_ty.const_int(1, false), "tag_int")
+                    .map_err(|e| CompileError::LlvmError(format!("tag or: {}", e)))?
+            }
             BasicValueEnum::PointerValue(pv) => {
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_handle")?
             }

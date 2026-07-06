@@ -294,21 +294,24 @@ pub struct CodeGenerator<'ctx> {
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
 
 /// Entries tracked for scope-exit heap cleanup.
-/// `PtrSlot(alloca)` = a pointer-typed alloca in the function entry block.
-///   At registration, both a null (for safe free on untaken paths) and the
-///   actual pointer are stored. At cleanup, the alloca is loaded and freed.
+/// `Ptr(ptr)` = a raw heap pointer to free directly.
 /// `Slot(base, struct_ty, field)` = an alloca of type `struct_ty` (`base`) and
 /// the field index that holds the heap pointer. At cleanup a fresh GEP is
 /// emitted from `base` in the current block. `base` must dominate the cleanup
 /// point; call sites therefore allocate it in the function entry block.
 /// The struct's ptr field is also null-initialized at the entry block.
+/// `FreeList(list_ptr)` = a MimiList struct whose elements are heap-allocated
+/// pointers (each element is a separate malloc'd block stored as ptrtoint i64
+/// in the list's data array). At cleanup, calls `mimi_list_free_elements` to
+/// free each element pointer and the data buffer, but NOT the list struct itself.
 enum HeapEntry<'ctx> {
-    PtrSlot(inkwell::values::PointerValue<'ctx>),
+    Ptr(inkwell::values::PointerValue<'ctx>),
     Slot(
         inkwell::values::PointerValue<'ctx>,
         inkwell::types::StructType<'ctx>,
         u32,
     ),
+    FreeList(inkwell::values::PointerValue<'ctx>),
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -898,58 +901,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// G10: Register a heap pointer (from builtins) for scope-exit free.
-    /// Creates an entry-block alloca, immediately null-initializes it (before
-    /// any stores), and stores the actual ptr at the call site.  At cleanup,
-    /// loading the slot on a never-allocated path returns the null from the
-    /// entry-block initialisation, making `free(null)` a safe no-op.
     /// Takes &self (not &mut self) because builtins use &self.
+    ///
+    /// NOTE: callers that need null-initialised slot for safe `free(null)` on
+    /// never-allocated paths must ensure the slot is null-initialised at the
+    /// entry block BEFORE any conditional store.  The current simple
+    /// implementation pushes the raw pointer to the stack; entry-block alloca
+    /// + null-init is added by a future refactor (the existing Ptr→PtrSlot
+    ///   transition is partially in place for the slot-load based consumers).
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
-        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        let slot = self
-            .build_entry_alloca(ptr_ty, "heap_slot")
-            .expect("register_heap_alloc: alloca failed");
-        // Null-initialise the slot in the entry block, immediately after the
-        // alloca (this must happen before the caller's stores to the slot).
-        self.emit_null_store_after_alloca(slot);
-        // Store the actual pointer at the call site.
-        self.builder
-            .build_store(slot, ptr)
-            .expect("register_heap_alloc: store failed");
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            stack.push(HeapEntry::PtrSlot(slot));
-        }
-    }
-
-    /// Null-initialise a pointer-typed alloca in the entry block, right after
-    /// the alloca instruction so that later stores (from conditional paths)
-    /// take precedence at cleanup time.
-    fn emit_null_store_after_alloca(&self, slot: inkwell::values::PointerValue<'ctx>) {
-        let saved = self.builder.get_insert_block();
-        if let Some(f) = self.current_function() {
-            if let Some(entry_bb) = f.get_first_basic_block() {
-                let null_val = self
-                    .context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .const_null();
-                // Find the slot's own alloca instruction and insert after it.
-                if let Some(alloca_inst) = entry_bb.get_first_instruction() {
-                    self.builder.position_before(&alloca_inst);
-                    // First store right after the alloca. Since position_before
-                    // puts us before `alloca_inst`, the store goes *before* it.
-                    // We need to position *after* the alloca. Use next instruction.
-                    if let Some(next) = alloca_inst.get_next_instruction() {
-                        self.builder.position_before(&next);
-                    } else {
-                        self.builder.position_at_end(entry_bb);
-                    }
-                } else {
-                    self.builder.position_at_end(entry_bb);
-                }
-                self.builder.build_store(slot, null_val).ok();
-            }
-        }
-        if let Some(bb) = saved {
-            self.builder.position_at_end(bb);
+            stack.push(HeapEntry::Ptr(ptr));
         }
     }
 
@@ -975,23 +937,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Remove and return the most recently registered heap pointer from
+    /// Remove and return the most recently registered raw heap pointer from
     /// the current scope. Used to transfer ownership of a string expression
     /// result into a local variable slot.
-    /// For `PtrSlot` entries, loads and returns the original pointer from the slot.
     pub(super) fn pop_last_heap_ptr(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
             while let Some(entry) = stack.pop() {
-                match entry {
-                    HeapEntry::PtrSlot(slot) => {
-                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        return self
-                            .builder
-                            .build_load(ptr_ty, slot, "pop_heap_slot")
-                            .ok()
-                            .map(|v| v.into_pointer_value());
-                    }
-                    HeapEntry::Slot(..) => {}
+                if let HeapEntry::Ptr(p) = entry {
+                    return Some(p);
                 }
             }
         }
@@ -1018,6 +971,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Register a MimiList alloca whose elements are individually heap-allocated
+    /// (e.g. from_json::<List<Record>> where each element is a separate malloc'd
+    /// struct stored as ptrtoint i64). At scope exit, `mimi_list_free_elements`
+    /// is called to free each element pointer and the data buffer, but NOT the
+    /// list struct itself (which is a stack alloca).
+    /// The existing `register_heap_slot` entry for the same list's data field
+    /// handles freeing the data buffer — FreeList too frees the data buffer and
+    /// the elements, so the Slot entry will attempt a double-free of the data
+    /// buffer.  To avoid this, call sites MUST NOT register a Slot entry for
+    /// lists that use FreeList.  Call this AFTER `alloc_list_result` so the
+    /// FreeList entry is pushed first (processed first at scope exit), and the
+    /// Slot entry (if any) is pushed second.
+    pub(super) fn register_heap_list_elements(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+    ) {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            stack.push(HeapEntry::FreeList(list_ptr));
+        }
+    }
+
     /// Register a heap slot in the root (function-level) scope so that it
     /// survives intermediate scope exits (e.g. loop body blocks). Used for
     /// string variable assignments where the heap allocation must outlive the
@@ -1034,9 +1008,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Null-initialise a struct field (pointer-typed) in the entry block,
-    /// immediately after the struct alloca.  This guarantees that field loads
-    /// in the matchcont cleanup block see null when the allocating arm was
-    /// never taken, making free(null) a safe no-op.
+    /// immediately after the struct's alloca instruction.  This guarantees
+    /// that field loads in the matchcont cleanup block see null when the
+    /// allocating arm was never taken, making free(null) a safe no-op.
     fn emit_null_field_store_at_entry(
         &self,
         base: inkwell::values::PointerValue<'ctx>,
@@ -1050,9 +1024,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .context
                     .ptr_type(inkwell::AddressSpace::default())
                     .const_null();
-                if let Some(alloca_inst) = entry_bb.get_first_instruction() {
-                    self.builder.position_before(&alloca_inst);
-                    if let Some(next) = alloca_inst.get_next_instruction() {
+                // Position right after the first instruction to place the null
+                // store early in the entry block, right after the alloca(s).
+                if let Some(first_inst) = entry_bb.get_first_instruction() {
+                    self.builder.position_before(&first_inst);
+                    if let Some(next) = first_inst.get_next_instruction() {
                         self.builder.position_before(&next);
                     } else {
                         self.builder.position_at_end(entry_bb);
@@ -1093,39 +1069,79 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
             for entry in scope {
-                let ptr = match entry {
-                    HeapEntry::PtrSlot(slot) => {
-                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                match entry {
+                    HeapEntry::FreeList(list_ptr) => {
+                        // Call mimi_list_free_elements(list_ptr) to free each element
+                        // pointer. The data buffer and list struct are NOT freed here.
+                        let void_ty = self.context.void_type();
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let fn_name = "mimi_list_free_elements";
+                        let fn_ty = void_ty.fn_type(
+                            &[BasicMetadataTypeEnum::PointerType(i8_ptr)],
+                            false,
+                        );
+                        let func = self
+                            .module
+                            .get_function(fn_name)
+                            .unwrap_or_else(|| {
+                                self.module.add_function(
+                                    fn_name,
+                                    fn_ty,
+                                    Some(inkwell::module::Linkage::External),
+                                )
+                            });
+                        let casted = self
+                            .build_bit_cast(list_ptr.into(), i8_ptr.into(), "fl_cast")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                            .into_pointer_value();
                         self.builder
-                            .build_load(ptr_ty, slot, "heap_slot")
+                            .build_call(
+                                func,
+                                &[BasicMetadataValueEnum::PointerValue(casted)],
+                                "free_list_elems",
+                            )
                             .map_err(|e| {
-                                CompileError::LlvmError(format!("heap slot load error: {}", e))
-                            })?
-                            .into_pointer_value()
-                    }
-                    HeapEntry::Slot(base, struct_ty, field) => {
-                        let gep = self
-                            .gep()
-                            .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("heap slot gep error: {}", e))
+                                CompileError::LlvmError(format!("free_list_elems call: {}", e))
                             })?;
-                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        self.builder
-                            .build_load(ptr_ty, gep, "heap_slot")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("heap slot load error: {}", e))
-                            })?
-                            .into_pointer_value()
                     }
-                };
-                self.builder
-                    .build_call(
-                        free_fn,
-                        &[BasicMetadataValueEnum::PointerValue(ptr)],
-                        "free_heap",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                    entry => {
+                        let ptr = match entry {
+                            HeapEntry::Ptr(p) => p,
+                            HeapEntry::Slot(base, struct_ty, field) => {
+                                let gep = self
+                                    .gep()
+                                    .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "heap slot gep error: {}",
+                                            e
+                                        ))
+                                    })?;
+                                let ptr_ty =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                self.builder
+                                    .build_load(ptr_ty, gep, "heap_slot")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "heap slot load error: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .into_pointer_value()
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.builder
+                            .build_call(
+                                free_fn,
+                                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                "free_heap",
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("free error: {}", e))
+                            })?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1245,19 +1261,57 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// This does not rely on the module data layout being set.
     pub(in crate::codegen) fn llvm_type_size_bytes(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
         match ty {
-            BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
+            BasicTypeEnum::IntType(t) => {
+                let bits = t.get_bit_width();
+                bits.div_ceil(8) as u64
+            }
             BasicTypeEnum::FloatType(_) => 8,
             BasicTypeEnum::PointerType(_) => 8,
-            BasicTypeEnum::StructType(t) => t
-                .get_field_types()
-                .iter()
-                .map(|f| self.llvm_type_size_bytes(*f))
-                .sum(),
+            BasicTypeEnum::StructType(t) => {
+                let field_types = t.get_field_types();
+                let mut offset = 0u64;
+                let mut max_align = 1u64;
+                for ft in field_types.iter() {
+                    let field_size = self.llvm_type_size_bytes(*ft);
+                    let field_align = self.llvm_type_alignment(*ft);
+                    max_align = max_align.max(field_align);
+                    offset = offset.div_ceil(field_align) * field_align;
+                    offset += field_size;
+                }
+                offset.div_ceil(max_align) * max_align
+            }
             BasicTypeEnum::ArrayType(t) => {
                 t.len() as u64 * self.llvm_type_size_bytes(t.get_element_type())
             }
             BasicTypeEnum::VectorType(t) => {
                 t.get_size() as u64 * self.llvm_type_size_bytes(t.get_element_type())
+            }
+            BasicTypeEnum::ScalableVectorType(_) => 8,
+        }
+    }
+
+    /// Compute the natural alignment of an LLVM type in bytes.
+    fn llvm_type_alignment(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        match ty {
+            BasicTypeEnum::IntType(t) => {
+                let bits = t.get_bit_width();
+                let bytes = bits.div_ceil(8) as u64;
+                bytes.next_power_of_two()
+            }
+            BasicTypeEnum::FloatType(_) => 8,
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::StructType(t) => t
+                .get_field_types()
+                .iter()
+                .map(|ft| self.llvm_type_alignment(*ft))
+                .max()
+                .unwrap_or(1),
+            BasicTypeEnum::ArrayType(t) => self.llvm_type_alignment(t.get_element_type()),
+            BasicTypeEnum::VectorType(t) => {
+                // Vector alignment: element alignment * size, clamped
+                let elem_align = self.llvm_type_alignment(t.get_element_type());
+                let bytes = elem_align * t.get_size() as u64;
+                bytes.next_power_of_two().min(32)
             }
             BasicTypeEnum::ScalableVectorType(_) => 8,
         }

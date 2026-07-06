@@ -334,12 +334,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     sprintf_args.push(BasicMetadataValueEnum::PointerValue(dp));
                                 }
                                 Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64") => {
-                                    let is32 = n == "i32";
-                                    if is32 {
-                                        fmt.push_str(&format!("\"{}\":%d", field.name));
-                                    } else {
-                                        fmt.push_str(&format!("\"{}\":%ld", field.name));
-                                    }
+                                    // All Mimi integer values are passed as i64 to sprintf.
+                                    // Use %ld (long) for both i32 and i64 to avoid the C UB of
+                                    // passing an 8-byte i64 value to %d (which reads 4 bytes).
+                                    fmt.push_str(&format!("\"{}\":%ld", field.name));
                                     sprintf_args.push(BasicMetadataValueEnum::IntValue(
                                         field_val.into_int_value(),
                                     ));
@@ -938,31 +936,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 break;
             }
             if let Some(target) = self.llvm_type_for(&param.ty) {
-                // When a pointer to a struct is passed where a struct by value
-                // is expected, load the struct from the pointer. This happens
-                // when record/tuple expressions (which compile to alloca
-                // pointers) are passed as function call arguments. Without this
-                // load, LLVM receives a pointer value but treats its bytes as
-                // the struct fields, producing garbage output.
-                //
-                // Skip the load when the parameter has a function type (func(..)):
-                // the argument is a function pointer (e.g. @sum_first_two) which
-                // points to machine code, not to a {ptr, ptr} closure struct.
-                if let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(sty)) =
-                    (args[i], target)
-                {
-                    if !matches!(&param.ty, Type::Func(..) | Type::ExternFunc(..)) {
-                        args[i] = self.build_load(
-                            BasicTypeEnum::StructType(sty),
-                            pv,
-                            &format!("{}_arg_load", param.name),
-                        )?;
-                    } else {
-                        args[i] = self.adjust_int_val(args[i], target)?;
-                    }
-                } else {
-                    args[i] = self.adjust_int_val(args[i], target)?;
-                }
+                args[i] = self.adjust_int_val(args[i], target)?;
             }
         }
         Ok(())

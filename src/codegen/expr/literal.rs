@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -22,25 +21,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr(s, "str")
                     .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-                let ptr = global.as_pointer_value();
-                let len = self.context.i64_type().const_int(s.len() as u64, false);
-                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let str_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                    ],
-                    false,
-                );
-                let sv = self
-                    .builder
-                    .build_insert_value(str_ty.get_undef(), ptr, 0, "str_data")
-                    .map_err(|e| CompileError::LlvmError(format!("insert str ptr: {}", e)))?;
-                let sv = self
-                    .builder
-                    .build_insert_value(sv, len, 1, "str_len")
-                    .map_err(|e| CompileError::LlvmError(format!("insert str len: {}", e)))?;
-                Ok(sv.into_struct_value().into())
+                Ok(global.as_pointer_value().into())
             }
             Lit::FString(parts) => Ok(self.compile_fstring(parts, vars)?),
         }

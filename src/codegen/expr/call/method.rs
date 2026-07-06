@@ -1010,6 +1010,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Build list struct {i64 len, i8* data}
                 let list_alloca = self.alloc_list_result(len_val, data_ptr)?;
 
+                // Determine if list elements are heap-allocated pointers (string or record)
+                // that need individual freeing at scope exit via FreeList mechanism.
+                let needs_element_free = matches!(
+                    inner_ty,
+                    Type::Name(n, _)
+                        if *n == "string"
+                            || self.type_defs.get(n).is_some_and(|td|
+                                matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+                );
+
                 // Build loop: for i = 0; i < len; i++
                 let function = self
                     .current_function()
@@ -1206,6 +1216,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(idx_alloca, next)?;
                 self.build_br(loop_bb)?;
                 self.builder.position_at_end(done_bb);
+
+                // Register FreeList cleanup if elements need individual freeing
+                if needs_element_free {
+                    self.register_heap_list_elements(list_alloca);
+                }
 
                 // Load and return list struct
                 let list_ty = self.list_struct_type();
