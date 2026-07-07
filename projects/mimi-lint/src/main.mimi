@@ -39,7 +39,7 @@ func main() -> i32 {
 
 func lint_file(path: string, source: string) -> List<string> {
     let mut diags: List<string> = []
-    let ast_json = parse(source)
+    let ast_json = mms_parse(source)
     let has_main_str = json_get_string(ast_json, "has_main")
     if has_main_str == "" {
         push(diags, path + ": 解析失败，AST 为空")

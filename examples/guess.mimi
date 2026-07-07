@@ -2,16 +2,13 @@
 // 验证: input()、while、match、字符串比较
 // 注: Ok/Err 未在类型检查器中注册，使用自定义类型绕过
 
-type GuessResult {
-    Good(string)
-    Bad(string)
-}
-
-func do_input() -> GuessResult {
-    let result = input()
+use std::io;
+use std::result;
+func do_input() -> Result<string, string> {
+    let result = input_line()
     match result {
-        Ok(s) => Good(s)
-        Err(e) => Bad(e)
+        Ok(s) => Ok(s)
+        Err(e) => Err(e)
     }
 }
 
@@ -32,7 +29,7 @@ func main() {
         println("第", attempts, "次尝试")
 
         match guess_result {
-            Good(s) => {
+            Ok(s) => {
                 println("你猜了:", s)
                 if s == "42" {
                     println("恭喜你猜对了！")
@@ -40,7 +37,7 @@ func main() {
                 }
                 ()
             }
-            Bad(e) => {
+            Err(e) => {
                 println("输入错误:", e)
                 ()
             }

@@ -1076,20 +1076,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let void_ty = self.context.void_type();
                         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let fn_name = "mimi_list_free_elements";
-                        let fn_ty = void_ty.fn_type(
-                            &[BasicMetadataTypeEnum::PointerType(i8_ptr)],
-                            false,
-                        );
-                        let func = self
-                            .module
-                            .get_function(fn_name)
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    fn_name,
-                                    fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
+                        let fn_ty =
+                            void_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+                        let func = self.module.get_function(fn_name).unwrap_or_else(|| {
+                            self.module.add_function(
+                                fn_name,
+                                fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
                         let casted = self
                             .build_bit_cast(list_ptr.into(), i8_ptr.into(), "fl_cast")
                             .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
@@ -1137,9 +1132,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 &[BasicMetadataValueEnum::PointerValue(ptr)],
                                 "free_heap",
                             )
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("free error: {}", e))
-                            })?;
+                            .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
                     }
                 }
             }

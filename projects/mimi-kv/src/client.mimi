@@ -1,12 +1,15 @@
 // mimi-kv client: CLI client for the mimi-kv server
 // Connects to server via TCP, sends commands, displays responses
 
+use std::env;
+use std::net;
+
 const DEFAULT_HOST: string = "127.0.0.1"
 const DEFAULT_PORT: i32 = 6380
 const MAX_RECV: i32 = 4096
 
 // Send a command and receive response
-func send_command(fd: i32, cmd: string) -> string {
+func send_command(fd: i64, cmd: string) -> string {
     let _ = send(fd, cmd + "\n")
     recv(fd, MAX_RECV)
 }
@@ -28,7 +31,7 @@ func format_response(resp: string) -> string {
         if inner == "" { return "(empty list)" }
         let items = str_split(inner, ",")
         let mut result = ""
-        let i = 0
+        let mut i = 0
         while i < len(items) {
             if i > 0 { result = result + "\n" }
             result = result + to_string(i + 1) + ") " + items[i]
@@ -40,16 +43,16 @@ func format_response(resp: string) -> string {
 }
 
 // Interactive REPL
-func repl(fd: i32) -> i32 {
+func repl(fd: i64) -> i32 {
     println("Connected to mimi-kv. Type 'quit' to exit.")
     println("Commands: GET key | SET key value | DEL key | EXISTS key")
     println("          KEYS | COUNT | SAVE | LOAD | CLEAR | PING | QUIT")
     println("")
 
-    let running = true
+    let mut running = true
     while running {
         print("mimi-kv> ")
-        let input = input_line()
+        let input = input()
         if input == "" { continue }
 
         let trimmed = str_trim(input)
@@ -67,31 +70,25 @@ func repl(fd: i32) -> i32 {
 
 // Main entry point
 func main() -> i32 {
-    let host = DEFAULT_HOST
-    let port = DEFAULT_PORT
+    let mut host = DEFAULT_HOST
+    let mut port = DEFAULT_PORT
 
     // Check for command-line arguments
     let arg_count = cli_args()
     if len(arg_count) >= 2 {
         host = arg_count[0]
         let parsed = str_parse_int(arg_count[1])
-        if parsed.0 { port = parsed.1 }
+        if parsed.0 { port = parsed.1 as i32 }
     }
 
     println("mimi-kv client — connecting to " + host + ":" + to_string(port))
 
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    if fd < 0 {
-        println("Failed to create socket")
-        return 1
-    }
-
-    let connect_result = connect(fd, host, port)
-    if connect_result < 0 {
+    let tcp_res = tcp_connect(host, port)
+    if !tcp_res.is_ok() {
         println("Failed to connect to " + host + ":" + to_string(port))
-        close_fd(fd)
         return 1
     }
+    let fd = tcp_res.unwrap()
 
     let result = repl(fd)
     close_fd(fd)

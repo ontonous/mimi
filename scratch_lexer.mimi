@@ -1,0 +1,4 @@
+func main() -> i32 {
+    println(lexer("func add:"))
+    0
+}

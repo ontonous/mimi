@@ -1,6 +1,9 @@
 // mimi-todo: CLI task tracker
 // Exercises: const, Record type annotations, Map ops, as cast, JSON persistence
 
+use std::io;
+use std::result;
+
 const DATA_FILE: string = "mimi-todo-data.json"
 const VERSION: string = "0.1.0"
 
@@ -55,7 +58,7 @@ func cmd_done(tasks: Record, args: string) -> Record {
         return tasks
     }
     let id_result = str_parse_int(args)
-    if !id_result.is_ok() {
+    if !id_result.0 {
         println("Invalid task ID: " + args)
         return tasks
     }
@@ -140,7 +143,7 @@ func main() -> i32 {
     let running = true
     while running {
         print("todo> ")
-        let input_result = input()
+        let input_result = input_line()
         if !input_result.is_ok() { continue }
         let line = input_result.unwrap()
         if line == "" { continue }

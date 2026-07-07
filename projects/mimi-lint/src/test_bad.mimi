@@ -3,7 +3,7 @@ func CamelCase(x: i32) -> i32 {
     let y = 2
 }
 
-func empty_func()
+func empty_func() {}
 
 func TooComplex(a: i32) -> i32 {
     if a > 0 {

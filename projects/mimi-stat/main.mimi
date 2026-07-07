@@ -1,13 +1,6 @@
 // mimi-stat: 完整的文件统计 CLI 工具
 // 用 Mimi 语言编写，展示语言能力，发现并修复语言缺口
 
-// === 数据类型 ===
-type StatResult {
-    total_files: i32
-    total_dirs: i32
-    total_bytes: i32
-    by_extension: string
-}
 
 // === 核心函数 ===
 
