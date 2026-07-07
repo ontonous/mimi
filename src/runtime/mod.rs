@@ -6693,9 +6693,7 @@ pub extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     match table.atomics.get(&(handle as u64)) {
-        Some(ConcurrencyAtomic::Bool(a)) => {
-            a.load(std::sync::atomic::Ordering::SeqCst) as i32
-        }
+        Some(ConcurrencyAtomic::Bool(a)) => a.load(std::sync::atomic::Ordering::SeqCst) as i32,
         _ => 0,
     }
 }
