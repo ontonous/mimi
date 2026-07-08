@@ -4,9 +4,10 @@
 
 **A system programming language with contract verification, structured concurrency, and linear capabilities**
 
-[![Version](https://img.shields.io/badge/version-0.28.22--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.28.30--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2815%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-2859+%20passed%20%7C%200%20failed-brightgreen.svg)](#)
+[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
 MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
@@ -44,7 +45,7 @@ Mimi is evolving fast and we'd love your feedback. Whether you're a programming 
 ### Current Status
 
 - **Core Language**: Type system, borrow checking, concurrency model — foundational components are in place and continuously refined.
-- **Standard Library**: 21 modules covering common scenarios; interfaces may still evolve.
+- **Standard Library**: 22 modules covering common scenarios; interfaces may still evolve.
 - **Toolchain**: Compiler, LSP, and package manager are all functional, though not yet at 1.0 stability.
 - **Verification & Codegen**: LLVM native compilation and Z3 contract verification are improving steadily; some advanced verification scenarios may still be incomplete.
 
@@ -86,7 +87,7 @@ Mimi is the production compiler backend for the **MimiSpec** intent-description 
 | **async** | `async fn` → Future state machine + Executor cooperative scheduling |
 | **LSP** | Language server: completion, hover, goto-definition, contract lens |
 | **Package Management** | `mimi.toml` + registry + git dependencies + dependency tree |
-| **Standard Library** | 23 modules: io, fs, net, json, csv, crypto (SHA-256/Base64), regex, template, paths, and more |
+| **Standard Library** | 22 modules: io, fs, net, json, csv, crypto (SHA-256/Base64), regex, template, array, iter, and more |
 | **MimiSpec Integration** | `.mms` parsing, `mms{}` placeholders, rule consistency checking |
 | **Compile Targets** | Native x86_64, cross-compilation to Windows, shared library `.so` |
 
@@ -133,7 +134,7 @@ func main() -> i32 {
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
-# 2383 passed, 0 failed, 21 ignored
+# 2859+ passed, 0 failed, 6 ignored
 ```
 
 ---
@@ -203,7 +204,7 @@ func main() {
 ## Standard Library
 
 | Module | File | Description |
-|---|---|---|
+|---|---|---|---|
 | `io` | `io.mimi` | I/O: `print_line`, `input_line` |
 | `fs` | `fs.mimi` | Filesystem: `read`, `write`, `exists` |
 | `strings` | `strings.mimi` | Strings: `split`, `join`, `replace_all` |
@@ -219,6 +220,8 @@ func main() {
 | `time` / `datetime` | `time.mimi` / `datetime.mimi` | Timestamp / datetime utilities |
 | `env` | `env.mimi` | Env vars / CLI arguments |
 | `mymath` | `mymath.mimi` | Math: gcd, lcm, is_prime |
+| `array` | `array.mimi` | Fixed-size arrays: fill, slice, rotate, binary_search |
+| `iter` | `iter.mimi` | Iterators: range, zip, enumerate, take, drop, chain |
 | `random` | `random.mimi` | Random number utilities |
 | `text` | `text.mimi` | Text: slugify, indent, wrap |
 | `result` | `result.mimi` | Result combinators |
@@ -280,7 +283,7 @@ mimi/
 │   ├── interp/            # Interpreter backend
 │   ├── codegen/           # LLVM codegen backend
 │   ├── verifier/          # Z3 formal verifier
-│   ├── ffi/               # FFI system (C/C++/Rust/Go/Node.js/Java/Python bindings)
+│   ├── ffi/               # FFI system (multi-language binding generation)
 │   ├── lsp/               # LSP server
 │   ├── contracts.rs       # Contract extraction
 │   ├── runtime/           # Rust runtime + profiler
@@ -288,9 +291,11 @@ mimi/
 │   ├── lint.rs            # Linter
 │   ├── manifest.rs        # Package manifest
 │   ├── loader.rs          # Module loader
-│   └── tests/             # Test suite
-├── std/                   # Standard library (21 modules)
-├── examples/              # Examples (29 programs)
+│   ├── diagnostic/        # Error codes & formatting
+│   ├── main/              # CLI subcommand implementations
+│   └── tests/             # Test suite (2859+ tests)
+├── std/                   # Standard library (22 modules)
+├── examples/              # Examples (28 programs)
 ├── docs/                  # Documentation
 │   ├── adr/               # Architecture Decision Records
 │   ├── syntax-reference.md
@@ -309,17 +314,37 @@ mimi/
 ## Version History
 
 | Version | Highlight |
-|---|---|
-| **v0.28.8** | Codegen quality refactor + helper unit tests + lexer/parse dual-backend tests, clippy clean |
-| **v0.28.2** | Usability: Record/Any type annotations, codegen map ops, `const`, `as` cast, `desc{}`/`rule{}` blocks |
-| **v0.28.1** | mimi-kv embedded store, map type inference fix, dual-backend map tests |
-| **v0.28** 🚀 | Use-driven evolution: dir/path/crypto builtins, multi-language FFI (7 langs), profiler, `mimi stat`/`mimi bindgen`, 2 design defect fixes |
-| **v0.27** 🔨 | Audit fixes: P0/P1/P2/P3 safety & correctness (arena, FFI, JSON, runtime) |
-| **v0.26** | Type unification engine + bidirectional inference + FFI P0/P1 security fixes |
-| **v0.25** | Type system refactor: TypeId Arena + Checker fixes + Newtype/ADT codegen |
-| **v0.24** | Structured concurrency state machine + runtime/FFI/codegen fixes |
+|---|---|---|
+| **v0.28.30** | Actor field mutate + codegen map_get string ABI (mimichat #3/#4) |
+| **v0.28.29** | `from_json::<List<T>>` returns owned mutable List (mimichat #2) |
+| **v0.28.28** | Actor user function calls + shared program context (mimichat #1) |
+| **v0.28.27** | Real code codegen sprint: reduce/trait self/newtype/35 real_world green |
+| **v0.28.26** | Quality gate + JSON throughput: `from_json/to_json List<RecordType>` codegen |
+| **v0.28.25** | Package import + MimiSpec syntax cleanup + prelude auto-load |
+| **v0.28.21** | Comptime/Quote codegen + LSP completion/goto/hover |
+| **v0.28.20** | Concurrency primitives: Mutex, Atomic, Channel |
+| **v0.28.19** | Actor Codegen: real mailbox + worker thread |
+| **v0.28.18** | FFI complete: complex repr(C) return, cross-thread callback |
+| **v0.28.17** | CLI consistency: unified type checker, SAFETY annotations |
+| **v0.28.16** | Codegen root fix: shared/weak lifecycle, string leak, Miri |
+| **v0.28.15** | Security review: all #[ignore] gaps closed, 270 unsafe audits |
+| **v0.28.14** | Diagnostics & formatting: error recovery, multi-position, lint |
+| **v0.28.13** | stdlib expansion: mymath, array, iter + codegen inline/GVN |
+| **v0.28.12** | Package management: add/install/remove/tree hardened |
+| **v0.28.11** | LSP: hover, completion, goto-definition, rename |
+| **v0.28.10** | Codegen gaps closed: sort_str, const, Set<T>, from_json |
+| **v0.28.9** | FFI export wrapper + multi-language bindgen + repr(C) |
+| **v0.28.8** | Codegen quality refactor + helper tests + lexer/parse dual |
+| **v0.28.7** | Multi-line syntax + mimi-make + mimi-lint + push() fix |
+| **v0.28.2** | Usability: Record/Any, map codegen, const, as cast |
+| **v0.28.1** | mimi-kv, map type inference, dual-backend map tests |
+| **v0.28** 🚀 | Use-driven: dir/path/crypto, 7-lang FFI, profiler, bindgen |
+| **v0.27** 🔨 | Audit: P0/P1/P2/P3 safety (arena, FFI, JSON, runtime) |
+| **v0.26** | Type unification + bidirectional inference + FFI security |
+| **v0.25** | TypeId Arena refactor + Newtype/ADT codegen |
+| **v0.24** | Structured concurrency state machine |
 | **v0.23** 🔨 | Z3 deep fix + internal audit |
-| **v0.22** | Language completion: Option/nested generics/loop/pipe/LSP |
+| **v0.22** | Language completion: Option, nested generics, loop, pipe, LSP |
 | **v0.21** | Clippy zero + codegen gap closure + docs |
 | **v0.20** | Structured concurrency: Future/Waker/Executor/poll codegen |
 | **v0.19** | Path-sensitive borrow + reborrow + conditional return |
@@ -361,14 +386,17 @@ LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
 # L2 type system soundness
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test typecheck::
 
+# Real-world MCDD suite
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test real_world
+
 # Clippy (zero-warnings gate)
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 
 # Format
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 # Benchmarks
-cargo bench
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench
 ```
 
 ### Development Principles

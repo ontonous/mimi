@@ -39,7 +39,8 @@ _Please provide the following to help us respond quickly:_
 最近的审计修复：
 
 | 问题 | 版本 | 描述 |
-|---|---|---|
+|---|---|---|---|
+| v0.28.26 多项修复 | v0.28.26 | Mutex 真正互斥、Channel 全局死锁修复、no_panic sigsetjmp UB→fork 隔离、heap slot dominance 修复 |
 | Item 5 | v0.17 | GEP 安全抽象：消除 62 处 unsafe 指针算术 |
 | Item 1/4/6/9 | v0.15 | C runtime → Rust 重写，消除线程竞态/JSON 深度/字符串边界/Map 零容量问题 |
 | F-16 ~ F-20 | v0.12 | FFI crash 保护、回调死锁、信号恢复 |

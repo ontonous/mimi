@@ -92,17 +92,16 @@
 ## 6. CI 门禁顺序（执行与修复优先级）
 
 ```
-1.  cargo test                          # 全量测试（当前 2,810+ 个 + 1 doc-test）
+1.  cargo test                          # 全量测试（当前 2,850+ 个，0 failed，6 ignored）
 2.  cargo test dual_                    # L1 双后端等价性
 3.  cargo test "typecheck::"            # L2 类型系统健全性
-4.  cargo test "adv_comptime|adv_quote" # 编译时元编程
-5.  cargo test ffi_                     # FFI 契约等价性
-6.  cargo test codegen_e2e              # 代码生成 E2E
-7.  cargo test "fmt_type"               # 类型格式化一致性
-8.  cargo test -- --ignored             # 已知差距（必须编译，允许失败）
-9.  cargo +nightly miri test ffi::runtime            # L3 Miri UB 检测（FFI runtime 子集）
-10. cargo +nightly miri test basic_control_flow      # L3 Miri UB 检测（解释器子集示例）
-11. cargo test e2e_valgrind -- --nocapture          # L3 Valgrind 内存安全
+4.  cargo test ffi_                     # FFI 契约等价性
+5.  cargo test codegen_e2e              # 代码生成 E2E
+6.  cargo test real_world               # MCDD 真实程序 CLI 回归
+7.  cargo test -- --ignored             # 已知差距（必须编译，允许失败）
+8.  cargo +nightly miri test ffi::runtime        # L3 Miri UB 检测（FFI runtime 子集）
+9.  cargo +nightly miri test basic_control_flow  # L3 Miri UB 检测（解释器子集示例）
+10. cargo test e2e_valgrind -- --nocapture        # L3 Valgrind 内存安全
 ```
 
 规则：
@@ -112,7 +111,7 @@
 
 注意：
 - Valgrind/Miri 测试需要外部工具链；在可用环境中单独运行。
-- 当前全量测试通过数：2810，0 failed，0 ignored（仅 sanitizer/Valgrind 测试保持 `#[ignore]`）。
+- 当前全量测试通过数：2859+，0 failed，6 ignored。
 - `cargo test -- --ignored` 允许失败，但所有被忽略测试必须能编译。
 
 ---
@@ -149,6 +148,11 @@
 | v0.28.19 Actor Codegen 真实并发 | mailbox + worker thread + self-call 死锁避免 + 1000 次压力测试 | ✅ |
 | v0.28.20 并发原语 | Mutex&lt;T&gt;、AtomicI32/I64/Bool、Channel&lt;T&gt; — 11 L1 dual 测试 | ✅ |
 | v0.28.21 Comptime/Quote Codegen | comptime 块 codegen 折叠 + quote 三阶段折叠 + 13 L1 测试 + usability DX pass | ✅ |
+| v0.28.26 质量止血 + JSON 贯通 | from_json/to_json List<RecordType codegen、Any to_string、35 real_world 全绿 | ✅ |
+| v0.28.27 真实代码 codegen 冲刺 | reduce lambda、trait self、newtype、泛型 ADT、包导入 | ✅ |
+| v0.28.28 Actor 用户函数可调用 | mimichat #1: actor worker 共享 program 上下文 | ✅ |
+| v0.28.29 from_json List mutate | from_json::<List<T>> 返回 owned 可变 List | ✅ |
+| v0.28.30 Actor 字段原地 mutate | self.field 写回 + codegen map_get string ABI 修复 | ⬜ |
 
 ---
 

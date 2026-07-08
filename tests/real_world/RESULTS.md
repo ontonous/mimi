@@ -1,8 +1,8 @@
 # Mimi 真实代码可用性评估结果
 
-**评估时间**：2026-07-04  
-**Mimi 版本**：0.28.26-dev  
-**最后更新**：2026-07-05（all gaps closed: Any to_string, from_json/to_json List<RecordType>）  
+**评估时间**：2026-07-09  
+**Mimi 版本**：0.28.30-dev  
+**最后更新**：2026-07-09  
 **评估命令**：`python3 tests/real_world/run_suite.py`  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 

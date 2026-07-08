@@ -7,9 +7,9 @@ Mimi FFI 绑定生成器与 codegen 的 ABI/内存/类型问题。
 
 | 项目 | 覆盖场景 | 状态 |
 |------|----------|------|
-| `xlang_math` | 标量、字符串、#[repr(C)] struct-by-value、回调 | 标量/字符串正常；struct-by-value 与回调 ABI 错误 |
-| `xlang_strings` | 字符串参数/返回值、内存所有权、i32 返回 | `greet` 正常；`char_count` 因 string param ABI 返回垃圾；`join` 返回/释放异常 |
-| `xlang_callback` | i32/bool 回调在各种语言中的调用 | 简单示例因寄存器巧合得到正确数值，实际 ABI 不匹配 |
+| `xlang_math` | 标量、字符串、#[repr(C)] struct-by-value、回调 | 全部正常（v0.28.18） |
+| `xlang_strings` | 字符串参数/返回值、内存所有权、i32 返回 | 全部正常（v0.28.18） |
+| `xlang_callback` | i32/bool 回调在各种语言中的调用 | 通过跨线程 callback 修复（v0.28.18） |
 
 ## 共享运行时 shim
 

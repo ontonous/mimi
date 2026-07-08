@@ -29,12 +29,6 @@
 - **Actor 方法可调用用户函数** (`src/interp/value.rs`, `src/interp/actor.rs`): ActorHandle 新增 `program: Arc<File>` 共享 AST 字段，worker 线程创建 Interp 时复用原始 program 上下文而非空白 AST。修复 mimichat gap #1：actor 方法内调用任意顶层用户函数（包括 builtin 和用户定义）现在能正确解析。验证：mimichat `RoomManager.member_count` 中提取 `members_from_json` 顶层函数后仍通过。
 
 ### Tests
-- 新增 `actor_method_calls_user_function` 与 `actor_method_calls_user_function_via_record` 解释器回归测试，覆盖 actor 方法内调用 i32 / string 用户函数两种典型场景.
-
-### Fixed
-- **Actor 方法可调用用户函数** (`src/interp/value.rs`, `src/interp/actor.rs`): ActorHandle 新增 `program: Arc<File>` 共享 AST 字段，worker 线程创建 Interp 时复用原始 program 上下文而非空白 AST。修复 mimichat gap #1：actor 方法内调用任意顶层用户函数（包括 builtin 和用户定义）现在能正确解析。验证：mimichat `RoomManager.member_count` 中提取 `members_from_json` 顶层函数后仍通过。
-
-### Tests
 - 新增 `actor_method_calls_user_function` 与 `actor_method_calls_user_function_via_record` 解释器回归测试，覆盖 actor 方法内调用 i32 / string 用户函数两种典型场景。
 
 ## [v0.28.26-dev] — 2026-07-08

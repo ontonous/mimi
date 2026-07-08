@@ -1,7 +1,14 @@
 # MimiSpec Bootstrap Plan (v0.29)
 
+# MimiSpec Bootstrap Plan (v0.29)
+
 > Goal: compile the MimiSpec parser using Mimi itself, making Mimi self-hosting
 > for its intent-description frontend.
+>
+> **⚠️ Status Update (v0.28.30)**: v0.29 self-hosting is **deferred** until the feature bugs
+> clearing plan (v0.28.28–v0.28.37+) is complete. The current priority is making `mimi run`
+> and `mimi build` fully equivalent on real Mimi code before attempting MimiSpec bootstrapping.
+> See [AGENTS.md §13.15 Feature Bugs 清零计划] for the current status.
 
 ---
 
