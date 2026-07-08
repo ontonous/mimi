@@ -329,13 +329,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                         .into_pointer_value();
                     self.build_store(result_scast, sv)?;
-                    // result_size = sizeof(struct)
-                    let struct_size = self.context.i64_type().const_int(
-                        sty.size_of()
-                            .map(|s| s.get_zero_extended_constant().unwrap_or(8))
-                            .unwrap_or(8),
-                        false,
-                    );
+                    // result_size = sizeof(struct).
+                    // v0.28.30: On x86_64, LLVM StructType::size_of() may
+                    // return None for structs containing `ptr` (opaque type),
+                    // falling back to 8 bytes which is wrong for 16-byte
+                    // structs like {ptr, i64}. Compute the size from field
+                    // types instead.
+                    let total_size: u64 = sty
+                        .get_field_types()
+                        .iter()
+                        .map(|ft| match ft {
+                            BasicTypeEnum::IntType(t) => (t.get_bit_width() as u64).div_ceil(8),
+                            BasicTypeEnum::PointerType(_) => 8,
+                            BasicTypeEnum::FloatType(_) => 8,
+                            BasicTypeEnum::ArrayType(at) => (at.len() as u64) * 8,
+                            _ => 8,
+                        })
+                        .sum();
+                    let struct_size = self.context.i64_type().const_int(total_size, false);
                     self.build_store(result_size_out, struct_size)?;
                     self.build_br(merge_bb)?;
                     continue;
@@ -1187,6 +1198,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| CompileError::LlvmError(format!("trunc i32 error: {}", e)))?
                 .into(),
+            Some(crate::ast::Type::Name(n, _)) if n == "string" => {
+                // v0.28.30: mailbox dispatch stores the full {i8*, i64} struct
+                // into the result blob (see compile_actor_dispatch). Load it
+                // as a struct rather than reconstructing from packed i64.
+                let str_ty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let result_scast = self
+                    .builder
+                    .build_bit_cast(
+                        result_blob,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "result_str_scast",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                    .into_pointer_value();
+                self.build_load(
+                    BasicTypeEnum::StructType(str_ty),
+                    result_scast,
+                    "mailbox_str_ret",
+                )?
+            }
             _ => raw_result,
         };
 

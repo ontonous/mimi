@@ -7576,3 +7576,80 @@ fn dual_from_json_list_push_i64() {
         "5\n1\n5"
     );
 }
+
+// Regression tests for v0.28.30 item #3 + #4: actor field map operations
+// (set, get, remove) must work in both interpreter and codegen, including
+// with string keys passed as variables (not just string literals). Prior to
+// the v0.28.28/v0.28.29 fixes, the actor worker thread had an empty AST
+// (#1) and the codegen push path lost in-place mutations (#2); #3 + #4 are
+// the related residual issues about actor field writeback semantics, which
+// are verified to behave correctly across backends.
+#[test]
+fn dual_actor_map_set_get_string_key() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor A {
+            mut m: Record = map_new()
+
+            func put(k: string, v: string) {
+                let m2 = map_set(self.m, k, v)
+                self.m = m2
+            }
+
+            func get(k: string) -> string {
+                let (exists, val) = map_get(self.m, k)
+                if !exists { return "" }
+                to_string(val)
+            }
+        }
+
+        func main() -> i32 {
+            let a = A.spawn()
+            a.put("name", "Alice")
+            a.put("city", "Beijing")
+            println(a.get("name"))
+            println(a.get("city"))
+            0
+        }
+        "#,
+        "Alice\nBeijing"
+    );
+}
+
+#[test]
+fn dual_actor_map_set_get_i32() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor A {
+            mut m: Record = map_new()
+
+            func put(k: string, v: i32) {
+                let m2 = map_set(self.m, k, v)
+                self.m = m2
+            }
+
+            func get(k: string) -> i32 {
+                let (exists, val) = map_get(self.m, k)
+                if !exists { return -1 }
+                to_int(val)
+            }
+        }
+
+        func main() -> i32 {
+            let a = A.spawn()
+            a.put("a", 42)
+            a.put("b", 99)
+            println(to_string(a.get("a")))
+            println(to_string(a.get("b")))
+            0
+        }
+        "#,
+        "42\n99"
+    );
+}

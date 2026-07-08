@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased] — v0.28.29-dev
+## [Unreleased] — v0.28.30-dev
+
+### Fixed
+- **actor 方法返回 string 正确传递** (`src/codegen/actors.rs`): 修复 actor 方法返回 string 类型值时空洞/乱码的问题。dispatch 函数中 `result_size_out` 现在根据 struct 字段数计算（n_fields × 8），而非依赖 `size_of()`（对含 `ptr` 类型的 struct 返回 None 或错误值）。同时 caller 端 `try_compile_actor_mailbox_call` 新增对 string 返回类型的处理：直接从 result_blob 加载完整的 `{i8*, i64}` struct。
+- **`to_string(i64)` 统一走 `mimi_any_to_string`** (`src/codegen/builtins/string/format.rs`, `src/runtime/mod.rs`): 所有 i64 转字符串通过 `mimi_any_to_string` 格式化。该函数使用地址范围启发式（≥0x10000 且 <0x8000_0000_0000_0000 视为 C 字符串指针，否则为整数），替代了此前只在 `was_any` 标志下生效的有限路径。修复 map 值（C 字符串指针的 ptrtoint）通过 actor mailbox 返回时打印整数句柄而非实际字符串的问题。
+- **`mimi_any_to_string` 恢复启发式实现** (`src/runtime/mod.rs`): 用 `0x10000..0x7fff_ffff_ffff_fffe` 地址范围检测替换位 0 tag 协议——后者与 `mimi_map_set` 存储的 untag ptrtoint 值冲突。
+
+### Tests
+- 新增 `dual_actor_map_set_get_string_key` 与 `dual_actor_map_set_get_i32` 双后端测试，验证 actor 内 `map_set`/`map_get` 传递 string 和 i32 值的双向正确性。
+
+## [v0.28.29-dev] — 2026-07-08
 
 ### Fixed
 - **`from_json::<List<T>>` 返回的 list 可 mutate** (`src/codegen/expr/call/simple.rs`, `src/codegen/expr/call/method.rs`, `src/codegen/mod.rs`, `src/codegen/expr.rs`, `src/interp/builtins/list.rs`): mimichat gap #2 双后端修复。
