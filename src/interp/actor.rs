@@ -30,7 +30,11 @@ impl<'a> Interpreter<'a> {
             methods: actor_def.methods.clone(),
         };
 
-        let handle = ActorHandle::new(instance);
+        // v0.28.28 fix for #1: share the spawning program's AST so the
+        // worker thread's Interpreter can resolve user-defined functions
+        // and types when executing actor methods.
+        let program = std::sync::Arc::new(self.file.clone());
+        let handle = ActorHandle::new(instance, program);
         Ok(Value::Actor(handle))
     }
 }

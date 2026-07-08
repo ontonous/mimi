@@ -370,11 +370,16 @@ pub struct ActorMailboxMsg {
 }
 
 /// Handle to a running actor with per-actor mailbox + dedicated worker thread.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ActorHandle {
     pub inner: std::sync::Arc<std::sync::RwLock<ActorInstance>>,
     pub mailbox: std::sync::mpsc::Sender<ActorMailboxMsg>,
     pub id: usize,
+    /// Shared program AST. v0.28.28 fix for #1: worker threads must be able
+    /// to call user-defined functions / resolve user types when executing
+    /// actor methods. The worker dereferences this `Arc<File>` (cheap, no
+    /// full AST clone per dispatch) to construct a per-call `Interpreter`.
+    pub program: std::sync::Arc<crate::ast::File>,
 }
 
 // SAFETY: ActorHandle is Send because all fields are Send: Arc<RwLock<ActorInstance>>
@@ -386,16 +391,6 @@ unsafe impl Send for ActorHandle {}
 // is Sync when ActorInstance is Send+Sync; mpsc::Sender<T> is Sync when T: Send;
 // ActorMailboxMsg is Send because Value and InterpError are Send+Sync; usize is Sync.
 unsafe impl Sync for ActorHandle {}
-
-impl Clone for ActorHandle {
-    fn clone(&self) -> Self {
-        ActorHandle {
-            inner: self.inner.clone(),
-            mailbox: self.mailbox.clone(),
-            id: self.id,
-        }
-    }
-}
 
 impl PartialEq for ActorHandle {
     fn eq(&self, other: &Self) -> bool {
@@ -414,21 +409,24 @@ thread_local! {
 
 impl ActorHandle {
     /// Creates a new actor, spawns its worker thread.
-    pub(crate) fn new(instance: ActorInstance) -> Self {
+    ///
+    /// `program` is the AST of the file that spawned this actor. The worker
+    /// uses it to construct per-call `Interpreter`s that can resolve
+    /// user-defined functions, types, and actors. Without this, actor
+    /// methods cannot call any user code (see mimichat gap #1, fixed in
+    /// v0.28.28).
+    pub(crate) fn new(instance: ActorInstance, program: std::sync::Arc<crate::ast::File>) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
         let inner = std::sync::Arc::new(std::sync::RwLock::new(instance));
 
         let worker_inner = inner.clone();
         let mailbox_tx_clone = mailbox_tx.clone();
+        let worker_program = program.clone();
         std::thread::Builder::new()
             .name(format!("actor-{}", id))
             .spawn(move || {
                 CURRENT_ACTOR_ID.with(|a| a.set(id));
-                let empty_file = crate::ast::File {
-                    imports: vec![],
-                    items: vec![],
-                };
                 while let Ok(msg) = mailbox_rx.recv() {
                     let result = {
                         // Read method definition
@@ -442,12 +440,15 @@ impl ActorHandle {
                                 .expect("actor method not found");
                             (func, actor.actor_name.clone())
                         };
-                        // Create minimal interpreter to run the method body
-                        let mut interp = crate::interp::Interpreter::new(&empty_file);
+                        // v0.28.28: reuse the spawning program's AST so
+                        // user-defined functions / types resolve inside
+                        // the actor method body.
+                        let mut interp = crate::interp::Interpreter::new(&worker_program);
                         let self_val = Value::Actor(ActorHandle {
                             inner: worker_inner.clone(),
                             mailbox: mailbox_tx_clone.clone(),
                             id,
+                            program: worker_program.clone(),
                         });
                         interp.push_scope();
                         interp
@@ -480,6 +481,7 @@ impl ActorHandle {
             inner,
             mailbox: mailbox_tx,
             id,
+            program,
         }
     }
 

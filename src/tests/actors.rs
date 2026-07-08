@@ -223,3 +223,52 @@ func main() -> i32 {
 "#;
     assert_eq!(run_with_stdlib("prelude.mimi", src), interp::Value::Int(42));
 }
+
+// Regression test for v0.28.28 item #1: actor methods must be able to call
+// user-defined top-level functions. Previously, the actor worker thread
+// created an Interpreter with an empty AST, so calls to user functions
+// failed with "function not found". The fix makes the worker share the
+// original program's func_index / type_defs.
+#[test]
+fn actor_method_calls_user_function() {
+    let src = r#"
+func double(x: i32) -> i32 {
+    return x * 2;
+}
+
+actor Processor {
+    val: i32 = 0;
+
+    func process(input: i32) -> i32 {
+        return double(input);
+    }
+}
+
+func main() -> i32 {
+    let p = Processor.spawn();
+    await p.process(5)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(10));
+}
+
+#[test]
+fn actor_method_calls_user_function_via_record() {
+    let src = r#"
+func build_msg(name: string) -> string {
+    return "user:" + name;
+}
+
+actor Messenger {
+    func format() -> string {
+        return build_msg("alice");
+    }
+}
+
+func main() -> string {
+    let m = Messenger.spawn();
+    await m.format()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("user:alice".into()));
+}
