@@ -80,9 +80,11 @@ mimi bindgen math.mimi -o bindings
 
 ## 8. 示例
 
-完整可编译示例见 `examples/ffi/` 与 `demos/`：
+完整可编译示例：
 
 - `examples/ffi/math.mimi` — 含标量、字符串、结构体、回调的综合示例。
 - `demos/c_ffi_layer/` — C 调用 Mimi。
 - `demos/rust_ffi/` — Rust 调用 Mimi。
 - `demos/python_ffi/` — Python 调用 Mimi。
+- `demos/contract_ffi/` — 合约验证 FFI 示例。
+- `projects/xlang_math/` — 多语言绑定生成验证项目（C++/Go/Node/Java/Python）。

@@ -1,6 +1,6 @@
 # Mimi Error Codes Reference
 
-Auto-generated from `src/diagnostic/codes.rs`.
+Sourced from `src/diagnostic/codes.rs`.
 
 ## Code Ranges
 
@@ -12,8 +12,12 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0300–E0399 | Ownership/borrow errors |
 | E0400–E0499 | Semantic errors |
 | E0500–E0599 | Contract/intention errors |
-| E0600–E0699 | Warnings |
-| E0800+ | Runtime errors |
+| E0600–E0699 | Warnings (legacy E06xx) |
+| W001–W010  | Warnings (preferred W0xx) |
+| E0700–E0722 | Codegen errors |
+| E0741–E0742 | FFI errors |
+| E0750–E0751 | File/resource errors |
+| E0800+      | Runtime errors |
 
 ## Error Codes
 
@@ -26,8 +30,8 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0005 | invalid integer literal |
 | E0006 | invalid float literal |
 | E0007 | tab indentation not allowed |
-| E0100 | expected token, found other |
-| E0101 | expected ';', found '}' |
+| E0100 | expected token |
+| E0101 | expected ';' |
 | E0102 | unexpected token at top level |
 | E0103 | unexpected token in pattern |
 | E0104 | unexpected token in expression |
@@ -45,19 +49,19 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0116 | missing 'in' in for loop |
 | E0117 | missing 'else' block |
 | E0118 | unterminated interpolation in f-string |
-| E0119 | `...` placeholder not allowed in production mode |
+| E0119 | '...' placeholder not allowed in production mode |
 | E0120 | unexpected '$' character |
 | E0200 | type mismatch |
 | E0201 | cannot negate type |
 | E0202 | cannot apply operator to types |
-| E0203 | cannot apply ! to type |
+| E0203 | cannot apply '!' to type |
 | E0204 | cannot dereference type |
 | E0205 | if condition must be bool |
 | E0206 | while condition must be bool |
 | E0207 | return type mismatch |
 | E0208 | cannot assign to immutable variable |
 | E0209 | cannot assign type to variable of different type |
-| E0210 | function expects N arguments, found M |
+| E0210 | function argument count mismatch |
 | E0211 | argument type mismatch |
 | E0212 | for loop requires a List |
 | E0213 | match expression must have at least one arm |
@@ -71,14 +75,14 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0221 | type has no method |
 | E0222 | method call requires named type |
 | E0223 | callee must be function name |
-| E0224 | cannot apply ? to type |
+| E0224 | cannot apply '?' to type |
 | E0225 | pattern type does not match subject |
 | E0226 | constructor undefined |
 | E0227 | variant takes no arguments |
-| E0228 | variant expects N arguments, found M |
+| E0228 | variant argument count mismatch |
 | E0229 | list element type mismatch |
 | E0230 | comprehension guard must be bool |
-| E0231 | unknown type |
+| E0231 | type not allowed in this context (e.g., FFI passport type in non-extern) |
 | E0232 | list element type mismatch |
 | E0233 | cannot assign through non-mutable reference |
 | E0234 | missing return value |
@@ -87,15 +91,33 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0237 | division by zero literal |
 | E0238 | modulo by zero literal |
 | E0239 | turbofish type argument count mismatch |
-| E0240 | where constraint violated (deprecated, use E0253) |
-| E0241 | effect not available (deprecated, use E0254) |
+| E0240 | where constraint violated |
+| E0241 | effect not available in scope |
+| E0242 | builtin function error |
+| E0243 | index out of bounds |
+| E0244 | cannot index non-tuple type |
+| E0245 | await requires Future type |
+| E0246 | type has no variant |
+| E0247 | record field type mismatch |
+| E0248 | missing field in record literal |
+| E0249 | name is not a record type |
+| E0250 | comprehension requires list |
+| E0251 | pattern mismatch |
+| E0252 | missing method in trait impl |
+| E0253 | where constraint violated |
+| E0254 | effect not available |
+| E0255 | function does not return on all paths (deprecated: use E0235) |
+| E0256 | linear capability not consumed |
+| E0257 | function argument count mismatch |
+| E0258 | shared binding type mismatch |
+| E0259 | non-expr assignment target |
 | E0300 | cannot borrow as mutable because already immutably borrowed |
 | E0301 | cannot borrow as mutable because already mutably borrowed |
 | E0302 | cannot borrow as immutable because already mutably borrowed |
 | E0303 | capability must be consumed before end of scope |
 | E0304 | capability already consumed |
 | E0305 | cannot capture local_shared in parasteps |
-| E0306 | arena escape: ref to arena memory assigned to outer scope |
+| E0306 | arena escape: reference to arena memory cannot outlive the arena block |
 | E0400 | undefined variable |
 | E0401 | undefined function |
 | E0402 | duplicate definition |
@@ -110,30 +132,10 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0411 | weak requires a shared value |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
-| E0502 | contracts on shared-param functions not verifiable by Z3 |
+| E0502 | contract on function with shared parameter is not verifiable by Z3 |
 | E0600 | variable shadows outer variable |
 | E0601 | unused variable |
 | E0602 | unused import |
-| E0242 | builtin function error (argument count/type) |
-| E0243 | index out of bounds |
-| E0244 | cannot index non-tuple type |
-| E0245 | await requires Future type |
-| E0246 | type has no variant |
-| E0247 | record field type mismatch |
-| E0248 | missing field in record literal |
-| E0249 | name is not a record type |
-| E0250 | comprehension requires list |
-| E0251 | pattern mismatch |
-| E0252 | missing method in trait impl |
-| E0253 | where constraint violated |
-| E0254 | effect not available in scope |
-| E0255 | function does not return on all paths |
-| E0256 | linear capability not consumed |
-| E0257 | function argument count mismatch |
-| E0258 | shared binding type mismatch |
-| E0259 | non-expr assignment target |
-| E0741 | FFI wrapper error |
-| E0742 | value is not callable |
 | E0700 | codegen internal error |
 | E0702 | unsupported statement in codegen |
 | E0706 | type not found in codegen |
@@ -141,9 +143,12 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0708 | method not found on type |
 | E0709 | builtin function error |
 | E0710 | extern function not declared |
+| E0712 | codegen internal error (json builtin) |
 | E0713 | LLVM IR generation error |
 | E0721 | unsupported binary operator |
 | E0722 | unsupported expression in codegen |
+| E0741 | FFI wrapper error |
+| E0742 | value is not callable |
 | E0750 | requires libc or I/O error |
 | E0751 | assertion failed |
 | E0800 | generic runtime error |
@@ -154,11 +159,25 @@ Auto-generated from `src/diagnostic/codes.rs`.
 | E0805 | non-exhaustive match at runtime |
 | E0806 | concurrent lock error |
 | E0807 | arena escape at runtime |
-| E0808 | contract violation at runtime (requires/ensures) |
+| E0808 | contract violation at runtime |
 | E0809 | field not found at runtime |
 | E0810 | runtime I/O error |
 | E0811 | builtin function runtime error |
-| E0812 | type mismatch at runtime |
-| E0813 | floating-point error (NaN, infinity) |
+| E0812 | runtime type mismatch |
+| E0813 | floating-point error |
 | E0814 | slice out of bounds at runtime |
-| E0712 | codegen internal error (json builtin) |
+
+## Warning Codes (W0xx)
+
+| Code | Description |
+|------|-------------|
+| W001 | standalone desc/rule has no implementation |
+| W002 | locked fragment ($/$$) with no implementation body |
+| W003 | `...` placeholder residual in .mimi files |
+| W004 | function naming convention (snake_case) |
+| W005 | shared variable written by multiple parallel steps in parasteps |
+| W006 | unused variable |
+| W007 | redundant parentheses |
+| W008 | `== true` / `== false` anti-pattern |
+| W009 | recursion depth hint |
+| W010 | unused import |

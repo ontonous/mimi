@@ -1,7 +1,7 @@
 # Mimi 语法参考
 
 > 本文档描述 Mimi 语言的完整语法，可作为自举实现的语法底本。
-> 版本: v0.28.0-dev
+> 版本: v0.28.30-dev
 > 数据来源: `src/lexer/`, `src/parser/`, `src/ast.rs`
 
 ## 1. 词法
@@ -71,12 +71,12 @@ local_shared  weak  weak_local    c_shared  c_borrow
 c_borrow_mut  raw_string  arena   alloc   cap
 trait     impl      dyn       where     extern
 if        else      for       in        while
-return    break     continue  match     use
-pub       drop      await     async     unsafe
+loop      return    break     continue  match     use
+const     pub       drop      await     async     unsafe
 spawn     steps     parasteps quote     comptime
 failure   requires  ensures   invariant math
 desc      rule      old       mms       with
-and       or        not       true      false
+as        and       or        not       true      false
 unit      nothing
 ```
 
@@ -658,6 +658,7 @@ item    ::= attr* vis? func_def
           | attr* vis? type_def
           | attr* vis? newtype_def
           | attr* vis? actor_def
+          | "const" ident "=" expr ";"           // 顶层常量
           | cap_def
           | trait_def
           | impl_def
@@ -888,21 +889,31 @@ stmt ::= ... ";"                     // 显式分号结束
 "or"    ≡ "||"
 "not"   ≡ "!"
 
-## 12. 已知限制（v0.28.2）
+## 12. 已知限制
 
 ### 12.1 不支持的语法
 
 | 语法 | 状态 | 替代方案 |
 |------|------|---------|
 | 嵌套 tuple 访问 `t.1.1` | ❌ 不支持 | 用解构 `let (a, b) = t; let (c, d) = b; d` |
+| `comptime func` 多重闭包依 | ⬜ 参考 | actor mailbox 替代 |
 
-### 12.2 Codegen 不支持的功能
+### 12.2 Codegen 状态对照
 
 | 功能 | Interpreter | Codegen | 说明 |
 |------|-------------|---------|------|
-| from_json | ✅ | ❌ | codegen 返回 graceful error |
-| Set 操作 | ✅ | ❌ | codegen 返回 graceful error |
-| sort_f64 / sort_str | ✅ | ❌ | codegen 返回 graceful error |
-| const 代码生成 | ✅ | ❌ | Item::Const 在 codegen 中被忽略 |
-| Set 操作 | ✅ | ❌ | codegen 返回 graceful error |
+| from_json | ✅ | ✅ | 支持基本类型 + List + Record |
+| Set 操作 | ✅ | ✅ | 支持 `new/size/contains/insert/remove/to_list` |
+| sort_f64 / sort_str | ✅ | ✅ | 内排序实现 |
+| const 代码生成 | ✅ | ✅ | `const_values` 缓存 + compile_expr |
+| Actor 用户函数调用 | ✅ | ✅ | worker 共享 program 上下文 |
+| from_json::<List<T>> | ✅ | ✅ | 返回 owned 可变 List |
+| Actor 字段 mutate | ✅ | ✅ | self.field 写回 |
+| closure (fn) | ✅ | ✅ | no-capture/capture/multi |
+| shared/weak 引用计数 | ✅ | ✅ | Rc/Arc 语义 |
+| Mutex / Atomic / Channel | ✅ | ✅ | 并发原语双后端 |
+| Map 操作 | ✅ | ✅ | `new/set/get/remove` |
+| lexer(source) / parse(source) | ✅ | ✅ | 元编程 |
+| ast_eval(ast) | ✅ | ❌ | 仅在 interp 路径实现 |
+| comptime func / quote! | ✅ | ❌ | 仅解释器求值；codegen 静默跳过 |
 ```

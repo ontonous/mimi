@@ -1,9 +1,7 @@
 # Mimi Registry Protocol (Draft)
 
-> **Status**: Draft — v0.28.12. Subject to change before v1.0.
-> **Compatibility**: Designed for the v0.28.x package manager. Earlier
-> versions of `mimi` do not speak this protocol; they only resolve
-> dependencies from a local registry directory at `~/.mimi/registry/`.
+> **Status**: Draft — v0.28.30-dev. Subject to change before v1.0.
+> **Compatibility**: Designed for the v0.28.x package manager.
 
 This document specifies the minimum JSON API that a Mimi package
 registry must implement. The protocol is intentionally tiny: it does
