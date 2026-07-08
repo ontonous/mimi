@@ -2,6 +2,9 @@
 
 ## [Unreleased] — v0.28.30-dev
 
+### Docs
+- **AGENTS.md 大幅精简**：将已完成版本的详细规划（§13.1–§13.12）归档至 `devdocs/archive/AGENTS_v0.28.14-v0.28.27-planning.md`；更新版本号（v0.28.26-dev→v0.28.30-dev）；标记 v0.28.28/v0.28.29 为 ✅；新增 §13.17 参考项目借鉴评估（含 Ghost 变量、Z3 超时回退、SMT 批处理切分三项推荐），将评估补入路线图 v0.28.33。
+
 ### Fixed
 - **actor 方法返回 string 正确传递** (`src/codegen/actors.rs`): 修复 actor 方法返回 string 类型值时空洞/乱码的问题。dispatch 函数中 `result_size_out` 现在根据 struct 字段数计算（n_fields × 8），而非依赖 `size_of()`（对含 `ptr` 类型的 struct 返回 None 或错误值）。同时 caller 端 `try_compile_actor_mailbox_call` 新增对 string 返回类型的处理：直接从 result_blob 加载完整的 `{i8*, i64}` struct。
 - **`to_string(i64)` 统一走 `mimi_any_to_string`** (`src/codegen/builtins/string/format.rs`, `src/runtime/mod.rs`): 所有 i64 转字符串通过 `mimi_any_to_string` 格式化。该函数使用地址范围启发式（≥0x10000 且 <0x8000_0000_0000_0000 视为 C 字符串指针，否则为整数），替代了此前只在 `was_any` 标志下生效的有限路径。修复 map 值（C 字符串指针的 ptrtoint）通过 actor mailbox 返回时打印整数句柄而非实际字符串的问题。
