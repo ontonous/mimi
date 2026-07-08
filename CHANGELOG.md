@@ -251,7 +251,7 @@
 ## [v0.28.15] - 2026-07-01
 
 ### Added
-- **自举准备文档**: 新增 `docs/bootstrap-plan.md`，描述 v0.29 MimiSpec 自举步骤、依赖、回滚策略与验收标准。
+- **自举准备文档**: 新增 `devdocs/bootstrap-plan.md`，描述 v0.29 MimiSpec 自举步骤、依赖、回滚策略与验收标准。
 - **`libmimi` 公开 API 文档**: `src/lib.rs` 增加 crate-level 文档，说明模块稳定性承诺与 v0.29 bootstrap 接口。
 
 ### Changed
@@ -259,10 +259,10 @@
   - 解除 `typecheck_recursive_func` 与 `typecheck_mutually_recursive_funcs` 的 `#[ignore]`；当前解释器可处理常规递归。
   - 解除 `e2e_net_fetch_failure` / `e2e_net_fetch_post_failure` 的 `#[ignore]`；网络不可达端口的失败路径现在正确。
   - 解除 `e2e_asan_list_ops` 的 `#[ignore]`；所有 `e2e_asan_*` 测试默认运行。
-  - 剩余 19 个 `#[ignore]` 均为外部工具链依赖（Valgrind 4 个 + cc-linker fuzz/property 15 个），已在 `docs/idd-guide.md` 中明确文档化。
+  - 剩余 19 个 `#[ignore]` 均为外部工具链依赖（Valgrind 4 个 + cc-linker fuzz/property 15 个），已在 `devdocs/idd-guide.md` 中明确文档化。
 - **Unsafe 审计**: 全仓补充 ~270 条 `// SAFETY:` 注释，覆盖 `runtime`、`interp/ffi`、`interp/value` 等模块。
 - **Codegen 清理**: 移除 `src/codegen/registry/types.rs` 中重复的 `BasicMetadataTypeEnum` 转换；规范化 `Result`/`Option` LLVM 布局到单一处理路径。
-- **诊断差距表更新**: `docs/idd-guide.md` 同步 `match on Result`、栈溢出保护、ASan/Valgrind/Miri 状态。
+- **诊断差距表更新**: `devdocs/idd-guide.md` 同步 `match on Result`、栈溢出保护、ASan/Valgrind/Miri 状态。
 
 ### Fixed
 - **Runtime HTTP 失败处理**: `mimi_http_get` / `mimi_http_post` 在请求失败时返回空字符串（原返回 null 指针导致 codegen 调用 `strlen` 时 SIGSEGV）。
