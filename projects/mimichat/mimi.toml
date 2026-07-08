@@ -1,0 +1,7 @@
+[package]
+name = "mimichat"
+version = "0.1.0"
+description = "Multi-user chat system with JSON-TCP protocol, concurrent room management, private messaging, and message persistence"
+authors = ["ontonous"]
+license = "Apache-2.0"
+entry = "src/main.mimi"
