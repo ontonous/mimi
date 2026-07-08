@@ -4168,10 +4168,10 @@ fn e2e_rule_violation_detected() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // Rule maps to ensures: result >= 0, but function returns -1 → contract violation
+    // Violates ensures: result >= 0 (function returns -1)
     let src = r#"
 func bad() -> i32 {
-    rule "result >= 0"
+    ensures: result >= 0
     -1
 }
 func main() -> i32 {
@@ -4194,11 +4194,11 @@ fn e2e_rule_in_nested_block() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // Rule inside an if block — mapping must recurse into inner blocks
+    // Ensures on function body
     let src = r#"
 func test(x: i32) -> i32 {
+    ensures: result > 0
     if x > 0 {
-        rule "result > 0"
         x
     } else {
         0
@@ -4219,11 +4219,11 @@ fn e2e_rule_violation_in_nested_block() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // Rule inside if block, violation
+    // Ensures violated when returning -1
     let src = r#"
 func bad(x: i32) -> i32 {
+    ensures: result > 0
     if x > 0 {
-        rule "result > 0"
         -1
     } else {
         0
@@ -4248,10 +4248,10 @@ fn e2e_rule_requires_violation_detected() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // requires: rule violation — caller passes 0
+    // requires violation — caller passes 0
     let src = r#"
 func safe_div(x: i32, y: i32) -> i32 {
-    rule "requires: y != 0"
+    requires: y != 0
     x / y
 }
 func main() -> i32 {
@@ -4273,10 +4273,10 @@ fn e2e_rule_spawn_and_await() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // Rule inside a spawned function
+    // Ensures inside a spawned function
     let src = r#"
 func double(n: i32) -> i32 {
-    rule "result == n * 2"
+    ensures: result == n * 2
     n * 2
 }
 func main() -> i32 {
@@ -4296,10 +4296,10 @@ fn e2e_rule_parasteps_with_rule() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    // Rule inside a function called from parasteps
+    // Ensures inside a function called from parasteps
     let src = r#"
 func double(n: i32) -> i32 {
-    rule "result >= 0"
+    ensures: result >= 0
     n * 2
 }
 func main() -> i32 {

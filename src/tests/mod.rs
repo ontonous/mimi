@@ -272,8 +272,7 @@ pub(crate) fn parse(src: &str) -> crate::ast::File {
 }
 
 pub(crate) fn run_source(src: &str) -> interp::Value {
-    let mut file = parse(src);
-    crate::contracts::map_rule_contracts(&mut file);
+    let file = parse(src);
     let mut interp = interp::Interpreter::new(&file);
     interp.run().expect("src/tests/mod.rs:151 unwrap failed")
 }
@@ -294,10 +293,9 @@ pub(crate) fn run_with_stdlib(stdlib_name: &str, src: &str) -> interp::Value {
 
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;
-    let mut file = parser::Parser::new(tokens)
+    let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
-    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_contracts = true;
     interp.run().map_err(|e| e.message().to_string())
@@ -309,10 +307,9 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
 /// (child-process heap is not accessible from the parent).
 pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;
-    let mut file = parser::Parser::new(tokens)
+    let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
-    crate::contracts::map_rule_contracts(&mut file);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_ffi = false;
     interp.verify_contracts = true;
@@ -379,10 +376,9 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     let tokens = crate::lexer::Lexer::new(src)
         .tokenize()
         .map_err(|e| format!("lexer: {}", e))?;
-    let mut file = crate::parser::Parser::new(tokens)
+    let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| format!("parser: {}", e))?;
-    crate::contracts::map_rule_contracts(&mut file);
 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
@@ -582,8 +578,7 @@ pub(crate) fn compile_only(src: &str) -> Result<std::path::PathBuf, String> {
 /// asserting both succeed. Does NOT compare stdout (contracts may
 /// produce different diagnostic output between backends).
 pub(crate) fn dual_assert_contract_ok(src: &str) {
-    let mut file = parse(src);
-    crate::contracts::map_rule_contracts(&mut file);
+    let file = parse(src);
     let mut interp = interp::Interpreter::new(&file);
     interp.verify_contracts = true;
     interp.run().expect("interpreter contract run failed");

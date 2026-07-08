@@ -110,9 +110,6 @@ fn run_once(
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
     loader::merge_prelude_into(&mut merged_file);
 
-    // Map inline rule statements to structured contracts
-    mimi::contracts::map_rule_contracts(&mut merged_file);
-
     let check_result = if strict {
         mimi::core::check_strict(&merged_file)
     } else {

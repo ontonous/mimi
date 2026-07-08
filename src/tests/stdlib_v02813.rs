@@ -924,10 +924,9 @@ fn compile_and_inspect(src: &str) -> (CodeGenerator<'static>, Vec<String>) {
     let context = Box::leak(Box::new(inkwell::context::Context::create()));
     let mut codegen = CodeGenerator::new(context, "v02813_inline_test");
     let tokens = lexer::Lexer::new(src).tokenize().expect("lexer failed");
-    let mut file = parser::Parser::new(tokens)
+    let file = parser::Parser::new(tokens)
         .parse_file()
         .expect("parser failed");
-    crate::contracts::map_rule_contracts(&mut file);
     codegen.compile_file(&file).expect("codegen failed");
     let names: Vec<String> = codegen.inline_candidates.iter().cloned().collect();
     (codegen, names)

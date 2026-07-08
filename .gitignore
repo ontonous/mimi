@@ -61,6 +61,9 @@ Thumbs.db
 AGENTS.md
 devdocs/
 
+# Reference projects
+references/
+
 # MiMoCode agent workspace
 .mimocode/
 

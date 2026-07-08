@@ -128,9 +128,6 @@ pub(crate) fn build(
         merged_file.items.push(main_item);
     }
 
-    // Map inline rule statements to structured contracts
-    mimi::contracts::map_rule_contracts(&mut merged_file);
-
     let check_result = if strict {
         mimi::core::check_strict(&merged_file)
     } else {
