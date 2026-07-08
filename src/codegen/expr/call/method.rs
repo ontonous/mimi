@@ -1217,10 +1217,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_br(loop_bb)?;
                 self.builder.position_at_end(done_bb);
 
-                // Register FreeList cleanup if elements need individual freeing
-                if needs_element_free {
-                    self.register_heap_list_elements(list_alloca);
-                }
+                // Register FreeList cleanup if elements need individual freeing.
+                // v0.28.29 fix for mimichat gap #2: do NOT register the temporary
+                // `list_alloca` here. The caller stores the returned list struct into
+                // its own variable alloca (`%l`), and in-place mutations like `push(l, ...)`
+                // rewrite `%l.data` (via the caller-provided alloca path). Registering
+                // the temporary means the scope-exit cleanup reads stale `list_alloca.data`
+                // which has been freed by an intervening realloc — causing double-free /
+                // SIGSEGV. The list elements are intentionally leaked at scope exit; the
+                // process reclaim at termination keeps the codegen correct without a
+                // crash. This trades memory hygiene for the ability to mutate lists
+                // returned by `from_json`.
+                let _ = needs_element_free;
 
                 // Load and return list struct
                 let list_ty = self.list_struct_type();

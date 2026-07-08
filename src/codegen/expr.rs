@@ -398,6 +398,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         Some(inner.trim().to_string())
     }
 
+    /// True iff `s` names a `List<...>` type (used by v0.28.29 to detect when
+    /// a builtin call argument needs the original alloca instead of a loaded
+    /// StructValue so in-place list mutations are visible to the caller).
+    pub(super) fn is_list_type_name(&self, s: &str) -> bool {
+        Self::strip_list_element_type(s).is_some()
+    }
+
     /// Map a stored LLVM value type back to a coarse Mimi type name for method
     /// dispatch. This is intentionally approximate: it only needs to distinguish
     /// the builtin scalar types and common struct layouts (string, List, Option,

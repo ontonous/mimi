@@ -7522,3 +7522,57 @@ fn dual_newtype_pattern() {
         "42\n42"
     );
 }
+
+// Regression test for v0.28.29 item #2: from_json::<List<T>> must return a
+// mutable list that survives subsequent push operations in codegen.
+// Previously, compile_push created a temporary alloca from the StructValue
+// passed at the call site; the in-place mutations to that temporary were
+// discarded, so the next push read stale (already-freed) data and crashed
+// with a double free / SIGSEGV.
+#[test]
+fn dual_from_json_list_push_then_len() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "[\"a\", \"b\", \"c\"]"
+            let mut l: List<string> = from_json::<List<string>>(s)
+            let n0 = len(l)
+            push(l, "x")
+            let n1 = len(l)
+            push(l, "y")
+            let n2 = len(l)
+            println(to_string(n0))
+            println(to_string(n1))
+            println(to_string(n2))
+            0
+        }
+        "#,
+        "3\n4\n5"
+    );
+}
+
+#[test]
+fn dual_from_json_list_push_i64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "[1, 2, 3]"
+            let mut l: List<i32> = from_json::<List<i32>>(s)
+            push(l, 4)
+            push(l, 5)
+            let total = len(l)
+            println(to_string(total))
+            println(to_string(l[0]))
+            println(to_string(l[4]))
+            0
+        }
+        "#,
+        "5\n1\n5"
+    );
+}

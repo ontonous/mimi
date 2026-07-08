@@ -983,6 +983,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// lists that use FreeList.  Call this AFTER `alloc_list_result` so the
     /// FreeList entry is pushed first (processed first at scope exit), and the
     /// Slot entry (if any) is pushed second.
+    ///
+    /// Note (v0.28.29): Currently unused by `from_json::<List<T>>` because the
+    /// caller stores the returned list struct into its own alloca that
+    /// in-place mutations (`push`/`pop`) rewrite. Registering the temporary
+    /// `list_alloca` would read stale data at scope exit and double-free.
+    /// Kept here for any future caller that needs element-level cleanup of
+    /// a list it owns exclusively.
+    #[allow(dead_code)]
     pub(super) fn register_heap_list_elements(
         &self,
         list_ptr: inkwell::values::PointerValue<'ctx>,

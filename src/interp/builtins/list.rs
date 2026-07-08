@@ -40,6 +40,13 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::List(l) => {
+                // v0.28.29 fix for mimichat gap #2: keep the value semantics
+                // — return the new (mutated) list — so the existing
+                // `eval_call_dispatch` special case (which assigns the result
+                // back to the lvalue when args[0] is a mutable variable)
+                // can do the in-place update uniformly. This matches the
+                // codegen backend's behaviour where `push(l, x)` mutates
+                // `l` rather than producing a new value.
                 let mut new_list = l.clone();
                 new_list.push(args[1].clone());
                 Ok(Value::List(new_list))

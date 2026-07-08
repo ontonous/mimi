@@ -175,6 +175,35 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let mut compiled_args = self.compile_arg_values(args, vars)?;
 
+        // v0.28.29 fix for mimichat gap #2: list-mutating builtins (`push`,
+        // `pop`) take a `*List` pointer at the LLVM level. When the caller
+        // passes a local `let l: List<T> = ...`, the alloca for `l` is the
+        // authoritative location. Naively `compile_arg_values` would `load`
+        // the struct out of the alloca, then `compile_push` would mutate a
+        // freshly-allocated temporary — discarding the changes and leaving
+        // `l.data` pointing at the (already-freed) pre-mutation buffer,
+        // causing double free / SIGSEGV on the next push.
+        //
+        // For mutating list builtins whose var slot is a `{i64, ptr}` struct
+        // (i.e. `let l: List<T> = from_json::<List<T>>(...)` where the codegen
+        // store the list value-by-value), swap args[0] from the loaded
+        // StructValue back to the original alloca pointer so the mutation
+        // is visible. Skip the swap when the var is already a list pointer
+        // (e.g. list literals — the loaded value is already a *List that
+        // `require_list_pointer` returns as-is, which is the correct LLVM
+        // pointer for gep against the list struct).
+        if matches!(name, "push" | "pop") && !args.is_empty() {
+            if let Expr::Ident(var_name) = &args[0] {
+                if self.is_list_type_name(&self.infer_object_type(&args[0], vars)) {
+                    if let Some(&(alloca, var_ty)) = vars.get(var_name) {
+                        if matches!(var_ty, BasicTypeEnum::StructType(_)) {
+                            compiled_args[0] = BasicValueEnum::PointerValue(alloca);
+                        }
+                    }
+                }
+            }
+        }
+
         self.maybe_convert_callback_args(name, &mut compiled_args)?;
         self.maybe_load_reprc_struct_args_for_extern(name, &mut compiled_args)?;
         self.coerce_args_to_param_types(name, &mut compiled_args)?;

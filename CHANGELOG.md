@@ -1,6 +1,22 @@
 # Changelog
 
-## [Unreleased] — v0.28.28-dev
+## [Unreleased] — v0.28.29-dev
+
+### Fixed
+- **`from_json::<List<T>>` 返回的 list 可 mutate** (`src/codegen/expr/call/simple.rs`, `src/codegen/expr/call/method.rs`, `src/codegen/mod.rs`, `src/codegen/expr.rs`, `src/interp/builtins/list.rs`): mimichat gap #2 双后端修复。
+  - **codegen**：当 `push`/`pop` builtin args[0] 是 List 类型的 `Expr::Ident` 且 var alloca 是 struct 类型时，caller 直接传 var alloca pointer 给 builtin（避免 `compile_arg_values` load 出 StructValue 后被 builtin copy 到 temp alloca 丢修改）；同时移除 from_json 内部对临时 list_alloca 的 `register_heap_list_elements`（避免 scope-exit cleanup 读到已被 push realloc 释放的旧 data buffer）。列表元素在 scope exit 时不主动 free，由进程终止回收。
+  - **interp**：`builtin_push` 维持值语义返回新 list，依赖 `eval_call_dispatch` 已存在的 `push` 特殊处理 assign 回 lvalue（需要 `let mut` 声明）。
+
+### Tests
+- 新增 `dual_from_json_list_push_then_len` 与 `dual_from_json_list_push_i64` 双后端测试，验证 from_json 后的 List<string> 和 List<i32> 可以连续 push。
+
+## [v0.28.28-dev] — 2026-07-08
+
+### Fixed
+- **Actor 方法可调用用户函数** (`src/interp/value.rs`, `src/interp/actor.rs`): ActorHandle 新增 `program: Arc<File>` 共享 AST 字段，worker 线程创建 Interp 时复用原始 program 上下文而非空白 AST。修复 mimichat gap #1：actor 方法内调用任意顶层用户函数（包括 builtin 和用户定义）现在能正确解析。验证：mimichat `RoomManager.member_count` 中提取 `members_from_json` 顶层函数后仍通过。
+
+### Tests
+- 新增 `actor_method_calls_user_function` 与 `actor_method_calls_user_function_via_record` 解释器回归测试，覆盖 actor 方法内调用 i32 / string 用户函数两种典型场景.
 
 ### Fixed
 - **Actor 方法可调用用户函数** (`src/interp/value.rs`, `src/interp/actor.rs`): ActorHandle 新增 `program: Arc<File>` 共享 AST 字段，worker 线程创建 Interp 时复用原始 program 上下文而非空白 AST。修复 mimichat gap #1：actor 方法内调用任意顶层用户函数（包括 builtin 和用户定义）现在能正确解析。验证：mimichat `RoomManager.member_count` 中提取 `members_from_json` 顶层函数后仍通过。
