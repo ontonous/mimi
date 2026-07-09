@@ -247,35 +247,9 @@ pub struct CodeGenerator<'ctx> {
 
     // ====================================================================
     // v0.28.13 — Inline / GVN scaffolding
-    // ====================================================================
-    /// Pure-function CSE cache: maps (func_name, arg_fingerprint) → the
-    /// previously computed SSA value. Used when the optimizer is enabled
-    /// (`MIMI_OPT=1`) to skip recomputation of pure calls.
-    ///
-    /// v0.28.13 introduces the data structure; full CSE propagation is
-    /// planned for v0.28.14. The fingerprint is a stable string derived
-    /// from the function name and the SSA names of its arguments.
-    #[allow(dead_code)]
-    pub(crate) cse_cache: HashMap<String, inkwell::values::BasicValueEnum<'ctx>>,
-    /// Small-function inline candidate list: functions whose IR size
-    /// (instruction count) is below `INLINE_INSTRUCTION_THRESHOLD`.
-    /// Populated during `compile_func` and consulted by
-    /// `should_inline_at_call_site`.
-    #[allow(dead_code)]
-    pub(crate) inline_candidates: std::collections::HashSet<String>,
-    /// Counter incremented for each CSE cache hit (used for diagnostics
-    /// and the `cse_hits` accessor in tests).
-    #[allow(dead_code)]
-    pub(crate) cse_hits: u64,
-    /// Counter incremented for each inline decision (used for diagnostics
-    /// and the `inline_count` accessor in tests).
-    #[allow(dead_code)]
-    pub(crate) inline_count: u64,
-    /// Names of functions that have been determined to be pure (no side
-    /// effects, no external calls). Pure functions are eligible for both
-    /// inlining and CSE. Populated during `compile_func` analysis pass.
-    #[allow(dead_code)]
-    pub(crate) pure_funcs: std::collections::HashSet<String>,
+    /// Candidate set for small-function inlining (populated during
+    /// `compile_func` and consulted by call-site dispatch).
+    /// Names of functions determined to be pure (no side effects).
 
     // ====================================================================
     // v0.28.19 — Actor real concurrency
@@ -300,10 +274,6 @@ type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)
 /// emitted from `base` in the current block. `base` must dominate the cleanup
 /// point; call sites therefore allocate it in the function entry block.
 /// The struct's ptr field is also null-initialized at the entry block.
-/// `FreeList(list_ptr)` = a MimiList struct whose elements are heap-allocated
-/// pointers (each element is a separate malloc'd block stored as ptrtoint i64
-/// in the list's data array). At cleanup, calls `mimi_list_free_elements` to
-/// free each element pointer and the data buffer, but NOT the list struct itself.
 enum HeapEntry<'ctx> {
     Ptr(inkwell::values::PointerValue<'ctx>),
     Slot(
@@ -311,7 +281,6 @@ enum HeapEntry<'ctx> {
         inkwell::types::StructType<'ctx>,
         u32,
     ),
-    FreeList(inkwell::values::PointerValue<'ctx>),
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -387,12 +356,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             list_elem_llvm_types: HashMap::new(),
             closure_wrappers: HashMap::new(),
             const_values: HashMap::new(),
-            // v0.28.13 inline/GVN scaffolding
-            cse_cache: HashMap::new(),
-            inline_candidates: std::collections::HashSet::new(),
-            cse_hits: 0,
-            inline_count: 0,
-            pure_funcs: std::collections::HashSet::new(),
             // v0.28.19 actor concurrency
             actor_names: std::collections::HashSet::new(),
             actor_method_ids: HashMap::new(),
@@ -695,149 +658,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     //   `cse_record` inserts a new entry. Both are no-ops in this version
     //   because the call site dispatch is conservative — the scaffold is
     //   tested via the accessors `cse_hits` and the deterministic fingerprint
-    //   derivation.
-    //
-    // - `should_inline_at_call_site` returns true when the callee is in
-    //   `inline_candidates` (small functions registered during
-    //   `compile_func`). The threshold and the per-function instruction
-    //   count metric are exposed via `INLINE_INSTRUCTION_THRESHOLD` and
-    //   `count_instructions_in_function` for diagnostic and test use.
-    //
-    // This is the *skeleton*: full integration with the call expression
-    // dispatch is left for v0.28.14 to avoid scope creep.
-
-    /// Maximum instruction count for a function to be inlined.
-    /// Functions with more than this many instructions are emitted as
-    /// real `call` instructions; smaller functions are inlined into
-    /// each call site.
-    pub(crate) const INLINE_INSTRUCTION_THRESHOLD: u32 = 20;
-
-    /// Derive a stable fingerprint string for a function call based on
-    /// the function name and the SSA names of its arguments. Used as
-    /// the key in `cse_cache`.
-    #[allow(dead_code)]
-    pub(crate) fn cse_fingerprint(&self, func_name: &str, args: &[BasicValueEnum<'ctx>]) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(args.len() + 1);
-        parts.push(func_name.to_string());
-        for (i, a) in args.iter().enumerate() {
-            // For SSA values we use the index as a proxy: the SSA
-            // numbering within a function is deterministic. For a more
-            // robust fingerprint, the value's instruction opcode could
-            // be added, but index alone suffices for v0.28.13's
-            // scaffolding.
-            parts.push(format!(
-                "arg{}:v{}",
-                i,
-                a.get_type().print_to_string().to_string_lossy()
-            ));
-        }
-        parts.join("|")
-    }
-
-    /// Look up a previously computed value for a pure-function call.
-    /// Returns the cached SSA value if present, or None.
-    /// Note: v0.28.13 only implements the lookup; the call site
-    /// dispatcher is left unchanged (so this always returns None in
-    /// practice). The data structure is exercised by tests.
-    #[allow(dead_code)]
-    pub(crate) fn cse_lookup(&mut self, fingerprint: &str) -> Option<BasicValueEnum<'ctx>> {
-        let hit = self.cse_cache.get(fingerprint).copied();
-        if hit.is_some() {
-            self.cse_hits += 1;
-        }
-        hit
-    }
-
-    /// Record a freshly computed pure-function result for future CSE hits.
-    /// Called by the call site dispatcher (v0.28.14 will integrate this).
-    #[allow(dead_code)]
-    pub(crate) fn cse_record(&mut self, fingerprint: String, value: BasicValueEnum<'ctx>) {
-        self.cse_cache.insert(fingerprint, value);
-    }
-
-    /// Returns true if the named function should be inlined at the call
-    /// site. Decision is based on `inline_candidates` membership
-    /// (populated by the analysis pass in `compile_func`).
-    #[allow(dead_code)]
-    pub(crate) fn should_inline_at_call_site(&mut self, func_name: &str) -> bool {
-        let in_set = self.inline_candidates.contains(func_name);
-        if in_set {
-            self.inline_count += 1;
-        }
-        in_set
-    }
-
-    /// Register a function as a candidate for inlining. Called by
-    /// `compile_func` after counting the function's instruction count.
-    #[allow(dead_code)]
-    pub(crate) fn register_inline_candidate(&mut self, func_name: String) {
-        self.inline_candidates.insert(func_name);
-    }
-
-    /// Mark a function as pure (no side effects, no external calls).
-    /// Pure functions are eligible for both inlining and CSE.
-    #[allow(dead_code)]
-    pub(crate) fn mark_pure(&mut self, func_name: String) {
-        self.pure_funcs.insert(func_name);
-    }
-
-    /// Count the number of instructions in a function. Returns 0 for
-    /// null or external functions. This is the metric used by the
-    /// inline decision.
-    pub(crate) fn count_instructions_in_function(
-        &self,
-        func: inkwell::values::FunctionValue<'ctx>,
-    ) -> u32 {
-        if func
-            .get_name()
-            .to_str()
-            .map(|s| s.is_empty())
-            .unwrap_or(true)
-        {
-            return 0;
-        }
-        // External (declaration only) functions: count = 1 (the call itself)
-        if func.get_linkage() == inkwell::module::Linkage::External
-            && func.count_basic_blocks() == 0
-        {
-            return 1;
-        }
-        let mut count: u32 = 0;
-        for bb in func.get_basic_blocks() {
-            count += bb.get_instructions().count() as u32;
-        }
-        count
-    }
-
-    /// Reset all inline/GVN state. Called between top-level compiles
-    /// so per-function caches do not leak across compilation units.
-    #[allow(dead_code)]
-    pub(crate) fn reset_inline_gvn_state(&mut self) {
-        self.cse_cache.clear();
-        self.inline_candidates.clear();
-        self.pure_funcs.clear();
-        self.cse_hits = 0;
-        self.inline_count = 0;
-    }
-
-    /// Diagnostic accessor: number of CSE cache hits so far.
-    #[allow(dead_code)]
-    pub(crate) fn cse_hits(&self) -> u64 {
-        self.cse_hits
-    }
-
-    /// Diagnostic accessor: number of inline decisions made.
-    #[allow(dead_code)]
-    pub(crate) fn inline_count(&self) -> u64 {
-        self.inline_count
-    }
-
-    fn current_fn_ret_type(&self) -> BasicTypeEnum<'ctx> {
-        self.current_function()
-            .and_then(|f| f.get_type().get_return_type())
-            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
-    }
-
     fn adjust_int_val(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -990,16 +810,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// `list_alloca` would read stale data at scope exit and double-free.
     /// Kept here for any future caller that needs element-level cleanup of
     /// a list it owns exclusively.
-    #[allow(dead_code)]
-    pub(super) fn register_heap_list_elements(
-        &self,
-        list_ptr: inkwell::values::PointerValue<'ctx>,
-    ) {
-        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            stack.push(HeapEntry::FreeList(list_ptr));
-        }
-    }
-
     /// Register a heap slot in the root (function-level) scope so that it
     /// survives intermediate scope exits (e.g. loop body blocks). Used for
     /// string variable assignments where the heap allocation must outlive the
@@ -1077,75 +887,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
             for entry in scope {
-                match entry {
-                    HeapEntry::FreeList(list_ptr) => {
-                        // Call mimi_list_free_elements(list_ptr) to free each element
-                        // pointer. The data buffer and list struct are NOT freed here.
-                        let void_ty = self.context.void_type();
-                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let fn_name = "mimi_list_free_elements";
-                        let fn_ty =
-                            void_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
-                        let func = self.module.get_function(fn_name).unwrap_or_else(|| {
-                            self.module.add_function(
-                                fn_name,
-                                fn_ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
-                        let casted = self
-                            .build_bit_cast(list_ptr.into(), i8_ptr.into(), "fl_cast")
-                            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
-                            .into_pointer_value();
-                        self.builder
-                            .build_call(
-                                func,
-                                &[BasicMetadataValueEnum::PointerValue(casted)],
-                                "free_list_elems",
-                            )
+                let ptr = match entry {
+                    HeapEntry::Ptr(p) => p,
+                    HeapEntry::Slot(base, struct_ty, field) => {
+                        let gep = self
+                            .gep()
+                            .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
                             .map_err(|e| {
-                                CompileError::LlvmError(format!("free_list_elems call: {}", e))
+                                CompileError::LlvmError(format!("heap slot gep error: {}", e))
                             })?;
-                    }
-                    entry => {
-                        let ptr = match entry {
-                            HeapEntry::Ptr(p) => p,
-                            HeapEntry::Slot(base, struct_ty, field) => {
-                                let gep = self
-                                    .gep()
-                                    .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!(
-                                            "heap slot gep error: {}",
-                                            e
-                                        ))
-                                    })?;
-                                let ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                self.builder
-                                    .build_load(ptr_ty, gep, "heap_slot")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!(
-                                            "heap slot load error: {}",
-                                            e
-                                        ))
-                                    })?
-                                    .into_pointer_value()
-                            }
-                            _ => {
-                                mimi_debug_assert!(false, "free_heap: unhandled HeapEntry variant");
-                                unreachable!()
-                            }
-                        };
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         self.builder
-                            .build_call(
-                                free_fn,
-                                &[BasicMetadataValueEnum::PointerValue(ptr)],
-                                "free_heap",
-                            )
-                            .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                            .build_load(ptr_ty, gep, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value()
                     }
-                }
+                };
+                self.builder
+                    .build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(ptr)],
+                        "free_heap",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
             }
         }
         Ok(())
@@ -1153,6 +919,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Resolve a Mimi type to its LLVM representation, preferring registered
     /// type definitions (records, enums, actors) over the built-in name mapping.
+    fn current_fn_ret_type(&self) -> BasicTypeEnum<'ctx> {
+        self.current_function()
+            .and_then(|f| f.get_type().get_return_type())
+            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
+    }
+
     pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         if let crate::ast::Type::Name(name, _) = ty {
             if let Some(llvm) = self.type_llvm.get(name) {

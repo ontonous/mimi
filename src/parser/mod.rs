@@ -107,7 +107,7 @@ impl Parser {
     }
 
     /// Create a parser in recovery mode: statement-level errors are caught and skipped.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_with_recovery(tokens: Vec<Token>) -> Self {
         Self {
             tokens,
