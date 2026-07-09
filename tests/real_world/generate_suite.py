@@ -274,12 +274,35 @@ func main() -> i32 {
 tests["std_collections.mimi"] = r'''
 use std::collections
 
+type Item { val: i32 }
+
 func main() -> i32 {
     let xs = [3, 1, 4, 1, 5]
     let doubled = map_list(xs, fn(x: i32) -> i32 { x * 2 })
     let evens = filter_list(xs, fn(x: i32) -> bool { x % 2 == 0 })
     let total = reduce_list(xs, fn(a: i32, b: i32) -> i32 { a + b }, 0)
-    if len(doubled) == 5 && len(evens) == 1 && total == 14 { 0 } else { 1 }
+    if len(doubled) != 5 || len(evens) != 1 || total != 14 { return 1 }
+    // Test builtin reduce with lambda (type inference now works)
+    let total2 = reduce(xs, fn(a: i32, e: i32) -> i32 { a + e }, 0)
+    if total2 != 14 { return 2 }
+    // Test struct-typed filter (was hitting i1/i64 ABI mismatch in codegen)
+    let items = [Item { val: 10 }, Item { val: 20 }]
+    let gt2 = filter(items, fn(x: Item) -> bool { x.val > 15 })
+    if len(gt2) != 1 { return 3 }
+    let mapped = map(items, fn(x: Item) -> i32 { x.val })
+    if len(mapped) != 2 { return 4 }
+    let mut sum = 0
+    for v in mapped { sum = sum + v }
+    if sum != 30 { return 5 }
+    // Test trait method dispatch with struct-typed elements
+    let flt = filter_list(items, fn(x: Item) -> bool { x.val > 15 })
+    if len(flt) != 1 { return 6 }
+    let mlt = map_list(items, fn(x: Item) -> i32 { x.val })
+    if len(mlt) != 2 { return 7 }
+    let mut sum2 = 0
+    for v in mlt { sum2 = sum2 + v }
+    if sum2 != 30 { return sum2 }
+    0
 }
 '''
 
@@ -310,11 +333,67 @@ func main() -> i32 {
 
 tests["std_json.mimi"] = r'''
 type Config { name: string, count: i64 }
+type JsonRecord { name: string, value: i32, flag: bool }
 
 func main() -> i32 {
+    // Record deserialization
     let s = "{\"name\":\"mimi\",\"count\":42}"
     let cfg = from_json::<Config>(s)
-    if cfg.name == "mimi" && cfg.count == 42 { 0 } else { 1 }
+    if cfg.name != "mimi" || cfg.count != 42 { return 1 }
+
+    // List deserialization
+    let nums = from_json::<List<i32>>("[10, 20, 30]")
+    if nums[0] != 10 || nums[1] != 20 || nums[2] != 30 { return 2 }
+
+    // Empty list
+    let empty = from_json::<List<i32>>("[]")
+    if len(empty) != 0 { return 3 }
+
+    // String list
+    let items = from_json::<List<string>>("[\"hello\",\"world\"]")
+    if items[0] != "hello" || items[1] != "world" { return 4 }
+
+    // Float list
+    let floats = from_json::<List<f64>>("[1.5, 2.5, 3.5]")
+    if floats[0] != 1.5 || floats[1] != 2.5 || floats[2] != 3.5 { return 5 }
+
+    // Bool list
+    let bools = from_json::<List<bool>>("[true, false, true]")
+    if bools[0] != true || bools[1] != false || bools[2] != true { return 6 }
+
+    // Record to_json
+    let rec = JsonRecord { name: "hi", value: 7, flag: true }
+    if to_json(rec) != "{\"flag\":true,\"name\":\"hi\",\"value\":7}" { return 19 }
+
+    // List of records
+    let rec_list = from_json::<List<JsonRecord>>("[{\"name\":\"x\",\"value\":10,\"flag\":true},{\"name\":\"y\",\"value\":20,\"flag\":false}]")
+    if len(rec_list) != 2 { return 7 }
+    if rec_list[0].name != "x" || rec_list[0].value != 10 || rec_list[0].flag != true { return 8 }
+    if rec_list[1].name != "y" || rec_list[1].value != 20 || rec_list[1].flag != false { return 9 }
+    let empty_rec = from_json::<List<JsonRecord>>("[]")
+    if len(empty_rec) != 0 { return 70 }
+    let rec_json = to_json(rec_list)
+    if rec_json != "[{\"flag\":true,\"name\":\"x\",\"value\":10},{\"flag\":false,\"name\":\"y\",\"value\":20}]" { return 71 }
+    let empty_rec_json = to_json(empty_rec)
+    if empty_rec_json != "[]" { return 72 }
+
+    // --- to_json scalars ---
+    if to_json(42) != "42" { return 10 }
+    if to_json(true) != "true" { return 11 }
+    if to_json(false) != "false" { return 12 }
+    if to_json("hello") != "\"hello\"" { return 14 }
+
+    // List to_json
+    let list_to_json = from_json::<List<i32>>("[1, 2, 3]")
+    if to_json(list_to_json) != "[1,2,3]" { return 15 }
+    let str_list = from_json::<List<string>>("[\"a\",\"b\"]")
+    if to_json(str_list) != "[\"a\",\"b\"]" { return 16 }
+    let f64_list = from_json::<List<f64>>("[1.5, 2.5]")
+    if to_json(f64_list) != "[1.5,2.5]" { return 17 }
+    let bool_list = from_json::<List<bool>>("[true, false]")
+    if to_json(bool_list) != "[true,false]" { return 18 }
+
+    0
 }
 '''
 
@@ -355,8 +434,16 @@ func main() -> i32 {
 tests["std_fs.mimi"] = r'''
 func main() -> i32 {
     let path = "/tmp/mimi_rw_test.txt"
-    let _ = write_file(path, "hello")
-    if file_exists(path) { 0 } else { 1 }
+    let _ = write_file(path, "hello world")
+
+    // Read back and verify content
+    match read_file(path) {
+        Ok(content) => {
+            if content != "hello world" { 2 }
+            else { 0 }
+        }
+        Err(_) => 1
+    }
 }
 '''
 
@@ -386,8 +473,9 @@ use std::template
 func main() -> i32 {
     let vars = map_new()
     let vars2 = map_set(vars, "name", "Mimi")
-    let _ = simple_render("Hello {{name}}!", vars2)
-    0
+    let result = simple_render("Hello {{name}}!", vars2)
+    // Verify the function returns the correct rendered string
+    if result == "Hello Mimi!" { 0 } else { 1 }
 }
 '''
 
@@ -395,7 +483,10 @@ tests["std_crypto.mimi"] = r'''
 use std::crypto
 
 func main() -> i32 {
-    if is_valid_hex("0a1f") && is_valid_hex("abcdef") { 0 } else { 1 }
+    if !is_valid_hex("0a1f") { return 1 }
+    if !is_valid_hex("abcdef") { return 2 }
+    let encoded = hex_encode("ABC")
+    if encoded == "414243" { 0 } else { 3 }
 }
 '''
 
@@ -408,8 +499,7 @@ func abs(x: i32) -> i32 {
 }
 
 func main() -> i32 {
-    abs(5)
-    0
+    if abs(5) == 5 { 0 } else { 1 }
 }
 '''
 
