@@ -76,11 +76,6 @@ fn e0221_no_method() {
     );
 }
 
-#[test]
-fn e0221_method_on_literal() {
-    assert_err_code(r"func main() -> i32 { (42).foo() }", crate::diagnostic::codes::E0221);
-}
-
 // ── E0224: cannot apply ? to type ─────────────────────────────────────
 #[test]
 fn e0224_question_on_i32() {

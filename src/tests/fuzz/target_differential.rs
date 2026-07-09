@@ -41,7 +41,6 @@ fn assert_expr_ret(ret_ty: &str, expr: &str) {
 }
 
 /// Convenience: i32-valued expression (most common case).
-#[allow(dead_code)]
 fn assert_expr(expr: &str) {
     assert_expr_ret("i32", expr);
 }

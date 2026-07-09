@@ -49,6 +49,7 @@ pub(crate) mod v1_2_traits_misc;
 pub(crate) mod v1_2_type_def_misc;
 pub(crate) mod v1_2_verification;
 pub(crate) mod v1_3_negative_suite;
+pub(crate) mod v1_4_tricky_interaction;
 
 pub(crate) mod actor_concurrent;
 pub(crate) mod borrow_boundary;
