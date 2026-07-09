@@ -1679,6 +1679,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Alloc: execute body sequentially (simplified - no custom allocator in codegen)
                     self.compile_block(body, vars)?;
                 }
+                Stmt::Func(f) => {
+                    if f.is_comptime {
+                        // Comptime functions: skip codegen (interpreter-only)
+                    } else {
+                        // Register nested function so user_func_signature_matches can find it
+                        self.func_defs
+                            .entry(f.name.clone())
+                            .or_insert_with(|| f.clone());
+                        // Save per-function state before compiling nested function, since
+                        // compile_func clears these at entry.
+                        let saved_block = self.builder.get_insert_block();
+                        let saved_type_map = self.type_map.clone();
+                        let saved_var_types = std::mem::take(&mut self.var_types);
+                        let saved_var_type_names = std::mem::take(&mut self.var_type_names);
+                        let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
+                        self.compile_func(f)?;
+                        self.var_types = saved_var_types;
+                        self.var_type_names = saved_var_type_names;
+                        self.list_elem_llvm_types = saved_list_elem;
+                        self.type_map = saved_type_map;
+                        if let Some(bb) = saved_block {
+                            self.builder.position_at_end(bb);
+                        }
+                    }
+                }
                 Stmt::Desc(..)
                 | Stmt::Rule(..)
                 | Stmt::Requires(..)

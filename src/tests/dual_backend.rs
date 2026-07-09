@@ -7795,3 +7795,61 @@ fn dual_actor_string_field_literal_init() {
         "Alice"
     );
 }
+
+#[test]
+fn dual_nested_func() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            func add(a: i32, b: i32) -> i32 { a + b }
+            func mul(a: i32, b: i32) -> i32 { a * b }
+            let x = add(3, 4)
+            let y = mul(x, 2)
+            println(to_string(y))
+            0
+        }
+        "#,
+        "14"
+    );
+}
+
+#[test]
+fn dual_nested_func_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            func greet(name: string) -> string { "Hello, " + name + "!" }
+            println(greet("World"))
+            0
+        }
+        "#,
+        "Hello, World!"
+    );
+}
+
+#[test]
+fn dual_nested_func_multiple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func helper(x: i32) -> i32 {
+            func double(n: i32) -> i32 { n * 2 }
+            func triple(n: i32) -> i32 { n * 3 }
+            double(x) + triple(x)
+        }
+        func main() -> i32 {
+            println(to_string(helper(5)))
+            0
+        }
+        "#,
+        "25"
+    );
+}
