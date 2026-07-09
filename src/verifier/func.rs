@@ -1,10 +1,9 @@
 use crate::ast::*;
-use crate::contracts;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, Z3VarMap};
 use crate::verifier::helpers::{
-    block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr, parse_contract_expr,
+    block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -231,37 +230,9 @@ impl crate::verifier::Verifier {
                     invariant_spans.push(*span);
                 }
                 Stmt::Math(exprs) => math_exprs.extend(exprs.clone()),
-                Stmt::MmsBlock {
-                    content: text,
-                    span: mms_span,
-                    ..
-                } => {
-                    let contract = contracts::extract_contracts(text);
-                    for _ in &contract.requires {
-                        requires_spans.push(*mms_span);
-                    }
-                    for req_text in &contract.requires {
-                        match parse_contract_expr(req_text) {
-                            Ok(expr) => requires_exprs.push(expr),
-                            Err(e) => parse_errors.push(format!("requires parse error: {}", e)),
-                        }
-                    }
-                    for _ in &contract.ensures {
-                        ensures_spans.push(*mms_span);
-                    }
-                    for ens_text in &contract.ensures {
-                        match parse_contract_expr(ens_text) {
-                            Ok(expr) => ensures_exprs.push(expr),
-                            Err(e) => parse_errors.push(format!("ensures parse error: {}", e)),
-                        }
-                    }
-                    for math_text in &contract.math {
-                        match parse_contract_expr(math_text) {
-                            Ok(expr) => math_exprs.push(expr),
-                            Err(e) => parse_errors.push(format!("math parse error: {}", e)),
-                        }
-                    }
-                }
+                // MmsBlock is a super-comment; contracts must use top-level
+                // requires:/ensures: statements for mimi verify.
+                Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => {}
                 _ => {}
             }
         }

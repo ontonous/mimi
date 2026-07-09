@@ -313,56 +313,8 @@ impl Parser {
         };
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        let ast = self.try_parse_mimispec_with_timeout(&content);
         let span = crate::span::Span::single(mms_line, mms_col);
-        Ok(Stmt::MmsBlock { content, ast, span })
-    }
-
-    fn try_parse_mimispec_with_timeout(&mut self, content: &str) -> Option<mimispec::ast::File> {
-        use std::time::Duration;
-
-        // Enforce at most one concurrent background MimiSpec parse thread per
-        // Parser instance. If a previous parse timed out, its worker thread may
-        // still be running; join it if it has finished, otherwise we cannot
-        // start a new one.
-        if let Some(handle) = self.mimispec_thread.take() {
-            if handle.is_finished() {
-                // Reclaim the finished thread so its resources are released.
-                let _ = handle.join();
-            } else {
-                // Previous parse still in progress; put the handle back and
-                // return None to avoid spawning an unbounded second thread.
-                self.mimispec_thread = Some(handle);
-                return None;
-            }
-        }
-
-        let content_owned = content.to_string();
-        let handle = std::thread::spawn(move || mimispec::parse(&content_owned));
-        self.mimispec_thread = Some(handle);
-        // We can safely unwrap because we just stored the handle above.
-        let handle = self.mimispec_thread.take().unwrap();
-
-        // Poll for completion with bounded wait.
-        let started = std::time::Instant::now();
-        let result = loop {
-            if handle.is_finished() {
-                break handle.join();
-            }
-            if started.elapsed() > Duration::from_millis(100) {
-                // Timeout: retain the handle so the thread is joined either on
-                // the next parse call or when the Parser is dropped. This
-                // prevents detached threads from accumulating.
-                self.mimispec_thread = Some(handle);
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
-
-        match result {
-            Ok(parsed) if parsed.errors.is_empty() => Some(parsed.file),
-            _ => None,
-        }
+        Ok(Stmt::MmsBlock { content, span })
     }
 
     fn parse_shared_let(&mut self, kind: SharedKind) -> Result<Stmt, ParseError> {

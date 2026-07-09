@@ -80,25 +80,6 @@ pub struct Parser {
     /// Statement-level errors collected during recovery parsing.
     /// These are returned alongside top-level errors by `parse_file_with_recovery`.
     errors: Vec<ParseError>,
-    /// Background MimiSpec parse thread handle.
-    ///
-    /// Each `Parser` instance is allowed at most one concurrent background
-    /// MimiSpec parse thread. If a parse exceeds the timeout, the handle is
-    /// retained here so the thread can be joined later (on the next parse call
-    /// or when the parser is dropped), preventing detached threads from
-    /// accumulating.
-    mimispec_thread: Option<std::thread::JoinHandle<mimispec::error::ParseResult>>,
-}
-
-impl Drop for Parser {
-    fn drop(&mut self) {
-        // Reclaim any background MimiSpec parse thread that outlived its
-        // timeout. The thread cannot be cancelled mid-parse, so we join it
-        // here to release its resources before the Parser is destroyed.
-        if let Some(handle) = self.mimispec_thread.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 impl Parser {
@@ -118,7 +99,6 @@ impl Parser {
             recovery_mode: false,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
-            mimispec_thread: None,
         }
     }
 
@@ -132,7 +112,6 @@ impl Parser {
             recovery_mode: true,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
-            mimispec_thread: None,
         }
     }
 

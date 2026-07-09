@@ -50,7 +50,7 @@ pub mod macros;
 
 pub mod ast;
 pub mod codegen;
-pub mod contracts;
+
 pub mod diagnostic;
 pub mod error;
 pub mod ffi;

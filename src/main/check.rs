@@ -1,17 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{extract_all_contracts, is_production, is_sketch, resolve_path};
-use mimi::contracts;
+use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::{lexer, parser};
 
-pub(crate) fn check(
-    path: Option<&Path>,
-    extract_contracts: bool,
-    strict: bool,
-    verify_rules: bool,
-) -> Result<(), String> {
+pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
@@ -21,7 +15,7 @@ pub(crate) fn check(
     } else {
         lexer::Lexer::new(&source).tokenize()?
     };
-    let mut file = if sketch {
+    let file = if sketch {
         parser::Parser::new_sketch(tokens).parse_file()?
     } else {
         let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
@@ -57,47 +51,6 @@ pub(crate) fn check(
             "expected .mimi production file or .mms sketch file, got {}",
             path.display()
         ));
-    }
-
-    // Extract contracts from mms blocks if requested
-    if extract_contracts {
-        let contracts = extract_all_contracts(&file);
-        if contracts.is_empty() {
-            println!("No contracts found in mms blocks.");
-        } else {
-            println!("Contracts extracted from mms blocks:");
-            for (func_name, contract) in &contracts {
-                println!("  {}:", func_name);
-                for req in &contract.requires {
-                    println!("    requires: {}", req);
-                }
-                for ens in &contract.ensures {
-                    println!("    ensures: {}", ens);
-                }
-                for m in &contract.math {
-                    println!("    math: {}", m);
-                }
-            }
-        }
-        // Bind contracts to functions
-        let contract_errors = contracts::bind_contracts(&mut file, contracts);
-        if !contract_errors.is_empty() {
-            let use_color = colors_enabled();
-            let src = fs::read_to_string(&path).ok();
-            let src_ref = src.as_deref();
-            for err in &contract_errors {
-                let d = mimi::diagnostic::Diagnostic::error(
-                    err.clone(),
-                    mimi::span::Span::single(0, 0),
-                );
-                let formatted = format_diagnostic(&d, src_ref, &path.display().to_string());
-                if use_color {
-                    eprint!("{}", formatted);
-                } else {
-                    eprint!("{}", strip_ansi(&formatted));
-                }
-            }
-        }
     }
 
     // Load imports if any (so `use std::json` and friends resolve)
