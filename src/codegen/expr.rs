@@ -364,6 +364,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     String::new()
                 }
             }
+            Expr::List(elems) => {
+                if let Some(first) = elems.first() {
+                    let elem = self.infer_object_type(first, vars);
+                    if elem.is_empty() { "List".into() } else { format!("List<{}>", elem) }
+                } else {
+                    "List".into()
+                }
+            }
             Expr::Block(block) => block
                 .last()
                 .and_then(|last| {
