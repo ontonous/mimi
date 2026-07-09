@@ -833,6 +833,18 @@ impl<'a> Interpreter<'a> {
                     )),
                 }
             }
+            Value::Newtype(_name, inner) => {
+                // Newtype .0 access: unwrap to the inner value.
+                // self.0 on newtype UserId = i32 returns the i32, not the wrapper.
+                if field == "0" {
+                    Ok(*inner.clone())
+                } else {
+                    Err(InterpError::new(format!(
+                        "newtype has no field '{}' — use .0 to access the inner value",
+                        field
+                    )))
+                }
+            }
             _ => Err(InterpError::new(format!(
                 "cannot access field '{}' on {}",
                 field,
