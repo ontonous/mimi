@@ -211,7 +211,7 @@ func add(x: i32, y: i32) -> i32 {
 fn verify_simple_requires() {
     let src = r#"
 func abs(x: i32) -> i32 {
-    mms { "requires: x > 0" }
+    requires: x > 0
     if x > 0 {
         x
     } else {
@@ -228,7 +228,7 @@ func abs(x: i32) -> i32 {
 fn verify_requires_with_literal() {
     let src = r#"
 func double(x: i32) -> i32 {
-    mms { "requires: x == 5" }
+    requires: x == 5
     x + x
 }
 "#;
@@ -241,7 +241,8 @@ func double(x: i32) -> i32 {
 fn verify_ensures_simple() {
     let src = r#"
 func positive(x: i32) -> i32 {
-    mms { "requires: x > 0\nensures: x > 0" }
+    requires: x > 0
+    ensures: x > 0
     x
 }
 "#;
@@ -254,7 +255,8 @@ func positive(x: i32) -> i32 {
 fn verify_ensures_fails() {
     let src = r#"
 func bad(x: i32) -> i32 {
-    mms { "requires: x == 1\nensures: x == 2" }
+    requires: x == 1
+    ensures: x == 2
     x
 }
 "#;
@@ -265,7 +267,8 @@ func bad(x: i32) -> i32 {
 fn verify_requires_and_ensures() {
     let src = r#"
 func identity(x: i32) -> i32 {
-    mms { "requires: x >= 0\nensures: x >= 0" }
+    requires: x >= 0
+    ensures: x >= 0
     x
 }
 "#;
@@ -278,7 +281,9 @@ func identity(x: i32) -> i32 {
 fn verify_math_constraint() {
     let src = r#"
 func mul(x: i32, y: i32) -> i32 {
-    mms { "requires: x == 3\nrequires: y == 4\nmath: { x * y == 12 }" }
+    requires: x == 3
+    requires: y == 4
+    math: { x * y == 12 }
     x * y
 }
 "#;
@@ -291,7 +296,9 @@ func mul(x: i32, y: i32) -> i32 {
 fn verify_comparison_ops() {
     let src = r#"
 func min(x: i32, y: i32) -> i32 {
-    mms { "requires: x == 5\nrequires: y == 10\nensures: x <= 10" }
+    requires: x == 5
+    requires: y == 10
+    ensures: x <= 10
     if x < y { x } else { y }
 }
 "#;
@@ -304,7 +311,8 @@ func min(x: i32, y: i32) -> i32 {
 fn verify_not_operator() {
     let src = r#"
 func is_positive(x: i32) -> i32 {
-    mms { "requires: not(x == 0)\nensures: not(x == 0)" }
+    requires: not(x == 0)
+    ensures: not(x == 0)
     x
 }
 "#;
@@ -317,7 +325,8 @@ func is_positive(x: i32) -> i32 {
 fn verify_and_operator() {
     let src = r#"
 func bounded(x: i32) -> i32 {
-    mms { "requires: x > 0 and x < 100\nensures: x > 0" }
+    requires: x > 0 and x < 100
+    ensures: x > 0
     x
 }
 "#;
@@ -330,7 +339,8 @@ func bounded(x: i32) -> i32 {
 fn verify_or_operator() {
     let src = r#"
 func either(x: i32) -> i32 {
-    mms { "requires: x == 1 or x == 2\nensures: x >= 1" }
+    requires: x == 1 or x == 2
+    ensures: x >= 1
     x
 }
 "#;
@@ -343,7 +353,8 @@ func either(x: i32) -> i32 {
 fn verify_ne_operator() {
     let src = r#"
 func nonzero(x: i32) -> i32 {
-    mms { "requires: x != 0\nensures: x != 0" }
+    requires: x != 0
+    ensures: x != 0
     x
 }
 "#;
@@ -356,7 +367,8 @@ func nonzero(x: i32) -> i32 {
 fn verify_ge_operator() {
     let src = r#"
 func non_negative(x: i32) -> i32 {
-    mms { "requires: x >= 0\nensures: x >= 0" }
+    requires: x >= 0
+    ensures: x >= 0
     x
 }
 "#;
@@ -369,12 +381,14 @@ func non_negative(x: i32) -> i32 {
 fn verify_multiple_functions() {
     let src = r#"
 func f1(x: i32) -> i32 {
-    mms { "requires: x == 1\nensures: x == 1" }
+    requires: x == 1
+    ensures: x == 1
     x
 }
 
 func f2(x: i32) -> i32 {
-    mms { "requires: x == 2\nensures: x == 2" }
+    requires: x == 2
+    ensures: x == 2
     x
 }
 "#;
@@ -389,7 +403,9 @@ func f2(x: i32) -> i32 {
 fn verify_subtraction() {
     let src = r#"
 func sub(x: i32, y: i32) -> i32 {
-    mms { "requires: x == 10\nrequires: y == 3\nensures: x - y == 7" }
+    requires: x == 10
+    requires: y == 3
+    ensures: x - y == 7
     x - y
 }
 "#;
@@ -402,7 +418,9 @@ func sub(x: i32, y: i32) -> i32 {
 fn verify_division() {
     let src = r#"
 func div(x: i32, y: i32) -> i32 {
-    mms { "requires: x == 12\nrequires: y == 4\nensures: x / y == 3" }
+    requires: x == 12
+    requires: y == 4
+    ensures: x / y == 3
     x / y
 }
 "#;
@@ -415,7 +433,9 @@ func div(x: i32, y: i32) -> i32 {
 fn verify_modulo() {
     let src = r#"
 func rem(x: i32, y: i32) -> i32 {
-    mms { "requires: x == 10\nrequires: y == 3\nensures: x % y == 1" }
+    requires: x == 10
+    requires: y == 3
+    ensures: x % y == 1
     x % y
 }
 "#;
@@ -428,7 +448,8 @@ func rem(x: i32, y: i32) -> i32 {
 fn verify_negation() {
     let src = r#"
 func negate(x: i32) -> i32 {
-    mms { "requires: x == 5\nensures: x == 5" }
+    requires: x == 5
+    ensures: x == 5
     0 - x
 }
 "#;
@@ -476,7 +497,8 @@ fn verify_module_nested() {
     let src = r#"
 module Math {
     func identity(x: i32) -> i32 {
-        mms { "requires: x >= 0\nensures: x >= 0" }
+        requires: x >= 0
+        ensures: x >= 0
         x
     }
 }
@@ -490,7 +512,8 @@ module Math {
 fn verify_le_operator() {
     let src = r#"
 func capped(x: i32) -> i32 {
-    mms { "requires: x <= 100\nensures: x <= 100" }
+    requires: x <= 100
+    ensures: x <= 100
     x
 }
 "#;
@@ -503,7 +526,8 @@ func capped(x: i32) -> i32 {
 fn verify_gt_operator() {
     let src = r#"
 func positive(x: i32) -> i32 {
-    mms { "requires: x > 0\nensures: x > 0" }
+    requires: x > 0
+    ensures: x > 0
     x
 }
 "#;
@@ -516,7 +540,8 @@ func positive(x: i32) -> i32 {
 fn verify_ensures_fails_counterexample() {
     let src = r#"
 func wrong(x: i32) -> i32 {
-    mms { "requires: x == 10\nensures: x == 20" }
+    requires: x == 10
+    ensures: x == 20
     x
 }
 "#;

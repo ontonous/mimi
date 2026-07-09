@@ -1,9 +1,6 @@
 use clap::{Parser, Subcommand};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use mimi::ast::{File, Item, Stmt};
-use mimi::contracts::Contract;
 use mimi::diagnostic::format::format_simple_error;
 
 #[path = "main/add.rs"]
@@ -67,9 +64,6 @@ enum Command {
     /// Parse and type-check a .mimi file, reporting all type errors
     Check {
         path: Option<PathBuf>,
-        /// Extract and display contracts from mms blocks
-        #[arg(long)]
-        extract_contracts: bool,
         /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
         #[arg(long)]
         strict: bool,
@@ -359,10 +353,9 @@ fn main() {
     let result = match args.cmd {
         Command::Check {
             path,
-            extract_contracts,
             strict,
             verify_rules,
-        } => check::check(path.as_deref(), extract_contracts, strict, verify_rules),
+        } => check::check(path.as_deref(), strict, verify_rules),
         Command::Run {
             path,
             verify_contracts,
@@ -549,45 +542,4 @@ pub(crate) fn is_sketch(path: &Path) -> bool {
 
 pub(crate) fn is_production(path: &Path) -> bool {
     path.extension().map(|e| e == "mimi").unwrap_or(false)
-}
-
-/// Extract contracts from all mms blocks in the file, keyed by function name
-pub(crate) fn extract_all_contracts(file: &File) -> HashMap<String, Contract> {
-    let mut result = HashMap::new();
-    extract_item_contracts(&file.items, &mut result);
-    result
-}
-
-pub(crate) fn extract_item_contracts(items: &[Item], out: &mut HashMap<String, Contract>) {
-    for item in items {
-        match item {
-            Item::Func(func) => {
-                let mut contract = Contract::default();
-                for stmt in &func.body {
-                    if let Stmt::MmsBlock {
-                        content: text,
-                        span,
-                        ..
-                    } = stmt
-                    {
-                        let c = mimi::contracts::extract_contracts_with_span(text, *span);
-                        contract.requires.extend(c.requires);
-                        contract.ensures.extend(c.ensures);
-                        contract.math.extend(c.math);
-                        contract.span = *span;
-                    }
-                }
-                if !contract.requires.is_empty()
-                    || !contract.ensures.is_empty()
-                    || !contract.math.is_empty()
-                {
-                    out.insert(func.name.clone(), contract);
-                }
-            }
-            Item::Module(m) => {
-                extract_item_contracts(&m.items, out);
-            }
-            _ => {}
-        }
-    }
 }

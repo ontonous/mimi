@@ -312,7 +312,6 @@ pub enum Stmt {
     /// mms {} super-comment block containing MimiSpec intent
     MmsBlock {
         content: String,
-        ast: Option<mimispec::ast::File>,
         span: crate::span::Span,
     },
     /// Nested function definition inside a block

@@ -285,7 +285,7 @@ mimi/
 │   ├── verifier/          # Z3 formal verifier
 │   ├── ffi/               # FFI system (multi-language binding generation)
 │   ├── lsp/               # LSP server
-│   ├── contracts.rs       # Contract extraction
+│   ├── contracts.rs       # (removed in v0.28.30 — was for MMS contract extraction)
 │   ├── runtime/           # Rust runtime + profiler
 │   ├── fmt.rs             # Formatter
 │   ├── lint.rs            # Linter

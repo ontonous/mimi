@@ -172,50 +172,6 @@ func main() -> i32 {
 }
 
 #[test]
-fn mms_block_contract_extraction() {
-    let src = r#"
-func pay(amount: i32) -> i32 {
-    mms { "requires: amount > 0" }
-    amount
-}
-
-func main() -> i32 {
-    pay(100)
-}
-"#;
-    let file = parse(src);
-    let func = file
-        .items
-        .iter()
-        .find_map(|item| {
-            if let crate::ast::Item::Func(f) = item {
-                if f.name == "pay" {
-                    Some(f)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/v1_2_misc_remaining.rs:201 unwrap failed");
-    let mms_text = func
-        .body
-        .iter()
-        .find_map(|s| {
-            if let crate::ast::Stmt::MmsBlock { content: t, .. } = s {
-                Some(t.clone())
-            } else {
-                None
-            }
-        })
-        .expect("src/tests/v1_2_misc_remaining.rs:204 unwrap failed");
-    let contracts = crate::contracts::extract_contracts(&mms_text);
-    assert_eq!(contracts.requires.len(), 1);
-    assert_eq!(contracts.requires[0], "amount > 0");
-}
-
-#[test]
 fn strict_mode_non_locked_ok() {
     let src = r#"
 func main() -> i32 {
