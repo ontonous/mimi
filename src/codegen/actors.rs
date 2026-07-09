@@ -401,7 +401,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .gep()
                     .build_struct_gep(sty, alloca, i as u32, &field.name)
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-                let val = if let Some(init) = &field.init {
+                let mut val = if let Some(init) = &field.init {
                     self.compile_expr(init, &empty_vars)?
                 } else {
                     let ty = types::mimi_type_to_llvm(self.context, &field.ty)
@@ -413,6 +413,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => self.context.i64_type().const_int(0, false).into(),
                     }
                 };
+                // String literals return a raw C string pointer; normalize to struct.
+                if let Some(init) = &field.init {
+                    val = self.normalize_string_value(val, init)?;
+                }
+                // List and record literals return a pointer to a stack-allocated
+                // struct. Load the struct value before storing into the actor field
+                // (same pattern as compile_let in block.rs:209-224).
+                if let BasicValueEnum::PointerValue(pv) = val {
+                    let field_tys = sty.get_field_types();
+                    let want_struct = i < field_tys.len()
+                        && matches!(&field_tys[i], BasicTypeEnum::StructType(_));
+                    if want_struct {
+                        let field_llvm_ty = field_tys[i];
+                        let loaded = self
+                            .builder
+                            .build_load(field_llvm_ty, pv, &format!("{}_load", field.name))
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("actor field load: {}", e))
+                            })?;
+                        val = loaded;
+                    }
+                }
                 self.build_store(gep, val)?;
             }
         }

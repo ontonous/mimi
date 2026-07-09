@@ -269,13 +269,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .ok_or_else(|| "malloc not declared".to_string())?;
                                     // Use size_of() on the StructType directly (not through
                                     // BasicTypeEnum, which may not expose size_of for structs).
-                                    let payload_size = packed_ty.size_of()
+                                    let payload_size = packed_ty
+                                        .size_of()
                                         .and_then(|sv| sv.get_zero_extended_constant())
                                         .unwrap_or(32);
-                                    let size_val = self.context.i64_type().const_int(
-                                        std::cmp::max(payload_size, 1),
-                                        false,
-                                    );
+                                    let size_val = self
+                                        .context
+                                        .i64_type()
+                                        .const_int(std::cmp::max(payload_size, 1), false);
                                     let malloc_call = self
                                         .builder
                                         .build_call(
@@ -409,7 +410,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Represent actor as a struct with fields
         let mut field_tys = Vec::new();
         for f in &actor.fields {
-            let ty = types::mimi_type_to_llvm(self.context, &f.ty)
+            let ty = self
+                .llvm_type_for(&f.ty)
                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
             field_tys.push(ty);
         }
