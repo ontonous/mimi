@@ -389,6 +389,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicValueEnum::StructValue(sv) => self.compile_index_on_struct(sv, obj, idx_val, vars),
             BasicValueEnum::ArrayValue(_) => self.compile_index_on_array(obj_val, idx_val),
+            BasicValueEnum::IntValue(iv) => {
+                // Heap pointer stored as i64 (nested List<List<T>> indexing).
+                // inttoptr recovers the list struct pointer for indexing.
+                let pv = self
+                    .builder
+                    .build_int_to_ptr(
+                        iv,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "list_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("int_to_ptr: {}", e)))?;
+                self.compile_index_on_pointer(pv, obj, idx_val, vars)
+            }
             _ => Err("index requires a list/array pointer".into()),
         }
     }

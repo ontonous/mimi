@@ -500,16 +500,18 @@ fn tricky_list_filter_match() {
 
 // 3c: Nested for loops building and accessing 2D list structure.
 // Combines: nested for loops, list push, nested list indexing.
-// CODEGEN_GAP: dynamically built List<List<i32>> indexing fails with
-// "index requires a list/array pointer" in codegen (dyn-build push obscures type).
+// ISSUE: type checker cannot infer List<List<i32>> without annotation on `rows`.
+// `let mut rows = []` gives List<unknown>, and push() can't retroactively set the
+// element type at the type-checker level. Fix: add type annotation to `rows`.
+// With annotation, codegen works (inttoptr for i64 heap pointer to inner list struct).
 
-#[ignore = "CODEGEN_GAP: List<List<i32>> indexing on dynamically-built list (push obscures type)"]
+#[ignore = "TYPE_INFERENCE: push() cannot propagate element type to empty list without annotation"]
 #[test]
 fn tricky_nested_loop_list() {
     check(
         "func main() -> i32 {
              let bases = [0, 10, 20];
-             let mut rows = [];
+             let mut rows: List<List<i32>> = [];
              for b in bases {
                  let mut row = [];
                  push(row, b + 1);
