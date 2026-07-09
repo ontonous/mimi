@@ -1018,7 +1018,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let list_alloca = self.alloc_list_result(len_val, data_ptr)?;
 
                 // Determine if list elements are heap-allocated pointers (string or record)
-                // that need individual freeing at scope exit via FreeList mechanism.
+                // that need individual freeing at scope exit.
                 let needs_element_free = matches!(
                     inner_ty,
                     Type::Name(n, _)
@@ -1224,7 +1224,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_br(loop_bb)?;
                 self.builder.position_at_end(done_bb);
 
-                // Register FreeList cleanup if elements need individual freeing.
+                // Register heap cleanup if elements need individual freeing.
                 // v0.28.29 fix for mimichat gap #2: do NOT register the temporary
                 // `list_alloca` here. The caller stores the returned list struct into
                 // its own variable alloca (`%l`), and in-place mutations like `push(l, ...)`

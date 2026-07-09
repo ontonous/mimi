@@ -652,12 +652,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     // small-function inlining and common-subexpression elimination. They are
     // wired in but the full codegen pass is planned for v0.28.14. The
     // current scope:
-    //
-    // - `cse_cache` is a HashMap keyed by a stable fingerprint string.
-    //   `cse_lookup` returns the previously computed SSA value if present;
-    //   `cse_record` inserts a new entry. Both are no-ops in this version
-    //   because the call site dispatch is conservative — the scaffold is
-    //   tested via the accessors `cse_hits` and the deterministic fingerprint
     fn adjust_int_val(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -791,25 +785,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Register a MimiList alloca whose elements are individually heap-allocated
-    /// (e.g. from_json::<List<Record>> where each element is a separate malloc'd
-    /// struct stored as ptrtoint i64). At scope exit, `mimi_list_free_elements`
-    /// is called to free each element pointer and the data buffer, but NOT the
-    /// list struct itself (which is a stack alloca).
-    /// The existing `register_heap_slot` entry for the same list's data field
-    /// handles freeing the data buffer — FreeList too frees the data buffer and
-    /// the elements, so the Slot entry will attempt a double-free of the data
-    /// buffer.  To avoid this, call sites MUST NOT register a Slot entry for
-    /// lists that use FreeList.  Call this AFTER `alloc_list_result` so the
-    /// FreeList entry is pushed first (processed first at scope exit), and the
-    /// Slot entry (if any) is pushed second.
-    ///
-    /// Note (v0.28.29): Currently unused by `from_json::<List<T>>` because the
-    /// caller stores the returned list struct into its own alloca that
-    /// in-place mutations (`push`/`pop`) rewrite. Registering the temporary
-    /// `list_alloca` would read stale data at scope exit and double-free.
-    /// Kept here for any future caller that needs element-level cleanup of
-    /// a list it owns exclusively.
     /// Register a heap slot in the root (function-level) scope so that it
     /// survives intermediate scope exits (e.g. loop body blocks). Used for
     /// string variable assignments where the heap allocation must outlive the
