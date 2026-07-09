@@ -366,7 +366,7 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Type::Result(
-                    Box::new(Type::Name("i32".into(), vec![])),
+                    Box::new(Type::Name("i64".into(), vec![])),
                     Box::new(Type::Name("string".into(), vec![])),
                 )
             }
@@ -497,7 +497,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                Type::Name("i32".into(), vec![])
+                Type::Option(Box::new(Type::Name("i32".into(), vec![])))
             }
             _ => {
                 self.emit_code(

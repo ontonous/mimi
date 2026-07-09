@@ -22,11 +22,13 @@ use proptest::prelude::*;
 /// `Value::Display` formatting, which must match codegen's `println` output).
 fn assert_body_ret(ret_ty: &str, body: &str, result: &str) {
     let interp_src = format!("func main() -> {} {{\n{}\n{}\n}}", ret_ty, body, result);
-    let cg_src = format!("func main() -> i32 {{\n{}\nprintln({});\n0\n}}", body, result);
+    let cg_src = format!(
+        "func main() -> i32 {{\n{}\nprintln({});\n0\n}}",
+        body, result
+    );
     let v = run_source(&interp_src);
     let interp_str = format!("{}", v);
-    let cg_stdout =
-        compile_and_run(&cg_src).expect("codegen should compile and run");
+    let cg_stdout = compile_and_run(&cg_src).expect("codegen should compile and run");
     let cg_str = cg_stdout.trim();
     assert_eq!(
         interp_str, cg_str,
@@ -96,18 +98,14 @@ fn arb_str_literal() -> impl Strategy<Value = String> {
 fn arb_str_expr() -> impl Strategy<Value = String> {
     let leaf = arb_str_literal();
     leaf.prop_recursive(2, 6, 3, |inner| {
-        (inner.clone(), inner.clone())
-            .prop_map(|(a, b)| format!("({} + {})", a, b))
+        (inner.clone(), inner.clone()).prop_map(|(a, b)| format!("({} + {})", a, b))
     })
 }
 
 // ─── Boolean expression generators ───────────────────────────────
 
 fn arb_bool_literal() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just("true".into()),
-        Just("false".into()),
-    ]
+    prop_oneof![Just("true".into()), Just("false".into()),]
 }
 
 fn arb_compare_expr() -> impl Strategy<Value = String> {
@@ -122,10 +120,7 @@ fn arb_compare_expr() -> impl Strategy<Value = String> {
 }
 
 fn arb_bool_expr() -> impl Strategy<Value = String> {
-    let leaf = prop_oneof![
-        arb_bool_literal(),
-        arb_compare_expr(),
-    ];
+    let leaf = prop_oneof![arb_bool_literal(), arb_compare_expr(),];
     leaf.prop_recursive(2, 6, 3, |inner| {
         prop_oneof![
             (inner.clone(), inner.clone()).prop_map(|(a, b)| format!("({} && {})", a, b)),
@@ -138,11 +133,10 @@ fn arb_bool_expr() -> impl Strategy<Value = String> {
 // ─── List expression generators ──────────────────────────────────
 
 fn arb_i32_list() -> impl Strategy<Value = String> {
-    proptest::collection::vec(0i64..20i64, 0..5)
-        .prop_map(|items| {
-            let elems: Vec<String> = items.iter().map(|n| n.to_string()).collect();
-            format!("[{}]", elems.join(", "))
-        })
+    proptest::collection::vec(0i64..20i64, 0..5).prop_map(|items| {
+        let elems: Vec<String> = items.iter().map(|n| n.to_string()).collect();
+        format!("[{}]", elems.join(", "))
+    })
 }
 
 fn arb_list_len_expr() -> impl Strategy<Value = String> {
@@ -151,16 +145,20 @@ fn arb_list_len_expr() -> impl Strategy<Value = String> {
 
 fn arb_list_index_expr() -> impl Strategy<Value = String> {
     // Guarantee index < len: generate items first, then pick index within range
-    proptest::collection::vec(0i64..20i64, 1..5).prop_flat_map(|items| {
-        let lst = format!(
-            "[{}]",
-            items.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
-        );
-        let max_idx = items.len();
-        (Just(lst), 0usize..max_idx)
-    }).prop_map(|(lst, idx)| {
-        format!("{}[{}]", lst, idx)
-    })
+    proptest::collection::vec(0i64..20i64, 1..5)
+        .prop_flat_map(|items| {
+            let lst = format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let max_idx = items.len();
+            (Just(lst), 0usize..max_idx)
+        })
+        .prop_map(|(lst, idx)| format!("{}[{}]", lst, idx))
 }
 
 // ─── Match expression generators ─────────────────────────────────
@@ -169,10 +167,7 @@ fn arb_match_int_expr() -> impl Strategy<Value = String> {
     let match_val = 0i64..5i64;
     let arm_vals = (0i64..100i64, 0i64..100i64, 0i64..100i64);
     (match_val, arm_vals).prop_map(|(mv, (a1, a2, a3))| {
-        format!(
-            "match {} {{ 0 => {}, 1 => {}, _ => {} }}",
-            mv, a1, a2, a3
-        )
+        format!("match {} {{ 0 => {}, 1 => {}, _ => {} }}", mv, a1, a2, a3)
     })
 }
 

@@ -140,11 +140,18 @@ impl Parser {
                 Ok(self.parse_unary()?.unary(UnOp::Deref))
             }
             TokenKind::Old => {
-                self.advance();
-                self.expect(TokenKind::LParen, "`(`")?;
-                let expr = self.parse_expr(0)?;
-                self.expect(TokenKind::RParen, "`)`")?;
-                Ok(Expr::Old(Box::new(expr)))
+                // Soft keyword: old(expr) is contract snapshot, bare 'old' is identifier
+                if self.pos + 1 < self.tokens.len()
+                    && self.tokens[self.pos + 1].kind == TokenKind::LParen
+                {
+                    self.advance(); // consume 'old'
+                    self.advance(); // consume '('
+                    let expr = self.parse_expr(0)?;
+                    self.expect(TokenKind::RParen, "`)`")?;
+                    Ok(Expr::Old(Box::new(expr)))
+                } else {
+                    self.parse_primary()
+                }
             }
             _ => self.parse_primary(),
         }
@@ -326,6 +333,10 @@ impl Parser {
                 // stray `)`s, so this is the canonical place.
                 self.expect(TokenKind::RParen, "`)` to close $(...) interpolation")?;
                 return self.parse_postfix(Expr::QuoteInterpolate(Box::new(inner)));
+            }
+            TokenKind::Old => {
+                self.advance();
+                return self.parse_postfix(Expr::Ident("old".to_string()));
             }
             TokenKind::Fn => {
                 self.advance();

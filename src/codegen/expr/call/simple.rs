@@ -193,14 +193,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         // `require_list_pointer` returns as-is, which is the correct LLVM
         // pointer for gep against the list struct).
         if matches!(name, "push" | "pop") && !args.is_empty() {
-            if let Expr::Ident(var_name) = &args[0] {
-                if self.is_list_type_name(&self.infer_object_type(&args[0], vars)) {
-                    if let Some(&(alloca, var_ty)) = vars.get(var_name) {
-                        if matches!(var_ty, BasicTypeEnum::StructType(_)) {
-                            compiled_args[0] = BasicValueEnum::PointerValue(alloca);
+            match &args[0] {
+                Expr::Ident(var_name) => {
+                    if self.is_list_type_name(&self.infer_object_type(&args[0], vars)) {
+                        if let Some(&(alloca, var_ty)) = vars.get(var_name) {
+                            if matches!(var_ty, BasicTypeEnum::StructType(_)) {
+                                compiled_args[0] = BasicValueEnum::PointerValue(alloca);
+                            }
                         }
                     }
                 }
+                // Handle self.field = push(self.field, val) — get GEP pointer to field slot
+                Expr::Field(obj_expr, field_name) => {
+                    if let Expr::Ident(obj_name) = obj_expr.as_ref() {
+                        if obj_name == "self" {
+                            if let Ok(field_gep) =
+                                self.compile_field_gep(obj_expr, field_name, vars)
+                            {
+                                if self.is_list_type_name(&self.infer_object_type(&args[0], vars)) {
+                                    compiled_args[0] = BasicValueEnum::PointerValue(field_gep);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 

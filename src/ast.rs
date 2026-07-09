@@ -315,6 +315,8 @@ pub enum Stmt {
         ast: Option<mimispec::ast::File>,
         span: crate::span::Span,
     },
+    /// Nested function definition inside a block
+    Func(FuncDef),
     /// alloc(Kind) { ... } block using a specific allocator
     Alloc {
         kind: AllocKind,

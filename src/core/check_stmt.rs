@@ -121,6 +121,11 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
+            Stmt::Func(func) => {
+                for s in &func.body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
             Stmt::Alloc { body, .. } => {
                 for s in body {
                     self.check_stmt_parasteps_safe(s, scopes);
@@ -206,6 +211,11 @@ impl<'a> Checker<'a> {
             | Stmt::Parasteps(block)
             | Stmt::OnFailure(block) => {
                 for s in block {
+                    self.collect_shared_writes_in_stmt(s, scopes, writes);
+                }
+            }
+            Stmt::Func(func) => {
+                for s in &func.body {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
             }
@@ -1191,6 +1201,22 @@ impl<'a> Checker<'a> {
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}
             Stmt::OnFailure(body) => {
                 self.check_block(body, ret, scopes);
+            }
+            Stmt::Func(func) => {
+                // Register nested function signature then check body.
+                // First, add to funcs so it can be called by name from enclosing scope.
+                let params: Vec<Type> = func
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type(&p.ty))
+                    .collect();
+                let ret = func
+                    .ret
+                    .as_ref()
+                    .map(|t| self.resolve_type(t))
+                    .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                self.funcs.insert(func.name.clone(), (params, ret));
+                self.check_item(&Item::Func(func.clone()));
             }
         }
     }

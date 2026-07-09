@@ -101,6 +101,10 @@ impl<'a> Interpreter<'a> {
                 let q_body = Box::new(self.quote_block(body)?);
                 Ok(Some(QuotedAst::Loop(q_body)))
             }
+            Stmt::Func(..) => {
+                // Nested funcs are not quotable; skip
+                Ok(None)
+            }
             Stmt::Desc(..)
             | Stmt::Rule(..)
             | Stmt::Requires(_, _)

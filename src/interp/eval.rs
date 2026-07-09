@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 mod expr;
 mod helpers;
@@ -228,6 +229,16 @@ impl<'a> Interpreter<'a> {
             }
             Stmt::Parasteps(block) => {
                 return self.eval_parasteps(block);
+            }
+            Stmt::Func(f) => {
+                // Bind nested function as a closure in the current scope
+                let closure = Value::Closure {
+                    params: f.params.clone(),
+                    ret: f.ret.clone(),
+                    body: f.body.clone(),
+                    captured: HashMap::new(),
+                };
+                self.bind(&f.name, closure)?;
             }
         }
         Ok(None)

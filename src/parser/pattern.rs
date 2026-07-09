@@ -146,6 +146,12 @@ impl Parser {
                     Ok(Pattern::Array(pats))
                 }
             }
+            // Soft keywords as identifiers in pattern context
+            TokenKind::Old => {
+                let name = tok.kind.source_text().to_string();
+                self.advance();
+                Ok(Pattern::Variable(name))
+            }
             // Keywords that can be used as identifiers in pattern context
             ref kw if crate::lexer::is_keyword_kind(kw) => {
                 let name = tok.kind.source_text().to_string();

@@ -1133,10 +1133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .into_pointer_value()
                             }
                             _ => {
-                                mimi_debug_assert!(
-                                    false,
-                                    "free_heap: unhandled HeapEntry variant"
-                                );
+                                mimi_debug_assert!(false, "free_heap: unhandled HeapEntry variant");
                                 unreachable!()
                             }
                         };

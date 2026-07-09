@@ -12,20 +12,29 @@ fn assert_err_code(src: &str, expected: &str) {
     assert!(
         has_code(&errors, expected),
         "expected {expected}, got codes: {:?}\nsrc: {src}",
-        errors.iter().map(|e| e.code.as_deref().unwrap_or("none")).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| e.code.as_deref().unwrap_or("none"))
+            .collect::<Vec<_>>()
     );
 }
 
 // ── E0204: cannot dereference type ────────────────────────────────────
 #[test]
 fn e0204_deref_non_pointer() {
-    assert_err_code(r"func main() -> i32 { let x = 42; *x }", crate::diagnostic::codes::E0204);
+    assert_err_code(
+        r"func main() -> i32 { let x = 42; *x }",
+        crate::diagnostic::codes::E0204,
+    );
 }
 
 // ── E0208: cannot assign to immutable ────────────────────────────────
 #[test]
 fn e0208_assign_immutable() {
-    assert_err_code(r"func main() -> i32 { let x = 1; x = 2; x }", crate::diagnostic::codes::E0208);
+    assert_err_code(
+        r"func main() -> i32 { let x = 1; x = 2; x }",
+        crate::diagnostic::codes::E0208,
+    );
 }
 
 // ── E0211: argument type mismatch ─────────────────────────────────────
@@ -40,7 +49,10 @@ fn e0211_arg_type_mismatch() {
 // ── E0213: match must have at least one arm ───────────────────────────
 #[test]
 fn e0213_match_no_arms() {
-    assert_err_code(r"func main() -> i32 { match 1 {} }", crate::diagnostic::codes::E0213);
+    assert_err_code(
+        r"func main() -> i32 { match 1 {} }",
+        crate::diagnostic::codes::E0213,
+    );
 }
 
 // ── E0215: match not exhaustive ───────────────────────────────────────
@@ -64,7 +76,10 @@ fn e0217_index_not_integer() {
 // ── E0218: cannot index type ──────────────────────────────────────────
 #[test]
 fn e0218_index_non_list() {
-    assert_err_code(r"func main() -> i32 { let x = 42; x[0] }", crate::diagnostic::codes::E0218);
+    assert_err_code(
+        r"func main() -> i32 { let x = 42; x[0] }",
+        crate::diagnostic::codes::E0218,
+    );
 }
 
 // ── E0221: type has no method ─────────────────────────────────────────
@@ -106,37 +121,55 @@ fn e0242_list_element_type_mismatch() {
 // ── E0207: return type mismatch ───────────────────────────────────────
 #[test]
 fn e0207_return_type_mismatch() {
-    assert_err_code(r"func main() -> i32 { return; }", crate::diagnostic::codes::E0207);
+    assert_err_code(
+        r"func main() -> i32 { return; }",
+        crate::diagnostic::codes::E0207,
+    );
 }
 
 // ── E0255: missing return on all paths ────────────────────────────────
 #[test]
 fn e0255_missing_return_in_if() {
-    assert_err_code(r"func main() -> i32 { if true { 1 } }", crate::diagnostic::codes::E0255);
+    assert_err_code(
+        r"func main() -> i32 { if true { 1 } }",
+        crate::diagnostic::codes::E0255,
+    );
 }
 
 // ── E0237: division by zero literal ───────────────────────────────────
 #[test]
 fn e0237_div_by_zero_literal() {
-    assert_err_code(r"func main() -> i32 { 5 / 0 }", crate::diagnostic::codes::E0237);
+    assert_err_code(
+        r"func main() -> i32 { 5 / 0 }",
+        crate::diagnostic::codes::E0237,
+    );
 }
 
 // ── E0238: modulo by zero literal ─────────────────────────────────────
 #[test]
 fn e0238_mod_by_zero_literal() {
-    assert_err_code(r"func main() -> i32 { 5 % 0 }", crate::diagnostic::codes::E0238);
+    assert_err_code(
+        r"func main() -> i32 { 5 % 0 }",
+        crate::diagnostic::codes::E0238,
+    );
 }
 
 // ── E0244: cannot index non-tuple type ────────────────────────────────
 #[test]
 fn e0244_index_non_tuple() {
-    assert_err_code(r"func main() -> i32 { let x = 42; x.0 }", crate::diagnostic::codes::E0244);
+    assert_err_code(
+        r"func main() -> i32 { let x = 42; x.0 }",
+        crate::diagnostic::codes::E0244,
+    );
 }
 
 // ── E0245: await requires Future type ─────────────────────────────────
 #[test]
 fn e0245_await_non_future() {
-    assert_err_code(r"func main() -> i32 { await 42 }", crate::diagnostic::codes::E0245);
+    assert_err_code(
+        r"func main() -> i32 { await 42 }",
+        crate::diagnostic::codes::E0245,
+    );
 }
 
 // ── E0246: type has no variant ────────────────────────────────────────
@@ -176,13 +209,19 @@ fn e0410_undefined_record_construction() {
 // ── E0400: undefined variable ─────────────────────────────────────────
 #[test]
 fn e0400_undefined_variable() {
-    assert_err_code(r"func main() -> i32 { undefined_var }", crate::diagnostic::codes::E0400);
+    assert_err_code(
+        r"func main() -> i32 { undefined_var }",
+        crate::diagnostic::codes::E0400,
+    );
 }
 
 // ── E0401: undefined function ─────────────────────────────────────────
 #[test]
 fn e0401_undefined_function() {
-    assert_err_code(r"func main() -> i32 { undefined_func() }", crate::diagnostic::codes::E0401);
+    assert_err_code(
+        r"func main() -> i32 { undefined_func() }",
+        crate::diagnostic::codes::E0401,
+    );
 }
 
 // ── E0406: undefined trait ────────────────────────────────────────────

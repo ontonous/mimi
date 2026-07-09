@@ -514,7 +514,7 @@ impl Parser {
         })
     }
 
-    fn parse_func(&mut self) -> Result<FuncDef, ParseError> {
+    pub(super) fn parse_func(&mut self) -> Result<FuncDef, ParseError> {
         let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Func)?;
         let name = self.expect_ident()?;
