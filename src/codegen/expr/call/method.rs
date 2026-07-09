@@ -277,6 +277,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        // 5c. Builtin List method dispatch: parts.len() → len(parts)
+        if (obj_type.starts_with("List<") || obj_type == "List") && method_name == "len" {
+            let obj_expr = obj.clone();
+            let call_expr = Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
+            return self.compile_expr(&call_expr, vars);
+        }
+
         Err(CompileError::Generic(format!(
             "method '{}' not compiled for type '{}' (missing crate?)",
             method_name, obj_type
@@ -1508,6 +1515,7 @@ fn string_method_to_builtin(method: &str) -> Option<&'static str> {
         "parse_int" => Some("str_parse_int"),
         "parse_float" => Some("str_parse_float"),
         "repeat" => Some("str_repeat"),
+        "index_of" => Some("str_index_of"),
         _ => None,
     }
 }
