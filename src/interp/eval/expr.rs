@@ -197,7 +197,10 @@ impl<'a> Interpreter<'a> {
                     }
                     v
                 }
-                _ => unreachable!("unsupported float binop {}", op),
+                _ => {
+                    mimi_debug_assert!(false, "unsupported float binop {} reached float_binop", op);
+                    unreachable!("unsupported float binop {}", op)
+                }
             };
             Ok(Value::Float(r))
         };
