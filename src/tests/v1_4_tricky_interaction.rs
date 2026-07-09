@@ -383,10 +383,7 @@ fn tricky_option_default() {
 
 // 2a: Generic record type + closure processing.
 // Combines: generic record, generic higher-order function, closure capture.
-// CODEGEN_GAP: Box<T>.value field access after generic function returns garbage value.
-// Interpreter passes (prints "42"), codegen prints heap pointer as int.
 
-#[ignore = "CODEGEN_GAP: generic record field access in codegen returns garbage value"]
 #[test]
 fn tricky_record_generic_closure() {
     check(
@@ -405,10 +402,7 @@ fn tricky_record_generic_closure() {
 
 // 2b: Generic swap on single-type Pair record.
 // Combines: generic record, generic function, field access.
-// CODEGEN_GAP: field access on monomorphized Pair<T> confuses type params:
-// "cannot access field on type 'Pair<Pair>'"
 
-#[ignore = "CODEGEN_GAP: field access on monomorphized generic record Pair<T>"]
 #[test]
 fn tricky_record_swap_generic() {
     check(
@@ -429,10 +423,7 @@ fn tricky_record_swap_generic() {
 
 // 2c: Nested record construction and field access chain.
 // Combines: nested record types, field access, constructor expressions.
-// CODEGEN_GAP: chained field access (o.inner.val) crashes with
-// "field access requires a struct or actor type, got 'i64'"
 
-#[ignore = "CODEGEN_GAP: chained field access o.inner.val crashes codegen"]
 #[test]
 fn tricky_nested_record_access() {
     check(
@@ -510,9 +501,9 @@ fn tricky_list_filter_match() {
 // 3c: Nested for loops building and accessing 2D list structure.
 // Combines: nested for loops, list push, nested list indexing.
 // CODEGEN_GAP: dynamically built List<List<i32>> indexing fails with
-// "index requires a list/array pointer" in codegen.
+// "index requires a list/array pointer" in codegen (dyn-build push obscures type).
 
-#[ignore = "CODEGEN_GAP: dynamically built List<List<i32>> indexing fails in codegen"]
+#[ignore = "CODEGEN_GAP: List<List<i32>> indexing on dynamically-built list (push obscures type)"]
 #[test]
 fn tricky_nested_loop_list() {
     check(
@@ -645,10 +636,7 @@ fn tricky_string_concat_match() {
 
 // 5a: Recursive enum (Expr: Num | Add) with match-based evaluation.
 // Combines: recursive enum definition, match, recursion.
-// CODEGEN_GAP: recursive enum causes SIGSEGV in codegen LLVM process.
-// Interpreter handles recursion correctly.
 
-#[ignore = "CODEGEN_GAP: recursive enum causes SIGSEGV in codegen"]
 #[test]
 fn tricky_recursive_enum_expr() {
     check(
@@ -697,9 +685,7 @@ fn tricky_enum_nested_match() {
 
 // 5c: Mutual recursion with recursive enum (even/odd on tree-like data).
 // Combines: recursive enum, mutual recursion, match.
-// CODEGEN_GAP: enum-like Tree type causes SIGSEGV in codegen LLVM process.
 
-#[ignore = "CODEGEN_GAP: enum Tree causes SIGSEGV in codegen"]
 #[test]
 fn tricky_mutual_recursion_enum() {
     check(
@@ -725,10 +711,7 @@ fn tricky_mutual_recursion_enum() {
 
 // 6a: Newtype + trait impl + method dispatch.
 // Combines: newtype, trait definition, trait impl with self, method call.
-// INTERP_GAP: interpreter panics with "cannot call method 'id' on value Newtype(42)".
-// Trait dispatch doesn't handle newtype wrapper in interpreter.
 
-#[ignore = "INTERP_GAP: trait method dispatch on newtype not supported in interpreter"]
 #[test]
 fn tricky_newtype_method() {
     check(
