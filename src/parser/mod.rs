@@ -80,6 +80,9 @@ pub struct Parser {
     /// Statement-level errors collected during recovery parsing.
     /// These are returned alongside top-level errors by `parse_file_with_recovery`.
     errors: Vec<ParseError>,
+    /// When true, uppercase identifiers followed by `{` are parsed as record literals.
+    /// When false (e.g., inside a match scrutinee), `{` is left unconsumed.
+    allow_record_literal: bool,
 }
 
 impl Parser {
@@ -99,6 +102,7 @@ impl Parser {
             recovery_mode: false,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
+            allow_record_literal: true,
         }
     }
 
@@ -112,6 +116,7 @@ impl Parser {
             recovery_mode: true,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
+            allow_record_literal: true,
         }
     }
 

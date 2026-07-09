@@ -228,6 +228,158 @@ fn arb_str_len_body() -> impl Strategy<Value = (String, String)> {
     })
 }
 
+// ─── Result/Option expression generators ─────────────────────────
+//
+// Generates enum constructor expressions and match arms for
+// `Result<i32, string>` and `Option<i32>`.
+
+/// Generate a Result<i32, string> expression: Ok(val) or Err("msg").
+fn arb_result_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        (0i64..20i64).prop_map(|v| format!("Ok({})", v)),
+        Just(r#"Err("err")"#.into()),
+        Just(r#"Err("fail")"#.into()),
+        Just(r#"Err("x")"#.into()),
+    ]
+}
+
+/// Generate an Option<i32> expression: Some(val) or None.
+fn arb_option_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("None".into()),
+        (0i64..20i64).prop_map(|v| format!("Some({})", v)),
+    ]
+}
+
+/// Generate a match on a Result or Option expression returning i32.
+fn arb_match_result_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Match on Ok(value) — returns the payload
+        (0i64..20i64).prop_map(|v| format!("match Ok({}) {{ Ok(v) => v, Err(_) => 0 }}", v)),
+        // Match on Err(msg) — returns fallback
+        Just("match Err(\"x\") { Ok(v) => 0, Err(_) => -1 }".into()),
+        // Match on Some(value) — returns the payload
+        (0i64..20i64).prop_map(|v| format!("match Some({}) {{ Some(v) => v, None => 0 }}", v)),
+        // Match on None — returns fallback
+        Just("match None { Some(v) => 0, None => -1 }".into()),
+    ]
+}
+
+// ─── Nested list generators ──────────────────────────────────────
+
+/// Generate a List<List<i32>> expression; returns i32 (len or indexed value).
+fn arb_nested_list_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Plain nested list literal → len() for i32 result
+        proptest::collection::vec(proptest::collection::vec(0i64..10i64, 1..4), 1..4,).prop_map(
+            |outer| {
+                let inner_strs: Vec<String> = outer
+                    .iter()
+                    .map(|inner| {
+                        let e: Vec<String> = inner.iter().map(|n| n.to_string()).collect();
+                        format!("[{}]", e.join(", "))
+                    })
+                    .collect();
+                format!("len([{}])", inner_strs.join(", "))
+            }
+        ),
+        // Nested list with double indexing [[0,1],[2,3]][oi][ii]
+        (2usize..4, 2usize..4)
+            .prop_flat_map(|(outer_sz, inner_sz)| {
+                (Just(outer_sz), Just(inner_sz), 0..outer_sz, 0..inner_sz)
+            })
+            .prop_map(|(outer_sz, inner_sz, oi, ii)| {
+                let inner_lists: Vec<String> = (0..outer_sz)
+                    .map(|row| {
+                        let elems: Vec<String> = (0..inner_sz)
+                            .map(|col| (row as i64 * 10 + col as i64).to_string())
+                            .collect();
+                        format!("[{}]", elems.join(", "))
+                    })
+                    .collect();
+                let lst = format!("[{}]", inner_lists.join(", "));
+                format!("{}[{}][{}]", lst, oi, ii)
+            }),
+    ]
+}
+
+/// Generate a complete program with a record type, a list of records,
+/// and field access returning i32.
+fn arb_record_list_expr() -> impl Strategy<Value = String> {
+    (0i64..10i64, 0i64..10i64).prop_map(|(x, y)| {
+        format!(
+            "type Point {{ x: i32, y: i32 }}\n\
+             func main() -> i32 {{\n\
+                 let pts = [Point {{ x: {}, y: {} }}];\n\
+                 println(pts[0].x);\n\
+                 0\n\
+             }}",
+            x, y
+        )
+    })
+}
+
+// ─── String method call generators ───────────────────────────────
+
+/// Generate a string expression used with len() (function-call style).
+/// Returns an i32 expression for use with assert_expr.
+fn arb_string_method_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Function-style len() on literals (known reliable)
+        arb_str_literal().prop_map(|s| format!("len({})", s)),
+        // Concat + len
+        (arb_str_literal(), arb_str_literal()).prop_map(|(a, b)| format!("len({} + {})", a, b)),
+        // Method-style .len() via Str trait dispatch
+        arb_str_literal().prop_map(|s| format!("({}).len()", s)),
+    ]
+}
+
+// ─── Multi-feature combined generators ──────────────────────────
+
+/// Combine while-loop + match + closure.
+/// Accumulates a value by matching on loop iteration index and
+/// applying a closure.
+fn arb_while_list_match_closure() -> impl Strategy<Value = (String, String)> {
+    (1i64..6i64, 1i64..4i64).prop_map(|(limit, step)| {
+        let body = format!(
+            "    let mut s = 0;\n    let mut i = 0;\n    \
+             let f = fn(x: i32) -> i32 {{ x + {} }};\n    \
+             while i < {} {{\n        \
+                 s = s + match i % 3 {{\n            \
+                     0 => f(i),\n            \
+                     1 => 10,\n            \
+                     _ => i,\n        \
+                 }};\n        \
+                 i = i + {};\n    \
+             }}",
+            step, limit, step
+        );
+        let result = "s".to_string();
+        (body, result)
+    })
+}
+
+/// Combine closure + record + match: defines a record type, uses a
+/// closure on its fields, and matches on one field to produce i32.
+fn arb_closure_record_match() -> impl Strategy<Value = String> {
+    (0i64..10i64, 0i64..10i64).prop_map(|(a, b)| {
+        format!(
+            "type Pair {{ a: i32, b: i32 }}\n\
+             func main() -> i32 {{\n\
+                 let p = Pair {{ a: {}, b: {} }};\n\
+                 let f = fn(v: i32) -> i32 {{ v * 2 }};\n\
+                 let r = match p.a {{\n\
+                     0 => f(p.b),\n\
+                     _ => f(p.a),\n\
+                 }};\n\
+                 println(r);\n\
+                 0\n\
+             }}",
+            a, b
+        )
+    })
+}
+
 // ─── Proptest targets ────────────────────────────────────────────
 
 proptest! {
@@ -320,5 +472,53 @@ proptest! {
     #[test]
     fn differential_str_len_mixed((body, result) in arb_str_len_body()) {
         assert_body_ret("i32", &body, &result);
+    }
+
+    // ── New: Result/Option match ──────────────────────────────────
+
+    #[test]
+    fn differential_match_result(expr in arb_match_result_expr()) {
+        assert_expr(&expr);
+    }
+
+    #[test]
+    fn differential_result_expr(expr in arb_result_expr()) {
+        assert_expr(&format!("match {} {{ Ok(v) => v, Err(_) => 0 }}", expr));
+    }
+
+    #[test]
+    fn differential_option_expr(expr in arb_option_expr()) {
+        assert_expr(&format!("match {} {{ Some(v) => v, None => 0 }}", expr));
+    }
+
+    // ── New: Nested lists ─────────────────────────────────────────
+
+    #[test]
+    fn differential_nested_list(expr in arb_nested_list_expr()) {
+        assert_expr(&expr);
+    }
+
+    #[test]
+    fn differential_record_list(prog in arb_record_list_expr()) {
+        assert_program_ok(&prog);
+    }
+
+    // ── New: String method / len ──────────────────────────────────
+
+    #[test]
+    fn differential_string_method(expr in arb_string_method_expr()) {
+        assert_expr(&expr);
+    }
+
+    // ── New: Multi-feature ────────────────────────────────────────
+
+    #[test]
+    fn differential_while_match_closure((body, result) in arb_while_list_match_closure()) {
+        assert_body_ret("i32", &body, &result);
+    }
+
+    #[test]
+    fn differential_closure_record_match(prog in arb_closure_record_match()) {
+        assert_program_ok(&prog);
     }
 }

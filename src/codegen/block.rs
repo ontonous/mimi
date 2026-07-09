@@ -241,8 +241,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if let Expr::Record { ty: None, .. } = init {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
-                        } else if let Expr::Record { ty: Some(tn), .. } = init {
+                        } else if let Expr::Record {
+                            ty: Some(tn),
+                            fields,
+                        } = init
+                        {
                             self.var_type_names.insert(name.clone(), tn.clone());
+                            // Infer concrete generic args from field values (e.g.
+                            // `Pair { a: 10, b: 20 }` → `Pair<i32>`).
+                            if let Some(td) = self.type_defs.get(tn) {
+                                if !td.generics.is_empty() {
+                                    let type_params: Vec<String> =
+                                        td.generics.iter().map(|g| g.name.clone()).collect();
+                                    let param_types: HashMap<String, Type> = self
+                                        .try_infer_generic_from_fields(
+                                            td,
+                                            fields,
+                                            vars,
+                                            &type_params,
+                                        );
+                                    if param_types.len() == td.generics.len() {
+                                        let args: Vec<Type> =
+                                            td.generics
+                                                .iter()
+                                                .map(|g| {
+                                                    param_types.get(&g.name).cloned().unwrap_or(
+                                                        Type::Name(g.name.clone(), vec![]),
+                                                    )
+                                                })
+                                                .collect();
+                                        self.var_types
+                                            .insert(name.clone(), Type::Name(tn.clone(), args));
+                                    }
+                                }
+                            }
                         } else if matches!(init, Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
                         } else if let Expr::List(list_elems) = init {
@@ -334,6 +366,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         self.register_list_elem_type(
                                                             name, &resolved,
                                                         );
+                                                    }
+                                                    // Newtype constructors: use the newtype name instead of
+                                                    // the transparent inner type so method dispatch works.
+                                                    Type::Newtype(n, _) => {
+                                                        self.var_type_names
+                                                            .insert(name.clone(), n.clone());
                                                     }
                                                     #[allow(unreachable_patterns)]
                                                     _ => {}
@@ -1093,5 +1131,41 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(last_val)
+    }
+
+    /// Given a type definition with generic params and record field expressions,
+    /// infer the concrete types for the generic params by examining the field values.
+    /// This is needed so `var_types` can store the full concrete type (e.g.
+    /// `Pair<i32>`) for record literals like `Pair { a: 10, b: 20 }`.
+    pub(super) fn try_infer_generic_from_fields(
+        &self,
+        td: &TypeDef,
+        fields: &[RecordFieldExpr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        type_params: &[String],
+    ) -> HashMap<String, Type> {
+        fn type_ident_name(ty: &Type) -> String {
+            if let Type::Name(n, _) = ty {
+                n.clone()
+            } else {
+                String::new()
+            }
+        }
+        let mut param_types: HashMap<String, Type> = HashMap::new();
+        if let TypeDefKind::Record(field_defs) = &td.kind {
+            for rf in fields {
+                if let Some(fd) = field_defs.iter().find(|f| f.name == rf.name) {
+                    let field_ty_name = self.infer_object_type(&rf.value, vars);
+                    let ftn = type_ident_name(&fd.ty);
+                    if !field_ty_name.is_empty()
+                        && field_ty_name != "unknown"
+                        && type_params.contains(&ftn)
+                    {
+                        param_types.insert(ftn, Type::Name(field_ty_name, vec![]));
+                    }
+                }
+            }
+        }
+        param_types
     }
 }

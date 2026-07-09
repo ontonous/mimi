@@ -95,7 +95,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             crate::ast::TypeDefKind::Record(fields) => {
                 let mut field_tys = Vec::new();
                 for f in fields {
-                    let ty = types::mimi_type_to_llvm(self.context, &f.ty).ok_or_else(|| {
+                    let ty = self.llvm_type_for(&f.ty).ok_or_else(|| {
                         CompileError::LlvmError(format!(
                             "cannot map record field '{}' type to LLVM",
                             crate::core::fmt_type(&f.ty)
@@ -147,6 +147,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let enum_ty = BasicTypeEnum::StructType(
                         self.context.struct_type(&[tag_ty, payload_ty], false),
                     );
+                    // Register the LLVM type BEFORE constructor generation so that
+                    // classify_variant_payload for recursive variants (e.g. Add(Expr, Expr))
+                    // resolves Expr → {i32, i64} instead of falling back to i64.
+                    // Without this, the constructor stores Packed({i64, i64}) but match
+                    // side decodes Packed({{i32, i64}, {i32, i64}}) → buffer over-read → SIGSEGV.
+                    self.type_llvm.insert(t.name.clone(), enum_ty);
                     // Register constructor functions for each variant
                     let struct_ty = self.context.struct_type(
                         &[BasicTypeEnum::IntType(self.context.i32_type()), payload_ty],
@@ -257,19 +263,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             "missing packed payload param".to_string(),
                                         )
                                     })?;
-                                    let payload_struct_ty = BasicTypeEnum::StructType(*packed_ty);
-                                    let struct_size =
-                                        payload_struct_ty.size_of().ok_or_else(|| {
-                                            CompileError::LlvmError(
-                                                "cannot get payload struct size".to_string(),
-                                            )
-                                        })?;
                                     let malloc_fn = self
                                         .module
                                         .get_function("malloc")
                                         .ok_or_else(|| "malloc not declared".to_string())?;
+                                    // Use size_of() on the StructType directly (not through
+                                    // BasicTypeEnum, which may not expose size_of for structs).
+                                    let payload_size = packed_ty.size_of()
+                                        .and_then(|sv| sv.get_zero_extended_constant())
+                                        .unwrap_or(32);
                                     let size_val = self.context.i64_type().const_int(
-                                        struct_size.get_zero_extended_constant().unwrap_or(16),
+                                        std::cmp::max(payload_size, 1),
                                         false,
                                     );
                                     let malloc_call = self

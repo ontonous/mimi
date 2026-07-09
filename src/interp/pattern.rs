@@ -85,8 +85,8 @@ impl<'a> Interpreter<'a> {
                         }
                         true
                     }
-                    // Handle newtype pattern matching: UserId(v) matches Newtype(v)
-                    Value::Newtype(inner) if pats.len() == 1 => {
+                    // Handle newtype pattern matching: UserId(v) matches Newtype(name, v)
+                    Value::Newtype(_name, inner) if pats.len() == 1 => {
                         self.match_pattern_inner(&pats[0], inner, allow_constructor, bindings)
                     }
                     _ => false,

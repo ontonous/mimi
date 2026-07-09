@@ -10,3 +10,6 @@ cc 08809f71072bbcbbdd94d45eb060a56ab8a4eb0f17b36f60651567b632283e18 # shrinks to
 cc b1f15fd22f2628c97fe1f21c58dfd424f9619e41d8d5c0c733044ddf55b9297b # shrinks to (body, result) = ("    let x = 0;\n    let x = x + 0;", "x")
 cc ffddf54d666c9c5fd0c9c49129b3be0493b27365d710992c551a405441c58564 # shrinks to expr = "(if true { 0 } else { 0 })"
 cc 387244c74099608762114688160f9f7593381917e8c7403086561e05a11985b4 # shrinks to expr = "0"
+cc b4c4627ad6f2b406508eab5962f71a9b9b80c1554277dcbbcef7cf9d659bbeb4 # shrinks to expr = "match None { Some(v) => 0, None => -1 }"
+cc 1a1930f6640bfd372e9a7df6a57490708f49d5145d5b202b966fd56871c80e20 # shrinks to expr = "[0][0]"
+cc c884fab512f4d78f0d8ee29d050421bcd8067cb2c52968d7eb0646d0095f9508 # shrinks to expr = "len([[0]])"

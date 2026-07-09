@@ -235,9 +235,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Option<Type> {
         match expr {
             Expr::Ident(name) => {
-                if let Some(tn) = self.var_type_names.get(name) {
-                    // Try to parse strings like "List<i32>" into proper AST types so
-                    // that generic monomorphization can extract element types.
+                // Prefer var_types (full AST type with generic args) for generic
+                // inference. Fall back to var_type_names (string-based) for types
+                // like "List<i32>" that can be parsed from a string.
+                if let Some(ty) = self.var_types.get(name) {
+                    Some(self.resolve_type(ty))
+                } else if let Some(tn) = self.var_type_names.get(name) {
                     if let Some(parsed) = crate::codegen::expr::call::helpers::parse_type_str(tn) {
                         Some(self.resolve_type(&parsed))
                     } else {
