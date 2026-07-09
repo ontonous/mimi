@@ -618,6 +618,7 @@ impl Parser {
 
     pub(crate) fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
+        self.skip_newlines();
         if self.at(&TokenKind::RParen) {
             return Ok(params);
         }
@@ -641,11 +642,18 @@ impl Parser {
                 mut_,
                 default_value,
             });
+            self.skip_newlines();
             if !self.at(&TokenKind::Comma) {
                 break;
             }
             self.advance();
+            self.skip_newlines();
+            // Allow trailing comma: if the next token is `)`, stop here.
+            if self.at(&TokenKind::RParen) {
+                break;
+            }
         }
+        self.skip_newlines();
         Ok(params)
     }
 
