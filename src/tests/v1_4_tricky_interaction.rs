@@ -250,22 +250,5 @@ fn tricky_nested_list_of_lists() {
     );
 }
 
-// ─── 13. Enum with record variant + match destructure ─────────────────
-// Codegen gap: enum with record variant pattern matching.
-
-#[test]
-#[ignore = "codegen: enum record variant match fails in interpreter path"]
-fn tricky_enum_record_variant_interp() {
-    check_interp_only(
-        "type Item { Label(string) | Group { children: List<i32> } }
-         func main() -> i32 {
-             let g = Group { children: [10, 20, 30] };
-             let sum = match g {
-                 Label(s) => len(s),
-                 Group { children } => children[0] + children[1] + children[2],
-             };
-             println(sum);
-             0
-         }",
-    );
-}
+// Enum record variants not supported in Mimi parser (syntax error).
+// Removed — this is not a codegen gap but an unsupported syntax.
