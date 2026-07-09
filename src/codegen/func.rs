@@ -1261,16 +1261,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);
-                                        } else if self
-                                            .type_defs
-                                            .get(func_name)
-                                            .is_some_and(|td| {
-                                                matches!(
-                                                    td.kind,
-                                                    crate::ast::TypeDefKind::Newtype(_)
-                                                )
-                                            })
-                                        {
+                                        } else if self.type_defs.get(func_name).is_some_and(|td| {
+                                            matches!(td.kind, crate::ast::TypeDefKind::Newtype(_))
+                                        }) {
                                             self.var_type_names
                                                 .insert(name.clone(), func_name.clone());
                                         } else if let Some((ret_ty, _is_async)) = self

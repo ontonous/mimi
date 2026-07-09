@@ -7727,3 +7727,71 @@ fn dual_actor_map_set_get_i32() {
         "42\n99"
     );
 }
+
+#[test]
+fn dual_actor_list_field_len_and_index() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor Box {
+            mut items: List<i32> = [0, 5, 10]
+            func get_len() -> i32 { len(self.items) }
+            func get0() -> i32 { self.items[0] }
+        }
+        func main() -> i32 {
+            let c = Box.spawn()
+            println(c.get_len())
+            println(c.get0())
+            0
+        }
+        "#,
+        "3\n0"
+    );
+}
+
+#[test]
+fn dual_actor_record_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        actor Box {
+            mut p: Point = Point { x: 10, y: 20 }
+            func get_x() -> i32 { self.p.x }
+            func get_y() -> i32 { self.p.y }
+        }
+        func main() -> i32 {
+            let c = Box.spawn()
+            println(c.get_x())
+            println(c.get_y())
+            0
+        }
+        "#,
+        "10\n20"
+    );
+}
+
+#[test]
+fn dual_actor_string_field_literal_init() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor Person {
+            mut name: string = "Alice"
+            func greet() -> string { println(self.name); self.name }
+        }
+        func main() -> i32 {
+            let p = Person.spawn()
+            p.greet()
+            0
+        }
+        "#,
+        "Alice"
+    );
+}
