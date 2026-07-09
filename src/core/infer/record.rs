@@ -76,7 +76,13 @@ fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         | Type::RawString
         | Type::Cap(_)
         | Type::ImplTrait(_)
-        | Type::DynTrait(_) => ty.clone(),
+        | Type::DynTrait(_) => {
+            mimi_debug_assert!(
+                !matches!(ty, Type::Infer),
+                "substitute_type_params: unexpected Infer leaf type"
+            );
+            ty.clone()
+        }
     }
 }
 

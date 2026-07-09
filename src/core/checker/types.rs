@@ -76,7 +76,10 @@ impl<'a> Checker<'a> {
             Type::Infer => Type::Infer,
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
-            Type::TypeVar(_) => ty.clone(),
+            Type::TypeVar(_) => {
+                mimi_debug_assert!(false, "resolve_type: unexpected TypeVar — should have been unified");
+                ty.clone()
+            }
             Type::ForAll(params, body) => {
                 Type::ForAll(params.clone(), Box::new(self.resolve_type(body)))
             }
