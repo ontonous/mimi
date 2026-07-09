@@ -8,9 +8,4 @@ pub(crate) enum BorrowState {
     BorrowedMut { span: Span },
 }
 
-impl BorrowState {
-    #[allow(dead_code)]
-    pub(crate) fn is_borrowed(&self) -> bool {
-        !matches!(self, BorrowState::Unborrowed)
-    }
-}
+impl BorrowState {}

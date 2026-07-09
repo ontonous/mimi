@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::{core, lexer, lockfile, manifest, parser};
+use crate::{lexer, lockfile, manifest, parser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -342,12 +342,6 @@ impl ModuleLoader {
         ))
     }
 
-    /// Get a loaded module by name
-    #[allow(dead_code)]
-    pub fn get_module(&self, name: &str) -> Option<&LoadedModule> {
-        self.modules.get(name)
-    }
-
     /// Merge all loaded module items into a single file for interpretation.
     /// Detects duplicate item names and emits a diagnostic (returns Err) if found.
     pub fn merge_all(&self) -> Result<File, String> {
@@ -386,15 +380,6 @@ impl ModuleLoader {
             imports: all_imports,
             items: all_items,
         })
-    }
-
-    /// Type-check all loaded modules
-    #[allow(dead_code)]
-    pub fn check_all(&self) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
-        for module in self.modules.values() {
-            core::check(&module.file)?;
-        }
-        Ok(())
     }
 }
 
