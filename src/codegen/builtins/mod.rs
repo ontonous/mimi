@@ -1482,6 +1482,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "read_file_bytes" => self.compile_read_file_bytes(args),
             "write_file_bytes" => self.compile_write_file_bytes(args),
             "read_lines_json" | "read_lines_json_builtin" => self.compile_read_lines_json(args),
+            "option_value_or" => self.compile_option_value_or(args),
             "sha256" => self.compile_sha256(args),
             "base64_encode" => self.compile_base64_encode(args),
             "base64_decode" => self.compile_base64_decode(args),
@@ -1733,6 +1734,82 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// G2: Convert an integer to an enum tag value.
     /// from_int(int_val, enum_type_name) -> i32 tag
+    fn compile_option_value_or(
+        &mut self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "option_value_or expects 2 arguments".to_string(),
+            ));
+        }
+        let option_val = args[0];
+        let default_val = match &args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(*iv),
+            BasicMetadataValueEnum::StructValue(sv) => BasicValueEnum::StructValue(*sv),
+            BasicMetadataValueEnum::PointerValue(pv) => BasicValueEnum::PointerValue(*pv),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "option_value_or: invalid default value type".to_string(),
+                ))
+            }
+        };
+        let default_ty = default_val.get_type();
+        let current_fn = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("option_value_or: no current function".to_string())
+        })?;
+        let ok_bb = self.context.append_basic_block(current_fn, "opt_or_ok");
+        let err_bb = self.context.append_basic_block(current_fn, "opt_or_err");
+        let merge_bb = self.context.append_basic_block(current_fn, "opt_or_done");
+        let result_alloca = self.build_alloca(default_ty, "opt_or_result")?;
+        let (disc, payload) = match option_val {
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let disc = self
+                    .builder
+                    .build_extract_value(sv, 0, "opt_disc")
+                    .map_err(|e| CompileError::LlvmError(format!("extract disc: {}", e)))?
+                    .into_int_value();
+                let payload = self
+                    .builder
+                    .build_extract_value(sv, 1, "opt_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+                (disc, payload)
+            }
+            BasicMetadataValueEnum::PointerValue(pv) => {
+                let loaded = self
+                    .builder
+                    .build_load(default_ty, pv, "opt_loaded")
+                    .map_err(|e| CompileError::LlvmError(format!("load option: {}", e)))?;
+                let disc = self
+                    .builder
+                    .build_extract_value(loaded.into_struct_value(), 0, "opt_disc")
+                    .map_err(|e| CompileError::LlvmError(format!("extract disc: {}", e)))?
+                    .into_int_value();
+                let payload = self
+                    .builder
+                    .build_extract_value(loaded.into_struct_value(), 1, "opt_payload")
+                    .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+                (disc, payload)
+            }
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "option_value_or: first arg must be an Option value".to_string(),
+                ))
+            }
+        };
+        self.builder
+            .build_conditional_branch(disc, ok_bb, err_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cond branch: {}", e)))?;
+        self.builder.position_at_end(ok_bb);
+        self.build_store(result_alloca, payload)?;
+        self.build_br(merge_bb)?;
+        self.builder.position_at_end(err_bb);
+        self.build_store(result_alloca, default_val)?;
+        self.build_br(merge_bb)?;
+        self.builder.position_at_end(merge_bb);
+        self.build_load(default_ty, result_alloca, "opt_or_val")
+    }
+
     fn compile_from_int(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
