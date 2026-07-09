@@ -10,10 +10,6 @@ fn check(src: &str, expected: &str) {
     assert_eq!(out.trim(), expected, "mismatch\nsrc: {}", src);
 }
 
-fn check_interp_only(src: &str) {
-    run_source(src);
-}
-
 // ─── 1. Generic + higher-order function + closure ──────────────────────
 // A generic higher-order function applying a closure.
 
@@ -215,13 +211,10 @@ fn tricky_mutual_recursion() {
 }
 
 // ─── 11. Closure + string comparison in match ─────────────────────────
-// Codegen gap known: match on string variable fails in LLVM.
-// Interpreter only.
 
 #[test]
-#[ignore = "codegen: match on string value triggers LLVM ICE (enum_tag ptr expected IntValue)"]
-fn tricky_string_match_interp() {
-    check_interp_only(
+fn tricky_string_match() {
+    check(
         "func main() -> i32 {
              let name = \"world\";
              let msg = \"hello, \" + name;
@@ -232,6 +225,7 @@ fn tricky_string_match_interp() {
              println(r);
              0
          }",
+        "42",
     );
 }
 

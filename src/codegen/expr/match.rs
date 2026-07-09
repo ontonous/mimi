@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::codegen::{CodeGenerator, VarEntry};
+use crate::codegen::CallSiteValueExt;
 use crate::error::CompileError;
 
 use inkwell::basic_block::BasicBlock;
@@ -639,25 +640,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let scrutinee_val = self.compile_expr(scrutinee, vars)?;
-        // Only integer/enum matches need a tag value. Tuple/array/slice matches
-        // work directly on the scrutinee value, so avoid extracting a tag from
-        // a pointer that may actually point to a tuple/list struct.
-        let needs_tag = arms
-            .iter()
-            .any(|arm| matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_)));
+        // Check if the scrutinee is a string (which needs strcmp-based comparison).
+        // Use type inference rather than extract_string_ptr because the latter
+        // returns Some for any pointer value (including ADT pointers).
+        let inferred_type = self.infer_object_type(scrutinee, vars);
+        let is_string_scrutinee = inferred_type == "string";
+        // Only integer/enum matches need a tag value. Tuple/array/slice/string matches
+        // work directly on the scrutinee value.
+        let needs_tag = if is_string_scrutinee {
+            false
+        } else {
+            arms.iter().any(|arm| {
+                matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_))
+            })
+        };
         let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = match scrutinee_val {
             BasicValueEnum::IntValue(iv) => Some(iv),
             BasicValueEnum::StructValue(sv) => {
-                let tag = self
-                    .builder
-                    .build_extract_value(sv, 0, "enum_tag")
-                    .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
-                    .into_int_value();
-                Some(
-                    self.builder
-                        .build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
-                        .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?,
-                )
+                if is_string_scrutinee {
+                    None
+                } else {
+                    let tag = self
+                        .builder
+                        .build_extract_value(sv, 0, "enum_tag")
+                        .map_err(|e| CompileError::LlvmError(format!("extract enum tag: {}", e)))?
+                        .into_int_value();
+                    Some(
+                        self.builder
+                            .build_int_z_extend(tag, self.context.i64_type(), "tag_ext")
+                            .map_err(|e| CompileError::LlvmError(format!("extend tag: {}", e)))?,
+                    )
+                }
             }
             BasicValueEnum::PointerValue(pv) if needs_tag => {
                 // Tag is always at index 0 as an i32 regardless of payload type.
@@ -790,34 +803,61 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Pattern::Literal(lit) => {
-                let scrutinee_iv = scrutinee_iv.ok_or_else(|| {
-                    CompileError::LlvmError(
-                        "literal match arm requires an integer or enum scrutinee".to_string(),
-                    )
-                })?;
-                let lit_val = match lit {
-                    Lit::Int(n) => self.context.i64_type().const_int(*n as u64, true),
-                    Lit::Bool(b) => {
-                        let b_val = self.context.bool_type().const_int(*b as u64, false);
-                        self.builder
-                            .build_int_z_extend(b_val, self.context.i64_type(), "bool_ext")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                    }
-                    Lit::Unit => self.context.i64_type().const_int(0, false),
-                    _ => return Err("unsupported match literal type".into()),
-                };
-                let cmp = self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, lit_val, "cmp")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-                // Always create an intermediate next block so the else chain
-                // never points directly at merge_bb.  This keeps the phi's
-                // predecessor set clean and avoids corrupting merge_bb.
-                let next_bb = self
-                    .context
-                    .append_basic_block(function, &format!("next{}", arm_idx));
-                self.build_cond_br(cmp, arm_bb, next_bb)?;
-                Ok((arm_bb, next_bb))
+                // String literals need strcmp-based comparison instead of tag matching.
+                if let Lit::String(s) = lit {
+                    let scrutinee_ptr = self.extract_string_ptr(&scrutinee_val).ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "string match requires a string scrutinee".to_string(),
+                        )
+                    })?;
+                    let global = self
+                        .builder
+                        .build_global_string_ptr(s, "match_str")
+                        .map_err(|e| CompileError::LlvmError(format!("global string: {}", e)))?;
+                    let lit_ptr = global.as_pointer_value();
+                    let strcmp_fn = self.get_runtime_fn("strcmp")?;
+                    let result = self
+                        .build_call(strcmp_fn, &[scrutinee_ptr.into(), lit_ptr.into()], "match_strcmp")?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| CompileError::LlvmError("strcmp returned void".to_string()))?
+                        .into_int_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    let eq = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, result, zero, "match_streq")
+                        .map_err(|e| CompileError::LlvmError(format!("strcmp error: {}", e)))?;
+                    let next_bb = self
+                        .context
+                        .append_basic_block(function, &format!("next{}", arm_idx));
+                    self.build_cond_br(eq, arm_bb, next_bb)?;
+                    Ok((arm_bb, next_bb))
+                } else {
+                    let scrutinee_iv = scrutinee_iv.ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "literal match arm requires an integer or enum scrutinee".to_string(),
+                        )
+                    })?;
+                    let lit_val = match lit {
+                        Lit::Int(n) => self.context.i64_type().const_int(*n as u64, true),
+                        Lit::Bool(b) => {
+                            let b_val = self.context.bool_type().const_int(*b as u64, false);
+                            self.builder
+                                .build_int_z_extend(b_val, self.context.i64_type(), "bool_ext")
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                        }
+                        Lit::Unit => self.context.i64_type().const_int(0, false),
+                        _ => return Err("unsupported match literal type".into()),
+                    };
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, scrutinee_iv, lit_val, "cmp")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+                    let next_bb = self
+                        .context
+                        .append_basic_block(function, &format!("next{}", arm_idx));
+                    self.build_cond_br(cmp, arm_bb, next_bb)?;
+                    Ok((arm_bb, next_bb))
+                }
             }
             Pattern::Constructor(name, _) => {
                 // Newtypes are transparent and have a single constructor, so
