@@ -236,19 +236,17 @@ fn tricky_string_match_interp() {
 }
 
 // ─── 12. Nested List<List<i32>> indexing ─────────────────────────────
-// Codegen gap: matrix[1] on List<List<i32>> not supported.
-// Interpreter only.
 
 #[test]
-#[ignore = "codegen: index on List<List<i32>> returns 'index requires a list/array pointer'"]
-fn tricky_nested_list_of_lists_interp() {
-    check_interp_only(
+fn tricky_nested_list_of_lists() {
+    check(
         "func main() -> i32 {
              let matrix = [[1, 2], [3, 4], [5, 6]];
              let row = matrix[1];
              println(row[0] + row[1]);
              0
          }",
+        "7",
     );
 }
 
