@@ -367,7 +367,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::List(elems) => {
                 if let Some(first) = elems.first() {
                     let elem = self.infer_object_type(first, vars);
-                    if elem.is_empty() { "List".into() } else { format!("List<{}>", elem) }
+                    if elem.is_empty() {
+                        "List".into()
+                    } else {
+                        format!("List<{}>", elem)
+                    }
                 } else {
                     "List".into()
                 }

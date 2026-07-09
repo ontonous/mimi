@@ -256,6 +256,61 @@ fn dual_compound() {
     dual_assert!("func main() -> i32 { println((2 + 3) * 4 - 1); 0 }", "19");
 }
 
+#[test]
+fn dual_compound_assign_plus_eq() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let mut x = 10; x += 5; println(x); 0 }",
+        "15"
+    );
+}
+
+#[test]
+fn dual_compound_assign_minus_eq() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let mut x = 10; x -= 3; println(x); 0 }",
+        "7"
+    );
+}
+
+#[test]
+fn dual_compound_assign_mul_eq() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let mut x = 10; x *= 4; println(x); 0 }",
+        "40"
+    );
+}
+
+#[test]
+fn dual_compound_assign_div_eq() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let mut x = 20; x /= 4; println(x); 0 }",
+        "5"
+    );
+}
+
+#[test]
+fn dual_compound_assign_string_plus_eq() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let mut s = \"he\"; s += \"llo\"; println(s); 0 }",
+        "hello"
+    );
+}
+
 // ─── 2.  Comparison → integer (7 tests) ──────────────────────
 
 #[test]

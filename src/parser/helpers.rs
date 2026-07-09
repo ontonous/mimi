@@ -138,18 +138,19 @@ impl Parser {
 
     pub(crate) fn expect_ident(&mut self) -> Result<String, ParseError> {
         let tok = self.peek();
-        match &tok.kind {
-            TokenKind::Ident(name) => {
-                let name = name.clone();
-                self.advance();
-                Ok(name)
+        let name = match &tok.kind {
+            TokenKind::Ident(name) => name.clone(),
+            TokenKind::Old => "old".to_string(),
+            _ => {
+                return Err(ParseError::new(
+                    format!("expected identifier, found {}", tok.kind),
+                    tok.line,
+                    tok.col,
+                ))
             }
-            _ => Err(ParseError::new(
-                format!("expected identifier, found {}", tok.kind),
-                tok.line,
-                tok.col,
-            )),
-        }
+        };
+        self.advance();
+        Ok(name)
     }
 
     pub(crate) fn skip_newlines(&mut self) {

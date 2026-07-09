@@ -95,6 +95,11 @@ impl Parser {
                 self.match_semi();
                 Ok(Stmt::Parasteps(body))
             }
+            TokenKind::Func => {
+                let func = self.parse_func()?;
+                self.match_semi();
+                Ok(Stmt::Func(func))
+            }
             TokenKind::Ident(s) if s == "on" => {
                 self.advance();
                 self.expect(TokenKind::Failure, "`failure`")?;

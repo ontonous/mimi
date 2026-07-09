@@ -461,7 +461,7 @@ pub fn fmt_type(t: &Type) -> String {
         Type::CBorrow(inner) => format!("c_borrow {}", fmt_type(inner)),
         Type::CBorrowMut(inner) => format!("c_borrow_mut {}", fmt_type(inner)),
         Type::RawString => "raw_string".to_string(),
-        Type::Infer => "_".to_string(),
+        Type::Infer => "infer".to_string(),
         Type::ExternFunc(args, ret) => {
             let args_str: Vec<String> = args.iter().map(fmt_type).collect();
             format!(

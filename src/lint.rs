@@ -194,6 +194,10 @@ fn collect_decls_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         Stmt::OnFailure(body) => collect_decls_in_block(body, info),
         Stmt::Parasteps(body) => collect_decls_in_block(body, info),
         Stmt::Alloc { body, .. } => collect_decls_in_block(body, info),
+        Stmt::Func(func) => {
+            info.declared.insert(func.name.clone());
+            collect_decls_in_block(&func.body, info);
+        }
         _ => {}
     }
 }
@@ -289,6 +293,9 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
             for e in exprs {
                 collect_refs_in_expr(e, info);
             }
+        }
+        Stmt::Func(func) => {
+            collect_refs_in_block(&func.body, info);
         }
         Stmt::MmsBlock { .. }
         | Stmt::Desc(..)

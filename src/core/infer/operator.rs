@@ -404,7 +404,10 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::And | BinOp::Or => {
-                mimi_debug_assert!(false, "logical operators should be handled before infer_binary");
+                mimi_debug_assert!(
+                    false,
+                    "logical operators should be handled before infer_binary"
+                );
                 unreachable!("logical operators are handled before infer_binary")
             }
             BinOp::Assign => {

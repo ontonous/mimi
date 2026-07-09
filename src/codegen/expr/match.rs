@@ -1,6 +1,6 @@
 use crate::ast::*;
-use crate::codegen::{CodeGenerator, VarEntry};
 use crate::codegen::CallSiteValueExt;
+use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::basic_block::BasicBlock;
@@ -650,9 +650,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let needs_tag = if is_string_scrutinee {
             false
         } else {
-            arms.iter().any(|arm| {
-                matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_))
-            })
+            arms.iter()
+                .any(|arm| matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_)))
         };
         let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = match scrutinee_val {
             BasicValueEnum::IntValue(iv) => Some(iv),
@@ -805,11 +804,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Pattern::Literal(lit) => {
                 // String literals need strcmp-based comparison instead of tag matching.
                 if let Lit::String(s) = lit {
-                    let scrutinee_ptr = self.extract_string_ptr(&scrutinee_val).ok_or_else(|| {
-                        CompileError::LlvmError(
-                            "string match requires a string scrutinee".to_string(),
-                        )
-                    })?;
+                    let scrutinee_ptr =
+                        self.extract_string_ptr(&scrutinee_val).ok_or_else(|| {
+                            CompileError::LlvmError(
+                                "string match requires a string scrutinee".to_string(),
+                            )
+                        })?;
                     let global = self
                         .builder
                         .build_global_string_ptr(s, "match_str")
@@ -817,7 +817,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let lit_ptr = global.as_pointer_value();
                     let strcmp_fn = self.get_runtime_fn("strcmp")?;
                     let result = self
-                        .build_call(strcmp_fn, &[scrutinee_ptr.into(), lit_ptr.into()], "match_strcmp")?
+                        .build_call(
+                            strcmp_fn,
+                            &[scrutinee_ptr.into(), lit_ptr.into()],
+                            "match_strcmp",
+                        )?
                         .try_as_basic_value_opt()
                         .ok_or_else(|| CompileError::LlvmError("strcmp returned void".to_string()))?
                         .into_int_value();
@@ -843,7 +847,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let b_val = self.context.bool_type().const_int(*b as u64, false);
                             self.builder
                                 .build_int_z_extend(b_val, self.context.i64_type(), "bool_ext")
-                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("zext error: {}", e))
+                                })?
                         }
                         Lit::Unit => self.context.i64_type().const_int(0, false),
                         _ => return Err("unsupported match literal type".into()),

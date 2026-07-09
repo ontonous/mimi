@@ -289,6 +289,11 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
+            Stmt::Func(func) => {
+                for s in &func.body {
+                    Self::collect_uses_in_stmt(s, uses);
+                }
+            }
             Stmt::MmsBlock { .. } | Stmt::Ellipsis | Stmt::Desc(..) | Stmt::Rule(..) => {}
             Stmt::Loop(body) => {
                 for s in body {

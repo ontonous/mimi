@@ -58,7 +58,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Spawn
             | TokenKind::Await
             | TokenKind::Quote
-            | TokenKind::Old
             | TokenKind::Nothing
             | TokenKind::Loop
             | TokenKind::As

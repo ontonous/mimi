@@ -486,12 +486,31 @@ impl<'a> Interpreter<'a> {
                 // push(list, elem) mutates the list in place and returns Unit.
                 // Returning Unit prevents push from leaking as a block value.
                 if name == "push" && !args.is_empty() {
-                    if let Expr::Ident(var_name) = &args[0] {
-                        if let Value::List(_) = &result {
-                            if self.is_mutable(var_name) {
-                                self.assign(var_name, result.clone())?;
+                    if let Value::List(_) = &result {
+                        match &args[0] {
+                            // Case 1: push(var, val) — assign result back to var
+                            Expr::Ident(var_name) => {
+                                if self.is_mutable(var_name) {
+                                    self.assign(var_name, result.clone())?;
+                                }
+                                return Ok(Value::Unit);
                             }
-                            return Ok(Value::Unit);
+                            // Case 2: push(self.field, val) — update actor field
+                            Expr::Field(obj_expr, field_name) => {
+                                if let Expr::Ident(obj_name) = obj_expr.as_ref() {
+                                    if obj_name == "self" {
+                                        if let Some(Value::Actor(handle)) = self.lookup("self") {
+                                            let mut inner = handle
+                                                .inner
+                                                .write()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            inner.fields.insert(field_name.clone(), result.clone());
+                                        }
+                                        return Ok(Value::Unit);
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }

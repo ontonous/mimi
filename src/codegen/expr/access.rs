@@ -247,6 +247,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         Err(format!("field '{}' not found on type '{}'", field_name, obj_type).into())
     }
 
+    /// Get a GEP pointer to a struct field without loading the value.
+    /// Used by push/pop on actor self.field to get the field slot pointer.
+    pub(in crate::codegen) fn compile_field_gep(
+        &mut self,
+        obj: &Expr,
+        field_name: &str,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let obj_val = self.compile_expr(obj, vars)?;
+        let obj_type = self.infer_object_type(obj, vars);
+        let field_ptr = self.materialize_field_base(obj_val, &obj_type)?;
+        let sty = self.expect_struct_type(&obj_type)?;
+        if let Some(td) = self.type_defs.get(&obj_type) {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
+                    let gep = self
+                        .gep()
+                        .build_struct_gep(sty, field_ptr, idx as u32, field_name)
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    return Ok(gep);
+                }
+            }
+        }
+        if let Ok(idx) = field_name.parse::<u32>() {
+            let gep = self
+                .gep()
+                .build_struct_gep(sty, field_ptr, idx, field_name)
+                .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+            return Ok(gep);
+        }
+        Err(format!("field '{}' not found on type '{}'", field_name, obj_type).into())
+    }
+
     /// Shared variable field access fast path.
     fn compile_shared_field_load(
         &mut self,
