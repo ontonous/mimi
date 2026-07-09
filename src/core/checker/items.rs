@@ -770,7 +770,7 @@ impl<'a> Checker<'a> {
             } => {
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
-                if let Some(declared_ty) = ty {
+                let const_ty = if let Some(declared_ty) = ty {
                     let resolved = self.resolve_type(declared_ty);
                     if !same_type(&resolved, &value_ty) {
                         self.emit_code(
@@ -783,7 +783,13 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
-                }
+                    resolved
+                } else {
+                    value_ty
+                };
+                // Register const type so that later items can reference it.
+                // infer_item already does this; check_item must too.
+                self.const_types.insert(name.clone(), const_ty);
             }
         }
     }
