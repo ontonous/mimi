@@ -901,6 +901,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             } => {
                 self.compile_shared_let_stmt(kind, name, ty, init, vars)?;
             }
+            Stmt::Func(f) => {
+                if f.is_comptime {
+                    // Comptime functions: skip codegen (interpreter-only)
+                } else {
+                    self.func_defs
+                        .entry(f.name.clone())
+                        .or_insert_with(|| f.clone());
+                    let saved_block = self.builder.get_insert_block();
+                    let saved_type_map = self.type_map.clone();
+                    let saved_var_types = std::mem::take(&mut self.var_types);
+                    let saved_var_type_names = std::mem::take(&mut self.var_type_names);
+                    let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
+                    self.compile_func(f)?;
+                    self.var_types = saved_var_types;
+                    self.var_type_names = saved_var_type_names;
+                    self.list_elem_llvm_types = saved_list_elem;
+                    self.type_map = saved_type_map;
+                    if let Some(bb) = saved_block {
+                        self.builder.position_at_end(bb);
+                    }
+                }
+            }
             Stmt::Desc(..)
             | Stmt::Rule(..)
             | Stmt::Requires(_, _)
