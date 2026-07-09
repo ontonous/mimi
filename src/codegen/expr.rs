@@ -492,9 +492,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             "str_index_of" => return Some("Option<i32>".to_string()),
             "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
             | "str_to_lower" | "str_repeat" | "to_string" | "int_to_string" | "float_to_string"
-            | "input" | "chr" | "read_file" | "type_name" | "c_str_to_string" | "from_json" => {
+            | "chr" | "type_name" | "c_str_to_string" | "from_json" => {
                 return Some("string".to_string())
             }
+            "input" | "read_file" => return Some("Result<string,string>".to_string()),
             "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
                 return Some("List<string>".to_string())
             }
@@ -506,6 +507,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // User-defined functions
         if let Some(fdef) = self.func_defs.get(name) {
             if let Some(ret_ty) = &fdef.ret {
+                // Check if this is a newtype constructor — return the newtype name
+                // (not the unfolded inner type) so trait method dispatch works.
+                if matches!(ret_ty, crate::ast::Type::Newtype(n, _) if n == name) {
+                    return Some(name.to_string());
+                }
                 return Some(crate::core::fmt_type(ret_ty));
             }
         }

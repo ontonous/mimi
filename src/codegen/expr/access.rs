@@ -193,10 +193,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Field access: obj.field
         let obj_val = self.compile_expr(obj, vars)?;
         let obj_type = self.infer_object_type(obj, vars);
+        let base_type = Self::strip_generic_params(&obj_type);
         let field_ptr = self.materialize_field_base(obj_val, &obj_type)?;
-        let sty = self.expect_struct_type(&obj_type)?;
+        let sty = self.expect_struct_type(base_type)?;
 
-        if let Some(td) = self.type_defs.get(&obj_type) {
+        if let Some(td) = self.type_defs.get(base_type) {
             if let TypeDefKind::Record(fields) = &td.kind {
                 if let Some(idx) = fields.iter().position(|f| f.name == *field_name) {
                     let gep = self
@@ -211,7 +212,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             (BasicTypeEnum::IntType(self.context.i32_type()), true)
                         }
                         _ => (
-                            types::mimi_type_to_llvm(self.context, &fields[idx].ty)
+                            self.llvm_type_for(&fields[idx].ty)
                                 .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
                             false,
                         ),
@@ -290,7 +291,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         let obj_type = self.infer_object_type(obj, vars);
-        let td = match self.type_defs.get(&obj_type) {
+        let base = Self::strip_generic_params(&obj_type);
+        let td = match self.type_defs.get(base) {
             Some(td) => td,
             None => return Ok(None),
         };
@@ -313,12 +315,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let sty = self
             .type_llvm
-            .get(&obj_type)
+            .get(base)
             .and_then(|bt| match bt {
                 BasicTypeEnum::StructType(s) => Some(*s),
                 _ => None,
             })
-            .ok_or_else(|| CompileError::Generic(format!("type '{}' is not a struct", obj_type)))?;
+            .ok_or_else(|| CompileError::Generic(format!("type '{}' is not a struct", base)))?;
         let gep = self
             .gep()
             .build_struct_gep(sty, heap_ptr, idx as u32, field_name)
@@ -328,16 +330,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_load(field_ty, gep, field_name).map(Some)
     }
 
+    /// Extract the base type name by stripping generic params (e.g. `Pair<i32>` → `Pair`).
+    /// This lets field access work with fully-resolved type names from var_types.
+    fn strip_generic_params(type_name: &str) -> &str {
+        if let Some(lt_pos) = type_name.find('<') {
+            &type_name[..lt_pos]
+        } else {
+            type_name
+        }
+    }
+
     /// Ensure a struct value is addressable (spill to stack if it is a value).
     fn materialize_field_base(
         &self,
         obj_val: BasicValueEnum<'ctx>,
         obj_type: &str,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let base = Self::strip_generic_params(obj_type);
         match obj_val {
             BasicValueEnum::PointerValue(pv) => Ok(pv),
             BasicValueEnum::StructValue(sv) => {
-                if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(obj_type) {
+                if let Some(BasicTypeEnum::StructType(sty)) = self.type_llvm.get(base) {
                     let alloca = self.build_alloca(*sty, "tmp")?;
                     self.build_store(alloca, sv)?;
                     Ok(alloca)

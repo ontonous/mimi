@@ -195,7 +195,7 @@ pub enum Value {
     ArenaRef(usize, usize, u64), // (arena_id, slot_idx, generation)
     ArenaBlock(usize),
     QuoteAst(Box<QuotedAst>),
-    Newtype(Box<Value>),
+    Newtype(String, Box<Value>),
     Actor(super::ActorHandle),
     Closure {
         params: Vec<Param>,
@@ -596,7 +596,7 @@ impl std::fmt::Display for Value {
             Value::ArenaRef(id, idx, gen) => write!(f, "ArenaRef({}, {}, gen={})", id, idx, gen),
             Value::ArenaBlock(id) => write!(f, "ArenaBlock({})", id),
             Value::QuoteAst(_) => write!(f, "QuoteAst(...)"),
-            Value::Newtype(v) => write!(f, "Newtype({})", v),
+            Value::Newtype(name, v) => write!(f, "{}({})", name, v),
             Value::Actor(_) => write!(f, "Actor(...)"),
             Value::Closure { .. } => write!(f, "Closure(...)"),
             Value::Shared(arc) => {
@@ -683,7 +683,7 @@ pub(crate) fn contains_local_shared(v: &Value) -> bool {
         Value::Tuple(elems) => elems.iter().any(contains_local_shared),
         Value::Record(_, fields) => fields.values().any(contains_local_shared),
         Value::Variant(_, args) => args.iter().any(contains_local_shared),
-        Value::Newtype(inner) => contains_local_shared(inner),
+        Value::Newtype(_, inner) => contains_local_shared(inner),
         Value::DynTrait { data, .. } => contains_local_shared(data),
         Value::Ref(rc) | Value::RefMut(rc) => {
             // RwLock::read() only returns Err on poisoning; in practice this is unreachable
@@ -710,7 +710,7 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
         Value::Tuple(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
         Value::Record(_, fields) => fields.values().any(|v| contains_arena_ref(v, arena_id)),
         Value::Variant(_, args) => args.iter().any(|v| contains_arena_ref(v, arena_id)),
-        Value::Newtype(inner) => contains_arena_ref(inner, arena_id),
+        Value::Newtype(_, inner) => contains_arena_ref(inner, arena_id),
         Value::DynTrait { data, .. } => contains_arena_ref(data, arena_id),
         Value::Ref(rc) | Value::RefMut(rc) => {
             if let Ok(v) = rc.read() {
@@ -760,7 +760,7 @@ pub(crate) fn is_copy(v: &Value) -> bool {
     match v {
         Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit => true,
         Value::Tuple(elems) => elems.iter().all(is_copy),
-        Value::Newtype(inner) => is_copy(inner),
+        Value::Newtype(_, inner) => is_copy(inner),
         Value::Shared(_) | Value::LocalShared(_) => true,
         Value::Record(_, fields) => fields.values().all(is_copy),
         Value::Variant(_, args) => args.iter().all(is_copy),
@@ -779,7 +779,7 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
         Value::List(l) => !l.is_empty(),
         Value::Set(s) => !s.is_empty(),
         Value::Unit => false,
-        Value::Newtype(inner) => is_truthy(inner),
+        Value::Newtype(_, inner) => is_truthy(inner),
         _ => true,
     }
 }
@@ -850,7 +850,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                 && a.iter()
                     .all(|(k, v)| b.get(k).map(|bv| values_equal(v, bv)).unwrap_or(false))
         }
-        (Value::Newtype(a), Value::Newtype(b)) => values_equal(a, b),
+        (Value::Newtype(_, a), Value::Newtype(_, b)) => values_equal(a, b),
         (Value::Ref(a), Value::Ref(b)) | (Value::RefMut(a), Value::RefMut(b)) => {
             if let (Ok(va), Ok(vb)) = (a.read(), b.read()) {
                 values_equal(&va, &vb)
@@ -968,7 +968,7 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Record(Some(_), _) => "record",
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",
-        Value::Newtype(_) => "newtype",
+        Value::Newtype(_, _) => "newtype",
         Value::Type(_) => "type",
         Value::Closure { .. } => "closure",
         Value::QuoteAst(_) => "AST",

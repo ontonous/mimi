@@ -240,7 +240,7 @@ impl<'a> Interpreter<'a> {
                 let val = args.into_iter().next().ok_or_else(|| {
                     InterpError::new("newtype constructor: expected one argument")
                 })?;
-                return Ok(Value::Newtype(Box::new(val)));
+                return Ok(Value::Newtype(name.into(), Box::new(val)));
             }
             return Ok(Value::Variant(name.into(), args));
         }
@@ -1089,6 +1089,24 @@ impl<'a> Interpreter<'a> {
                         )))
                     }
                 }
+            }
+            Value::Newtype(type_name, _inner) => {
+                // Dispatch trait methods using the newtype name.
+                if let Some(impls) = self.type_impls.get(type_name) {
+                    for methods in impls.values() {
+                        if let Some(func) = methods.iter().find(|f| f.name == method) {
+                            let func = func.clone();
+                            return self.with_scope(|this| {
+                                this.bind("self", obj.clone())?;
+                                this.call_func(&func, args)
+                            });
+                        }
+                    }
+                }
+                Err(InterpError::new(format!(
+                    "newtype '{}' has no method '{}'",
+                    type_name, method
+                )))
             }
             _ => Err(InterpError::new(format!(
                 "cannot call method '{}' on value {}",

@@ -1469,7 +1469,7 @@ fn dual_contract_ensures() {
     if !can_link() {
         return;
     }
-    // codegen does not support `result` in ensures; run interp-only.
+    // SKIP_CODEGEN: uses `result` in ensures clause (codegen-gapped)
     dual_assert_interp_only!(
         r#"
         func double(x: i32) -> i32 {
@@ -3988,7 +3988,8 @@ fn dual_regex_capture_groups() {
     if !can_link() {
         return;
     }
-    // codegen runtime uses custom RegexEngine without capture group support
+    // SKIP_CODEGEN: codegen runtime uses custom RegexEngine without capture group support.
+    // Codegen counterpart below verifies codegen returns "[]" as documented.
     dual_assert_interp_only!(
         r#"
         func main() -> i32 {
@@ -3999,6 +4000,25 @@ fn dual_regex_capture_groups() {
         "#,
         interp::Value::Int(0)
     );
+}
+
+#[test]
+fn dual_codegen_regex_capture_groups() {
+    if !can_link() {
+        return;
+    }
+    // Codegen counterpart to dual_regex_capture_groups.
+    // Codegen uses custom RegexEngine which doesn't support capture groups,
+    // so it returns "[]" instead of the actual capture groups.
+    let src = r#"
+        func main() -> i32 {
+            let groups = regex_capture_groups("2024-01-15", "([0-9]{4})-([0-9]{2})-([0-9]{2})")
+            println(groups)
+            0
+        }
+    "#;
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "[]");
 }
 
 #[test]
@@ -5068,8 +5088,7 @@ fn dual_recursive_type_interp_build() {
     if !can_link() {
         return;
     }
-    // Recursive type with List<Expr> construction — interp-only:
-    // codegen can't index List<Expr> (recursive non-scalar element type)
+    // SKIP_CODEGEN: codegen can't index List<Expr> (recursive non-scalar element type)
     dual_assert_interp_only!(
         r#"
         type Expr {
@@ -6692,7 +6711,7 @@ fn dual_read_lines_each() {
     if !can_link() {
         return;
     }
-    // read_lines_each is interp-only (closure callback not supported in codegen builtin path)
+    // SKIP_CODEGEN: read_lines_each (closure callback) has no codegen implementation
     dual_assert_interp_only!(
         r#"
         func main() -> i32 {

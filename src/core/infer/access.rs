@@ -310,6 +310,10 @@ impl<'a> Checker<'a> {
                 }
             }
             Type::Newtype(_, inner) if idx == 0 => inner.as_ref().clone(),
+            // Newtype registered as Type::Name (e.g. in impl method self parameter)
+            Type::Name(name, _) if idx == 0 && self.newtypes.contains_key(name) => {
+                self.newtypes[name].clone()
+            }
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0244,

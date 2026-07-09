@@ -1160,8 +1160,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
-                        } else if let Expr::Record { ty: Some(tn), .. } = init {
+                        } else if let Expr::Record {
+                            ty: Some(tn),
+                            fields,
+                        } = init
+                        {
                             self.var_type_names.insert(name.clone(), tn.clone());
+                            // Infer concrete generic args from field values (e.g.
+                            // `Pair { a: 10, b: 20 }` → `Pair<i32>`).
+                            if let Some(td) = self.type_defs.get(tn) {
+                                if !td.generics.is_empty() {
+                                    let type_params: Vec<String> =
+                                        td.generics.iter().map(|g| g.name.clone()).collect();
+                                    let param_types: HashMap<String, Type> = self
+                                        .try_infer_generic_from_fields(
+                                            td,
+                                            fields,
+                                            vars,
+                                            &type_params,
+                                        );
+                                    if param_types.len() == td.generics.len() {
+                                        let args: Vec<Type> =
+                                            td.generics
+                                                .iter()
+                                                .map(|g| {
+                                                    param_types.get(&g.name).cloned().unwrap_or(
+                                                        Type::Name(g.name.clone(), vec![]),
+                                                    )
+                                                })
+                                                .collect();
+                                        self.var_types
+                                            .insert(name.clone(), Type::Name(tn.clone(), args));
+                                    }
+                                }
+                            }
                         } else if matches!(init, Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
                         } else if let Expr::List(list_elems) = init {
@@ -1229,6 +1261,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);
+                                        } else if self
+                                            .type_defs
+                                            .get(func_name)
+                                            .is_some_and(|td| {
+                                                matches!(
+                                                    td.kind,
+                                                    crate::ast::TypeDefKind::Newtype(_)
+                                                )
+                                            })
+                                        {
+                                            self.var_type_names
+                                                .insert(name.clone(), func_name.clone());
                                         } else if let Some((ret_ty, _is_async)) = self
                                             .func_defs
                                             .get(func_name)

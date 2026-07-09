@@ -24,7 +24,17 @@ impl<'a> Checker<'a> {
         }
 
         let obj_ty = self.infer_expr(obj, scopes);
-        if let Type::Name(type_name, type_args) = &obj_ty {
+        // Newtype delegates method dispatch using the newtype name.
+        // e.g. UserId(42).id() looks up trait methods for "UserId".
+        let (type_name, type_args): (&String, &[Type]) = match &obj_ty {
+            Type::Newtype(name, _) => (name, &[]),
+            Type::Name(tn, ta) => (tn, ta.as_slice()),
+            _ => {
+                // fall through to the rest of the method (string/list/trait check below)
+                (&String::new(), &[])
+            }
+        };
+        if !type_name.is_empty() {
             // Check built-in Option/Result methods; fall through to trait dispatch for unknown methods
             if type_name == "Option" && type_args.len() == 1 {
                 let known = [

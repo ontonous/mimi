@@ -283,7 +283,10 @@ impl Parser {
             TokenKind::LBracket => self.parse_bracket_primary()?,
             TokenKind::Match => {
                 self.advance();
+                let saved = self.allow_record_literal;
+                self.allow_record_literal = false;
                 let e = self.parse_expr(0)?;
+                self.allow_record_literal = saved;
                 self.skip_newlines();
                 self.expect(TokenKind::LBrace, "`{`")?;
                 let arms = self.parse_match_arms()?;
@@ -651,7 +654,7 @@ impl Parser {
                 }
             } else if self.at(&TokenKind::LBracket) {
                 e = self.parse_slice_or_index(e)?;
-            } else if self.at(&TokenKind::LBrace) {
+            } else if self.at(&TokenKind::LBrace) && self.allow_record_literal {
                 if let Expr::Ident(ty_name) = &e {
                     if ty_name
                         .chars()

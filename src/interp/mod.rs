@@ -581,7 +581,7 @@ impl<'a> Interpreter<'a> {
             Value::Record(Some(name), _) => name.clone(),
             Value::Record(None, _) => "record".into(),
             Value::Error(_) => "error".into(),
-            Value::Newtype(v) => self.value_type_name(v),
+            Value::Newtype(name, _v) => name.clone(),
             Value::Type(name) => name.clone(),
             Value::Closure { .. } => "closure".into(),
             Value::QuoteAst(_) => "AST".into(),

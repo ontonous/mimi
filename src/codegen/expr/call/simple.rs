@@ -544,6 +544,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.maybe_wrap_string_args_for_call(name, args, &mut compiled_args)?;
         self.maybe_convert_list_args_to_values(name, &mut compiled_args)?;
+        self.maybe_convert_record_args_to_values(name, &mut compiled_args)?;
         self.maybe_wrap_named_fn_args_to_closures(name, args, &mut compiled_args)?;
 
         metadata_args = compiled_args
@@ -667,6 +668,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Convert pointer-valued record arguments to struct values when the function
+    /// parameter expects a record type (passed by value in LLVM).
+    fn maybe_convert_record_args_to_values(
+        &self,
+        name: &str,
+        compiled_args: &mut [BasicValueEnum<'ctx>],
+    ) -> Result<(), CompileError> {
+        let Some(fdef) = self.func_defs.get(name) else {
+            return Ok(());
+        };
+        for (i, arg) in compiled_args.iter_mut().enumerate() {
+            if i < fdef.params.len() {
+                if let Type::Name(tn, _) = &fdef.params[i].ty {
+                    if tn != "List" && self.type_defs.contains_key(tn) {
+                        if let BasicValueEnum::PointerValue(pv) = arg {
+                            if let Some(param_llvm) = self.llvm_type_for(&fdef.params[i].ty) {
+                                let loaded = self.build_load(
+                                    param_llvm,
+                                    *pv,
+                                    &format!("{}_struct_arg", &fdef.params[i].name),
+                                )?;
+                                *arg = loaded;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Convert function pointers to closure structs when the parameter type expects func(T) -> U.
     fn maybe_wrap_named_fn_args_to_closures(
         &mut self,
@@ -773,7 +805,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
-                (Self::mangle_name(name, &callee_map), callee_map)
+                let mangled = Self::mangle_name(name, &callee_map);
+                (mangled, callee_map)
             } else {
                 (
                     Self::mangle_name(name, &self.type_map),
