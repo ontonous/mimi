@@ -471,7 +471,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (e.g. `str_index_of(...).unwrap_or(-1)`, `getenv(...).is_ok()`) can be
     /// dispatched even when the result is not bound to a variable.
     /// Infer the return type of a string method for use in method chain resolution.
-    fn infer_string_method_return_type(&self, method: &str) -> String {
+    pub(super) fn infer_string_method_return_type(&self, method: &str) -> String {
         match method {
             "trim" | "to_upper" | "to_lower" | "repeat" | "replace" | "char_at" | "substring" => {
                 "string".to_string()
@@ -481,6 +481,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "split" => "List<string>".to_string(),
             "parse_int" => "Result<i64,string>".to_string(),
             "parse_float" => "Result<f64,string>".to_string(),
+            "index_of" => "Option<i32>".to_string(),
             _ => String::new(),
         }
     }

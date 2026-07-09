@@ -318,6 +318,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 } else if method_name == "upgrade" {
                                     self.track_weak_upgrade_type(name, obj);
+                                } else {
+                                    // Generic string method call: infer return type
+                                    let obj_type = self.infer_object_type(obj, vars);
+                                    if obj_type == "string" {
+                                        let ret_type =
+                                            self.infer_string_method_return_type(method_name);
+                                        if !ret_type.is_empty() {
+                                            self.var_type_names.insert(name.clone(), ret_type);
+                                        }
+                                    }
                                 }
                             } else if let Expr::Ident(func_name) = callee.as_ref() {
                                 match func_name.as_str() {

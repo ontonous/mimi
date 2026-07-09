@@ -837,8 +837,10 @@ impl<'a> Interpreter<'a> {
                             .ok_or("index_of expects 1 argument")?;
                         match substr {
                             Value::String(p) => match s.find(&p) {
-                                Some(i) => Ok(Value::Int(i as i64)),
-                                None => Ok(Value::Int(-1)),
+                                Some(i) => {
+                                    Ok(Value::Variant("Some".into(), vec![Value::Int(i as i64)]))
+                                }
+                                None => Ok(Value::Variant("None".into(), vec![])),
                             },
                             _ => Err("index_of expects a string argument".into()),
                         }
