@@ -703,12 +703,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: Option<&Expr>,
     ) -> MimiResult<()> {
         let ensures = self.ensures_stmts.clone();
+        // Adjust the value once and reuse for both ensures check and return,
+        // avoiding double application of adjust_int_val (which is not idempotent).
+        let val = val
+            .map(|v| -> Result<BasicValueEnum<'ctx>, CompileError> {
+                let adjusted = self.adjust_int_val(v, ret_type)?;
+                Ok(adjusted)
+            })
+            .transpose()?;
         if !ensures.is_empty() {
             let result_alloca = self.build_alloca(ret_type, "result")?;
             let stored_val =
                 val.unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
-            let adjusted = self.adjust_int_val(stored_val, ret_type)?;
-            self.build_store(result_alloca, adjusted)?;
+            self.build_store(result_alloca, stored_val)?;
             let mut ensures_vars = vars.clone();
             ensures_vars.insert("result".to_string(), (result_alloca, ret_type));
             for ensures_expr in &ensures {
@@ -728,8 +735,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.pop_cap_scope();
         match val {
             Some(v) => {
-                let adjusted = self.adjust_int_val(v, ret_type)?;
-                let adjusted = self.coerce_variant_value(adjusted, ret_type, ret_ty_ast)?;
+                let adjusted = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                 let adjusted = self.load_return_value_if_needed(adjusted)?;
                 self.build_return(Some(&adjusted))?;
             }

@@ -2613,48 +2613,16 @@ pub extern "C" fn mimi_regex_capture_groups(
 
 // ─── Sort helpers ────────────────────────────────────────────────
 
-/// Sorts an f64 list in place (ascending). data points to the raw element buffer.
-/// count is the number of elements. Each f64 is 8 bytes (stored as i64 bits).
+/// Sorts an f64 list in place (ascending). Uses Rust's `sort_unstable_by`
+/// for O(n log n) performance instead of the original O(n²) bubble sort.
 #[no_mangle]
 pub extern "C" fn mimi_sort_f64_inplace(data: *mut u8, count: i64) {
     if data.is_null() || count <= 1 {
         return;
     }
-    let elem_size: usize = 8;
-    let total_bytes = (count as usize) * elem_size;
     // SAFETY: `data` is non-null and caller must ensure it points to `count * 8` writable bytes.
-    let slice = unsafe { std::slice::from_raw_parts_mut(data, total_bytes) };
-    for i in 0..(count as usize) {
-        for j in 0..(count as usize) - 1 - i {
-            let a_off = j * elem_size;
-            let b_off = (j + 1) * elem_size;
-            let a_bits = u64::from_ne_bytes([
-                slice[a_off],
-                slice[a_off + 1],
-                slice[a_off + 2],
-                slice[a_off + 3],
-                slice[a_off + 4],
-                slice[a_off + 5],
-                slice[a_off + 6],
-                slice[a_off + 7],
-            ]);
-            let b_bits = u64::from_ne_bytes([
-                slice[b_off],
-                slice[b_off + 1],
-                slice[b_off + 2],
-                slice[b_off + 3],
-                slice[b_off + 4],
-                slice[b_off + 5],
-                slice[b_off + 6],
-                slice[b_off + 7],
-            ]);
-            if f64::from_bits(a_bits) > f64::from_bits(b_bits) {
-                for k in 0..elem_size {
-                    slice.swap(a_off + k, b_off + k);
-                }
-            }
-        }
-    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(data as *mut f64, count as usize) };
+    slice.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// Sorts a list of UTF-8 C strings in place (ascending lexicographic order).
