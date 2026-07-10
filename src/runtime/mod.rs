@@ -444,6 +444,10 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     if list.is_null() {
         return;
     }
+    // SAFETY: list is non-null (checked above) and points to a valid
+    // MimiList allocated by mimi_list_alloc. The reference `&*list` is
+    // valid for the duration of this call; we copy out the fields we
+    // need before dropping the list itself.
     unsafe {
         let lst = &*list;
         if lst.owns_data && !lst.data.is_null() {
@@ -489,6 +493,9 @@ pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
     if list.is_null() {
         return;
     }
+    // SAFETY: list is non-null (checked by the caller) and points to a
+    // valid MimiList. The reference `&*list` lives only within this
+    // function body.
     unsafe {
         let lst = &*list;
         // H8 fix: only free elements if the list owns its data. C-allocated
@@ -668,6 +675,10 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
         // racing with a concurrent weak retain on a different thread.
         if unsafe { (*hdr).weak.load(Ordering::Acquire) } == 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
+            // SAFETY: hdr is non-null and was allocated with this layout
+            // (we just observed strong==0 and weak==0, so no other thread
+            // can hold a reference). dealloc must be called with the same
+            // layout used in the original alloc.
             unsafe {
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
@@ -719,6 +730,9 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
         // load to synchronize with concurrent strong retain operations.
         if unsafe { (*hdr).strong.load(Ordering::Acquire) } <= 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
+            // SAFETY: hdr is non-null; we just observed weak==0 and strong<=0
+            // under Acquire ordering, so no other thread can hold a reference.
+            // The layout matches the one used at alloc time.
             unsafe {
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
@@ -888,6 +902,10 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         let ptr = value as *const u8;
         // Short bounded scan for null terminator.
         let mut len: usize = 0;
+        // SAFETY: ptr comes from the range check above (heap-aligned, in
+        // user space). The bounded scan reads at most MAX_BOUNDED_SCAN
+        // bytes — if a page fault occurs the OS will deliver SIGSEGV, but
+        // the range check makes that extremely unlikely for valid heap.
         unsafe {
             while len < MAX_BOUNDED_SCAN {
                 let byte = *ptr.add(len);
@@ -908,10 +926,14 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         }
         // C12: no null within 256 bytes — treat as large integer (≥1MB) and
         // format as hex to avoid reading arbitrary memory for 1MB.
+        // SAFETY: malloc(24) returned a valid buffer; null check below
+        // guards against OOM. The buffer is at least 24 bytes and the
+        // format string "0x%lx\0" writes at most ~20 bytes on 64-bit.
         let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
         if buf.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: buf is non-null and 24 bytes; the format spec is bounded.
         unsafe {
             libc::sprintf(buf, b"0x%lx\0".as_ptr() as *const _, value as u64);
         }
@@ -958,6 +980,10 @@ pub extern "C" fn mimi_map_from_list(
         // We mitigate by capping n at 1M, but the real fix requires a
         // different API that takes slices. For now, validate each key
         // handle looks like a plausible heap pointer before dereference.
+        // SAFETY: keys and values are non-null (caller-checked) and n
+        // is capped at 1M, so index `i` is in bounds for the caller's
+        // arrays (we trust the caller's array length, the cap is just
+        // a defensive upper bound).
         let key_handle = unsafe { *keys.add(i as usize) };
         let val_handle = unsafe { *values.add(i as usize) };
         // C7 fix: only treat as C string pointer if it looks like a
@@ -967,7 +993,13 @@ pub extern "C" fn mimi_map_from_list(
         if key_handle >= 1_048_576 && key_handle % 8 == 0 {
             let key_str = key_handle as *const std::ffi::c_char;
             if !key_str.is_null() {
+                // SAFETY: key_str passed the heap-aligned check above;
+                // CStr::from_ptr reads up to the first NUL byte. The
+                // resulting &str lives only within this expression.
                 let s = unsafe { CStr::from_ptr(key_str) }.to_str().unwrap_or("");
+                // SAFETY: map_ptr is the just-allocated map (handle != 0);
+                // we are the only writer at this point and the lifetime
+                // of the insert is independent of the source key_str.
                 unsafe {
                     (*map_ptr).inner.insert(s.to_string(), val_handle);
                 }
@@ -1572,6 +1604,9 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     // H5 fix: free old C strings before clearing to prevent memory leak.
     for ptr in args.argv.drain(..) {
         if ptr != 0 {
+            // SAFETY: ptr came from `libc::malloc`-family allocator in `alloc_c_string`,
+            // and the null check above guards against double-free. The same
+            // allocator must be used to free.
             unsafe { libc::free(ptr as *mut std::ffi::c_void) };
         }
     }
@@ -1626,6 +1661,9 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     for i in 1..args.argc as usize {
         let ptr = args.argv[i] as *const std::ffi::c_char;
         let s = if !ptr.is_null() {
+            // SAFETY: ptr is a non-null C string owned by the args table.
+            // cstr_to_string only reads up to the first NUL byte; the lifetime
+            // of the resulting String is independent of the source buffer.
             unsafe { cstr_to_string(ptr) }
         } else {
             String::new()
@@ -3764,11 +3802,17 @@ pub extern "C" fn mimi_tuple_deserialize(
                 let raw_bytes = bytes[start..pos].to_vec();
                 let unescaped = json_unescape(&raw_bytes);
                 if !unescaped.is_empty() {
+                    // SAFETY: out_values is the caller's array with `count`
+                    // entries; idx is bounds-checked above against count.
+                    // The store overwrites a previously-written slot in
+                    // the same array.
                     unsafe {
                         *out_values.offset(idx as isize) =
                             alloc_c_string_from_bytes(&unescaped) as i64;
                     }
                 } else {
+                    // SAFETY: same as the if-branch: out_values is bounds-checked
+                    // by the caller-supplied count.
                     unsafe {
                         *out_values.offset(idx as isize) = 0;
                     }
@@ -5069,6 +5113,10 @@ pub extern "C" fn mimi_set_env(
         Ok(guard) => guard,
         Err(_) => return 0,
     };
+    // SAFETY: key_str and value_str are non-null C strings (checked above).
+    // std::env::set_var takes &str which requires UTF-8; this is a
+    // best-effort call and may panic on non-UTF-8 input, which matches
+    // the documented behavior of this runtime function.
     unsafe { std::env::set_var(key_str, value_str) };
     1
 }
