@@ -4,8 +4,18 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 
 pub(crate) struct ThreadPool {
-    _workers: Vec<thread::JoinHandle<()>>,
+    workers: Vec<thread::JoinHandle<()>>,
     sender: mpsc::Sender<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        // Drop the sender first to signal workers (recv returns Err, loop breaks)
+        // Then join all worker threads to ensure clean shutdown.
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl ThreadPool {
@@ -30,7 +40,7 @@ impl ThreadPool {
         }
 
         ThreadPool {
-            _workers: workers,
+            workers,
             sender,
         }
     }

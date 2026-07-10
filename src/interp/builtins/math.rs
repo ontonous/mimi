@@ -18,7 +18,12 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("abs expects 1 argument"));
         }
         match &args[0] {
-            Value::Int(v) => Ok(Value::Int(v.abs())),
+            Value::Int(v) => {
+                let abs = v.checked_abs().ok_or_else(|| {
+                    InterpError::new("abs: overflow (i64::MIN has no positive equivalent)")
+                })?;
+                Ok(Value::Int(abs))
+            }
             Value::Float(v) => Ok(Value::Float(v.abs())),
             _ => Err(InterpError::new("abs expects a number")),
         }
