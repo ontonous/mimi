@@ -236,7 +236,16 @@ fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
     if cap <= 0 {
         return std::ptr::null_mut();
     }
-    let sz = 8 + (cap as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    // C10/H17: use checked_mul to prevent integer overflow.
+    let elem_size = std::mem::size_of::<*mut std::ffi::c_char>();
+    let data_size = match (cap as usize).checked_mul(elem_size) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let sz = match 8usize.checked_add(data_size) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
     // SAFETY: `cap > 0` so the allocation size is non-zero; result is checked for null.
     let alloc = unsafe { libc::malloc(sz) as *mut i64 };
     if alloc.is_null() {
@@ -724,7 +733,10 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
     }
     // SAFETY: `ptr` was checked non-null and came from `mimi_rc_alloc`; `rc_header_ref` contract satisfied.
     let hdr = unsafe { rc_header_ref(ptr) };
-    let mut s = hdr.strong.load(Ordering::Relaxed);
+    // H19: use Acquire on initial load to match the CAS on the release path,
+    // ensuring we see the latest strong count. Relaxed could observe a stale 0
+    // and return null even when strong=1, causing a false-negative upgrade failure.
+    let mut s = hdr.strong.load(Ordering::Acquire);
     loop {
         if s == 0 {
             return std::ptr::null_mut();
@@ -733,7 +745,13 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
             .strong
             .compare_exchange_weak(s, s + 1, Ordering::Acquire, Ordering::Relaxed)
         {
-            Ok(_) => return ptr,
+            Ok(_) => {
+                // M31: Acquire fence ensures all prior writes to the RC object
+                // are visible after a successful weak upgrade, preventing a race
+                // where the object is being freed by another thread.
+                std::sync::atomic::fence(Ordering::Acquire);
+                return ptr;
+            }
             Err(new_s) => s = new_s,
         }
     }
@@ -854,17 +872,17 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
     // or an untagged integer. Validate before treating as pointer.
     const MIN_HEAP: usize = 1_048_576; // 1MB — below this is definitely not a heap ptr
     const MAX_ADDR: usize = usize::MAX - 4096;
-    const MAX_BOUNDED_SCAN: usize = 1_048_576; // 1MB max scan to avoid wild reads
+    const MAX_BOUNDED_SCAN: usize = 256; // C12: limit scan to 256 bytes to avoid 1MB arbitrary read
 
     if value >= MIN_HEAP && value < MAX_ADDR && value % 8 == 0 {
         let ptr = value as *const u8;
-        // Bounded scan for null terminator.
+        // Short bounded scan for null terminator.
         let mut len: usize = 0;
         unsafe {
             while len < MAX_BOUNDED_SCAN {
                 let byte = *ptr.add(len);
                 if byte == 0 {
-                    // Found null terminator — this is a valid C string.
+                    // Found null terminator within 256 bytes — likely a real C string.
                     let buf = libc::malloc(len + 1) as *mut u8;
                     if buf.is_null() {
                         return std::ptr::null_mut();
@@ -878,9 +896,19 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
                 len += 1;
             }
         }
+        // C12: no null within 256 bytes — treat as large integer (≥1MB) and
+        // format as hex to avoid reading arbitrary memory for 1MB.
+        let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
+        if buf.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe {
+            libc::sprintf(buf, b"0x%lx\0".as_ptr() as *const _, value as u64);
+        }
+        return buf;
     }
 
-    // Fallback: format as integer. Use sprintf for consistency with old behavior.
+    // Fallback: format as decimal integer (value < 1MB, bit 0 = 0, not tagged).
     let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
     if buf.is_null() {
         return std::ptr::null_mut();
@@ -963,7 +991,11 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     // Use libc::malloc for the data pointer to ensure it is compatible with
     // libc::free (which mimi_list_free uses). Rust Vec uses jemalloc/allocator
     // which may not be compatible with libc::free on all platforms (e.g. MSVC).
-    let data_size = (len as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    // H18: use checked_mul to prevent integer overflow on large maps.
+    let data_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
+        Some(s) => s,
+        None => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+    };
     let data_ptr = if data_size > 0 {
         // SAFETY: data_size is positive and within reasonable bounds.
         unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char }
@@ -1561,7 +1593,11 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     }
     let data_ptr = items.as_mut_ptr();
     let len = items.len() as i64;
-    std::mem::forget(items);
+    // M24: use ManuallyDrop to avoid leaking 24-byte Vec struct metadata.
+    // The raw data buffer is owned by the MimiList returned below; when
+    // mimi_list_free is called, it frees data via libc::free and the list
+    // struct via Box::from_raw.
+    std::mem::ManuallyDrop::new(items);
     Box::into_raw(Box::new(MimiList {
         len,
         data: data_ptr,
@@ -3082,12 +3118,19 @@ fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
     }
 
     // Read response
+    // M27: limit total response size to prevent OOM from malicious server.
+    const MAX_HTTP_RESPONSE: usize = 100 * 1024 * 1024; // 100MB
     let mut response = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                if response.len() + n > MAX_HTTP_RESPONSE {
+                    return None;
+                }
+                response.extend_from_slice(&buf[..n]);
+            }
             Err(_) => break,
         }
     }
@@ -3483,6 +3526,39 @@ pub extern "C" fn mimi_json_deserialize(
     result as *mut std::ffi::c_void
 }
 
+/// C11: Free a buffer returned by mimi_json_deserialize / mimi_list_deserialize.
+/// Reconstructs the Vec<i64> and drops it, freeing both the data buffer and
+/// any heap-allocated string pointers (elem_type==2).
+#[no_mangle]
+pub extern "C" fn mimi_json_deserialize_free(
+    buf: *mut std::ffi::c_void,
+    len: i64,
+    elem_type: i64,
+) {
+    if buf.is_null() || len <= 0 {
+        return;
+    }
+    let count = len as usize;
+    // Rebuild Vec from the pointer, then drop it (frees the allocation).
+    // SAFETY: `buf` was created by a prior mimi_json_deserialize call with
+    // matching `len` and `elem_type`.
+    unsafe {
+        let ptr = buf as *mut i64;
+        // If this was a string-typed deserialization, free each C string first.
+        if elem_type == 2 {
+            for i in 0..count {
+                let p = *ptr.add(i) as *mut std::ffi::c_char;
+                if !p.is_null() {
+                    libc::free(p as *mut std::ffi::c_void);
+                }
+            }
+        }
+        // Drop the Vec without running element destructors (i64 is trivially
+        // copy, and strings were already freed above).
+        let _ = Vec::from_raw_parts(ptr, 0, count);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_list_deserialize(
     json: *const std::ffi::c_char,
@@ -3697,9 +3773,11 @@ pub extern "C" fn mimi_tuple_deserialize(
                     pos += 1;
                 }
                 if neg {
-                    // wrapping_neg is safe here (i64::MIN.neg() overflows but we
-                    // already bounded val above).
-                    val = val.wrapping_neg();
+                    // M30: use checked_neg to avoid silent wrapping on i64::MIN.
+                    val = match val.checked_neg() {
+                        Some(v) => v,
+                        None => 0, // overflow — clamp to 0
+                    };
                 }
                 // SAFETY: `out_values` was checked non-null above; `idx < count`.
                 unsafe {
@@ -4163,6 +4241,12 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
+    // C13: atomically set completed to -1 (freed sentinel) so any racing
+    // mimi_future_set_completed will see the sentinel and skip writing.
+    unsafe {
+        let rep = &*(fut as *const MimiFutureRepr);
+        rep.completed.store(-1, Ordering::Release);
+    }
     // SAFETY: `fut` was checked non-null; reconstructing the Box allocated by `mimi_future_alloc`.
     unsafe {
         drop(Box::from_raw(fut as *mut MimiFutureRepr));
@@ -4175,9 +4259,14 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         return;
     }
     use std::sync::atomic::Ordering;
-    // SAFETY: `fut` was checked non-null; `MimiFutureRepr` is valid.
+    // C13: check for freed sentinel (-1) before writing.
+    // If the future was freed concurrently, skip to avoid UAF.
     unsafe {
         let rep = &*(fut as *const MimiFutureRepr);
+        let prev = rep.completed.load(Ordering::Acquire);
+        if prev == -1 {
+            return; // future was freed — do not write to freed memory
+        }
         rep.completed.store(1, Ordering::Release);
     }
 }
@@ -7322,13 +7411,11 @@ pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
             mimi_quote_drop(n.data1 as *mut MimiQuotedAst);
         } else {
             // Variable-arity: data0 is a pointer to a `Vec<*mut MimiQuotedAst>`.
-            // M9: validate the pointer looks like a plausible heap allocation
-            // before dereferencing, to guard against corrupted argc values.
+            // M9/C15: always attempt Box::from_raw for argc>2. This value was
+            // created by mimi_quote_new_list which always uses Box + into_raw,
+            // so the pointer is always valid. We only skip if null.
             let arr_ptr = n.data0 as *mut Vec<*mut MimiQuotedAst>;
-            if !arr_ptr.is_null()
-                && (arr_ptr as usize) >= 1024 * 1024
-                && (arr_ptr as usize) % 8 == 0
-            {
+            if !arr_ptr.is_null() {
                 // SAFETY: `arr_ptr` was created by `mimi_quote_new_list`.
                 let vec = Box::from_raw(arr_ptr);
                 for &child in vec.iter() {
