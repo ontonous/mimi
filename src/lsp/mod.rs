@@ -103,6 +103,8 @@ impl LspServer {
 
     /// Insert a verification result into the cache. Used by tests.
     #[cfg(test)]
+    /// Insert a verification result into the cache. Used by tests.
+    #[cfg(test)]
     pub(crate) fn insert_verification_cache(
         &mut self,
         key: String,
