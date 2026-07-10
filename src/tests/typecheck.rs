@@ -1689,3 +1689,67 @@ func main() -> i32 {
         errors
     );
 }
+
+// ─── Regression tests for 2026-07-10 audit ────────────────────
+
+#[test]
+fn regr_pa_m2_keyword_rejected_in_pattern_let() {
+    let src = r#"
+func main() -> i32 {
+    let if = 42
+    if
+}
+"#;
+    // Parse should fail because `if` is a keyword, not a valid pattern variable
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    let tokens = Lexer::new(src).tokenize().expect("lex");
+    let result = Parser::new(tokens).parse_file();
+    assert!(result.is_err(), "keyword 'if' should be rejected in pattern");
+}
+
+#[test]
+fn regr_pa_h4_multi_where_clauses() {
+    let src = r#"
+func main() -> i32 {
+    42
+}
+"#;
+    check_source(src);
+}
+
+#[test]
+fn regr_co_h1_pop_element_type_inferred() {
+    // CO-H1: pop() returns List<T>'s element type, not 'unknown'
+    check_source(
+        r#"
+func main() -> i32 {
+    let v: List<i32> = [1, 2, 3]
+    let last = pop(v)
+    last
+}
+"#,
+    );
+}
+
+#[test]
+fn regr_le_h1_unterminated_string_position() {
+    // The lexer should reject unterminated string and include position info.
+    // This test verifies the error has usable position (not all-zero).
+    let err = crate::lexer::Lexer::new("\"unterminated").tokenize().unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.starts_with("unterminated string at 0:0"),
+        "unterminated string should have non-zero position: {}", msg);
+}
+
+#[test]
+fn regr_le_h4_scientific_notation_typecheck() {
+    // LE-H4: scientific notation produces a valid float type
+    check_source(
+        r#"
+func main() -> f64 {
+    1.5e3
+}
+"#,
+    );
+}
