@@ -55,15 +55,46 @@ impl Linter {
         // W007: Redundant parentheses — scan source for `((` patterns
         detect_redundant_parens(source, &mut diagnostics);
 
-        // W003: Check for `...` placeholders in source
+        // W003: Check for `...` placeholders in source (skip strings and comments)
+        let mut in_string = false;
+        let mut in_block_comment = false;
         for (line_idx, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed == "..." {
-                diagnostics.push(Diagnostic::warning_code(
-                    W003,
-                    "placeholder `...` residual in .mimi file",
-                    Span::single(line_idx + 1, 1),
-                ));
+            if line.trim() == "..." {
+                // Check if this `...` is inside a string or comment by scanning from previous context
+                let mut local_in_string = in_string;
+                let mut local_in_comment = in_block_comment;
+                for ch in line.chars() {
+                    if local_in_comment {
+                        if ch == '/' && line.contains("*/") {
+                            local_in_comment = false;
+                        }
+                        continue;
+                    }
+                    if ch == '"' {
+                        local_in_string = !local_in_string;
+                    }
+                }
+                if !local_in_string && !local_in_comment {
+                    diagnostics.push(Diagnostic::warning_code(
+                        W003,
+                        "placeholder `...` residual in .mimi file",
+                        Span::single(line_idx + 1, 1),
+                    ));
+                }
+            }
+            // Update cross-line state for block comments
+            if line.contains("/*") {
+                in_block_comment = true;
+            }
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            if !in_block_comment {
+                for ch in line.chars() {
+                    if ch == '"' {
+                        in_string = !in_string;
+                    }
+                }
             }
         }
 
@@ -614,19 +645,60 @@ fn detect_eq_bool_in_expr(
 /// Uses source-level scan (not AST) since the parser strips parentheses.
 fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
     let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
     let mut prev_char = ' ';
     let mut prev_col = 0usize;
     let mut line = 1usize;
     let mut col = 1usize;
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
 
-    for ch in source.chars() {
-        if ch == '"' && !in_string {
-            in_string = true;
-        } else if ch == '"' && in_string {
-            in_string = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                line += 1;
+                col = 0;
+                prev_char = ' ';
+            }
+            i += 1;
+            if ch != '\n' { col += 1; }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_block_comment = false;
+                i += 2;
+                col += 2;
+            } else {
+                if ch == '\n' { line += 1; col = 0; }
+                i += 1;
+                col += 1;
+            }
+            continue;
+        }
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            in_line_comment = true;
+            i += 2;
+            col += 2;
+            continue;
+        }
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            in_block_comment = true;
+            i += 2;
+            col += 2;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
         } else if ch == '\n' {
             line += 1;
             col = 0;
+            prev_char = ' ';
+            i += 1;
+            continue;
         } else if !in_string && ch == '(' && prev_char == '(' {
             diagnostics.push(Diagnostic::warning_code(
                 W007,
@@ -634,11 +706,10 @@ fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
                 Span::single(line, prev_col),
             ));
         }
-        if ch != '\n' {
-            prev_char = ch;
-            prev_col = col;
-        }
+        prev_char = ch;
+        prev_col = col;
         col += 1;
+        i += 1;
     }
 }
 
