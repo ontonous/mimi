@@ -1676,7 +1676,7 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     // The raw data buffer is owned by the MimiList returned below; when
     // mimi_list_free is called, it frees data via libc::free and the list
     // struct via Box::from_raw.
-    std::mem::ManuallyDrop::new(items);
+    let _drop_guard = std::mem::ManuallyDrop::new(items);
     Box::into_raw(Box::new(MimiList {
         len,
         data: data_ptr,

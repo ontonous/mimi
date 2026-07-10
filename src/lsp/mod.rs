@@ -333,6 +333,7 @@ impl LspServer {
     /// Convenience wrapper: process a single JSON-RPC message and return the response.
     /// Used by unit tests. Takes `&mut self` for API compat; internally calls
     /// `flow::transition` which takes ownership and returns the updated server.
+    #[allow(dead_code)]
     pub(crate) fn handle_message(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
         let server = std::mem::replace(self, LspServer::new());
         let (updated, response) = flow::transition(server, msg);
