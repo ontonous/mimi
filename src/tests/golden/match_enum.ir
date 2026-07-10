@@ -342,8 +342,8 @@ entry:
   %x1 = load i64, ptr %x, align 4
   br label %matchelse
 
-matchcont:                                        ; preds = %wccont1, %arm1, %arm0
-  %match.result = phi i64 [ 1, %arm0 ], [ 0, %arm1 ], [ 0, %wccont1 ]
+matchcont:                                        ; preds = %arm1, %arm0
+  %match.result = phi i64 [ 1, %arm0 ], [ 0, %arm1 ]
   ret i64 %match.result
 
 matchelse:                                        ; preds = %entry
@@ -360,5 +360,5 @@ arm1:                                             ; preds = %next0
   br label %matchcont
 
 wccont1:                                          ; No predecessors!
-  br label %matchcont
+  unreachable
 }

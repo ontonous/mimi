@@ -108,7 +108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 CompileError::LlvmError(format!("extract payload: {}", e))
                             })?;
                         // Check if the variant's payload is a struct type (ptrtoint encoded)
-                        let (decoded, ty) = self.decode_payload_struct(name, payload_val)?;
+                        let (decoded, ty) = self.decode_payload_struct(name, payload_val, None)?;
                         (decoded, ty)
                     }
                     BasicValueEnum::PointerValue(pv) => {
@@ -131,7 +131,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| {
                                 CompileError::LlvmError(format!("extract payload: {}", e))
                             })?;
-                        let (decoded, ty) = self.decode_payload_struct(name, payload_val)?;
+                        let (decoded, ty) = self.decode_payload_struct(name, payload_val, None)?;
                         (decoded, ty)
                     }
                     BasicValueEnum::IntValue(iv) => {
@@ -550,15 +550,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         variant_name: &str,
         payload_val: BasicValueEnum<'ctx>,
+        expected_ty: Option<BasicTypeEnum<'ctx>>,
     ) -> Result<(BasicValueEnum<'ctx>, BasicTypeEnum<'ctx>), CompileError> {
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
 
         // Built-in Result/Option payloads are stored at their natural LLVM type
         // (e.g. `{ptr, i64}` for `Result<string, E>`), not as a ptrtoint-encoded
         // i64. Use the extracted value's type directly.
+        // Built-in Err on Result<T, string> stores ptrtoint(heap_{ptr,len}_struct)
+        // in the i64 error slot. Reconstruct the string struct if expected.
         let is_builtin_result_or_option = matches!(variant_name, "Ok" | "Err" | "Some")
             && self.find_variant_owner(variant_name).is_none();
         if is_builtin_result_or_option {
+            if variant_name == "Err"
+                && matches!(payload_val, BasicValueEnum::IntValue(_))
+                && expected_ty
+                    .as_ref()
+                    .is_some_and(|t| matches!(t, BasicTypeEnum::StructType(_)))
+            {
+                let Some(ty) = expected_ty else {
+                    return Err(
+                        "decode_payload_struct: expected_ty is None for Err string payload".into(),
+                    );
+                };
+                let ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        payload_val.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "err_str_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("err string inttoptr: {}", e)))?;
+                let loaded = self
+                    .builder
+                    .build_load(ty, ptr, "err_str_struct")
+                    .map_err(|e| CompileError::LlvmError(format!("err string load: {}", e)))?;
+                return Ok((loaded, ty));
+            }
             return Ok((payload_val, payload_val.get_type()));
         }
 
@@ -727,14 +755,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             incoming_bbs.push(body_bb);
         }
 
-        // Unreachable else block (should not be reached if match is exhaustive).
-        // else_bb is a fresh next_N block (never merge_bb) thanks to the
-        // unconditional intermediate-block creation above.
+        // Unreachable else block. Use LLVM unreachable to prevent undef
+        // propagation — if the match is truly exhaustive this is never reached.
+        // If it IS reached (non-exhaustive match), this triggers UB at runtime.
+        // The type checker should guarantee exhaustiveness.
         self.builder.position_at_end(else_bb);
-        self.build_br(merge_bb)?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("match else unreachable: {}", e)))?;
 
         // Merge block - use phi to select the right value
-        self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs, else_bb)
+        self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)
     }
 
     /// Compile a single match arm's dispatch block: create the arm block, build
@@ -1006,13 +1037,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build the final phi node in the merge block that selects the value
-    /// produced by the matching arm.
+    /// produced by the matching arm. The else_bb (unreachable) is NOT a
+    /// predecessor of merge_bb, so it contributes no phi entry.
     fn build_match_phi(
         &self,
         merge_bb: BasicBlock<'ctx>,
         incoming_vals: &[BasicValueEnum<'ctx>],
         incoming_bbs: &[BasicBlock<'ctx>],
-        else_bb: BasicBlock<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         self.builder.position_at_end(merge_bb);
         if incoming_vals.is_empty() {
@@ -1023,22 +1054,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_phi(ty, "match.result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        let mut phi_incoming: Vec<_> = incoming_vals
+        let phi_incoming: Vec<_> = incoming_vals
             .iter()
             .zip(incoming_bbs.iter())
             .map(|(v, bb)| (v as &dyn inkwell::values::BasicValue, *bb))
             .collect();
-        // Add the unreachable else block with a dummy value so every
-        // predecessor of merge_bb has a phi entry.  Use the correct LLVM
-        // type for the dummy (use `undef` for struct types, i64 0 for
-        // ints/pointers — but always match `ty`).
-        let dummy_val: inkwell::values::BasicValueEnum<'ctx> = match ty {
-            inkwell::types::BasicTypeEnum::IntType(it) => it.const_zero().into(),
-            inkwell::types::BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
-            inkwell::types::BasicTypeEnum::StructType(st) => st.get_undef().into(),
-            _ => self.context.i64_type().const_zero().into(),
-        };
-        phi_incoming.push((&dummy_val as &dyn inkwell::values::BasicValue, else_bb));
         phi.add_incoming(&phi_incoming);
         Ok(phi.as_basic_value())
     }

@@ -193,17 +193,52 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_ptr_to_int(pv, i64_ty, "err_to_i64")?.into()
             }
             BasicValueEnum::StructValue(sv) => {
-                // Check if this is a Mimi string struct {ptr, i64} (from string literal).
-                // If so, extract the raw pointer and convert to i64.
+                // Check if this is a Mimi string struct {ptr, i64}.
+                // If so, heap-allocate a {ptr, len} struct, store it there,
+                // and store the pointer as i64. The `?` operator in
+                // try_expr.rs reconstructs via inttoptr + GEP + load.
                 let sv_fields = sv.get_type().get_field_types();
                 let is_mimi_string = sv_fields.len() == 2
                     && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
                 if is_mimi_string {
-                    let str_ptr = self
-                        .build_extract_value(sv.into(), 0, "err_str_ptr")?
-                        .into_pointer_value();
-                    self.build_ptr_to_int(str_ptr, i64_ty, "err_str_i64")?
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let string_struct_ty = self.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    );
+                    let heap_ty = BasicTypeEnum::StructType(string_struct_ty);
+                    let malloc_fn = self.get_runtime_fn("malloc")?;
+                    let alloc_size = i64_ty.const_int(16, false);
+                    let heap_ptr = call_try_basic_value(&self.build_call(
+                        malloc_fn,
+                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
+                        "err_str_malloc",
+                    )?)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("malloc for err string returned void".into())
+                    })?
+                    .into_pointer_value();
+                    let str_ptr_gep = self
+                        .gep()
+                        .build_struct_gep(heap_ty, heap_ptr, 0, "err_str_ptr_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("err str gep: {}", e)))?;
+                    self.build_store(
+                        str_ptr_gep,
+                        self.build_extract_value(sv.into(), 0, "err_str_ptr")?,
+                    )?;
+                    let str_len_gep = self
+                        .gep()
+                        .build_struct_gep(heap_ty, heap_ptr, 1, "err_str_len_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("err len gep: {}", e)))?;
+                    self.build_store(
+                        str_len_gep,
+                        self.build_extract_value(sv.into(), 1, "err_str_len")?,
+                    )?;
+                    self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
                         .into()
                 } else {
                     // Custom enum values are {i32 tag, i64 payload}; Result stores
