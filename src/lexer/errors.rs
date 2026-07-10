@@ -23,12 +23,30 @@ pub enum LexerError {
         line: usize,
         col: usize,
     },
-    UnterminatedString,
-    UnterminatedEscape,
-    UnterminatedFString,
-    UnterminatedFStringEscape,
-    UnterminatedInterpolation,
-    UnterminatedBlockComment,
+    UnterminatedString {
+        line: usize,
+        col: usize,
+    },
+    UnterminatedEscape {
+        line: usize,
+        col: usize,
+    },
+    UnterminatedFString {
+        line: usize,
+        col: usize,
+    },
+    UnterminatedFStringEscape {
+        line: usize,
+        col: usize,
+    },
+    UnterminatedInterpolation {
+        line: usize,
+        col: usize,
+    },
+    UnterminatedBlockComment {
+        line: usize,
+        col: usize,
+    },
     InvalidEscape {
         escape: String,
         line: usize,
@@ -60,14 +78,24 @@ impl fmt::Display for LexerError {
             LexerError::UnexpectedCharacter { c, line, col } => {
                 write!(f, "unexpected character '{}' at {}:{}", c, line, col)
             }
-            LexerError::UnterminatedString => write!(f, "unterminated string"),
-            LexerError::UnterminatedEscape => write!(f, "unterminated escape"),
-            LexerError::UnterminatedFString => write!(f, "unterminated f-string"),
-            LexerError::UnterminatedFStringEscape => write!(f, "unterminated escape in f-string"),
-            LexerError::UnterminatedInterpolation => {
-                write!(f, "unterminated interpolation in f-string")
+            LexerError::UnterminatedString { line, col } => {
+                write!(f, "unterminated string at {}:{}", line, col)
             }
-            LexerError::UnterminatedBlockComment => write!(f, "unterminated block comment"),
+            LexerError::UnterminatedEscape { line, col } => {
+                write!(f, "unterminated escape at {}:{}", line, col)
+            }
+            LexerError::UnterminatedFString { line, col } => {
+                write!(f, "unterminated f-string at {}:{}", line, col)
+            }
+            LexerError::UnterminatedFStringEscape { line, col } => {
+                write!(f, "unterminated escape in f-string at {}:{}", line, col)
+            }
+            LexerError::UnterminatedInterpolation { line, col } => {
+                write!(f, "unterminated interpolation in f-string at {}:{}", line, col)
+            }
+            LexerError::UnterminatedBlockComment { line, col } => {
+                write!(f, "unterminated block comment at {}:{}", line, col)
+            }
             LexerError::InvalidEscape { escape, line, col } => {
                 write!(f, "invalid {} escape at {}:{}", escape, line, col)
             }
@@ -103,28 +131,28 @@ pub fn unexpected_character(c: char, line: usize, col: usize) -> LexerError {
     LexerError::UnexpectedCharacter { c, line, col }
 }
 
-pub fn unterminated_string() -> LexerError {
-    LexerError::UnterminatedString
+pub fn unterminated_string(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedString { line, col }
 }
 
-pub fn unterminated_escape() -> LexerError {
-    LexerError::UnterminatedEscape
+pub fn unterminated_escape(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedEscape { line, col }
 }
 
-pub fn unterminated_fstring() -> LexerError {
-    LexerError::UnterminatedFString
+pub fn unterminated_fstring(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedFString { line, col }
 }
 
-pub fn unterminated_fstring_escape() -> LexerError {
-    LexerError::UnterminatedFStringEscape
+pub fn unterminated_fstring_escape(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedFStringEscape { line, col }
 }
 
-pub fn unterminated_interpolation() -> LexerError {
-    LexerError::UnterminatedInterpolation
+pub fn unterminated_interpolation(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedInterpolation { line, col }
 }
 
-pub fn unterminated_block_comment() -> LexerError {
-    LexerError::UnterminatedBlockComment
+pub fn unterminated_block_comment(line: usize, col: usize) -> LexerError {
+    LexerError::UnterminatedBlockComment { line, col }
 }
 
 pub fn invalid_escape(escape: &str, line: usize, col: usize) -> LexerError {

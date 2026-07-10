@@ -43,7 +43,7 @@ impl<'a> super::Lexer<'a> {
         let mut depth: i32 = 1;
         while depth > 0 {
             match self.peek() {
-                None => return Err(unterminated_block_comment()),
+                None => return Err(unterminated_block_comment(self.line, self.col)),
                 Some('*') => {
                     self.advance();
                     if self.peek() == Some('/') {
@@ -82,7 +82,7 @@ impl<'a> super::Lexer<'a> {
         let mut s = String::new();
         loop {
             match self.peek() {
-                None => return Err(unterminated_string()),
+                None => return Err(unterminated_string(self.line, self.col)),
                 Some('"') => {
                     self.advance();
                     break;
@@ -114,7 +114,7 @@ impl<'a> super::Lexer<'a> {
                             s.push(c);
                             self.advance();
                         }
-                        None => return Err(unterminated_escape()),
+                        None => return Err(unterminated_escape(self.line, self.col)),
                     }
                 }
                 Some(c) => {
@@ -135,7 +135,7 @@ impl<'a> super::Lexer<'a> {
         let mut s = String::new();
         loop {
             match self.peek() {
-                None => return Err(unterminated_fstring()),
+                None => return Err(unterminated_fstring(self.line, self.col)),
                 Some('"') => {
                     self.advance();
                     break;
@@ -243,7 +243,7 @@ impl<'a> super::Lexer<'a> {
                             s.push(c);
                             self.advance();
                         }
-                        None => return Err(unterminated_fstring_escape()),
+                        None => return Err(unterminated_fstring_escape(self.line, self.col)),
                     }
                 }
                 Some('{') => {
@@ -266,7 +266,7 @@ impl<'a> super::Lexer<'a> {
                         self.advance();
                     }
                     if depth != 0 {
-                        return Err(unterminated_interpolation());
+                        return Err(unterminated_interpolation(self.line, self.col));
                     }
                 }
                 Some(c) => {
