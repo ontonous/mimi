@@ -206,15 +206,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(buf, self.context.i8_type().const_int(b'?' as u64, false))
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                let nul = unsafe {
-                    self.builder.build_in_bounds_gep(
+                let nul = self
+                    .gep()
+                    .build_in_bounds_gep(
                         self.context.i8_type(),
                         buf,
                         &[self.context.i64_type().const_int(1, false)],
                         "nul_pos",
                     )
-                }
-                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
                 self.builder
                     .build_store(nul, self.context.i8_type().const_int(0, false))
                     .map_err(|e| CompileError::LlvmError(format!("store nul: {}", e)))?;

@@ -1031,17 +1031,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let children_alloca = self.build_alloca(i8_ty.array_type(len as u32), "quote_children")?;
         for (i, stmt) in block.iter().enumerate() {
             let child_ptr = self.compile_quote_runtime_stmt(stmt)?; // returns i8*
-            let gep = unsafe {
-                self.builder
-                    .build_in_bounds_gep(
-                        // SAFETY: indices are within array bounds
-                        i8_ty,
-                        children_alloca,
-                        &[i64_ty.const_int(i as u64, false)],
-                        "quote_child_gep",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("quote child gep: {}", e)))?
-            };
+            let gep = self
+                .gep()
+                .build_in_bounds_gep(
+                    i8_ty,
+                    children_alloca,
+                    &[i64_ty.const_int(i as u64, false)],
+                    "quote_child_gep",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("quote child gep: {}", e)))?;
             self.build_store(gep, child_ptr)?;
         }
         let children_ptr = self
