@@ -1,0 +1,454 @@
+//! Flow-based parser state machine — v0.29.0 prototype.
+//!
+//! Replaces the top-level parse loop with a pure state machine.
+//! Each `transition(self, event) -> Result<(Self, Option<...>), Error>` call
+//! consumes the old state and produces a new one. No `&mut self` at the top level.
+//!
+//! Internally creates temporary `Parser` instances (via `Parser::splice`) for
+//! recursive descent sub-parsing. This is the "scoped &mut self" pattern.
+
+#![allow(dead_code)]
+
+use super::*;
+
+// ---------------------------------------------------------------------------
+// Macros
+// ---------------------------------------------------------------------------
+
+/// Create an empty flow accumulator.
+macro_rules! flow_acc {
+    () => {
+        FlowAcc {
+            imports: Vec::new(),
+            items: Vec::new(),
+            errors: Vec::new(),
+        }
+    };
+}
+
+/// Create the initial `FlowState::Init`.
+macro_rules! flow_init {
+    ($recovery:expr) => {
+        FlowState::Init {
+            pos: 0,
+            recovery: $recovery,
+            acc: flow_acc!(),
+        }
+    };
+}
+
+/// Return `Ok((state, None))` — continue without producing output.
+/// `$acc` and `$recovery` are explicit parameters due to macro hygiene.
+macro_rules! state_continue {
+    ($variant:ident { $($field:ident $(: $val:expr)?),+ $(,)? }, $acc:expr, $recovery:expr) => {
+        Ok((FlowState::$variant {
+            $($field $(: $val)?),+,
+            acc: $acc,
+            recovery: $recovery,
+        }, None))
+    };
+}
+
+/// Return `Ok((state, Some(output)))` — continue with a parsed unit.
+macro_rules! state_yield {
+    ($variant:ident { $($field:ident $(: $val:expr)?),+ $(,)? }, $acc:expr, $recovery:expr, $output:expr) => {
+        Ok((FlowState::$variant {
+            $($field $(: $val)?),+,
+            acc: $acc,
+            recovery: $recovery,
+        }, Some($output)))
+    };
+}
+
+/// Return `Ok((Done(file, errors), None))` — terminate successfully.
+macro_rules! state_done {
+    ($acc:expr) => {
+        Ok((FlowState::Done(
+            File {
+                imports: std::mem::take(&mut $acc.imports),
+                items: std::mem::take(&mut $acc.items),
+            },
+            $acc.errors,
+        ), None))
+    };
+}
+
+/// Drive the flow state machine to completion.
+///
+/// Usage:
+/// ```ignore
+/// let result: Result<File, ParseError> = run_flow!(state, mode, tokens);
+/// let (file, errors): (File, Vec<ParseError>) = run_flow!(recovery state, mode, tokens);
+/// ```
+macro_rules! run_flow {
+    // Strict mode: first error fails
+    ($state:expr, $mode:expr, $tokens:expr) => {{
+        let mut __state = $state;
+        loop {
+            match __state {
+                FlowState::Done(file, _errors) => break Ok(file),
+                __s => {
+                    let (new_state, _) = __s.transition(&FlowEvent::Step, $mode, $tokens)?;
+                    __state = new_state;
+                }
+            }
+        }
+    }};
+    // Recovery mode: collect errors
+    (recovery $state:expr, $mode:expr, $tokens:expr) => {{
+        let mut __state = $state;
+        loop {
+            match __state {
+                FlowState::Done(file, errors) => break (file, errors),
+                __s => {
+                    match __s.transition(&FlowEvent::Step, $mode, $tokens) {
+                        Ok((new_state, _)) => __state = new_state,
+                        Err(e) => break (File { imports: Vec::new(), items: Vec::new() }, vec![e]),
+                    }
+                }
+            }
+        }
+    }};
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// Events that drive the parser state machine.
+#[derive(Debug, Clone)]
+pub enum FlowEvent {
+    /// Advance to the next parsing unit (import, item, or EOF).
+    Step,
+    /// Finalize and produce the output.
+    Complete,
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// Accumulated parse results shared across states.
+#[derive(Debug, Clone)]
+pub struct FlowAcc {
+    pub imports: Vec<Import>,
+    pub items: Vec<Item>,
+    pub errors: Vec<ParseError>,
+}
+
+/// Pure parse state — each variant represents a distinct parser phase.
+/// No `&mut self` methods — only `self -> Result<Self, _>` transitions.
+///
+/// The `pos`, `recovery`, `acc` fields are present in every active variant
+/// and are propagated automatically by the `state_continue!` / `state_yield!` macros.
+#[derive(Debug, Clone)]
+pub enum FlowState {
+    Init { pos: usize, recovery: bool, acc: FlowAcc },
+    Imports { pos: usize, recovery: bool, acc: FlowAcc },
+    Items { pos: usize, recovery: bool, acc: FlowAcc },
+    Done(File, Vec<ParseError>),
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (pure functions on slices)
+// ---------------------------------------------------------------------------
+
+/// Skip newlines in a token slice starting from `pos`, return new position.
+fn skip_newlines_slice(tokens: &[Token], mut pos: usize) -> usize {
+    while pos < tokens.len() && matches!(tokens[pos].kind, TokenKind::Newline) {
+        pos += 1;
+    }
+    pos
+}
+
+/// Peek at the token at `pos`, returning EOF if out of bounds.
+fn peek_slice(tokens: &[Token], pos: usize) -> &Token {
+    if pos >= tokens.len() {
+        static EOF: Token = Token { kind: TokenKind::Eof, line: 0, col: 0 };
+        &EOF
+    } else {
+        &tokens[pos]
+    }
+}
+
+/// Check if the token at `pos` matches a kind.
+fn at_slice(tokens: &[Token], pos: usize, kind: &TokenKind) -> bool {
+    peek_slice(tokens, pos).kind == *kind
+}
+
+// ---------------------------------------------------------------------------
+// Sub-parser creation
+// ---------------------------------------------------------------------------
+
+/// Create a temporary Parser at the given position within a token slice.
+/// This is the bridge between Flow state and the existing recursive descent
+/// parser. The Vec<Token> is cloned (cheap: ~24 bytes per token).
+fn sub_parser(tokens: &[Token], pos: usize, mode: ParseMode) -> Parser {
+    Parser::splice(tokens, pos, mode)
+}
+
+// ---------------------------------------------------------------------------
+// Parse one item or import (stateless helpers that consume a Parser)
+// ---------------------------------------------------------------------------
+
+fn parse_one_import(tokens: &[Token], pos: usize, mode: ParseMode) -> Result<(Import, usize), ParseError> {
+    let mut p = sub_parser(tokens, pos, mode);
+    let import = p.parse_import()?;
+    Ok((import, p.pos))
+}
+
+fn parse_one_item(tokens: &[Token], pos: usize, mode: ParseMode) -> Result<(Item, usize), ParseError> {
+    let mut p = sub_parser(tokens, pos, mode);
+    let item = p.parse_item()?;
+    Ok((item, p.pos))
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: skip to sync token
+// ---------------------------------------------------------------------------
+
+fn recover_to_sync_slice(tokens: &[Token], mut pos: usize) -> usize {
+    const SYNC: &[TokenKind] = &[
+        TokenKind::Func, TokenKind::Type, TokenKind::Module, TokenKind::Actor,
+        TokenKind::Cap, TokenKind::Trait, TokenKind::Impl, TokenKind::Extern,
+        TokenKind::Use, TokenKind::RBrace, TokenKind::Eof,
+    ];
+    let max_skip = 100;
+    let mut skipped = 0;
+    while pos < tokens.len() && skipped < max_skip {
+        if SYNC.iter().any(|k| tokens[pos].kind == *k) {
+            return pos;
+        }
+        pos += 1;
+        skipped += 1;
+    }
+    pos
+}
+
+// ---------------------------------------------------------------------------
+// Transition function — the heart of the Flow state machine
+// ---------------------------------------------------------------------------
+
+impl FlowState {
+    /// Pure state transition: consumes `self`, returns new state + optional output.
+    /// - No `&mut self` — state is passed by value (ownership transfer).
+    /// - Errors are either fatal (return Err) or recovery events.
+    /// - Internal sub-parsing uses scoped `&mut` via temporary `Parser::splice`.
+    pub fn transition(
+        self,
+        event: &FlowEvent,
+        mode: ParseMode,
+        tokens: &[Token],
+    ) -> Result<(Self, Option<FlowOutput>), ParseError> {
+        match (self, event) {
+            // ── Init → Imports or Items (or Done if empty) ─────────
+            (FlowState::Init { pos, recovery, mut acc }, FlowEvent::Step) => {
+                let pos = skip_newlines_slice(tokens, pos);
+                if pos >= tokens.len() || at_slice(tokens, pos, &TokenKind::Eof) {
+                    state_done!(acc)
+                } else if at_slice(tokens, pos, &TokenKind::Use) {
+                    state_continue!(Imports { pos }, acc, recovery)
+                } else {
+                    state_continue!(Items { pos }, acc, recovery)
+                }
+            }
+
+            // ── Imports → Imports (more) or Items (done) ──────────
+            (FlowState::Imports { pos, recovery, acc }, FlowEvent::Step) => {
+                let pos = skip_newlines_slice(tokens, pos);
+                if pos >= tokens.len() || !at_slice(tokens, pos, &TokenKind::Use) {
+                    state_continue!(Items { pos }, acc, recovery)
+                } else {
+                    match parse_one_import(tokens, pos, mode) {
+                        Ok((import, new_pos)) => {
+                            let mut acc = acc;
+                            acc.imports.push(import);
+                            let new_pos = skip_newlines_slice(tokens, new_pos);
+                            state_yield!(Imports { pos: new_pos }, acc, recovery, FlowOutput::Import)
+                        }
+                        Err(e) => {
+                            if recovery {
+                                let mut acc = acc;
+                                acc.errors.push(e);
+                                let new_pos = recover_to_sync_slice(tokens, pos + 1);
+                                state_yield!(Imports { pos: new_pos }, acc, recovery, FlowOutput::Error)
+                            } else {
+                                Err(e)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Items → Items (more) or Done (EOF) ────────────────
+            (FlowState::Items { pos, recovery, mut acc }, FlowEvent::Step) => {
+                let pos = skip_newlines_slice(tokens, pos);
+                if pos >= tokens.len() || at_slice(tokens, pos, &TokenKind::Eof) {
+                    state_done!(acc)
+                } else {
+                    match parse_one_item(tokens, pos, mode) {
+                        Ok((item, new_pos)) => {
+                            let mut acc = acc;
+                            acc.items.push(item);
+                            state_yield!(Items { pos: new_pos }, acc, recovery, FlowOutput::Item)
+                        }
+                        Err(e) => {
+                            if recovery {
+                                let mut acc = acc;
+                                acc.errors.push(e);
+                                let new_pos = recover_to_sync_slice(tokens, pos);
+                                let new_pos = if new_pos == pos { pos + 1 } else { new_pos };
+                                state_yield!(Items { pos: new_pos }, acc, recovery, FlowOutput::Error)
+                            } else {
+                                Err(e)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Complete (force finalize) ─────────────────────────
+            (state, FlowEvent::Complete) => match state {
+                FlowState::Init { mut acc, .. }
+                | FlowState::Imports { mut acc, .. }
+                | FlowState::Items { mut acc, .. } => state_done!(acc),
+                done @ FlowState::Done(..) => Ok((done, None)),
+            },
+
+            // ── Terminal state ────────────────────────────────────
+            (done @ FlowState::Done(..), _) => Ok((done, None)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Events passed out of transitions
+// ---------------------------------------------------------------------------
+
+/// Lightweight output type — signals what was produced without carrying data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowOutput {
+    Import,
+    Item,
+    Error,
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+/// Flow-based parser: strict mode (first error fails).
+/// Semantically equivalent to `Parser::parse_file()`.
+pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseError> {
+    run_flow!(flow_init!(false), mode, &tokens)
+}
+
+/// Flow-based parser: recovery mode (collects all errors).
+/// Semantically equivalent to `Parser::parse_file_with_recovery()`.
+pub fn flow_parse_with_recovery(tokens: Vec<Token>, mode: ParseMode) -> (File, Vec<ParseError>) {
+    run_flow!(recovery flow_init!(true), mode, &tokens)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn tokenize(src: &str) -> Vec<Token> {
+        Lexer::new(src).tokenize().expect("lex failed")
+    }
+
+    fn assert_parse_equivalent(src: &str) {
+        let tokens = tokenize(src);
+        let old_result = Parser::new(tokens.clone()).parse_file();
+        let flow_result = flow_parse(tokens, ParseMode::Production);
+        match (&old_result, &flow_result) {
+            (Ok(old_file), Ok(flow_file)) => assert_eq!(
+                format!("{old_file:?}"), format!("{flow_file:?}"),
+                "AST mismatch for source: {src}"
+            ),
+            (Err(old_err), Err(flow_err)) => assert_eq!(
+                old_err.to_string(), flow_err.to_string(),
+                "Error mismatch for source: {src}"
+            ),
+            _ => panic!("Parser result mismatch for source: {src}\n  old: {old_result:?}\n  flow: {flow_result:?}"),
+        }
+    }
+
+    fn assert_recovery_equivalent(src: &str) {
+        let tokens = tokenize(src);
+        let (old_file, old_errors) = Parser::new_with_recovery(tokens.clone()).parse_file_with_recovery();
+        let (flow_file, flow_errors) = flow_parse_with_recovery(tokens, ParseMode::Production);
+        assert_eq!(format!("{old_file:?}"), format!("{flow_file:?}"), "Recovery AST mismatch");
+        assert_eq!(old_errors.len(), flow_errors.len(), "Error count mismatch for: {src}");
+    }
+
+    fn real_world_files() -> Vec<std::path::PathBuf> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("real_world");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten()
+            .flatten().filter(|e| e.path().extension().is_some_and(|x| x == "mimi"))
+            .map(|e| e.path()).collect();
+        files.sort();
+        files
+    }
+
+    // ── Basic ──────────────────────────────────────────────────
+
+    #[test] fn test_empty_file() { assert_parse_equivalent(""); }
+    #[test] fn test_only_newlines() { assert_parse_equivalent("\n\n\n"); }
+    #[test] fn test_single_import() { assert_parse_equivalent("use std::io;"); }
+    #[test] fn test_multiple_imports() { assert_parse_equivalent("use std::io;\nuse std::fs;\nuse std::collections;"); }
+    #[test] fn test_simple_func() { assert_parse_equivalent("func main() -> i32 { 42 }"); }
+    #[test] fn test_func_with_import() { assert_parse_equivalent("use std::io;\n\nfunc main() -> i32 { 42 }"); }
+    #[test] fn test_multiple_items() { assert_parse_equivalent("func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 { add(1, 2) }\n"); }
+    #[test] fn test_with_comments_and_newlines() { assert_parse_equivalent("// A comment\nuse std::io\n\nfunc greet(name: string) { print_line(\"Hello \" + name) }\n"); }
+    #[test] fn test_only_imports() { assert_parse_equivalent("use a;\nuse b::c;\nuse d::e::f;"); }
+    #[test] fn test_only_item() { assert_parse_equivalent("type Foo = i32;"); }
+    #[test] fn test_multiline_params() { assert_parse_equivalent("func foo(\n    a: i32,\n    b: string,\n) -> i32 { a }\n"); }
+
+    // ── Recovery ───────────────────────────────────────────────
+
+    #[test] fn test_recovery_empty() { assert_recovery_equivalent(""); }
+    #[test] fn test_recovery_simple() { assert_recovery_equivalent("func main() -> i32 { 42 }"); }
+
+    // ── Real-world equivalence ─────────────────────────────────
+
+    #[test]
+    fn test_flow_parser_matches_legacy_all_real_world() {
+        let files = real_world_files();
+        assert!(!files.is_empty(), "No real_world .mimi files found");
+        for path in &files {
+            let src = std::fs::read_to_string(&path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let tokens = tokenize(&src);
+            let old = Parser::new(tokens.clone()).parse_file();
+            let flow = flow_parse(tokens, ParseMode::Production);
+            match (&old, &flow) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a.imports.len(), b.imports.len(), "import count: {name}");
+                    assert_eq!(a.items.len(), b.items.len(), "item count: {name}");
+                }
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "error: {name}"),
+                _ => panic!("mismatch: {name}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_flow_recovery_matches_legacy_all_real_world() {
+        for path in &real_world_files() {
+            let src = std::fs::read_to_string(path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let tokens = tokenize(&src);
+            let (old_f, old_e) = Parser::new_with_recovery(tokens.clone()).parse_file_with_recovery();
+            let (flow_f, flow_e) = flow_parse_with_recovery(tokens, ParseMode::Production);
+            assert_eq!(old_f.imports.len(), flow_f.imports.len(), "import: {name}");
+            assert_eq!(old_f.items.len(), flow_f.items.len(), "item: {name}");
+            assert_eq!(old_e.len(), flow_e.len(), "errors: {name}");
+        }
+    }
+}
