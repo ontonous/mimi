@@ -163,6 +163,52 @@ fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
 }
 
 /// JSON-escape a string: wrap in double quotes, escape `"`, `\`, and control chars.
+/// JSON unescape: convert escape sequences \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+/// into the actual characters they represent. Used during deserialization.
+fn json_unescape(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] != b'\\' {
+            out.push(s[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= s.len() {
+            out.push(b'\\');
+            break;
+        }
+        match s[i] {
+            b'"' => out.push(b'"'),
+            b'\\' => out.push(b'\\'),
+            b'/' => out.push(b'/'),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'u' => {
+                // \uXXXX — parse 4 hex digits
+                if i + 4 < s.len() {
+                    let hex_str = std::str::from_utf8(&s[i + 1..i + 5]).unwrap_or("0000");
+                    if let Ok(code) = u32::from_str_radix(hex_str, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            let mut buf = [0u8; 4];
+                            let encoded = ch.encode_utf8(&mut buf);
+                            out.extend_from_slice(encoded.as_bytes());
+                        }
+                    }
+                    i += 4;
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
 fn json_escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -204,12 +250,22 @@ fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
     unsafe { alloc.add(1) as *mut *mut std::ffi::c_char }
 }
 
-/// v0.28.13: Reallocate a MimiList data array, preserving the hidden capacity header.
+/// Reallocate a MimiList data array, preserving the hidden capacity header.
 fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut std::ffi::c_char {
     if new_cap <= 0 {
         return std::ptr::null_mut();
     }
-    let sz = 8 + (new_cap as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    // H11 fix: use checked multiplication to prevent integer overflow that
+    // could lead to undersized allocation and subsequent buffer overflow.
+    let elem_size = std::mem::size_of::<*mut std::ffi::c_char>();
+    let data_size = match (new_cap as usize).checked_mul(elem_size) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let sz = match 8usize.checked_add(data_size) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
     if old.is_null() {
         return alloc_list_data(new_cap);
     }
@@ -228,13 +284,15 @@ fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut
     unsafe { nb.add(1) as *mut *mut std::ffi::c_char }
 }
 
-/// v0.28.13: Read the hidden capacity from data[-8]. Returns 0 if no header.
-fn list_cap(data: *mut *mut std::ffi::c_char) -> i64 {
-    if data.is_null() {
+/// Read the hidden capacity from data[-8]. Returns 0 if no header.
+/// H1 fix: only reads header for lists where owns_data is true. For
+/// non-owning lists or null data, returns 0 immediately to avoid
+/// reading garbage that could coincidentally have bit 63 set.
+fn list_cap(list: &MimiList) -> i64 {
+    if !list.owns_data || list.data.is_null() {
         return 0;
     }
-    // SAFETY: reading data[-1] is valid only for Rust-allocated lists with the hidden header; otherwise returns 0.
-    let hdr = unsafe { *(data as *mut i64).offset(-1) };
+    let hdr = unsafe { *(list.data as *mut i64).offset(-1) };
     if hdr < 0 {
         hdr & 0x7FFF_FFFF_FFFF_FFFF
     } else {
@@ -250,10 +308,9 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     if list.is_null() {
         return;
     }
-    // SAFETY: `list` was checked non-null; mutable reference is held only within this function.
     let lst = unsafe { &mut *list };
     let len = lst.len;
-    let cap = list_cap(lst.data);
+    let cap = list_cap(lst);
     if len + 1 > cap {
         let nc = if cap <= 0 { 4 } else { cap * 2 };
         let nd = realloc_list_data(lst.data, nc);
@@ -290,7 +347,7 @@ pub extern "C" fn mimi_list_push_grow(
     let lst = unsafe { &mut *list };
     let len = lst.len;
     let old_data = lst.data;
-    let cap = list_cap(old_data);
+    let cap = list_cap(lst);
     let needed = len + additional;
     if needed > cap {
         let new_cap = if cap <= 0 {
@@ -300,9 +357,17 @@ pub extern "C" fn mimi_list_push_grow(
                 needed
             }
         } else {
+            // H12 fix: prevent infinite loop on corrupted cap. If doubling
+            // would overflow, cap at i64::MAX (effectively unbounded).
             let mut nc = cap;
             while nc < needed {
-                nc *= 2;
+                nc = match nc.checked_mul(2) {
+                    Some(v) => v,
+                    None => {
+                        nc = i64::MAX;
+                        break;
+                    }
+                };
             }
             nc
         };
@@ -323,7 +388,7 @@ pub extern "C" fn mimi_list_push_grow(
                 );
             }
         }
-        // Free old data if it has a header; otherwise free directly
+        // Free old data if it has a header; otherwise skip (can't verify origin)
         if cap > 0 {
             // Has header: free allocation base (data - 8)
             // SAFETY: `old_data` has a hidden header, so `old_data - 1` is the valid allocation base.
@@ -332,13 +397,12 @@ pub extern "C" fn mimi_list_push_grow(
                 // SAFETY: `base` is the valid allocation base returned by `alloc_list_data`.
                 libc::free(base);
             }
-        } else if !old_data.is_null() {
-            // No header (literal): free data directly
-            unsafe {
-                // SAFETY: `old_data` is a non-null allocation without a header, freed directly.
-                libc::free(old_data as *mut std::ffi::c_void);
-            }
         }
+        // H2 fix: when cap <= 0 (no header), old_data may point to a static buffer
+        // or stack-allocated array. We cannot verify it was heap-allocated, so
+        // we skip libc::free to avoid UB (freeing non-heap memory). The old_data
+        // pointer is replaced by new_data; the caller is responsible for the old
+        // allocation's lifetime.
         lst.data = new_data;
         new_data
     } else {
@@ -358,7 +422,9 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     }
 }
 
-/// S22: Free a MimiList and optionally its C string elements.
+/// Free a MimiList and optionally its C string elements.
+/// The MimiList struct itself is always heap-allocated via Box in this runtime,
+/// so we use Box::from_raw to free it (NOT libc::free, which would be allocator mismatch).
 /// FFI-2: Only frees data if `owns_data` is true (Rust-allocated).
 /// C-allocated data (owns_data=false) is skipped to avoid wrong-allocator heap corruption.
 ///
@@ -370,39 +436,36 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
         return;
     }
     unsafe {
-        // SAFETY: `list` was checked non-null; data is freed using the correct base depending on header presence.
         let lst = &*list;
         if lst.owns_data && !lst.data.is_null() {
-            let cap = list_cap(lst.data);
+            let cap = list_cap(lst);
             if cap > 0 {
                 if free_elements {
                     for i in 0..lst.len as usize {
-                        // SAFETY: element pointer is non-null and was allocated by `libc::malloc`.
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
-                // SAFETY: `cap > 0` guarantees a hidden header at `data - 1`.
                 let base = (lst.data as *mut i64).offset(-1) as *mut std::ffi::c_void;
                 libc::free(base);
             } else {
                 if free_elements {
                     for i in 0..lst.len as usize {
-                        // SAFETY: element pointer is non-null and was allocated by `libc::malloc`.
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
-                // SAFETY: `data` is non-null and has no hidden header; free the pointer directly.
                 libc::free(lst.data as *mut std::ffi::c_void);
             }
         }
-        // SAFETY: `list` was checked non-null and is freed after its data/elements.
-        libc::free(list as *mut std::ffi::c_void);
+        // C1 fix: The MimiList struct was allocated via Box::new()/Box::into_raw() in
+        // all runtime functions (mimi_str_split, mimi_map_keys, etc.).
+        // Using libc::free here would be UB on musl/macOS (allocator mismatch).
+        drop(Box::from_raw(list));
     }
 }
 
@@ -419,7 +482,10 @@ pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
     }
     unsafe {
         let lst = &*list;
-        if !lst.data.is_null() {
+        // H8 fix: only free elements if the list owns its data. C-allocated
+        // lists (owns_data=false) have elements allocated by the C allocator
+        // and must not be freed via libc::free (wrong allocator or double-free).
+        if lst.owns_data && !lst.data.is_null() {
             for i in 0..lst.len as usize {
                 let e = *lst.data.add(i);
                 if !e.is_null() {
@@ -586,11 +652,14 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
     // SAFETY: atomic decrement with Release ordering; if it returns 1, we own the last strong reference.
     if unsafe { (*hdr).strong.fetch_sub(1, Ordering::Release) } == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
-        // SAFETY: after the Acquire fence, reading weak count is synchronized with the releasing thread.
-        if unsafe { (*hdr).weak.load(Ordering::Relaxed) } == 0 {
+        // H3 fix: Use Acquire ordering for the weak count load to synchronize
+        // with the AcqRelease CAS in mimi_rc_weak_retain. Without this, a
+        // Relaxed load could see a stale weak count of 0 even after another
+        // thread's weak_retain CAS has incremented it, leading to dealloc
+        // racing with a concurrent weak retain on a different thread.
+        if unsafe { (*hdr).weak.load(Ordering::Acquire) } == 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
             unsafe {
-                // SAFETY: `layout` is reconstructed from the valid header; dealloc matches the original alloc.
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
         }
@@ -637,11 +706,11 @@ pub extern "C" fn mimi_rc_weak_release(ptr: *mut std::ffi::c_void) {
     // SAFETY: atomic decrement with Release ordering; if it returns 1, we own the last weak reference.
     if unsafe { (*hdr).weak.fetch_sub(1, Ordering::Release) } == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
-        // SAFETY: after the Acquire fence, reading strong count is synchronized with releasing threads.
-        if unsafe { (*hdr).strong.load(Ordering::Relaxed) } <= 0 {
+        // H4 fix: same TOCTOU as H3 — use Acquire ordering for strong count
+        // load to synchronize with concurrent strong retain operations.
+        if unsafe { (*hdr).strong.load(Ordering::Acquire) } <= 0 {
             let layout = unsafe { rc_dealloc_layout(hdr) };
             unsafe {
-                // SAFETY: `layout` is reconstructed from the valid header; dealloc matches the original alloc.
                 std::alloc::dealloc(hdr as *mut u8, layout);
             }
         }
@@ -759,55 +828,67 @@ pub extern "C" fn mimi_map_set(
     }
 }
 
-/// Format an `Any` value (a raw i64 handle) to a heap-allocated C string.
-/// Uses a heuristic address-range check to distinguish C string pointers
-/// from integer values:
-///   - Values >= 0x10000 and < 0x8000_0000_0000_0000 → treated as C string
-///     pointers (heap/string addresses on x86-64 Linux).
-///   - Smaller values (including 0 and negative overflow) are formatted as
-///     integers via `sprintf("%ld")`.
+/// Format an `Any` value (a raw usize handle) to a heap-allocated C string.
+///
+/// Uses a two-tier approach:
+/// 1. Bit-0 tag: codegen stores integers as `(val << 1) | 1` (bit 0 = 1),
+///    pointers are stored directly (bit 0 = 0 due to alignment).
+/// 2. If bit 0 is clear and the value looks like a plausible heap pointer
+///    (>= 1MB, 8-byte aligned), performs a *bounded* scan (max 1MB) for
+///    a null terminator to confirm it's a valid C string.
+/// 3. Falls back to integer formatting for everything else.
+///
+/// This eliminates the unbounded `libc::strlen` on arbitrary memory
+/// (C2 audit fix). Still heuristic — callers that can provide a type
+/// tag should use `mimi_any_to_string_tagged` instead.
 ///
 /// The caller must `free` the returned pointer with `mimi_string_free`.
 #[no_mangle]
 pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
-    // Heuristic: typed map values use raw i64 representation.  Integer
-    // values (small ints) are distinguishable from heap-allocated string
-    // pointers by their address range: heap pointers from the Mimi runtime
-    // (via malloc) are at least 64KB-aligned on modern allocators.
-    // Use a conservative threshold: anything below 1MB is treated as an
-    // integer; anything at or above 1MB is likely a valid heap pointer.
-    // This is not foolproof (a heap that mmap's below 1MB would break it),
-    // but it's safer than a too-broad range that catches values like 200000.
-    const PTR_RANGE: std::ops::Range<usize> = 1_048_576..usize::MAX - 4096; // 1MB .. top-4KB
-    if !PTR_RANGE.contains(&value) {
-        // Format as integer: sprintf(buf, "%ld", (i64)value)
-        let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
-        if buf.is_null() {
-            return std::ptr::null_mut();
-        }
-        unsafe {
-            libc::sprintf(buf, b"%ld\0".as_ptr() as *const _, value as i64);
-        }
-        return buf;
+    // Check bit-0 tag (codegen tags integers with bit 0 = 1).
+    if value & 1 == 1 {
+        return alloc_c_string(&((value >> 1) as i64).to_string());
     }
-    // Treat as a C string pointer (likely heap-allocated by the Mimi runtime).
-    let ptr = value as *const std::ffi::c_char;
-    // SAFETY: ptr is >= 1MB and < top of address space. We assume it was
-    // allocated by the Mimi runtime as a null-terminated C string.
-    // This is inherently heuristic — callers that pass integer values with
-    // magnitude >= 1MB will cause `strlen` to read arbitrary memory.
-    let len = unsafe { libc::strlen(ptr) };
-    let buf = unsafe { libc::malloc(len + 1) as *mut u8 };
+
+    // Bit 0 is clear — could be a heap pointer (aligned, so bit 0 = 0)
+    // or an untagged integer. Validate before treating as pointer.
+    const MIN_HEAP: usize = 1_048_576; // 1MB — below this is definitely not a heap ptr
+    const MAX_ADDR: usize = usize::MAX - 4096;
+    const MAX_BOUNDED_SCAN: usize = 1_048_576; // 1MB max scan to avoid wild reads
+
+    if value >= MIN_HEAP && value < MAX_ADDR && value % 8 == 0 {
+        let ptr = value as *const u8;
+        // Bounded scan for null terminator.
+        let mut len: usize = 0;
+        unsafe {
+            while len < MAX_BOUNDED_SCAN {
+                let byte = *ptr.add(len);
+                if byte == 0 {
+                    // Found null terminator — this is a valid C string.
+                    let buf = libc::malloc(len + 1) as *mut u8;
+                    if buf.is_null() {
+                        return std::ptr::null_mut();
+                    }
+                    if len > 0 {
+                        std::ptr::copy_nonoverlapping(ptr, buf, len);
+                    }
+                    *buf.add(len) = 0;
+                    return buf as *mut std::ffi::c_char;
+                }
+                len += 1;
+            }
+        }
+    }
+
+    // Fallback: format as integer. Use sprintf for consistency with old behavior.
+    let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
     if buf.is_null() {
         return std::ptr::null_mut();
     }
-    if len > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(ptr as *const u8, buf, len);
-        }
+    unsafe {
+        libc::sprintf(buf, b"%ld\0".as_ptr() as *const _, value as i64);
     }
-    unsafe { *buf.add(len) = 0 };
-    buf as *mut std::ffi::c_char
+    buf
 }
 
 #[no_mangle]
@@ -830,19 +911,28 @@ pub extern "C" fn mimi_map_from_list(
     if handle == 0 || keys.is_null() || values.is_null() || n <= 0 {
         return handle;
     }
-    // S6: Validate n doesn't exceed reasonable bounds (max 1M entries).
+    // C6/C7 fix: validate n bounds and ensure pointers look like valid
+    // C string pointers before dereferencing.
     let n = n.min(1_000_000);
+    let map_ptr = handle as *mut MimiMap;
     for i in 0..n {
-        // SAFETY: caller must ensure `keys`/`values` arrays have at least `n` elements.
-        unsafe {
-            let key_handle = *keys.add(i as usize);
-            let val_handle = *values.add(i as usize);
+        // C6: We only have the caller's word that arrays have >= n elements.
+        // We mitigate by capping n at 1M, but the real fix requires a
+        // different API that takes slices. For now, validate each key
+        // handle looks like a plausible heap pointer before dereference.
+        let key_handle = unsafe { *keys.add(i as usize) };
+        let val_handle = unsafe { *values.add(i as usize) };
+        // C7 fix: only treat as C string pointer if it looks like a
+        // valid heap pointer (>= 1MB, 8-byte aligned). This is still
+        // heuristic but prevents ValueHandle integers from being
+        // interpreted as pointers.
+        if key_handle >= 1_048_576 && key_handle % 8 == 0 {
             let key_str = key_handle as *const std::ffi::c_char;
             if !key_str.is_null() {
-                let s = CStr::from_ptr(key_str).to_str().unwrap_or("");
-                (*map_from_handle(handle))
-                    .inner
-                    .insert(s.to_string(), val_handle);
+                let s = unsafe { CStr::from_ptr(key_str) }.to_str().unwrap_or("");
+                unsafe {
+                    (*map_ptr).inner.insert(s.to_string(), val_handle);
+                }
             }
         }
     }
@@ -1048,13 +1138,12 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
 }
 
 /// Render a codegen `List<i32>` (layout `{i64 len, i8* data}` where data points
-/// to i64 slots) to a printable heap-allocated C string.
+/// to pointer-sized slots) to a printable heap-allocated C string.
 #[no_mangle]
 pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
-    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
     let lst = unsafe { &*list };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
@@ -1068,7 +1157,10 @@ pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ff
         if i > 0 {
             parts.push(String::from(", "));
         }
-        let item = unsafe { *(lst.data as *const i32).offset(i) };
+        // M12 fix: read as i64 (pointer-sized slot) and cast to i32.
+        // Reading directly as *const i32 is endian-dependent; using i64
+        // then truncating is portable.
+        let item = unsafe { *(lst.data as *const i64).offset(i) } as i32;
         parts.push(item.to_string());
     }
     parts.push(String::from("]"));
@@ -1393,15 +1485,27 @@ fn init_cli_args() {
 #[no_mangle]
 pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");
+    // M11: use get_or_init instead of get+expect to handle the case where
+    // init_cli_args was already called but the OnceLock was not yet initialized
+    // (e.g. when called before init_cli_args completes on another thread).
+    let args_mutex = CLI_ARGS.get_or_init(|| {
+        Mutex::new(CliArgs {
+            argc: 0,
+            argv: Vec::new(),
+        })
+    });
     let mut args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     args.argc = argc;
-    args.argv.clear();
+    // H5 fix: free old C strings before clearing to prevent memory leak.
+    for ptr in args.argv.drain(..) {
+        if ptr != 0 {
+            unsafe { libc::free(ptr as *mut std::ffi::c_void) };
+        }
+    }
     // S9: Copy strings to owned memory instead of storing raw pointers.
     // Original argv may be freed after init returns.
     if !argv.is_null() && argc > 0 {
         for i in 0..argc as isize {
-            // SAFETY: pointer is non-null or the helper handles null safely.
             unsafe {
                 let s = cstr_to_string(*argv.offset(i));
                 let ptr = alloc_c_string(&s);
@@ -1442,9 +1546,18 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     } else {
         (args.argc - 1) as usize
     };
+    // C8 fix: copy each arg string into an owned libc::malloc allocation
+    // instead of returning pointers into CLI_ARGS storage. This eliminates
+    // the dangling pointer risk when CLI_ARGS is re-initialized.
     let mut items: Vec<*mut std::ffi::c_char> = Vec::with_capacity(count);
     for i in 1..args.argc as usize {
-        items.push(args.argv[i] as *mut std::ffi::c_char);
+        let ptr = args.argv[i] as *const std::ffi::c_char;
+        let s = if !ptr.is_null() {
+            unsafe { cstr_to_string(ptr) }
+        } else {
+            String::new()
+        };
+        items.push(alloc_c_string(&s));
     }
     let data_ptr = items.as_mut_ptr();
     let len = items.len() as i64;
@@ -1452,7 +1565,7 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     Box::into_raw(Box::new(MimiList {
         len,
         data: data_ptr,
-        owns_data: false,
+        owns_data: true,
     }))
 }
 
@@ -2203,6 +2316,20 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
     ptr
 }
 
+/// C9 fix: Free a SetValueHandle array returned by `mimi_set_to_list`.
+/// Must be called with the pointer and length as returned by `mimi_set_to_list`.
+/// Safe to call with null pointer (no-op).
+#[no_mangle]
+pub extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
+    if ptr.is_null() || len <= 0 {
+        return;
+    }
+    // Reconstruct the Vec from the raw pointer and length, then drop it.
+    unsafe {
+        drop(Vec::from_raw_parts(ptr, len as usize, len as usize));
+    }
+}
+
 // ─── Regex (simple recursive backtracking engine, self-contained) ───
 
 struct RegexEngine;
@@ -2475,6 +2602,8 @@ impl RegexEngine {
     }
 }
 
+const MAX_REGEX_PATTERN_LEN: usize = 512;
+
 #[no_mangle]
 pub extern "C" fn mimi_regex_match(
     text: *const std::ffi::c_char,
@@ -2487,6 +2616,9 @@ pub extern "C" fn mimi_regex_match(
     let t = unsafe { cstr_to_string(text) };
     // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
+    if p.len() > MAX_REGEX_PATTERN_LEN {
+        return 0;
+    }
     RegexEngine::match_pattern(&t, &p) as i32
 }
 
@@ -2502,6 +2634,9 @@ pub extern "C" fn mimi_regex_find(
     let t = unsafe { cstr_to_string(text) };
     // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
+    if p.len() > MAX_REGEX_PATTERN_LEN {
+        return alloc_c_string("");
+    }
     match RegexEngine::find_match(&t, &p) {
         Some((start, end)) => {
             let matched = &t[start..end];
@@ -2524,6 +2659,9 @@ pub extern "C" fn mimi_regex_replace(
     let t = unsafe { cstr_to_string(text) };
     // SAFETY: pointers checked non-null above.
     let p = unsafe { cstr_to_string(pattern) };
+    if p.len() > MAX_REGEX_PATTERN_LEN {
+        return std::ptr::null_mut();
+    }
     // SAFETY: replacement pointer checked non-null above.
     let r = unsafe { cstr_to_string(replacement) };
     let result = RegexEngine::replace_all(&t, &p, &r);
@@ -2675,10 +2813,21 @@ fn fd_to_i32(fd: i64) -> Option<i32> {
 
 #[no_mangle]
 pub extern "C" fn mimi_socket(domain: i64, type_: i64, protocol: i64) -> i64 {
-    // We'll use libc calls directly.
-    // SAFETY: direct POSIX socket calls; integer arguments are cast from validated i64 values.
+    // H13 fix: validate domain/type/protocol fit in i32 range before truncation.
+    let domain_i32 = match i32::try_from(domain) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    let type_i32 = match i32::try_from(type_) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    let protocol_i32 = match i32::try_from(protocol) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
     unsafe {
-        let fd = libc::socket(domain as i32, type_ as i32, protocol as i32);
+        let fd = libc::socket(domain_i32, type_i32, protocol_i32);
         if fd >= 0 {
             let reuse: i32 = 1;
             libc::setsockopt(
@@ -2751,7 +2900,11 @@ pub extern "C" fn mimi_bind(fd: i64, port: i64) -> i64 {
     if fd < 0 {
         return -1;
     }
-    // SAFETY: direct POSIX calls with a validated file descriptor.
+    // H13 fix: validate port fits in u16 range before truncation.
+    let port_u16 = match u16::try_from(port) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
     unsafe {
         let fd_i32 = match fd_to_i32(fd) {
             Some(v) => v,
@@ -2759,7 +2912,7 @@ pub extern "C" fn mimi_bind(fd: i64, port: i64) -> i64 {
         };
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        addr.sin_port = (port as u16).to_be();
+        addr.sin_port = port_u16.to_be();
         addr.sin_addr.s_addr = libc::INADDR_ANY;
         libc::bind(
             fd_i32,
@@ -2876,10 +3029,11 @@ pub extern "C" fn mimi_close(fd: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
-    let rest = url.strip_prefix("http://")?;
+    // M20: explicitly reject HTTPS (no TLS support in this runtime).
     if url.starts_with("https://") {
         return None;
     }
+    let rest = url.strip_prefix("http://")?;
 
     let (host_part, path_part) = if let Some(slash_idx) = rest.find('/') {
         let (h, p) = rest.split_at(slash_idx);
@@ -2963,7 +3117,14 @@ pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::
     let u = unsafe { cstr_to_string(url) };
     let (host, port, path) = match parse_http_url(&u) {
         Some(v) => v,
-        None => return std::ptr::null_mut(),
+        None => {
+            // M20: HTTPS URLs are unsupported; log and return null.
+            #[cfg(debug_assertions)]
+            if u.starts_with("https://") {
+                eprintln!("[mimi runtime] HTTPS not supported (no TLS), use http://");
+            }
+            return std::ptr::null_mut();
+        }
     };
 
     let request = format!(
@@ -2998,7 +3159,14 @@ pub extern "C" fn mimi_http_post(
     };
     let (host, port, path) = match parse_http_url(&u) {
         Some(v) => v,
-        None => return std::ptr::null_mut(),
+        None => {
+            // M20: HTTPS URLs are unsupported; log and return null.
+            #[cfg(debug_assertions)]
+            if u.starts_with("https://") {
+                eprintln!("[mimi runtime] HTTPS not supported (no TLS), use http://");
+            }
+            return std::ptr::null_mut();
+        }
     };
 
     let request = format!(
@@ -3058,17 +3226,24 @@ pub extern "C" fn mimi_json_serialize(
                 // String: raw is a C string pointer
                 result.push('"');
                 if raw != 0 {
-                    // SAFETY: `raw` is non-zero and the caller must ensure it is a valid C string pointer.
-                    let s = unsafe { std::ffi::CStr::from_ptr(raw as *const std::ffi::c_char) };
-                    let s_str = s.to_string_lossy();
-                    for c in s_str.chars() {
-                        match c {
-                            '"' => result.push_str("\\\""),
-                            '\\' => result.push_str("\\\\"),
-                            '\n' => result.push_str("\\n"),
-                            '\r' => result.push_str("\\r"),
-                            '\t' => result.push_str("\\t"),
-                            _ => result.push(c),
+                    // C3/C4 fix: validate that `raw` looks like a plausible
+                    // heap pointer before dereferencing. A valid heap pointer
+                    // from malloc is >= 1MB and 8-byte aligned. If it doesn't
+                    // meet these criteria, treat it as empty string instead of
+                    // passing a possibly-invalid address to CStr::from_ptr.
+                    let ptr = raw as *const std::ffi::c_char;
+                    if (raw as usize) >= 1_048_576 && (raw as usize) % 8 == 0 {
+                        let s = unsafe { std::ffi::CStr::from_ptr(ptr) };
+                        let s_str = s.to_string_lossy();
+                        for c in s_str.chars() {
+                            match c {
+                                '"' => result.push_str("\\\""),
+                                '\\' => result.push_str("\\\\"),
+                                '\n' => result.push_str("\\n"),
+                                '\r' => result.push_str("\\r"),
+                                '\t' => result.push_str("\\t"),
+                                _ => result.push(c),
+                            }
                         }
                     }
                 }
@@ -3219,16 +3394,29 @@ pub extern "C" fn mimi_json_deserialize(
                     pos += 1;
                 }
                 let start = pos;
+                // M10: limit per-string length to prevent oversized allocation.
+                const MAX_JSON_STR_LEN: usize = 10 * 1024 * 1024; // 10MB
+                let mut str_len: usize = 0;
                 while pos < bytes.len() && bytes[pos] != b'"' {
                     if bytes[pos] == b'\\' {
                         pos += 2;
+                        str_len += 2;
                     } else {
                         pos += 1;
+                        str_len += 1;
+                    }
+                    if str_len > MAX_JSON_STR_LEN {
+                        // Oversized string: skip past closing quote
+                        while pos < bytes.len() && bytes[pos] != b'"' {
+                            pos += 1;
+                        }
+                        break;
                     }
                 }
-                let slen = pos - start;
-                let s_bytes = bytes[start..start + slen].to_vec();
-                data[idx as usize] = alloc_c_string_from_bytes(&s_bytes) as i64;
+                // M19 fix: unescape JSON escape sequences (\n, \", \\, \uXXXX, etc.)
+                let raw_bytes = bytes[start..usize::min(pos, start + MAX_JSON_STR_LEN)].to_vec();
+                let unescaped = json_unescape(&raw_bytes);
+                data[idx as usize] = alloc_c_string_from_bytes(&unescaped) as i64;
                 if pos < bytes.len() && bytes[pos] == b'"' {
                     pos += 1;
                 }
@@ -3342,17 +3530,20 @@ pub extern "C" fn mimi_tuple_serialize(
             2 => {
                 result.push('"');
                 if raw != 0 {
-                    // SAFETY: `raw` is non-zero and caller must ensure it is a valid C string pointer.
-                    let s = unsafe { std::ffi::CStr::from_ptr(raw as *const std::ffi::c_char) };
-                    let s_str = s.to_string_lossy();
-                    for c in s_str.chars() {
-                        match c {
-                            '"' => result.push_str("\\\""),
-                            '\\' => result.push_str("\\\\"),
-                            '\n' => result.push_str("\\n"),
-                            '\r' => result.push_str("\\r"),
-                            '\t' => result.push_str("\\t"),
-                            _ => result.push(c),
+                    // C4 fix: validate heap pointer before dereference.
+                    let ptr = raw as *const std::ffi::c_char;
+                    if (raw as usize) >= 1_048_576 && (raw as usize) % 8 == 0 {
+                        let s = unsafe { std::ffi::CStr::from_ptr(ptr) };
+                        let s_str = s.to_string_lossy();
+                        for c in s_str.chars() {
+                            match c {
+                                '"' => result.push_str("\\\""),
+                                '\\' => result.push_str("\\\\"),
+                                '\n' => result.push_str("\\n"),
+                                '\r' => result.push_str("\\r"),
+                                '\t' => result.push_str("\\t"),
+                                _ => result.push(c),
+                            }
                         }
                     }
                 }
@@ -3456,17 +3647,16 @@ pub extern "C" fn mimi_tuple_deserialize(
                         pos += 1;
                     }
                 }
-                let slen = pos - start;
-                if slen > 0 {
-                    let s_bytes = bytes[start..start + slen].to_vec();
+                // M19 fix: unescape JSON escape sequences
+                let raw_bytes = bytes[start..pos].to_vec();
+                let unescaped = json_unescape(&raw_bytes);
+                if !unescaped.is_empty() {
                     unsafe {
-                        // SAFETY: `out_values` was checked non-null above; `idx < count`.
                         *out_values.offset(idx as isize) =
-                            alloc_c_string_from_bytes(&s_bytes) as i64;
+                            alloc_c_string_from_bytes(&unescaped) as i64;
                     }
                 } else {
                     unsafe {
-                        // SAFETY: `out_values` was checked non-null above; `idx < count`.
                         *out_values.offset(idx as isize) = 0;
                     }
                 }
@@ -3476,21 +3666,39 @@ pub extern "C" fn mimi_tuple_deserialize(
                 idx += 1;
             }
             _ => {
-                // Integer
+                // Integer (or null literal)
+                // M8: detect null literal in JSON and write 0.
+                if pos + 3 < bytes.len()
+                    && bytes[pos] == b'n'
+                    && &bytes[pos..pos + 4] == b"null"
+                {
+                    pos += 4;
+                    unsafe { *out_values.offset(idx as isize) = 0 }
+                    idx += 1;
+                    continue;
+                }
                 let neg = if bytes[pos] == b'-' {
                     pos += 1;
                     true
                 } else {
                     false
                 };
+                // M16: use checked arithmetic to avoid silent wrapping on overflow.
                 let mut val: i64 = 0;
                 while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                    val = val
-                        .wrapping_mul(10)
-                        .wrapping_add((bytes[pos] - b'0') as i64);
+                    let digit = (bytes[pos] - b'0') as i64;
+                    match val.checked_mul(10) {
+                        Some(v) => match v.checked_add(digit) {
+                            Some(s) => val = s,
+                            None => { val = 0; break; }
+                        }
+                        None => { val = 0; break; }
+                    }
                     pos += 1;
                 }
                 if neg {
+                    // wrapping_neg is safe here (i64::MIN.neg() overflows but we
+                    // already bounded val above).
                     val = val.wrapping_neg();
                 }
                 // SAFETY: `out_values` was checked non-null above; `idx < count`.
@@ -3988,19 +4196,27 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
 }
 
 /// Spawned thread handles retained so they can be joined before process exit.
-/// Joining detached threads avoids Valgrind "possibly lost" reports for the
-/// pthread stack allocation. The mutex protects the vector across threads.
-static SPAWN_HANDLES: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
-    std::sync::Mutex::new(Vec::new());
+/// H15 fix: use OnceLock so the atexit handler can check whether SPAWN_HANDLES
+/// is still initialized before accessing it. This prevents UB when atexit fires
+/// after Rust's static destructors have already dropped the Mutex.
+static SPAWN_HANDLES: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> =
+    std::sync::OnceLock::new();
 static SPAWN_ATEXIT_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+fn get_spawn_handles() -> &'static std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> {
+    SPAWN_HANDLES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
 extern "C" fn mimi_join_spawned_threads_atexit() {
-    // SAFETY: called once from `atexit` after main returns; no other thread is
-    // accessing `SPAWN_HANDLES` at this point (all futures have completed).
-    if let Ok(mut handles) = SPAWN_HANDLES.lock() {
-        for handle in handles.drain(..) {
-            let _ = handle.join();
+    // H15 fix: check if SPAWN_HANDLES is still initialized before trying to
+    // lock it. If Rust statics have already been dropped, OnceLock::get()
+    // returns None and we skip joining (handles will be detached by OS).
+    if let Some(handles_mutex) = SPAWN_HANDLES.get() {
+        if let Ok(mut handles) = handles_mutex.lock() {
+            for handle in handles.drain(..) {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -4024,7 +4240,7 @@ pub extern "C" fn mimi_spawn_future(
         // SAFETY: the spawned thread owns the future pointer for the duration of `poll_fn`; it was checked non-null.
         unsafe { poll_fn(future_addr as *mut std::ffi::c_void) };
     });
-    if let Ok(mut handles) = SPAWN_HANDLES.lock() {
+    if let Ok(mut handles) = get_spawn_handles().lock() {
         handles.push(handle);
     }
     // Register an atexit handler once to join all spawned threads before exit.
@@ -4565,13 +4781,19 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
     };
+    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd_str)
         .output();
     match output {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
+                &out.stdout[..MAX_EXEC_OUTPUT]
+            } else {
+                &out.stdout
+            };
+            let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
             alloc_c_string(&stdout)
         }
         Err(_) => alloc_c_string(""),
@@ -4690,7 +4912,13 @@ pub extern "C" fn mimi_append_file(
     }
 }
 
+/// H14 fix: Global mutex for env var operations to prevent data races
+/// when Mimi actor/spawn threads call set_var concurrently.
+static SETENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Sets an environment variable. Returns 1 on success, 0 on failure.
+/// Thread-safe: uses a global mutex to serialize env var modifications,
+/// preventing data races when called from multiple actor threads.
 #[no_mangle]
 pub extern "C" fn mimi_set_env(
     key: *const std::ffi::c_char,
@@ -4699,17 +4927,19 @@ pub extern "C" fn mimi_set_env(
     if key.is_null() || value.is_null() {
         return 0;
     }
-    // SAFETY: `key` was checked non-null above.
     let key_str = match unsafe { CStr::from_ptr(key) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    // SAFETY: `value` was checked non-null above.
     let value_str = match unsafe { CStr::from_ptr(value) }.to_str() {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    // SAFETY: set_var is unsafe in newer Rust editions; safe for single-threaded Mimi programs
+    // Serialize env var writes under a global lock.
+    let _lock = match SETENV_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => return 0,
+    };
     unsafe { std::env::set_var(key_str, value_str) };
     1
 }
@@ -4930,6 +5160,8 @@ pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
 }
 
 #[no_mangle]
+/// M15: template string formatting with up to 8 arguments ({}-placeholders).
+/// If more than 8 args are needed, callers should concatenate intermediate results.
 pub extern "C" fn mimi_str_format(
     num_args: i64,
     template: *const std::ffi::c_char,
@@ -4997,23 +5229,26 @@ pub extern "C" fn mimi_read_file_partial(
     }
 }
 
-/// Reads an entire file as raw bytes, returned as a C string (may contain null bytes).
-/// Caller must free with mimi_string_free.
+/// Reads an entire file as raw bytes, returned as a C string.
+/// Note: the returned C string is null-terminated, so any null byte in the
+/// file content will be preserved in the allocation but consumer functions
+/// that use `strlen`/`CStr::from_ptr` will see truncated content.
+/// Caller must free with `mimi_string_free`.
 #[no_mangle]
 pub extern "C" fn mimi_read_file_bytes(path: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if path.is_null() {
         return alloc_c_string("");
     }
-    // SAFETY: `path` was checked non-null above.
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
     };
     match std::fs::read(path_str) {
-        Ok(bytes) => {
-            let s = String::from_utf8_lossy(&bytes);
-            alloc_c_string(&s)
-        }
+        // M5/M22 fix: use raw bytes directly instead of from_utf8_lossy which
+        // replaces non-UTF8 bytes with U+FFFD. alloc_c_string_from_bytes
+        // preserves the exact byte content including null bytes (though the
+        // first null will terminate if consumed as a C string).
+        Ok(bytes) => alloc_c_string_from_bytes(&bytes),
         Err(_) => alloc_c_string(""),
     }
 }
@@ -5042,7 +5277,12 @@ pub extern "C" fn mimi_write_file_bytes(
 
 /// Reads file line-by-line, calling callback(line) for each line.
 /// callback_fn is a function pointer: fn(line_ptr: *const c_char) -> ()
-/// Returns the number of lines processed, or -1 on error.
+///
+/// # String lifecycle (M7)
+/// The `line_ptr` passed to `callback_fn` is freed by `libc::free` immediately
+/// after the callback returns. The callback MUST copy the string if it needs
+/// the data after returning (e.g., by calling `alloc_c_string` on it).
+/// Holding onto the pointer after the callback returns is a use-after-free bug.
 #[no_mangle]
 pub extern "C" fn mimi_read_lines_each(
     path: *const std::ffi::c_char,
@@ -5424,6 +5664,11 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // M1 fix: U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are
+            // valid JSON only when escaped. Unescaped, they break JSON parsers
+            // that follow ECMAScript 2018+ line-terminator rules.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -6495,19 +6740,17 @@ struct ConcurrencyMutex {
     inner: Arc<std::sync::Mutex<i64>>,
 }
 
-/// A held mutex guard returned to codegen/interpreter as an opaque guard
-/// handle. The `_arc` clone keeps the `Mutex` alive for the guard's lifetime;
-/// the `guard` lifetime is extended to `'static` because the mutex will not be
-/// deallocated while this struct exists.
+/// A held mutex guard. The `_arc` clone keeps the `Mutex` alive for the
+/// guard's lifetime; the `guard` lifetime is extended to `'static` via
+/// transmute because the Arc guarantees the Mutex is never deallocated
+/// while the guard exists. The guard is stored in thread-local storage
+/// (single-thread access) until `mimi_mutex_unlock` removes it.
 struct HeldMutexGuard {
     _arc: Arc<std::sync::Mutex<i64>>,
     guard: std::sync::MutexGuard<'static, i64>,
 }
 
 thread_local! {
-    /// Guards are stored per-thread because `std::sync::MutexGuard` is not
-    /// `Send`. A mutex guard should only be accessed from the thread that
-    /// locked it, so thread-local storage is both safe and semantically correct.
     static MIMI_MUTEX_GUARDS: std::cell::RefCell<HashMap<u64, HeldMutexGuard>> =
         std::cell::RefCell::new(HashMap::new());
 }
@@ -6742,10 +6985,13 @@ pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
     };
     // Drop the global table lock before blocking on the mutex.
     let guard = arc.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the `Arc` clone in `HeldMutexGuard` keeps the mutex alive for as
-    // long as the guard exists, so extending the guard lifetime to `'static`
-    // is sound. The guard is stored in thread-local storage until
-    // `mimi_mutex_unlock` removes it.
+    // H7: lifetime extension via transmute. This is sound because:
+    //   1. `arc` (Arc clone) is stored alongside in HeldMutexGuard._arc,
+    //      keeping the underlying Mutex alive
+    //   2. The guard is stored in TLS and only accessed from the locking thread
+    //   3. `mimi_mutex_unlock` drops the guard before the Arc is dropped
+    // This avoids the type-system limitation where MutexGuard's lifetime
+    // is syntactically tied to the stack frame, not the Arc's heap lifetime.
     let guard: std::sync::MutexGuard<'static, i64> = unsafe { std::mem::transmute(guard) };
     let held = HeldMutexGuard { _arc: arc, guard };
     let id = MIMI_MUTEX_GUARD_NEXT_ID.fetch_add(1, Ordering::SeqCst);
@@ -6789,6 +7035,11 @@ pub extern "C" fn mimi_mutex_drop(handle: i64) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     table.mutexes.remove(&(handle as u64));
+    // M3 note: existing HeldMutexGuard entries in TLS still hold Arc clones
+    // of the Mutex, so the underlying data stays alive. However, after drop(),
+    // no new lock() calls can acquire this mutex. Existing guards will still
+    // work (get/set/unlock) until dropped via mimi_mutex_unlock — they reference
+    // the old Mutex via their Arc clone.
 }
 
 // ---------- Channel<i64> (mpsc, unbounded) ----------
@@ -7071,8 +7322,13 @@ pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
             mimi_quote_drop(n.data1 as *mut MimiQuotedAst);
         } else {
             // Variable-arity: data0 is a pointer to a `Vec<*mut MimiQuotedAst>`.
+            // M9: validate the pointer looks like a plausible heap allocation
+            // before dereferencing, to guard against corrupted argc values.
             let arr_ptr = n.data0 as *mut Vec<*mut MimiQuotedAst>;
-            if !arr_ptr.is_null() {
+            if !arr_ptr.is_null()
+                && (arr_ptr as usize) >= 1024 * 1024
+                && (arr_ptr as usize) % 8 == 0
+            {
                 // SAFETY: `arr_ptr` was created by `mimi_quote_new_list`.
                 let vec = Box::from_raw(arr_ptr);
                 for &child in vec.iter() {
