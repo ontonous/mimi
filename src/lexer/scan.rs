@@ -311,8 +311,11 @@ impl<'a> super::Lexer<'a> {
                             }
                         }
                         Some(c) => {
-                            s.push(c);
-                            self.advance();
+                            return Err(invalid_escape(
+                                &format!("\\{}", c),
+                                self.line,
+                                self.col,
+                            ));
                         }
                         None => return Err(unterminated_fstring_escape(self.line, self.col)),
                     }
