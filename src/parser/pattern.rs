@@ -146,14 +146,10 @@ impl Parser {
                     Ok(Pattern::Array(pats))
                 }
             }
-            // Soft keywords as identifiers in pattern context
+            // Keywords that can be used as identifiers in pattern context.
+            // Only `old` is allowed as a soft keyword — all other keywords
+            // are reserved and cannot be used as binding names.
             TokenKind::Old => {
-                let name = tok.kind.source_text().to_string();
-                self.advance();
-                Ok(Pattern::Variable(name))
-            }
-            // Keywords that can be used as identifiers in pattern context
-            ref kw if crate::lexer::is_keyword_kind(kw) => {
                 let name = tok.kind.source_text().to_string();
                 self.advance();
                 Ok(Pattern::Variable(name))
