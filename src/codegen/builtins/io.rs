@@ -2311,6 +2311,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.wrap_c_string(raw_ptr)
     }
 
+    pub(super) fn compile_exec_safe(
+        &self,
+        _args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        Err(CompileError::Generic(
+            "exec_safe: codegen not yet implemented, use `mimi run` instead".to_string(),
+        ))
+    }
+
     pub(super) fn compile_exec_pipe(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],

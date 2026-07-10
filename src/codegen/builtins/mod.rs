@@ -1486,6 +1486,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "mkdir_p" => self.compile_mkdir_p(args),
             "remove_file" => self.compile_remove_file(args),
             "exec" => self.compile_exec(args),
+            "exec_safe" => self.compile_exec_safe(args),
             "exec_pipe" => self.compile_exec_pipe(args),
             "file_stat" => self.compile_file_stat(args),
             "append_file" => self.compile_append_file(args),

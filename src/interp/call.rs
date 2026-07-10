@@ -329,6 +329,7 @@ impl<'a> Interpreter<'a> {
             "mkdir_p" => self.builtin_mkdir_p(args),
             "remove_file" => self.builtin_remove_file(args),
             "exec" => self.builtin_exec(args),
+            "exec_safe" => self.builtin_exec_safe(args),
             "exec_pipe" => self.builtin_exec_pipe(args),
             "file_stat" => self.builtin_file_stat(args),
             "append_file" => self.builtin_append_file(args),
