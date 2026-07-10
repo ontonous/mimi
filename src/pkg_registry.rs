@@ -59,6 +59,33 @@ pub fn registry_dir() -> Result<std::path::PathBuf, String> {
     Ok(reg_dir)
 }
 
+/// Recursively copy a directory, skipping entries rejected by `filter`.
+/// `filter` receives entry file names (not full paths); return true to skip.
+pub fn copy_dir_recursive_filtered(
+    src: &Path,
+    dst: &Path,
+    filter: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read_dir {}: {}", src.display(), e))? {
+        let entry = entry.map_err(|e| format!("read_dir entry: {}", e))?;
+        let fname = entry.file_name();
+        let fname_str = fname.to_string_lossy();
+        if filter(&fname_str) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(fname);
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_recursive_filtered(&src_path, &dst_path, filter)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {}: {}", src_path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Recursively copy a directory
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
