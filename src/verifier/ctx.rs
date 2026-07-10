@@ -177,6 +177,12 @@ pub struct Verifier {
     /// Populated during verify_func to enable substitution of local variables
     /// when encoding body-return expressions. Fixes P0.1 for let-binding calls:
     /// `let y = double(x); y` now correctly resolves `y` to `double(x)`.
+    // TODO(#issue-TBD): this field is written but never read — see §21 red
+    // line 3 (escape hatch). The current let-substitution logic uses local
+    // variables in verify_func (func.rs:393); the ctx-level field is a
+    // vestigial design. Either remove it or wire it into the Z3 encoding
+    // path so the substitution survives function boundaries.
+    #[allow(dead_code)]
     pub(crate) let_subst: HashMap<String, Expr>,
     /// E1: Tracks the number of push() calls without corresponding pop().
     /// When check_safe() replaces the solver (Unknown/crash), the fresh solver
