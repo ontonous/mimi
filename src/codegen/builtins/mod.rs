@@ -180,7 +180,7 @@ fn register_libc<'ctx>(
 
     module.add_function(
         "sprintf",
-        i64.fn_type(
+        i32.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
