@@ -1061,8 +1061,7 @@ pub extern "C" fn mimi_list_i32_to_string(list: *const MimiList) -> *mut std::ff
         if i > 0 {
             parts.push(String::from(", "));
         }
-        // `lst.data` was bitcast from `*mut i64`; cast back and read element.
-        let item = unsafe { *(lst.data as *const i64).offset(i) };
+        let item = unsafe { *(lst.data as *const i32).offset(i) };
         parts.push(item.to_string());
     }
     parts.push(String::from("]"));
@@ -2167,7 +2166,7 @@ pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut SetValueHandle {
     // P2-14 fix: handle == 0 (invalid) returns distinct sentinel from empty set.
-    // Invalid handle: returns -1 cast to pointer, *out_len = -1.
+    // Invalid handle: returns null, *out_len = -1.
     // Empty set: returns null, *out_len = 0.
     // This allows callers to distinguish the two cases.
     if out_len.is_null() {
@@ -2178,7 +2177,7 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
         unsafe {
             *out_len = -1;
         }
-        return -1isize as *mut SetValueHandle;
+        return std::ptr::null_mut();
     }
     // SAFETY: handle validated by `set_from_handle`; shared reference is in a single scope.
     let set = unsafe { &*set_from_handle(handle) };

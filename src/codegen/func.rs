@@ -445,7 +445,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 matches!(val, BasicValueEnum::PointerValue(_))
                     || matches!(
                         callee.as_ref(),
-                        Expr::Ident(name) if name.starts_with("str_") || name == "to_string"
+                        Expr::Ident(name)
+                            if matches!(
+                                name.as_str(),
+                                "str_concat"
+                                    | "str_repeat"
+                                    | "str_slice"
+                                    | "str_trim"
+                                    | "str_join"
+                                    | "str_from"
+                                    | "to_string"
+                                    | "format"
+                            )
                     )
             }
             _ => false,
