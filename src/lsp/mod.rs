@@ -12,7 +12,6 @@ pub(crate) mod completion;
 pub(crate) mod diagnostic;
 pub(crate) mod flow;
 pub(crate) mod folding;
-pub(crate) mod handlers;
 pub(crate) mod hierarchy;
 pub(crate) mod hover;
 pub(crate) mod inlay;
@@ -331,7 +330,4 @@ impl LspServer {
         }
     }
 
-    pub(crate) fn handle_message(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
-        handlers::handle_message(self, msg)
     }
-}
