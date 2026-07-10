@@ -207,10 +207,14 @@ impl<'a> Checker<'a> {
             "pop" => {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "pop expects 1 argument");
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                let list_ty = self.infer_expr(&args[0], scopes);
+                let elem_ty = match &list_ty {
+                    Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
+                    _ => Type::Name("unknown".into(), vec![]),
+                };
+                return elem_ty;
             }
             "min" | "max" => {
                 if args.len() != 2 {

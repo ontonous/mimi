@@ -883,8 +883,13 @@ impl Parser {
                 new_args.extend(args);
                 Ok(Expr::Call(callee, new_args))
             }
-            Expr::Ident(_) | Expr::Field(_, _) | Expr::Turbofish(_, _, _) => {
+            Expr::Ident(_) | Expr::Field(_, _) => {
                 Ok(Expr::Call(Box::new(rhs), vec![lhs]))
+            }
+            Expr::Turbofish(func_name, type_args, mut turbofish_args) => {
+                // a |> name::<T>(b, c) → Turbofish(name, [T], [a, b, c])
+                turbofish_args.insert(0, lhs);
+                Ok(Expr::Turbofish(func_name, type_args, turbofish_args))
             }
             _ => {
                 let line = self.peek().line;
