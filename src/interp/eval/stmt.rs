@@ -395,9 +395,9 @@ impl<'a> Interpreter<'a> {
         let result = self.eval_block(block);
 
         // Check for escape in outer scopes
-        let outer_count = self.env.len() - 1;
+        let outer_count = self.scope_env.env.len() - 1;
         let mut escape_var = None;
-        for scope in self.env.iter().take(outer_count) {
+        for scope in self.scope_env.env.iter().take(outer_count) {
             for (name, val) in scope {
                 if contains_arena_ref(val, arena_id) {
                     escape_var = Some(name.clone());
@@ -527,13 +527,7 @@ impl<'a> Interpreter<'a> {
                     }
                     Value::IndexRefMut { owner, index } => {
                         // Ensure the owner variable is mutable
-                        let is_mut = self
-                            .mut_vars
-                            .iter()
-                            .rev()
-                            .find_map(|s| s.get(&owner))
-                            .copied()
-                            .unwrap_or(false);
+                        let is_mut = self.is_mutable(&owner);
                         if !is_mut {
                             return Err(InterpError::new(format!(
                                 "cannot assign through borrowed index into immutable variable '{}'",
@@ -703,7 +697,7 @@ impl<'a> Interpreter<'a> {
                         // Update the binding
                         if let Expr::Ident(name) = obj.as_ref() {
                             let mut found = false;
-                            for scope in self.env.iter_mut().rev() {
+                            for scope in self.scope_env.env.iter_mut().rev() {
                                 if scope.contains_key(name) {
                                     scope.insert(name.clone(), Value::List(items));
                                     found = true;
@@ -812,7 +806,7 @@ impl<'a> Interpreter<'a> {
         // Parasteps block: execute spawn statements in parallel
         // Collect spawn expressions and their results
         // Runtime assertion: scan current scope for LocalShared values
-        for scope in &self.env {
+        for scope in &self.scope_env.env {
             for val in scope.values() {
                 if crate::interp::value::contains_local_shared(val) {
                     return Err(InterpError::new(

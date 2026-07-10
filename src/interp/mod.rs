@@ -11,9 +11,11 @@ mod ffi_call;
 mod pattern;
 pub(crate) mod pool;
 mod quote;
+mod scope_env;
 mod value;
 
 pub use error::InterpError;
+pub use scope_env::ScopeEnv;
 pub use value::*;
 
 /// Alias for interpreter results.
@@ -35,11 +37,8 @@ pub(crate) enum LoopAction {
 
 pub struct Interpreter<'a> {
     file: &'a File,
-    env: Vec<HashMap<String, Value>>,
-    /// Track which variables have been moved (for move semantics)
-    moved_vars: Vec<HashMap<String, bool>>,
-    /// Track which variables are mutable
-    mut_vars: Vec<HashMap<String, bool>>,
+    /// Scope-level evaluation state (variable bindings, mutability, call stack)
+    pub scope_env: ScopeEnv,
     constructors: HashMap<String, usize>,
     /// Set of constructor names that are newtypes (for wrapping result in Value::Newtype)
     newtype_constructors: HashMap<String, bool>,
@@ -85,8 +84,6 @@ pub struct Interpreter<'a> {
     early_return: Option<Value>,
     /// Exit code signal from builtin `exit()`; once set, execution stops.
     exited: Option<i32>,
-    /// Call stack for error context (function names being executed)
-    call_stack: Vec<String>,
     /// Recursion depth guard to prevent stack overflow
     recursion_depth: usize,
     /// O(1) function lookup index: name -> FuncDef
@@ -157,9 +154,7 @@ impl<'a> Interpreter<'a> {
         Self::build_actor_index(&file.items, &mut actor_index);
         Self {
             file,
-            env: vec![HashMap::new()],
-            moved_vars: vec![HashMap::new()],
-            mut_vars: vec![HashMap::new()],
+            scope_env: ScopeEnv::new(),
             constructors,
             newtype_constructors,
             type_variants,
@@ -182,7 +177,6 @@ impl<'a> Interpreter<'a> {
             loop_action: None,
             early_return: None,
             exited: None,
-            call_stack: Vec::new(),
             recursion_depth: 0,
             func_index,
             actor_index,
@@ -869,15 +863,11 @@ impl<'a> Interpreter<'a> {
     }
 
     fn push_scope(&mut self) {
-        self.env.push(HashMap::new());
-        self.moved_vars.push(HashMap::new());
-        self.mut_vars.push(HashMap::new());
+        self.scope_env.push_scope();
     }
 
     fn pop_scope(&mut self) {
-        self.env.pop();
-        self.moved_vars.pop();
-        self.mut_vars.pop();
+        self.scope_env.pop_scope();
     }
 
     /// Run a closure inside a freshly pushed scope, guaranteeing that the
@@ -886,129 +876,61 @@ impl<'a> Interpreter<'a> {
     where
         F: FnOnce(&mut Self) -> Result<T, InterpError>,
     {
-        self.push_scope();
+        self.scope_env.push_scope();
         let result = f(self);
-        self.pop_scope();
+        self.scope_env.pop_scope();
         result
     }
 
     fn push_call(&mut self, func_name: &str) {
-        self.call_stack.push(func_name.to_string());
+        self.scope_env.push_call(func_name);
     }
 
     fn pop_call(&mut self) {
-        self.call_stack.pop();
+        self.scope_env.pop_call();
     }
 
     /// Convert a string error into an InterpError with current call stack context.
     fn interp_err(&self, msg: String) -> InterpError {
-        InterpError::new(msg).with_call_stack(self.call_stack.clone())
+        self.scope_env.interp_err(msg)
     }
 
     /// Convert a string error with operation context into an InterpError.
     fn interp_err_op(&self, msg: String, op: &str) -> InterpError {
-        InterpError::with_op(msg, op).with_call_stack(self.call_stack.clone())
+        self.scope_env.interp_err_op(msg, op)
     }
 
     fn bind(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        let env = self
-            .env
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind")?;
-        env.insert(name.into(), value);
-        self.moved_vars
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind")?
-            .insert(name.into(), false);
-        // Default to immutable unless explicitly marked as mutable
-        self.mut_vars
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind")?
-            .entry(name.into())
-            .or_insert(false);
-        Ok(())
+        self.scope_env.bind(name, value)
     }
 
     fn bind_mut(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        self.env
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind_mut")?
-            .insert(name.into(), value);
-        self.moved_vars
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind_mut")?
-            .insert(name.into(), false);
-        self.mut_vars
-            .last_mut()
-            .ok_or("internal error: scope stack empty in bind_mut")?
-            .insert(name.into(), true);
-        Ok(())
+        self.scope_env.bind_mut(name, value)
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
-        for (scope, moved) in self.env.iter().zip(self.moved_vars.iter()).rev() {
-            if let Some(v) = scope.get(name) {
-                if moved.get(name).copied().unwrap_or(false) {
-                    return None; // Treat moved vars as undefined
-                }
-                return Some(v.clone());
-            }
+        let v = self.scope_env.lookup(name);
+        if v.is_some() {
+            return v;
         }
         // Check globals
         self.globals.get(name).cloned()
     }
 
     fn is_mutable(&self, name: &str) -> bool {
-        for mut_scope in self.mut_vars.iter().rev() {
-            if let Some(&is_mut) = mut_scope.get(name) {
-                return is_mut;
-            }
-        }
-        false
+        self.scope_env.is_mutable(name)
     }
 
     fn is_moved(&self, name: &str) -> bool {
-        for moved in self.moved_vars.iter().rev() {
-            if let Some(&m) = moved.get(name) {
-                return m;
-            }
-        }
-        false
+        self.scope_env.is_moved(name)
     }
 
     fn mark_moved(&mut self, name: &str) {
-        for moved in self.moved_vars.iter_mut().rev() {
-            if moved.contains_key(name) {
-                moved.insert(name.into(), true);
-                return;
-            }
-        }
+        self.scope_env.mark_moved(name)
     }
 
     fn assign(&mut self, name: &str, value: Value) -> Result<(), InterpError> {
-        for (scope, moved) in self.env.iter_mut().zip(self.moved_vars.iter_mut()).rev() {
-            if scope.contains_key(name) {
-                // Check if variable is mutable
-                for mut_scope in self.mut_vars.iter().rev() {
-                    if let Some(&is_mut) = mut_scope.get(name) {
-                        if !is_mut {
-                            return Err(InterpError::new(format!(
-                                "cannot assign to immutable variable '{}'",
-                                name
-                            )));
-                        }
-                        break;
-                    }
-                }
-                scope.insert(name.into(), value);
-                moved.insert(name.into(), false);
-                return Ok(());
-            }
-        }
-        Err(InterpError::new(format!(
-            "undefined variable '{}' in assignment",
-            name
-        )))
+        self.scope_env.assign(name, value)
     }
 
     /// Push a new compensation scope level

@@ -70,7 +70,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Errno> {
         if let Some(ensures_expr) = &contract.ensures {
             self.push_scope();
-            self.env
+            self.scope_env.env
                 .last_mut()
                 .ok_or_else(|| {
                     Errno::Generic("FFI call: no scope after push (impossible)".to_string())
