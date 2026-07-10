@@ -186,7 +186,7 @@ func main() -> i32 {
     42
 }
 "#;
-    let diagnostics = server.compute_diagnostics(text);
+    let diagnostics = server.compute_diagnostics(text, None);
     assert!(diagnostics.is_empty());
 }
 
@@ -195,7 +195,7 @@ fn lsp_diagnostics_parse_error() {
     use crate::lsp::LspServer;
     let server = LspServer::new();
     let text = "func main() -> i32 {";
-    let diagnostics = server.compute_diagnostics(text);
+    let diagnostics = server.compute_diagnostics(text, None);
     assert!(!diagnostics.is_empty());
 }
 
@@ -209,7 +209,7 @@ func main() -> i32 {
     x
 }
 "#;
-    let diagnostics = server.compute_diagnostics(text);
+    let diagnostics = server.compute_diagnostics(text, None);
     assert!(!diagnostics.is_empty());
 }
 

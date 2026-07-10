@@ -94,7 +94,7 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
                 .as_str()?;
             server.cache_put(uri.to_string(), text.to_string());
             // Publish diagnostics
-            let diagnostics = server.compute_diagnostics(text);
+            let diagnostics = server.compute_diagnostics(text, Some(uri));
             Some(serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/publishDiagnostics",
@@ -119,7 +119,7 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
 
             let text = changes.first()?.get("text")?.as_str()?;
             server.cache_put(uri.to_string(), text.to_string());
-            let mut diagnostics = server.compute_diagnostics(text);
+            let mut diagnostics = server.compute_diagnostics(text, Some(uri));
             let verif_diags =
                 server.compute_verification_diagnostics(text, server.last_cursor_line, uri);
             diagnostics.extend(verif_diags);
@@ -154,7 +154,7 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
                 .and_then(|t| t.as_str())
                 .or_else(|| server.documents.get(uri).map(|s| s.as_str()))
                 .unwrap_or("");
-            let diagnostics = server.compute_diagnostics(text);
+            let diagnostics = server.compute_diagnostics(text, Some(uri));
             Some(serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/publishDiagnostics",
