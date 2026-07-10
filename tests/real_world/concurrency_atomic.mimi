@@ -1,0 +1,8 @@
+func main() -> i32 {
+    let a = atomic_i32_new(5)
+    atomic_i32_store(a, 10)
+    let v = atomic_i32_load(a)
+    let prev = atomic_i32_fetch_add(a, 3)
+    let ok = v == 10 && prev == 10 && atomic_i32_load(a) == 13
+    if ok { 0 } else { 1 }
+}

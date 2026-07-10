@@ -1,0 +1,13 @@
+func main() -> i32 {
+    let path = "/tmp/mimi_rw_test.txt"
+    let _ = write_file(path, "hello world")
+
+    // Read back and verify content
+    match read_file(path) {
+        Ok(content) => {
+            if content != "hello world" { 2 }
+            else { 0 }
+        }
+        Err(_) => 1
+    }
+}

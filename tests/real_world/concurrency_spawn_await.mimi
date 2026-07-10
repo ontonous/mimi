@@ -1,0 +1,7 @@
+func add(a: i32, b: i32) -> i32 { a + b }
+
+func main() -> i32 {
+    let t = spawn add(2, 3)
+    let r = await t
+    if r == 5 { 0 } else { 1 }
+}

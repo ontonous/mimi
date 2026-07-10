@@ -1,0 +1,8 @@
+func main() -> i32 {
+    let a = clamp(10, 0, 5)
+    let b = double(7)
+    let c = identity(7)
+    let d = is_even(4)
+    let ok = a > 4 && a < 6 && b > 13 && b < 15 && c == 7 && d
+    if ok { 0 } else { 1 }
+}

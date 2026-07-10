@@ -1,0 +1,6 @@
+type Box<T> { value: T }
+
+func main() -> i32 {
+    let b = Box { value: 42 }
+    if b.value == 42 { 0 } else { 1 }
+}

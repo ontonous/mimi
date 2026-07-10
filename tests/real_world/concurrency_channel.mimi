@@ -1,0 +1,6 @@
+func main() -> i32 {
+    let ch = channel_new()
+    channel_send(ch, 99)
+    let v = channel_recv(ch)
+    if v == 99 { 0 } else { 1 }
+}
