@@ -327,15 +327,17 @@ impl<'a> Interpreter<'a> {
                 ))
             }
             Expr::MapLiteral { entries } => {
-                // Evaluate map literal at quote time and interpolate the result
-                let v = self.eval_expr(&Expr::MapLiteral {
-                    entries: entries.clone(),
-                })?;
-                Ok(QuotedAst::Interpolate(Box::new(v)))
+                let mut q_entries = Vec::new();
+                for (k, v) in entries {
+                    let qk = self.quote_expr(k)?;
+                    let qv = self.quote_expr(v)?;
+                    q_entries.push((qk, qv));
+                }
+                Ok(QuotedAst::MapLiteral(q_entries))
             }
             Expr::SetLiteral(elems) => {
-                let v = self.eval_expr(&Expr::SetLiteral(elems.clone()))?;
-                Ok(QuotedAst::Interpolate(Box::new(v)))
+                let q_elems: Result<Vec<_>, _> = elems.iter().map(|e| self.quote_expr(e)).collect();
+                Ok(QuotedAst::SetLiteral(q_elems?))
             }
             Expr::NamedArg(name, value) => Ok(QuotedAst::NamedArg(
                 name.clone(),
@@ -761,6 +763,26 @@ impl<'a> Interpreter<'a> {
                 let vals: Result<Vec<_>, _> =
                     elems.iter().map(|e| self.eval_quoted_ast(e)).collect();
                 Ok(Value::Tuple(vals?))
+            }
+            QuotedAst::MapLiteral(entries) => {
+                let mut map = std::collections::HashMap::new();
+                for (k, v) in entries {
+                    let key = self.eval_quoted_ast(k)?;
+                    let val = self.eval_quoted_ast(v)?;
+                    let key_str = key.to_string();
+                    map.insert(key_str, val);
+                }
+                Ok(Value::Record(None, map))
+            }
+            QuotedAst::SetLiteral(elems) => {
+                let mut vals: Vec<Value> = Vec::new();
+                for e in elems {
+                    let v = self.eval_quoted_ast(e)?;
+                    if !vals.iter().any(|existing| values_equal(existing, &v)) {
+                        vals.push(v);
+                    }
+                }
+                Ok(Value::Set(vals))
             }
             QuotedAst::Call(callee, args) => {
                 let func_val = self.eval_quoted_ast(callee)?;
