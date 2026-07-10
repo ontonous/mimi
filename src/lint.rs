@@ -523,8 +523,7 @@ fn detect_eq_bool_in_expr(
                 Expr::Literal(Lit::Bool(true)) => {
                     "comparison to `true` is unnecessary; use the expression directly"
                 }
-                Expr::Literal(Lit::Bool(false)) => "comparison to `false`; use `!expr` instead",
-                _ => unreachable!(),
+                _ => "comparison to `false`; use `!expr` instead",
             };
             diagnostics.push(Diagnostic::warning_code(
                 W008,
@@ -535,10 +534,7 @@ fn detect_eq_bool_in_expr(
         Expr::Binary(op, lhs, rhs) if *op == BinOp::NeCmp && is_bool_lit(rhs) => {
             let msg = match &**rhs {
                 Expr::Literal(Lit::Bool(true)) => "comparison to `true`; use `!expr` instead",
-                Expr::Literal(Lit::Bool(false)) => {
-                    "comparison to `false` is unnecessary; use the expression directly"
-                }
-                _ => unreachable!(),
+                _ => "comparison to `false` is unnecessary; use the expression directly",
             };
             diagnostics.push(Diagnostic::warning_code(
                 W008,
