@@ -346,6 +346,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);
+                                        } else if crate::codegen::builtins::is_builtin(func_name) {
+                                            let obj_type = self.infer_object_type(init, vars);
+                                            if !obj_type.is_empty() && obj_type.as_str() != func_name.as_str() {
+                                                self.var_type_names
+                                                    .insert(name.clone(), obj_type);
+                                            }
                                         } else if let Some((ret_ty, is_async)) = self
                                             .func_defs
                                             .get(func_name)
