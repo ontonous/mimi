@@ -86,6 +86,7 @@ pub func input_line() -> Result<string, string> {
     }
 }
 
+// input_int: Reads a line from stdin and parses it as an integer.
 pub func input_int() -> Result<i32, string> {
     let parsed = input_line()
     if parsed.is_err() {
@@ -100,6 +101,7 @@ pub func input_int() -> Result<i32, string> {
     }
 }
 
+// input_float: Reads a line from stdin and parses it as a float.
 pub func input_float() -> Result<f64, string> {
     let parsed = input_line()
     if parsed.is_err() {
@@ -117,6 +119,7 @@ pub func input_float() -> Result<f64, string> {
 
 
 
+// input_bool: Reads a line from stdin and parses it as "true"/"false".
 pub func input_bool() -> Result<bool, string> {
     let parsed = input_line()
     if parsed.is_err() {
