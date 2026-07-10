@@ -600,4 +600,44 @@ mod tests {
             assert_eq!(old_e.len(), flow_e.len(), "errors: {name}");
         }
     }
+
+    /// Regression test for the mms{} block parser.
+    /// Previously `first_col.unwrap_or(0)` masked an invariant — we want
+    /// the mms body to be preserved verbatim through the parser.
+    #[test]
+    fn mms_block_nested_braces_preserved() {
+        let src = r#"func test() -> i32 {
+            mms{
+                desc {
+                    page 10
+                }
+            }
+            return 0
+        }"#;
+        let tokens = Lexer::new(src).tokenize().expect("lex");
+        let file = flow_parse(tokens, ParseMode::Production).expect("parse");
+        let func_body = file
+            .items
+            .first()
+            .and_then(|i| match i {
+                crate::ast::Item::Func(f) => Some(&f.body),
+                _ => None,
+            })
+            .expect("expected first item to be a function");
+        let mms = func_body
+            .iter()
+            .find_map(|s| match s {
+                crate::ast::Stmt::MmsBlock { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("expected MmsBlock statement in function body");
+        assert!(
+            mms.contains("desc"),
+            "outer content should keep 'desc' marker: {mms:?}"
+        );
+        assert!(
+            mms.contains("page 10"),
+            "outer content should keep nested page: {mms:?}"
+        );
+    }
 }

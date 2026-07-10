@@ -249,7 +249,9 @@ impl Parser {
                     first_line = Some(tok.line);
                     first_col = Some(tok.col);
                 }
-                let base_col = first_col.unwrap_or(0);
+                // SAFETY: first_col is set immediately above on the first
+                // non-empty token, so it is Some whenever we reach here.
+                let base_col = first_col.expect("first_col set on first non-empty token");
                 let relative_col = tok.col.saturating_sub(base_col);
                 if text.ends_with('\n') || text.is_empty() {
                     text.push_str(&" ".repeat(relative_col));
@@ -298,7 +300,9 @@ impl Parser {
                         first_line = Some(tok.line);
                         first_col = Some(tok.col);
                     }
-                    let base_col = first_col.unwrap_or(0);
+                    // SAFETY: first_col is set on the first non-empty token,
+                    // so it is Some whenever we reach here.
+                    let base_col = first_col.expect("first_col set on first non-empty token");
                     let relative_col = tok.col.saturating_sub(base_col);
                     if text.ends_with('\n') || text.is_empty() {
                         text.push_str(&" ".repeat(relative_col));
