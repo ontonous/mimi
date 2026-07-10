@@ -48,11 +48,18 @@ pub(crate) fn run(
 }
 
 /// Extract the integer exit code from an interpreter return value.
-/// Unit returns are mapped to 0.
+/// Unit returns are mapped to 0 (success). Bool maps to 0=true (success)
+/// and 1=false (failure), matching Unix convention.
 fn value_to_exit_code(value: &mimi::interp::Value) -> i32 {
     match value {
         mimi::interp::Value::Int(n) => *n as i32,
-        mimi::interp::Value::Bool(b) => *b as i32,
+        mimi::interp::Value::Bool(b) => {
+            if *b {
+                0
+            } else {
+                1
+            }
+        }
         mimi::interp::Value::Unit => 0,
         _ => 0,
     }

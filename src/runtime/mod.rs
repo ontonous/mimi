@@ -770,11 +770,17 @@ pub extern "C" fn mimi_map_set(
 /// The caller must `free` the returned pointer with `mimi_string_free`.
 #[no_mangle]
 pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
-    // Heuristic: typical user-space heap addresses are >= 0x10000 and
-    // < 0x8000_0000_0000_0000 on x86-64 Linux. Small integers (including
-    // 0, negative overflow) are below this range.
-    let is_likely_ptr = (0x10000usize..0x7fff_ffff_ffff_fffe).contains(&value);
-    if !is_likely_ptr {
+    // Heuristic: typed map values use raw i64 representation.  Integer
+    // values (small ints) are distinguishable from heap-allocated string
+    // pointers by their address range: heap pointers from the Mimi runtime
+    // (via malloc) are at least 64KB-aligned on modern allocators.
+    // Use a conservative threshold: anything below 1MB is treated as an
+    // integer; anything at or above 1MB is likely a valid heap pointer.
+    // This is not foolproof (a heap that mmap's below 1MB would break it),
+    // but it's safer than a too-broad range that catches values like 200000.
+    const PTR_THRESHOLD: usize = 1_048_576; // 1MB
+    let val_usize = value as usize;
+    if val_usize < PTR_THRESHOLD || val_usize >= usize::MAX - 4096 {
         // Format as integer: sprintf(buf, "%ld", (i64)value)
         let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
         if buf.is_null() {
@@ -785,19 +791,12 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         }
         return buf;
     }
-    // Treat as a C string pointer. Copy the string so the caller can
-    // own it (the original pointer may be to a string literal or a
-    // runtime string that goes out of scope).
+    // Treat as a C string pointer (likely heap-allocated by the Mimi runtime).
     let ptr = value as *const std::ffi::c_char;
-    if ptr.is_null() {
-        let buf = unsafe { libc::malloc(1) as *mut std::ffi::c_char };
-        if !buf.is_null() {
-            unsafe { *buf = 0 };
-        }
-        return buf;
-    }
-    // SAFETY: ptr is non-null and we assume it's a valid C string.
-    // The caller must ensure the value came from a map set with a string.
+    // SAFETY: ptr is >= 1MB and < top of address space. We assume it was
+    // allocated by the Mimi runtime as a null-terminated C string.
+    // This is inherently heuristic — callers that pass integer values with
+    // magnitude >= 1MB will cause `strlen` to read arbitrary memory.
     let len = unsafe { libc::strlen(ptr) };
     let buf = unsafe { libc::malloc(len + 1) as *mut u8 };
     if buf.is_null() {

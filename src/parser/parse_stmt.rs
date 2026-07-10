@@ -226,15 +226,15 @@ impl Parser {
     fn parse_brace_block_content(&mut self) -> Result<String, ParseError> {
         self.expect(TokenKind::LBrace, "`{`")?;
         let mut text = String::new();
-        let mut depth = 1;
+        let mut depth = 1u32;
         let mut first_line = None;
         let mut first_col = None;
-        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+        while !self.at(&TokenKind::Eof) {
             let tok = self.peek();
             match &tok.kind {
                 TokenKind::LBrace => depth += 1,
                 TokenKind::RBrace => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         break;
                     }
@@ -275,15 +275,15 @@ impl Parser {
             self.expect_string()?
         } else {
             let mut text = String::new();
-            let mut depth = 1;
+            let mut depth = 1u32;
             let mut first_line = None;
             let mut first_col = None;
-            while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            while !self.at(&TokenKind::Eof) {
                 let tok = self.peek();
                 match &tok.kind {
                     TokenKind::LBrace => depth += 1,
                     TokenKind::RBrace => {
-                        depth -= 1;
+                        depth = depth.saturating_sub(1);
                         if depth == 0 {
                             break;
                         }

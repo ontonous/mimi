@@ -272,20 +272,18 @@ impl LspServer {
             // Read JSON body
             let mut body = vec![0u8; len];
 
-            // Consume the \r\n separator between the Content-Length header
-            // line and the JSON body.  read_line includes the trailing \n
-            // but the protocol spec requires \r\n before the body.  The
-            // \r\n after the header line is the separator — consume both
-            // bytes so read_exact starts at the actual JSON body.
-            {
-                let mut sep = [0u8; 2];
-                if reader.read(&mut sep).unwrap_or(0) < 2 {
-                    // If the separator is just a single \n (some clients),
-                    // the first byte consumed is the \n.  A second read
-                    // would be the next header — bail out and let the loop
-                    // re-read the header.
-                    return Err("short separator".to_string());
-                }
+            // Consume the separator between the Content-Length header
+            // line and the JSON body.  read_line includes the trailing \n.
+            // The protocol spec requires \r\n before the body, but some
+            // clients send only \n.  Read one byte (the \n that was already
+            // consumed by read_line) and optionally a \r byte before it.
+            // Then discard the \r if present.
+            let mut single = [0u8; 1];
+            let _ = reader.read(&mut single);
+            if single[0] == b'\r' {
+                // \r\n — consume the trailing \n too
+                let mut nl = [0u8; 1];
+                let _ = reader.read(&mut nl);
             }
 
             reader
