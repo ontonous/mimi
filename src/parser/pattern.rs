@@ -41,9 +41,12 @@ impl Parser {
                 if self.at(&TokenKind::LParen) {
                     self.advance();
                     let mut pats = Vec::new();
+                    let mut idx = 0usize;
                     if !self.at(&TokenKind::RParen) {
                         loop {
-                            pats.push(self.parse_pattern()?);
+                            let p = self.parse_pattern()?;
+                            pats.push((format!("_{}", idx), p));
+                            idx += 1;
                             if !self.at(&TokenKind::Comma) {
                                 break;
                             }
@@ -72,10 +75,7 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RBrace, "`}`")?;
-                    Ok(Pattern::Constructor(
-                        name,
-                        fields.into_iter().map(|(_, p)| p).collect(),
-                    ))
+                    Ok(Pattern::Constructor(name, fields))
                 } else if name == "_" {
                     Ok(Pattern::Wildcard)
                 } else {

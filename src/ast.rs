@@ -221,7 +221,7 @@ pub enum Pattern {
     Wildcard,
     Variable(String),
     Literal(Lit),
-    Constructor(String, Vec<Pattern>),
+    Constructor(String, Vec<(String, Pattern)>),
     Tuple(Vec<Pattern>),
     /// Array pattern: [p1, p2, ...]
     Array(Vec<Pattern>),

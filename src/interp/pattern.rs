@@ -78,7 +78,7 @@ impl<'a> Interpreter<'a> {
                         if pats.len() != vals.len() {
                             return false;
                         }
-                        for (p, v) in pats.iter().zip(vals.iter()) {
+                        for ((_, p), v) in pats.iter().zip(vals.iter()) {
                             if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
                                 return false;
                             }
@@ -87,7 +87,7 @@ impl<'a> Interpreter<'a> {
                     }
                     // Handle newtype pattern matching: UserId(v) matches Newtype(name, v)
                     Value::Newtype(_name, inner) if pats.len() == 1 => {
-                        self.match_pattern_inner(&pats[0], inner, allow_constructor, bindings)
+                        self.match_pattern_inner(&pats[0].1, inner, allow_constructor, bindings)
                     }
                     _ => false,
                 }
