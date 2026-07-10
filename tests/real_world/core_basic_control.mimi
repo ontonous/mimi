@@ -1,0 +1,16 @@
+func main() -> i32 {
+    let mut n = 0
+    let mut i = 0
+    while i < 5 {
+        n += i
+        i += 1
+    }
+    for j in range(0, 3) {
+        n += j
+    }
+    if n == 13 {
+        0
+    } else {
+        1
+    }
+}

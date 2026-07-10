@@ -1,0 +1,11 @@
+pub func double(x: i32) -> i32 {
+    x * 2
+}
+
+pub func greet(name: string) -> string {
+    "Hello, " + name + "!"
+}
+
+pub func factorial(n: i32) -> i32 {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}

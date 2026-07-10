@@ -1,0 +1,8 @@
+use std::env
+
+func main() -> i32 {
+    let args = cli_args()
+    let has_path = has_var("PATH")
+    let count = arg_count()
+    if count >= 0 && has_path { 0 } else { 1 }
+}

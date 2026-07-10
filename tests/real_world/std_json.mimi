@@ -1,0 +1,75 @@
+type Config { name: string, count: i64 }
+type JsonRecord { name: string, value: i32, flag: bool }
+
+func main() -> i32 {
+    // Record deserialization
+    let s = "{\"name\":\"mimi\",\"count\":42}"
+    let cfg = from_json::<Config>(s)
+    if cfg.name != "mimi" || cfg.count != 42 { return 1 }
+
+    // List deserialization
+    let nums = from_json::<List<i32>>("[10, 20, 30]")
+    if nums[0] != 10 || nums[1] != 20 || nums[2] != 30 { return 2 }
+
+    // Empty list
+    let empty = from_json::<List<i32>>("[]")
+    if len(empty) != 0 { return 3 }
+
+    // String list
+    let items = from_json::<List<string>>("[\"hello\",\"world\"]")
+    if items[0] != "hello" || items[1] != "world" { return 4 }
+
+    // Float list
+    let floats = from_json::<List<f64>>("[1.5, 2.5, 3.5]")
+    if floats[0] != 1.5 || floats[1] != 2.5 || floats[2] != 3.5 { return 5 }
+
+    // Bool list
+    let bools = from_json::<List<bool>>("[true, false, true]")
+    if bools[0] != true || bools[1] != false || bools[2] != true { return 6 }
+
+    // Record to_json
+    let rec = JsonRecord { name: "hi", value: 7, flag: true }
+    if to_json(rec) != "{\"flag\":true,\"name\":\"hi\",\"value\":7}" { return 19 }
+
+    // List of records (from_json::<List<RecordType>>)
+    let rec_list = from_json::<List<JsonRecord>>("[{\"name\":\"x\",\"value\":10,\"flag\":true},{\"name\":\"y\",\"value\":20,\"flag\":false}]")
+    if len(rec_list) != 2 { return 7 }
+    if rec_list[0].name != "x" || rec_list[0].value != 10 || rec_list[0].flag != true { return 8 }
+    if rec_list[1].name != "y" || rec_list[1].value != 20 || rec_list[1].flag != false { return 9 }
+    // Empty list of records
+    let empty_rec = from_json::<List<JsonRecord>>("[]")
+    if len(empty_rec) != 0 { return 70 }
+    // to_json of List<RecordType>
+    let rec_json = to_json(rec_list)
+    if rec_json != "[{\"flag\":true,\"name\":\"x\",\"value\":10},{\"flag\":false,\"name\":\"y\",\"value\":20}]" { return 71 }
+    // to_json of empty record list
+    let empty_rec_json = to_json(empty_rec)
+    if empty_rec_json != "[]" { return 72 }
+
+    // Mixed: string list with bool-like check
+    if len(items) != 2 { return 11 }
+    if len(floats) != 3 { return 12 }
+    if len(bools) != 3 { return 13 }
+
+    // --- to_json ---
+    // Scalar to_json
+    if to_json(42) != "42" { return 10 }
+    if to_json(true) != "true" { return 11 }
+    if to_json(false) != "false" { return 12 }
+    if to_json("hello") != "\"hello\"" { return 14 }
+
+    // List to_json
+    let list_to_json = from_json::<List<i32>>("[1, 2, 3]")
+    if to_json(list_to_json) != "[1,2,3]" { return 15 }
+
+    let str_list = from_json::<List<string>>("[\"a\",\"b\"]")
+    if to_json(str_list) != "[\"a\",\"b\"]" { return 16 }
+
+    let f64_list = from_json::<List<f64>>("[1.5, 2.5]")
+    if to_json(f64_list) != "[1.5,2.5]" { return 17 }
+
+    let bool_list = from_json::<List<bool>>("[true, false]")
+    if to_json(bool_list) != "[true,false]" { return 18 }
+
+    0
+}

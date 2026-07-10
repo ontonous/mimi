@@ -1,0 +1,8 @@
+use std::datetime
+
+func main() -> i32 {
+    let now = now_secs()
+    let future = days_from_now(1)
+    let fmt = format_duration_secs(3661)
+    if future > now && len(fmt) > 0 { 0 } else { 1 }
+}

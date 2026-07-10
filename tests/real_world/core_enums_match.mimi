@@ -1,0 +1,14 @@
+type Shape { Circle(f64) | Rect(f64, f64) }
+
+func area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h
+    }
+}
+
+func main() -> i32 {
+    let c = Circle(1.0)
+    let r = Rect(2.0, 3.0)
+    if area(c) > 3.0 && area(r) == 6.0 { 0 } else { 1 }
+}
