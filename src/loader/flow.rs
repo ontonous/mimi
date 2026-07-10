@@ -31,7 +31,6 @@ pub struct Acc {
     pub dep_paths: HashMap<String, PathBuf>,
     pub lock_entries: HashMap<String, lockfile::LockEntry>,
     pub base_dir: PathBuf,
-    visiting: HashSet<PathBuf>,
 }
 
 impl Acc {
@@ -91,14 +90,6 @@ pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule)
         return Ok((acc, m));
     }
 
-    // Cycle detection via visiting set
-    if !acc.visiting.insert(path.clone()) {
-        return Err(format!(
-            "circular dependency detected: {} imports itself",
-            path.display()
-        ));
-    }
-
     // Worklist as DFS stack. Each entry: (file_path, ancestor_chain).
     // ancestor_chain is the set of paths leading to this file (for cycle detection).
     let mut worklist: Vec<(PathBuf, Vec<PathBuf>)> = vec![(path.clone(), vec![path.clone()])];
@@ -138,7 +129,6 @@ pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule)
 
             // Add to worklist if not already processed
             if !parsed.contains_key(&import_path) && !acc.loaded.contains_key(&import_path) {
-                acc.visiting.insert(import_path.clone());
                 let mut child_ancestors = ancestors.clone();
                 child_ancestors.push(import_path.clone());
                 worklist.push((import_path, child_ancestors));
@@ -170,12 +160,6 @@ pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule)
             }
         }
     }
-
-    // Clean up visiting set for all files we processed
-    for (file_path, _) in &worklist {
-        acc.visiting.remove(file_path);
-    }
-    acc.visiting.remove(&path);
 
     // Return the main module
     let main_module = acc
@@ -259,7 +243,6 @@ fn resolve_import_path(from: &Path, import_path: &[String], acc: &Acc) -> Result
                 ]) {
                     if import_path.len() == 1
                         || found != dep_root.with_extension("mimi")
-                        || import_path.len() == 1
                     {
                         return Ok(found);
                     }

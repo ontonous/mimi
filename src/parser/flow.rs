@@ -341,7 +341,8 @@ impl FlowState {
                         Err(e) => {
                             if recovery {
                                 acc.errors.push(e);
-                                let new_pos = recover_to_sync_slice(tokens, pos + 1);
+                                let new_pos = recover_to_sync_slice(tokens, pos);
+                                let new_pos = if new_pos == pos { pos + 1 } else { new_pos };
                                 state_yield!(
                                     Imports { pos: new_pos },
                                     acc,
