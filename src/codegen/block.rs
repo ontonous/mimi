@@ -342,7 +342,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .insert(name.clone(), "Option".to_string());
                                     }
                                     _ => {
-                                        if let Some((type_name, _)) =
+                                        // Known builtins that return Result<string,string>
+                                        if matches!(
+                                            func_name.as_str(),
+                                            "read_file" | "write_file" | "read_file_partial"
+                                                | "read_file_bytes" | "write_file_bytes"
+                                                | "input" | "getenv" | "base64_decode"
+                                                | "mimi_lexer_tokenize" | "mimi_parse_source"
+                                        ) {
+                                            self.var_type_names.insert(
+                                                name.clone(),
+                                                "Result<string,string>".to_string(),
+                                            );
+                                        } else if let Some((type_name, _)) =
                                             self.find_variant_owner(func_name)
                                         {
                                             self.var_type_names.insert(name.clone(), type_name);

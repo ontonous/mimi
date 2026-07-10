@@ -95,8 +95,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "to_string"
                             | "int_to_string"
                             | "float_to_string"
-                            | "input"
-                            | "read_file"
                             | "chr"
                             | "str_char_at"
                             | "str_substring"
