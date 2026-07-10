@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::resolve_path;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::verifier::{VerifStatus, Verifier};
+use mimi::verifier::VerifStatus;
 use mimi::{lexer, loader, parser};
 
 pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
@@ -25,26 +25,22 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         file
     };
 
-    let mut verifier = Verifier::new()?;
-
-    // Dump Z3 assertions before verification if --dump-z3 is set
-    if dump_z3 {
-        // Run a lightweight no-op check to ensure solver is initialized,
-        // then dump debug info
+    let results = if dump_z3 {
+        // --dump-z3 needs access to Verifier::dump_smt2 after verification,
+        // which the Flow state machine doesn't expose. Keep direct for this case.
+        let mut verifier = mimi::verifier::Verifier::new()?;
         eprintln!("; Z3 SMT-LIB2 dump for {}", path.display());
         eprintln!("; (verification will proceed after dump)");
-    }
-
-    let results = verifier.verify_file(&merged_file);
-
-    // Dump Z3 assertions after population if --dump-z3 is set
-    if dump_z3 {
+        let results = verifier.verify_file(&merged_file);
         if let Some(smt2) = verifier.dump_smt2() {
             eprintln!("{}", smt2);
         } else {
             eprintln!("; (no Z3 assertions)");
         }
-    }
+        results
+    } else {
+        mimi::verifier::flow_verify_file_or_mock(&merged_file)?
+    };
 
     if results.is_empty() {
         println!("No contracts to verify in {}", path.display());

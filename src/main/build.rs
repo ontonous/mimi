@@ -154,9 +154,8 @@ pub(crate) fn build(
     }
 
     if verify_ffi {
-        match verifier::Verifier::with_timeout(5000) {
-            Ok(mut v) => {
-                let ffi_results = v.verify_ffi_call_sites(&merged_file);
+        match verifier::flow_verify_ffi_call_sites_or_mock(&merged_file) {
+            Ok(ffi_results) => {
                 for res in &ffi_results {
                     match res.status {
                         verifier::VerifStatus::Failed => {

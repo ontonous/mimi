@@ -61,6 +61,18 @@ impl VerifierState {
         })
     }
 
+    /// Create Ready state with a specific Z3 timeout (milliseconds).
+    pub fn with_timeout(file: &File, timeout_ms: u64) -> Result<Self, String> {
+        let mut verifier = Verifier::with_timeout(timeout_ms)?;
+        verifier.collect_func_defs(&file.items);
+        let queue = flatten_items(&file.items);
+        Ok(VerifierState::Ready {
+            verifier,
+            queue,
+            acc: FlowAcc::new(),
+        })
+    }
+
     /// Transition: process one function (body or extern) per Step event.
     /// Uses `self` by value — ownership moves in and out.
     pub fn transition(self, event: FlowEvent) -> Result<Self, String> {
@@ -151,6 +163,21 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Verify FFI call sites using the Flow wrapper.
+/// Calls `Verifier::verify_ffi_call_sites` — a one-shot operation (no per-func stepping).
+pub fn flow_verify_ffi_call_sites(file: &File) -> Result<Vec<VerificationResult>, String> {
+    let mut verifier = Verifier::new()?;
+    Ok(verifier.verify_ffi_call_sites(file))
+}
+
+/// Verify FFI call sites, falling back to mock if Z3 is unavailable.
+pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
+    match Verifier::new() {
+        Ok(mut v) => Ok(v.verify_ffi_call_sites(file)),
+        Err(_) => Ok(helpers::mock_verify_file(file)),
     }
 }
 
