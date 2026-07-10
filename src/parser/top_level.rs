@@ -346,8 +346,11 @@ impl Parser {
                         self.expect(TokenKind::At, "`@`")?;
                         Some(CapMode::Move) // Default to move
                     } else if self.at(&TokenKind::BitAnd) {
-                        // & means borrow
                         self.advance();
+                        // &mut is parsed but mutability isn't tracked in ExternParam
+                        if self.at(&TokenKind::Mut) {
+                            self.advance();
+                        }
                         Some(CapMode::Borrow)
                     } else {
                         None
