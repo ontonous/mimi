@@ -162,6 +162,8 @@ pub enum QuotedAst {
         body: Box<QuotedAst>,
     },
     NamedArg(String, Box<QuotedAst>),
+    MapLiteral(Vec<(QuotedAst, QuotedAst)>),
+    SetLiteral(Vec<QuotedAst>),
 }
 
 #[derive(Debug, Clone)]

@@ -290,7 +290,7 @@ impl<'a> Interpreter<'a> {
         Ok(domain as i64)
     }
 
-    /// Wrapper for libc::send that retries on EINTR.
+    /// Wrapper for libc::send that retries on EINTR and handles closed connections.
     fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpError> {
         let mut sent: isize = 0;
         while (sent as usize) < len {
@@ -303,6 +303,11 @@ impl<'a> Interpreter<'a> {
                     0,
                 )
             };
+            if n == 0 {
+                return Err(InterpError::new(
+                    "send: connection closed while sending data",
+                ));
+            }
             if n < 0 {
                 let err = unsafe { *libc::__errno_location() };
                 if err == libc::EINTR {
@@ -315,12 +320,18 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Wrapper for libc::recv that retries on EINTR.
-    fn recv_all(fd: i32, buf: &mut [u8]) -> Result<usize, InterpError> {
+    /// Read all data from a socket until the connection is closed.
+    fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
+        let mut chunk = vec![0u8; 32768];
         loop {
-            // SAFETY: fd is valid, buf is a writable slice.
+            // SAFETY: fd is valid, chunk is a writable slice.
             let n = unsafe {
-                libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+                libc::recv(
+                    fd,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                    0,
+                )
             };
             if n < 0 {
                 let err = unsafe { *libc::__errno_location() };
@@ -329,8 +340,12 @@ impl<'a> Interpreter<'a> {
                 }
                 return Err(InterpError::new(format!("recv error: {}", err)));
             }
-            return Ok(n as usize);
+            if n == 0 {
+                break;
+            }
+            result.extend_from_slice(&chunk[..n as usize]);
         }
+        Ok(())
     }
 
     fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
@@ -341,14 +356,13 @@ impl<'a> Interpreter<'a> {
             c_req.as_ptr() as *const libc::c_void,
             request.len(),
         )?;
-        let mut buf: Vec<u8> = vec![0u8; 65536];
-        let n = Self::recv_all(fd as i32, &mut buf)?;
+        let mut buf = Vec::new();
+        Self::recv_all_into(fd as i32, &mut buf)?;
         // SAFETY: fd/domain was validated by prior socket/connect calls.
         unsafe { libc::close(fd as i32) };
-        if n == 0 {
+        if buf.is_empty() {
             return Err(InterpError::new("http: empty response"));
         }
-        buf.truncate(n);
         Ok(String::from_utf8_lossy(&buf).to_string())
     }
 
