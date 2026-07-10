@@ -10,6 +10,7 @@ use crate::verifier::{VerifStatus, Verifier};
 pub(crate) mod code_actions;
 pub(crate) mod completion;
 pub(crate) mod diagnostic;
+pub(crate) mod flow;
 pub(crate) mod folding;
 pub(crate) mod handlers;
 pub(crate) mod hierarchy;
@@ -306,7 +307,9 @@ impl LspServer {
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.handle_message(&msg)
+                    let (new_self, response) = flow::transition(std::mem::take(self), &msg);
+                    *self = new_self;
+                    response
                 }));
                 match result {
                     Ok(Some(response)) => {
