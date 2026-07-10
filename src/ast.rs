@@ -134,7 +134,7 @@ pub struct FuncDef {
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Block,
-    pub where_clause: Option<WhereClause>,
+    pub where_clause: Vec<WhereClause>,
     pub generics: Vec<GenericParam>,
     pub effects: Vec<String>,
     pub is_comptime: bool,

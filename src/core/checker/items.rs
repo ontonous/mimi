@@ -255,10 +255,10 @@ impl<'a> Checker<'a> {
                         .insert(qualified_name.clone(), f.generics.clone());
                 }
                 // Store where clause if present
-                if let Some(where_clause) = &f.where_clause {
+                for wc in &f.where_clause {
                     self.where_clauses.insert(
-                        qualified_name.clone(),
-                        (where_clause.type_param.clone(), where_clause.bounds.clone()),
+                        f.name.clone(),
+                        (wc.type_param.clone(), wc.bounds.clone()),
                     );
                 }
                 // Store effects if present and validate against declared caps

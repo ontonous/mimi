@@ -64,7 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             params: func.params.clone(),
             ret: func.ret.clone(),
             body: func.body.clone(),
-            where_clause: None,
+            where_clause: Vec::new(),
             generics: vec![],
             effects: vec![],
             is_comptime: false,
