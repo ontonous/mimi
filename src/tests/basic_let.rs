@@ -180,12 +180,18 @@ func main() -> i32 {
 "#;
     let tokens = lexer::Lexer::new(src).tokenize().unwrap();
     let (file, errors) = parser::Parser::new(tokens).parse_file_with_recovery();
-    assert!(errors.is_empty(), "multiline let initializer should not error, got: {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "multiline let initializer should not error, got: {:?}",
+        errors
+    );
     // Verify the let binding exists with initializer
     use crate::ast::{Item, Stmt};
     let has_let = file.items.iter().any(|item| {
         if let Item::Func(func) = item {
-            func.body.iter().any(|stmt| matches!(stmt, Stmt::Let { init: Some(_), .. }))
+            func.body
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Let { init: Some(_), .. }))
         } else {
             false
         }

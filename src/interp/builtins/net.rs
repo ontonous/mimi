@@ -338,14 +338,8 @@ impl<'a> Interpreter<'a> {
         let mut chunk = vec![0u8; 32768];
         loop {
             // SAFETY: fd is valid, chunk is a writable slice.
-            let n = unsafe {
-                libc::recv(
-                    fd,
-                    chunk.as_mut_ptr() as *mut libc::c_void,
-                    chunk.len(),
-                    0,
-                )
-            };
+            let n =
+                unsafe { libc::recv(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len(), 0) };
             if n < 0 {
                 let err = unsafe { *libc::__errno_location() };
                 if err == libc::EINTR {

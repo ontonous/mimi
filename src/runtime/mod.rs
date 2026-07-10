@@ -994,7 +994,13 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     // H18: use checked_mul to prevent integer overflow on large maps.
     let data_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
         Some(s) => s,
-        None => return Box::into_raw(Box::new(MimiList { len: 0, data: std::ptr::null_mut(), owns_data: true })),
+        None => {
+            return Box::into_raw(Box::new(MimiList {
+                len: 0,
+                data: std::ptr::null_mut(),
+                owns_data: true,
+            }))
+        }
     };
     let data_ptr = if data_size > 0 {
         // SAFETY: data_size is positive and within reasonable bounds.
@@ -1012,7 +1018,9 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
                 alloc_c_string(k.as_str())
             };
             // SAFETY: data_ptr is valid, i is within bounds.
-            unsafe { *data_ptr.add(i) = entry; }
+            unsafe {
+                *data_ptr.add(i) = entry;
+            }
         }
     }
     let list = Box::new(MimiList {
@@ -3530,11 +3538,7 @@ pub extern "C" fn mimi_json_deserialize(
 /// Reconstructs the Vec<i64> and drops it, freeing both the data buffer and
 /// any heap-allocated string pointers (elem_type==2).
 #[no_mangle]
-pub extern "C" fn mimi_json_deserialize_free(
-    buf: *mut std::ffi::c_void,
-    len: i64,
-    elem_type: i64,
-) {
+pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i64, elem_type: i64) {
     if buf.is_null() || len <= 0 {
         return;
     }
@@ -3744,10 +3748,7 @@ pub extern "C" fn mimi_tuple_deserialize(
             _ => {
                 // Integer (or null literal)
                 // M8: detect null literal in JSON and write 0.
-                if pos + 3 < bytes.len()
-                    && bytes[pos] == b'n'
-                    && &bytes[pos..pos + 4] == b"null"
-                {
+                if pos + 3 < bytes.len() && bytes[pos] == b'n' && &bytes[pos..pos + 4] == b"null" {
                     pos += 4;
                     unsafe { *out_values.offset(idx as isize) = 0 }
                     idx += 1;
@@ -3766,9 +3767,15 @@ pub extern "C" fn mimi_tuple_deserialize(
                     match val.checked_mul(10) {
                         Some(v) => match v.checked_add(digit) {
                             Some(s) => val = s,
-                            None => { val = 0; break; }
+                            None => {
+                                val = 0;
+                                break;
+                            }
+                        },
+                        None => {
+                            val = 0;
+                            break;
                         }
-                        None => { val = 0; break; }
                     }
                     pos += 1;
                 }

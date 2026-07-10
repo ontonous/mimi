@@ -34,9 +34,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
-                    let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
-                        BasicTypeEnum::IntType(self.context.i64_type())
-                    });
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
                     val = self.adjust_int_val(val, ret_type)?;
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
@@ -345,10 +345,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         // Known builtins that return Result<string,string>
                                         if matches!(
                                             func_name.as_str(),
-                                            "read_file" | "write_file" | "read_file_partial"
-                                                | "read_file_bytes" | "write_file_bytes"
-                                                | "input" | "getenv" | "base64_decode"
-                                                | "mimi_lexer_tokenize" | "mimi_parse_source"
+                                            "read_file"
+                                                | "write_file"
+                                                | "read_file_partial"
+                                                | "read_file_bytes"
+                                                | "write_file_bytes"
+                                                | "input"
+                                                | "getenv"
+                                                | "base64_decode"
+                                                | "mimi_lexer_tokenize"
+                                                | "mimi_parse_source"
                                         ) {
                                             self.var_type_names.insert(
                                                 name.clone(),
@@ -360,9 +366,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.var_type_names.insert(name.clone(), type_name);
                                         } else if crate::codegen::builtins::is_builtin(func_name) {
                                             let obj_type = self.infer_object_type(init, vars);
-                                            if !obj_type.is_empty() && obj_type.as_str() != func_name.as_str() {
-                                                self.var_type_names
-                                                    .insert(name.clone(), obj_type);
+                                            if !obj_type.is_empty()
+                                                && obj_type.as_str() != func_name.as_str()
+                                            {
+                                                self.var_type_names.insert(name.clone(), obj_type);
                                             }
                                         } else if let Some((ret_ty, is_async)) = self
                                             .func_defs
@@ -924,9 +931,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(e)) => {
                     let mut val = self.compile_expr(e, vars)?;
-                    let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
-                        BasicTypeEnum::IntType(self.context.i64_type())
-                    });
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
                     val = self.adjust_int_val(val, ret_type)?;
                     // P0-4: heap-copy string returns so the caller
                     // doesn't later free() a .rodata literal pointer.

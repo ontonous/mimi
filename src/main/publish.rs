@@ -4,7 +4,13 @@ use mimi::pkg_registry;
 fn should_skip_entry(name: &str) -> bool {
     matches!(
         name,
-        ".git" | ".gitignore" | "target" | "node_modules" | ".DS_Store" | "Cargo.lock" | ".opencode"
+        ".git"
+            | ".gitignore"
+            | "target"
+            | "node_modules"
+            | ".DS_Store"
+            | "Cargo.lock"
+            | ".opencode"
     )
 }
 

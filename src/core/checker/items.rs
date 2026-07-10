@@ -256,10 +256,8 @@ impl<'a> Checker<'a> {
                 }
                 // Store where clause if present
                 for wc in &f.where_clause {
-                    self.where_clauses.insert(
-                        f.name.clone(),
-                        (wc.type_param.clone(), wc.bounds.clone()),
-                    );
+                    self.where_clauses
+                        .insert(f.name.clone(), (wc.type_param.clone(), wc.bounds.clone()));
                 }
                 // Store effects if present and validate against declared caps
                 if !f.effects.is_empty() {

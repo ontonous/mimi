@@ -664,7 +664,9 @@ fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
                 prev_char = ' ';
             }
             i += 1;
-            if ch != '\n' { col += 1; }
+            if ch != '\n' {
+                col += 1;
+            }
             continue;
         }
         if in_block_comment {
@@ -673,7 +675,10 @@ fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
                 i += 2;
                 col += 2;
             } else {
-                if ch == '\n' { line += 1; col = 0; }
+                if ch == '\n' {
+                    line += 1;
+                    col = 0;
+                }
                 i += 1;
                 col += 1;
             }

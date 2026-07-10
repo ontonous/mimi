@@ -1,22 +1,42 @@
 //! Flow-based Mimi lexer — state machine outer loop over the scanning logic.
 //!
 //! States: Start → LineStart → Dispatch → (scanning helper) → LineStart → ... → Done
-//! Each `Step` event processes one outer-loop iteration (skip whitespace, scan one token, etc.).
+//! Each `Step` event processes one outer-loop iteration.
+//! Transitions consume self and return new state (no output — tokens accumulate in acc).
 
 use crate::lexer::errors::{
-    dedent_mismatch, indent_not_multiple_of_four, tabs_not_allowed,
-    unexpected_character, unexpected_dollar, unterminated_block_comment,
-    unterminated_escape, unterminated_fstring, unterminated_fstring_escape,
-    unterminated_interpolation, unterminated_string, invalid_escape, LexerError,
+    dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
+    unexpected_character, unexpected_dollar, unterminated_block_comment, unterminated_escape,
+    unterminated_fstring, unterminated_fstring_escape, unterminated_interpolation,
+    unterminated_string, LexerError,
 };
 use crate::lexer::keywords::keyword_or_ident;
 use crate::lexer::token::{LexerMode, Token, TokenKind};
 use std::str::Chars;
 
+// ── Position advancement macros ──────────────────────────────────────
+
+/// Advance one character, discard it, return new position.
+macro_rules! next {
+    ($pos:expr) => {{
+        let (__p, _) = $pos.advance();
+        __p
+    }};
+}
+
+/// Advance one character, return (new_position, consumed_char).
+macro_rules! consume {
+    ($pos:expr) => {{
+        let (__p, __c) = $pos.advance();
+        (__p, __c)
+    }};
+}
+
 // ── Shared position state ────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct LexerPos<'a> {
+    #[allow(dead_code)]
     pub src: &'a str,
     pub chars: Chars<'a>,
     pub line: usize,
@@ -59,10 +79,7 @@ impl<'a> LexerPos<'a> {
         let mut pos = self;
         loop {
             match pos.peek() {
-                Some(' ') | Some('\t') | Some('\r') => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
-                }
+                Some(' ') | Some('\t') | Some('\r') => pos = next!(pos),
                 _ => break,
             }
         }
@@ -74,82 +91,85 @@ impl<'a> LexerPos<'a> {
         loop {
             match pos.peek() {
                 Some('\n') | None => break,
-                Some(_) => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
-                }
+                Some(_) => pos = next!(pos),
             }
         }
         pos
     }
 
     fn skip_block_comment(self) -> Result<Self, LexerError> {
-        let (pos, _) = self.advance();
-        let (mut pos, _) = pos.advance();
+        let pos = next!(self);
+        let mut pos = next!(pos);
         let mut depth: i32 = 1;
         while depth > 0 {
             match pos.peek() {
                 None => return Err(unterminated_block_comment(pos.line, pos.col)),
                 Some('*') => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
+                    pos = next!(pos);
                     if pos.peek() == Some('/') {
-                        let (new_pos, _) = pos.advance();
-                        pos = new_pos;
+                        pos = next!(pos);
                         depth -= 1;
                     }
                 }
                 Some('/') => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
+                    pos = next!(pos);
                     if pos.peek() == Some('*') {
-                        let (new_pos, _) = pos.advance();
-                        pos = new_pos;
+                        pos = next!(pos);
                         depth += 1;
                     }
                 }
-                Some(_) => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
-                }
+                Some(_) => pos = next!(pos),
             }
         }
         Ok(pos)
     }
 
     fn scan_string(self) -> Result<(Self, String), LexerError> {
-        let (pos, _) = self.advance();
-        let mut pos = pos;
+        let mut pos = next!(self);
         let mut s = String::new();
         loop {
             match pos.peek() {
                 None => return Err(unterminated_string(pos.line, pos.col)),
                 Some('"') => {
-                    let (new_pos, _) = pos.advance();
-                    pos = new_pos;
+                    pos = next!(pos);
                     break;
                 }
                 Some('\\') => {
-                    let (new_pos, _ch) = pos.advance();
-                    pos = new_pos;
+                    pos = next!(pos);
                     match pos.peek() {
-                        Some('n') => { s.push('\n'); let (np, _) = pos.advance(); pos = np; }
-                        Some('t') => { s.push('\t'); let (np, _) = pos.advance(); pos = np; }
-                        Some('r') => { s.push('\r'); let (np, _) = pos.advance(); pos = np; }
-                        Some('\\') => { s.push('\\'); let (np, _) = pos.advance(); pos = np; }
-                        Some('"') => { s.push('"'); let (np, _) = pos.advance(); pos = np; }
-                        Some('0') => { s.push('\0'); let (np, _) = pos.advance(); pos = np; }
+                        Some('n') => {
+                            s.push('\n');
+                            pos = next!(pos);
+                        }
+                        Some('t') => {
+                            s.push('\t');
+                            pos = next!(pos);
+                        }
+                        Some('r') => {
+                            s.push('\r');
+                            pos = next!(pos);
+                        }
+                        Some('\\') => {
+                            s.push('\\');
+                            pos = next!(pos);
+                        }
+                        Some('"') => {
+                            s.push('"');
+                            pos = next!(pos);
+                        }
+                        Some('0') => {
+                            s.push('\0');
+                            pos = next!(pos);
+                        }
                         Some('x') => {
                             let start_col = pos.col;
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                             let mut hex = String::with_capacity(2);
                             for _ in 0..2 {
                                 match pos.peek() {
                                     Some(c) if c.is_ascii_hexdigit() => {
                                         hex.push(c);
-                                        let (np, _) = pos.advance();
-                                        pos = np;
+                                        pos = next!(pos);
                                     }
                                     _ => break,
                                 }
@@ -157,23 +177,19 @@ impl<'a> LexerPos<'a> {
                             if hex.len() != 2 {
                                 return Err(invalid_escape("\\x", pos.line, start_col));
                             }
-                            let value = u8::from_str_radix(&hex, 16).unwrap();
-                            s.push(value as char);
+                            s.push(u8::from_str_radix(&hex, 16).unwrap() as char);
                         }
                         Some('u') => {
                             let start_col = pos.col;
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                             let mut code = String::new();
                             match pos.peek() {
                                 Some('{') => {
-                                    let (np, _) = pos.advance();
-                                    pos = np;
+                                    pos = next!(pos);
                                     while let Some(c) = pos.peek() {
                                         if c.is_ascii_hexdigit() || c == '_' {
                                             code.push(c);
-                                            let (np, _) = pos.advance();
-                                            pos = np;
+                                            pos = next!(pos);
                                         } else {
                                             break;
                                         }
@@ -184,16 +200,14 @@ impl<'a> LexerPos<'a> {
                                     if code.is_empty() {
                                         return Err(invalid_escape("\\u{}", pos.line, start_col));
                                     }
-                                    let (np, _) = pos.advance();
-                                    pos = np;
+                                    pos = next!(pos);
                                 }
                                 _ => {
                                     for _ in 0..4 {
                                         match pos.peek() {
                                             Some(c) if c.is_ascii_hexdigit() => {
                                                 code.push(c);
-                                                let (np, _) = pos.advance();
-                                                pos = np;
+                                                pos = next!(pos);
                                             }
                                             _ => break,
                                         }
@@ -210,14 +224,15 @@ impl<'a> LexerPos<'a> {
                                 None => return Err(invalid_escape("\\u", pos.line, start_col)),
                             }
                         }
-                        Some(c) => return Err(invalid_escape(&format!("\\{}", c), pos.line, pos.col)),
+                        Some(c) => {
+                            return Err(invalid_escape(&format!("\\{}", c), pos.line, pos.col))
+                        }
                         None => return Err(unterminated_escape(pos.line, pos.col)),
                     }
                 }
                 Some(c) => {
                     s.push(c);
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                 }
             }
         }
@@ -225,41 +240,61 @@ impl<'a> LexerPos<'a> {
     }
 
     fn scan_fstring(self) -> Result<(Self, String), LexerError> {
-        let (pos, _) = self.advance();
-        let (mut pos, _) = pos.advance();
+        let pos = next!(self);
+        let mut pos = next!(pos);
         let mut s = String::new();
         loop {
             match pos.peek() {
                 None => return Err(unterminated_fstring(pos.line, pos.col)),
                 Some('"') => {
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     break;
                 }
                 Some('\\') => {
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     match pos.peek() {
-                        Some('n') => { s.push('\n'); let (np, _) = pos.advance(); pos = np; }
-                        Some('t') => { s.push('\t'); let (np, _) = pos.advance(); pos = np; }
-                        Some('r') => { s.push('\r'); let (np, _) = pos.advance(); pos = np; }
-                        Some('\\') => { s.push_str("\\\\"); let (np, _) = pos.advance(); pos = np; }
-                        Some('"') => { s.push('"'); let (np, _) = pos.advance(); pos = np; }
-                        Some('{') => { s.push_str("\\{"); let (np, _) = pos.advance(); pos = np; }
-                        Some('}') => { s.push_str("\\}"); let (np, _) = pos.advance(); pos = np; }
-                        Some('0') => { s.push_str("\\0"); let (np, _) = pos.advance(); pos = np; }
+                        Some('n') => {
+                            s.push('\n');
+                            pos = next!(pos);
+                        }
+                        Some('t') => {
+                            s.push('\t');
+                            pos = next!(pos);
+                        }
+                        Some('r') => {
+                            s.push('\r');
+                            pos = next!(pos);
+                        }
+                        Some('\\') => {
+                            s.push_str("\\\\");
+                            pos = next!(pos);
+                        }
+                        Some('"') => {
+                            s.push('"');
+                            pos = next!(pos);
+                        }
+                        Some('{') => {
+                            s.push_str("\\{");
+                            pos = next!(pos);
+                        }
+                        Some('}') => {
+                            s.push_str("\\}");
+                            pos = next!(pos);
+                        }
+                        Some('0') => {
+                            s.push_str("\\0");
+                            pos = next!(pos);
+                        }
                         Some('x') => {
                             s.push_str("\\x");
                             let start_col = pos.col;
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                             let mut got = 0;
                             for _ in 0..2 {
                                 match pos.peek() {
                                     Some(c) if c.is_ascii_hexdigit() => {
                                         s.push(c);
-                                        let (np, _) = pos.advance();
-                                        pos = np;
+                                        pos = next!(pos);
                                         got += 1;
                                     }
                                     _ => break,
@@ -272,18 +307,15 @@ impl<'a> LexerPos<'a> {
                         Some('u') => {
                             s.push_str("\\u");
                             let start_col = pos.col;
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                             if pos.peek() == Some('{') {
                                 s.push('{');
-                                let (np, _) = pos.advance();
-                                pos = np;
+                                pos = next!(pos);
                                 let hex_start = s.len();
                                 while let Some(c) = pos.peek() {
                                     if c.is_ascii_hexdigit() || c == '_' {
                                         s.push(c);
-                                        let (np, _) = pos.advance();
-                                        pos = np;
+                                        pos = next!(pos);
                                     } else {
                                         break;
                                     }
@@ -295,16 +327,14 @@ impl<'a> LexerPos<'a> {
                                     return Err(invalid_escape("\\u{}", pos.line, start_col));
                                 }
                                 s.push('}');
-                                let (np, _) = pos.advance();
-                                pos = np;
+                                pos = next!(pos);
                             } else {
                                 let mut got = 0;
                                 for _ in 0..4 {
                                     match pos.peek() {
                                         Some(c) if c.is_ascii_hexdigit() => {
                                             s.push(c);
-                                            let (np, _) = pos.advance();
-                                            pos = np;
+                                            pos = next!(pos);
                                             got += 1;
                                         }
                                         _ => break,
@@ -315,14 +345,15 @@ impl<'a> LexerPos<'a> {
                                 }
                             }
                         }
-                        Some(c) => return Err(invalid_escape(&format!("\\{}", c), pos.line, pos.col)),
+                        Some(c) => {
+                            return Err(invalid_escape(&format!("\\{}", c), pos.line, pos.col))
+                        }
                         None => return Err(unterminated_fstring_escape(pos.line, pos.col)),
                     }
                 }
                 Some('{') => {
                     s.push('{');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     let mut depth = 1;
                     while let Some(c) = pos.peek() {
                         if c == '{' {
@@ -331,14 +362,12 @@ impl<'a> LexerPos<'a> {
                             depth -= 1;
                             if depth == 0 {
                                 s.push('}');
-                                let (np, _) = pos.advance();
-                                pos = np;
+                                pos = next!(pos);
                                 break;
                             }
                         }
                         s.push(c);
-                        let (np, _) = pos.advance();
-                        pos = np;
+                        pos = next!(pos);
                     }
                     if depth != 0 {
                         return Err(unterminated_interpolation(pos.line, pos.col));
@@ -346,8 +375,7 @@ impl<'a> LexerPos<'a> {
                 }
                 Some(c) => {
                     s.push(c);
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                 }
             }
         }
@@ -360,20 +388,16 @@ impl<'a> LexerPos<'a> {
         let mut is_float = false;
         if let Some('0') = pos.peek() {
             let mut tmp = pos.chars.clone();
-            let next = tmp.next();
-            match next {
+            match tmp.next() {
                 Some('x') | Some('X') => {
                     s.push('0');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     s.push('x');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     while let Some(c) = pos.peek() {
                         if c.is_ascii_hexdigit() || c == '_' {
                             s.push(c);
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                         } else {
                             break;
                         }
@@ -382,16 +406,13 @@ impl<'a> LexerPos<'a> {
                 }
                 Some('b') | Some('B') => {
                     s.push('0');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     s.push('b');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     while let Some(c) = pos.peek() {
                         if c == '0' || c == '1' || c == '_' {
                             s.push(c);
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                         } else {
                             break;
                         }
@@ -400,16 +421,13 @@ impl<'a> LexerPos<'a> {
                 }
                 Some('o') | Some('O') => {
                     s.push('0');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     s.push('o');
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                     while let Some(c) = pos.peek() {
                         if (c.is_ascii_digit() && c != '8' && c != '9') || c == '_' {
                             s.push(c);
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                         } else {
                             break;
                         }
@@ -422,8 +440,7 @@ impl<'a> LexerPos<'a> {
         while let Some(c) = pos.peek() {
             if c.is_ascii_digit() {
                 s.push(c);
-                let (np, _) = pos.advance();
-                pos = np;
+                pos = next!(pos);
             } else if c == '.' {
                 if is_float {
                     break;
@@ -432,15 +449,13 @@ impl<'a> LexerPos<'a> {
                 if tmp.next().map(|x| x.is_ascii_digit()).unwrap_or(false) {
                     is_float = true;
                     s.push(c);
-                    let (np, _) = pos.advance();
-                    pos = np;
+                    pos = next!(pos);
                 } else {
                     break;
                 }
             } else if c == '_' {
                 s.push(c);
-                let (np, _) = pos.advance();
-                pos = np;
+                pos = next!(pos);
             } else {
                 break;
             }
@@ -448,13 +463,11 @@ impl<'a> LexerPos<'a> {
         if let Some(ch) = pos.peek() {
             if ch == 'e' || ch == 'E' {
                 s.push(ch);
-                let (np, _) = pos.advance();
-                pos = np;
+                pos = next!(pos);
                 if let Some(sign) = pos.peek() {
                     if sign == '+' || sign == '-' {
                         s.push(sign);
-                        let (np, _) = pos.advance();
-                        pos = np;
+                        pos = next!(pos);
                     }
                 }
                 if pos.peek().map_or(false, |d| d.is_ascii_digit()) {
@@ -462,8 +475,7 @@ impl<'a> LexerPos<'a> {
                     while let Some(d) = pos.peek() {
                         if d.is_ascii_digit() || d == '_' {
                             s.push(d);
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                         } else {
                             break;
                         }
@@ -471,7 +483,11 @@ impl<'a> LexerPos<'a> {
                 }
             }
         }
-        let kind = if is_float { TokenKind::Float(s) } else { TokenKind::Int(s) };
+        let kind = if is_float {
+            TokenKind::Float(s)
+        } else {
+            TokenKind::Int(s)
+        };
         (pos, kind)
     }
 
@@ -482,8 +498,7 @@ impl<'a> LexerPos<'a> {
         while let Some(c) = pos.peek() {
             if c.is_alphanumeric() || c == '_' {
                 s.push(c);
-                let (np, _) = pos.advance();
-                pos = np;
+                pos = next!(pos);
             } else {
                 break;
             }
@@ -498,7 +513,6 @@ impl<'a> LexerPos<'a> {
 pub struct LexerAcc {
     pub tokens: Vec<Token>,
     pub indent_stack: Vec<usize>,
-    pub errors: Vec<LexerError>,
 }
 
 impl LexerAcc {
@@ -506,7 +520,6 @@ impl LexerAcc {
         LexerAcc {
             tokens: vec![],
             indent_stack: vec![0],
-            errors: vec![],
         }
     }
 }
@@ -515,52 +528,22 @@ impl LexerAcc {
 
 #[derive(Debug, Clone, Copy)]
 pub enum LexerEvent {
-    /// Advance to the next token-producing iteration
     Step,
-    /// Force finalization (flush de-dents, emit EOF)
+    #[allow(dead_code)]
     Complete,
 }
-
-// ── Output ───────────────────────────────────────────────────────────
-
-/// Optional token output from a transition.
-pub type LexerOutput = Option<Token>;
 
 // ── Flow macros ──────────────────────────────────────────────────────
 
 macro_rules! state_continue {
     ($variant:ident { $($field:ident $(: $val:expr)?),* $(,)? }, $pos:expr, $mode:expr, $at_line_start:expr, $acc:expr) => {
-        Ok((
-            LexerState::$variant {
-                pos: $pos,
-                mode: $mode,
-                at_line_start: $at_line_start,
-                acc: $acc,
-                $($field $(: $val)?),*
-            },
-            None,
-        ))
-    };
-}
-
-macro_rules! state_yield {
-    ($variant:ident { $($field:ident $(: $val:expr)?),* $(,)? }, $pos:expr, $mode:expr, $at_line_start:expr, $acc:expr, $output:expr) => {
-        Ok((
-            LexerState::$variant {
-                pos: $pos,
-                mode: $mode,
-                at_line_start: $at_line_start,
-                acc: $acc,
-                $($field $(: $val)?),*
-            },
-            Some($output),
-        ))
-    };
-}
-
-macro_rules! state_done {
-    ($acc:expr) => {
-        Ok((LexerState::Done(Ok($acc)), None))
+        Ok(LexerState::$variant {
+            pos: $pos,
+            mode: $mode,
+            at_line_start: $at_line_start,
+            acc: $acc,
+            $($field $(: $val)?),*
+        })
     };
 }
 
@@ -568,34 +551,31 @@ macro_rules! state_done {
 
 #[derive(Debug)]
 pub enum LexerState<'a> {
-    /// Initial — process shebang, then go to LineStart
     Start {
         pos: LexerPos<'a>,
         mode: LexerMode,
+        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
-    /// At beginning of a line — handle indentation
     LineStart {
         pos: LexerPos<'a>,
         mode: LexerMode,
+        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
-    /// Peeked a character — decide what to do
     Dispatch {
         pos: LexerPos<'a>,
         mode: LexerMode,
+        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
-        ch: char,
     },
-    /// Done — holds the final result
     Done(Result<LexerAcc, LexerError>),
 }
 
 impl<'a> LexerState<'a> {
-    /// Create the initial state from source text.
     pub fn new(source: &'a str, mode: LexerMode) -> Self {
         LexerState::Start {
             pos: LexerPos::new(source),
@@ -609,87 +589,74 @@ impl<'a> LexerState<'a> {
     ///
     /// Each `Step` event processes one outer-loop iteration:
     ///   Start → LineStart → Dispatch → (scan token or skip) → LineStart → ...
-    /// Each successful transition returns `(new_state, Option<Token>)`.
-    /// The `Complete` event flushes dedents and emits EOF.
-    pub fn transition(
-        self,
-        event: LexerEvent,
-    ) -> Result<(Self, LexerOutput), LexerError> {
+    /// Returns the new state with tokens accumulated in `acc.tokens`.
+    pub fn transition(self, event: LexerEvent) -> Result<Self, LexerError> {
         match (self, event) {
             // ── Start: handle shebang ─────────────────────────────
-            (
-                LexerState::Start {
-                    pos, mode, at_line_start: _, mut acc,
-                },
-                LexerEvent::Step,
-            ) => {
+            (LexerState::Start { pos, mode, acc, .. }, LexerEvent::Step) => {
                 let mut pos = pos;
-                // Skip shebang at the very beginning
                 if pos.peek() == Some('#') {
                     let mut tmp = pos.chars.clone();
                     if tmp.next() == Some('!') {
-                        // Skip everything until newline
                         loop {
                             match pos.peek() {
                                 Some('\n') | None => break,
-                                Some(_) => {
-                                    let (np, _) = pos.advance();
-                                    pos = np;
-                                }
+                                Some(_) => pos = next!(pos),
                             }
                         }
                     }
                 }
-                state_continue!(LineStart { }, pos, mode, true, acc)
+                state_continue!(LineStart {}, pos, mode, true, acc)
             }
 
             // ── LineStart: process indentation ─────────────────────
             (
                 LexerState::LineStart {
-                    mut pos, mode, at_line_start, mut acc,
+                    pos,
+                    mode,
+                    at_line_start,
+                    acc,
                 },
                 LexerEvent::Step,
             ) => {
                 if !at_line_start {
-                    return state_continue!(Dispatch { ch: '\0' }, pos, mode, false, acc);
+                    return state_continue!(Dispatch {}, pos, mode, false, acc);
                 }
+                let mut pos = pos;
+                let mut acc = acc;
                 loop {
                     let mut spaces = 0usize;
                     while pos.peek() == Some(' ') {
-                        let (np, _) = pos.advance();
-                        pos = np;
+                        pos = next!(pos);
                         spaces += 1;
                     }
                     if pos.peek() == Some('\t') {
                         return Err(tabs_not_allowed(pos.line, pos.col));
                     }
                     if pos.peek().is_none() {
-                        let (pos, _) = pos.advance();
-                        return state_continue!(Dispatch { ch: '\0' }, pos, mode, false, acc);
+                        let acc = advance_to_done(pos, mode, acc);
+                        return Ok(LexerState::Done(Ok(acc)));
                     }
                     let mut is_comment_line = false;
                     if pos.peek() == Some('/') {
-                        let mut tmp = pos.chars.clone();
-                        if tmp.next() == Some('/') {
-                            is_comment_line = true;
-                            pos = pos.skip_line_comment();
-                        } else if tmp.next() == Some('*') {
+                        if pos.chars.clone().next() == Some('*') {
                             pos = pos.skip_block_comment()?;
                             pos = pos.skip_whitespace_inline();
                             if pos.peek() == Some('\n') || pos.peek().is_none() {
                                 is_comment_line = true;
                             }
+                        } else if pos.chars.clone().next() == Some('/') {
+                            is_comment_line = true;
+                            pos = pos.skip_line_comment();
                         }
                     }
                     let is_blank = pos.peek() == Some('\n');
                     if is_comment_line || is_blank {
                         if pos.peek() == Some('\n') {
-                            let (np, _) = pos.advance();
-                            pos = np;
+                            pos = next!(pos);
                         }
                         continue;
                     }
-                    // real content
                     if mode == LexerMode::Sketch {
                         if !spaces.is_multiple_of(4) {
                             return Err(indent_not_multiple_of_four(pos.line, pos.col));
@@ -697,37 +664,35 @@ impl<'a> LexerState<'a> {
                         let current = *acc.indent_stack.last().unwrap_or(&0);
                         if spaces > current {
                             acc.indent_stack.push(spaces);
-                            let token = Token {
+                            acc.tokens.push(Token {
                                 kind: TokenKind::Indent,
                                 line: pos.line,
                                 col: spaces,
-                            };
-                            acc.tokens.push(token.clone());
-                            return state_yield!(Dispatch { ch: '\0' }, pos, mode, false, acc, token);
+                            });
+                            return state_continue!(Dispatch {}, pos, mode, false, acc);
                         } else if spaces < current {
                             while *acc.indent_stack.last().unwrap_or(&0) > spaces {
                                 acc.indent_stack.pop();
-                                let token = Token {
+                                acc.tokens.push(Token {
                                     kind: TokenKind::Dedent,
                                     line: pos.line,
                                     col: spaces,
-                                };
-                                acc.tokens.push(token.clone());
-                                return state_yield!(Dispatch { ch: '\0' }, pos, mode, false, acc, token);
+                                });
+                                return state_continue!(Dispatch {}, pos, mode, false, acc);
                             }
                             if *acc.indent_stack.last().unwrap_or(&0) != spaces {
                                 return Err(dedent_mismatch(pos.line, pos.col));
                             }
                         }
                     }
-                    return state_continue!(Dispatch { ch: '\0' }, pos, mode, false, acc);
+                    return state_continue!(Dispatch {}, pos, mode, false, acc);
                 }
             }
 
             // ── Dispatch: peek character ──────────────────────────
             (
                 LexerState::Dispatch {
-                    pos, mode, at_line_start: _, mut acc, ch: _,
+                    pos, mode, mut acc, ..
                 },
                 LexerEvent::Step,
             ) => {
@@ -737,74 +702,75 @@ impl<'a> LexerState<'a> {
                 let c = match pos.peek() {
                     Some(c) => c,
                     None => {
-                        // EOF
-                        let (pos, _) = pos.advance();
-                        return flush_and_done(pos, mode, acc);
+                        pos = next!(pos);
+                        let mut acc = acc;
+                        if mode == LexerMode::Sketch {
+                            while acc.indent_stack.len() > 1 {
+                                acc.indent_stack.pop();
+                                acc.tokens.push(Token {
+                                    kind: TokenKind::Dedent,
+                                    line: pos.line,
+                                    col: pos.col,
+                                });
+                            }
+                        }
+                        acc.tokens.push(Token {
+                            kind: TokenKind::Eof,
+                            line: pos.line,
+                            col: pos.col,
+                        });
+                        return Ok(LexerState::Done(Ok(acc)));
                     }
                 };
 
-                // Newline
                 if c == '\n' {
-                    let (np, _) = pos.advance();
-                    let token = Token {
+                    pos = next!(pos);
+                    acc.tokens.push(Token {
                         kind: TokenKind::Newline,
                         line,
                         col,
-                    };
-                    acc.tokens.push(token.clone());
-                    return state_yield!(LineStart { }, np, mode, true, acc, token);
+                    });
+                    return state_continue!(LineStart {}, pos, mode, true, acc);
                 }
 
-                // Line continuation: backslash
+                // Line continuation: backslash + newline
                 if c == '\\' {
-                    let (np, _) = pos.advance();
-                    let np = np.skip_whitespace_inline();
+                    pos = next!(pos);
+                    let np = pos.skip_whitespace_inline();
                     if np.peek() == Some('\n') {
-                        let (np, _) = np.advance();
-                        return state_continue!(LineStart { }, np, mode, true, acc);
+                        let np = next!(np);
+                        return state_continue!(LineStart {}, np, mode, true, acc);
                     }
                     return Err(unexpected_character('\\', line, col));
                 }
 
-                // Block comment: /* ... */
+                // Block comment or line comment
                 if c == '/' {
-                    let mut tmp = pos.chars.clone();
-                    if tmp.next() == Some('*') {
+                    if pos.chars.clone().next() == Some('*') {
                         let pos = pos.skip_block_comment()?;
-                        return state_continue!(LineStart { }, pos, mode, true, acc);
+                        return state_continue!(LineStart {}, pos, mode, true, acc);
                     }
-                }
-
-                // Line comment: //
-                if c == '/' {
-                    let mut tmp = pos.chars.clone();
-                    if tmp.next() == Some('/') {
+                    if pos.chars.clone().next() == Some('/') {
                         let pos = pos.skip_line_comment();
-                        return state_continue!(LineStart { }, pos, mode, true, acc);
+                        return state_continue!(LineStart {}, pos, mode, true, acc);
                     }
                 }
 
-                // Scan a token (not at line start — false for at_line_start)
                 let (pos, kind) = lex_scan_token(pos, c, line, col)?;
-                let token = Token { kind, line, col };
-                acc.tokens.push(token.clone());
-                state_yield!(LineStart { }, pos, mode, false, acc, token)
+                acc.tokens.push(Token { kind, line, col });
+                state_continue!(LineStart {}, pos, mode, false, acc)
             }
 
             // ── Complete: force finalization ───────────────────────
             (state, LexerEvent::Complete) => match state {
                 LexerState::Start { acc, .. }
                 | LexerState::LineStart { acc, .. }
-                | LexerState::Dispatch { acc, .. }
-                    => Ok((LexerState::Done(Ok(acc)), None)),
-                LexerState::Done(result) => {
-                    let result = result?;
-                    Ok((LexerState::Done(Ok(result)), None))
-                }
+                | LexerState::Dispatch { acc, .. } => Ok(LexerState::Done(Ok(acc))),
+                done @ LexerState::Done(_) => Ok(done),
             },
 
-            // ── Done + Step: already finished, stay Done ──────────
-            (done @ LexerState::Done(_), LexerEvent::Step) => Ok((done, None)),
+            // ── Done + Step: identity ─────────────────────────────
+            (done @ LexerState::Done(_), LexerEvent::Step) => Ok(done),
         }
     }
 }
@@ -828,209 +794,177 @@ fn lex_scan_token(
         }
         '0'..='9' => Ok(pos.scan_number()),
         'a'..='z' | 'A'..='Z' | '_' => {
-            let (pos, first_ch) = pos.advance();
+            let (pos, first_ch) = consume!(pos);
             let (pos, name) = pos.scan_ident(first_ch.unwrap_or('\0'));
             Ok((pos, keyword_or_ident(&name)))
         }
         '+' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::PlusEq))
+                Ok((next!(pos), TokenKind::PlusEq))
             } else {
                 Ok((pos, TokenKind::Plus))
             }
         }
         '-' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('>') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Arrow))
+                Ok((next!(pos), TokenKind::Arrow))
             } else if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::MinusEq))
+                Ok((next!(pos), TokenKind::MinusEq))
             } else {
                 Ok((pos, TokenKind::Minus))
             }
         }
         '*' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('*') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Pow))
+                Ok((next!(pos), TokenKind::Pow))
             } else if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::StarEq))
+                Ok((next!(pos), TokenKind::StarEq))
             } else {
                 Ok((pos, TokenKind::Star))
             }
         }
         '/' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::SlashEq))
+                Ok((next!(pos), TokenKind::SlashEq))
             } else {
                 Ok((pos, TokenKind::Slash))
             }
         }
-        '%' => {
-            let (pos, _) = pos.advance();
-            Ok((pos, TokenKind::Percent))
-        }
+        '%' => Ok((next!(pos), TokenKind::Percent)),
         '=' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::EqEq))
+                Ok((next!(pos), TokenKind::EqEq))
             } else if pos.peek() == Some('>') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::FatArrow))
+                Ok((next!(pos), TokenKind::FatArrow))
             } else {
                 Ok((pos, TokenKind::Eq))
             }
         }
         '!' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Ne))
+                Ok((next!(pos), TokenKind::Ne))
             } else {
                 Ok((pos, TokenKind::Bang))
             }
         }
         '<' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Le))
+                Ok((next!(pos), TokenKind::Le))
             } else if pos.peek() == Some('<') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Shl))
+                Ok((next!(pos), TokenKind::Shl))
             } else {
                 Ok((pos, TokenKind::Lt))
             }
         }
         '>' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Ge))
+                Ok((next!(pos), TokenKind::Ge))
             } else if pos.peek() == Some('>') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Shr))
+                Ok((next!(pos), TokenKind::Shr))
             } else {
                 Ok((pos, TokenKind::Gt))
             }
         }
         '&' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('&') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::AndAnd))
+                Ok((next!(pos), TokenKind::AndAnd))
             } else if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::BitAndEq))
+                Ok((next!(pos), TokenKind::BitAndEq))
             } else {
                 Ok((pos, TokenKind::BitAnd))
             }
         }
         '|' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('|') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::OrOr))
+                Ok((next!(pos), TokenKind::OrOr))
             } else if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::BitOrEq))
+                Ok((next!(pos), TokenKind::BitOrEq))
             } else if pos.peek() == Some('>') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::PipeArrow))
+                Ok((next!(pos), TokenKind::PipeArrow))
             } else {
                 Ok((pos, TokenKind::BitOr))
             }
         }
         '^' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('=') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::BitXorEq))
+                Ok((next!(pos), TokenKind::BitXorEq))
             } else {
                 Ok((pos, TokenKind::BitXor))
             }
         }
-        '~' => {
-            let (pos, _) = pos.advance();
-            Ok((pos, TokenKind::Tilde))
-        }
+        '~' => Ok((next!(pos), TokenKind::Tilde)),
         '$' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('(') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::DollarParen))
+                Ok((next!(pos), TokenKind::DollarParen))
             } else {
                 Err(unexpected_dollar(line, col))
             }
         }
-        '(' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::LParen)) }
-        ')' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::RParen)) }
-        '{' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::LBrace)) }
-        '}' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::RBrace)) }
-        '[' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::LBracket)) }
-        ']' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::RBracket)) }
+        '(' => Ok((next!(pos), TokenKind::LParen)),
+        ')' => Ok((next!(pos), TokenKind::RParen)),
+        '{' => Ok((next!(pos), TokenKind::LBrace)),
+        '}' => Ok((next!(pos), TokenKind::RBrace)),
+        '[' => Ok((next!(pos), TokenKind::LBracket)),
+        ']' => Ok((next!(pos), TokenKind::RBracket)),
         ':' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some(':') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::ColonColon))
+                Ok((next!(pos), TokenKind::ColonColon))
             } else {
                 Ok((pos, TokenKind::Colon))
             }
         }
-        ';' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::Semi)) }
-        ',' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::Comma)) }
+        ';' => Ok((next!(pos), TokenKind::Semi)),
+        ',' => Ok((next!(pos), TokenKind::Comma)),
         '.' => {
-            let (pos, _) = pos.advance();
+            let pos = next!(pos);
             if pos.peek() == Some('.') && pos.chars.clone().next() == Some('.') {
-                let (pos, _) = pos.advance();
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::Ellipsis))
+                Ok((next!(next!(pos)), TokenKind::Ellipsis))
             } else if pos.peek() == Some('.') {
-                let (pos, _) = pos.advance();
-                Ok((pos, TokenKind::DotDot))
+                Ok((next!(pos), TokenKind::DotDot))
             } else {
                 Ok((pos, TokenKind::Dot))
             }
         }
-        '?' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::Question)) }
-        '@' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::At)) }
-        '#' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::Hash)) }
-        '\'' => { let (pos, _) = pos.advance(); Ok((pos, TokenKind::Tick)) }
+        '?' => Ok((next!(pos), TokenKind::Question)),
+        '@' => Ok((next!(pos), TokenKind::At)),
+        '#' => Ok((next!(pos), TokenKind::Hash)),
+        '\'' => Ok((next!(pos), TokenKind::Tick)),
         _ => Err(unexpected_character(c, line, col)),
     }
 }
 
-// ── Finalization helpers ─────────────────────────────────────────────
+// ── Finalization helper (used by LineStart when EOF) ─────────────────
 
-fn flush_and_done(pos: LexerPos, mode: LexerMode, mut acc: LexerAcc) -> Result<(LexerState, Option<Token>), LexerError> {
+fn advance_to_done(pos: LexerPos, mode: LexerMode, mut acc: LexerAcc) -> LexerAcc {
     if mode == LexerMode::Sketch {
         while acc.indent_stack.len() > 1 {
             acc.indent_stack.pop();
-            let token = Token {
+            acc.tokens.push(Token {
                 kind: TokenKind::Dedent,
                 line: pos.line,
                 col: pos.col,
-            };
-            acc.tokens.push(token);
+            });
         }
     }
-    let token = Token {
+    acc.tokens.push(Token {
         kind: TokenKind::Eof,
         line: pos.line,
         col: pos.col,
-    };
-    acc.tokens.push(token);
-    state_done!(acc)
+    });
+    acc
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
@@ -1038,26 +972,12 @@ fn flush_and_done(pos: LexerPos, mode: LexerMode, mut acc: LexerAcc) -> Result<(
 /// Tokenize source text using the Flow-based lexer state machine.
 pub fn flow_tokenize(source: &str, mode: LexerMode) -> Result<Vec<Token>, LexerError> {
     let mut state = LexerState::new(source, mode);
-    // First transition: Start → LineStart
-    let (new_state, _) = match state.transition(LexerEvent::Step) {
-        Ok(result) => result,
-        Err(e) => return Err(e),
-    };
-    state = new_state;
-
     loop {
-        let new_state = match state.transition(LexerEvent::Step) {
-            Ok((s, _)) => s,
-            Err(e) => return Err(e),
-        };
-        match new_state {
-            LexerState::Done(result) => {
-                let acc = result?;
-                return Ok(acc.tokens);
-            }
-            other => {
-                state = other;
-            }
+        state = state.transition(LexerEvent::Step)?;
+        match state {
+            LexerState::Done(Ok(acc)) => return Ok(acc.tokens),
+            LexerState::Done(Err(e)) => return Err(e),
+            _ => {}
         }
     }
 }
@@ -1071,9 +991,9 @@ mod tests {
 
     fn tokenize_legacy(source: &str, mode: LexerMode) -> Result<Vec<Token>, LexerError> {
         if mode == LexerMode::Production {
-            Lexer::new(source).tokenize()
+            Lexer::new(source).legacy_tokenize()
         } else {
-            Lexer::new_sketch(source).tokenize()
+            Lexer::new_sketch(source).legacy_tokenize()
         }
     }
 
@@ -1081,7 +1001,9 @@ mod tests {
         if flow.len() != legacy.len() {
             panic!(
                 "token count mismatch for {:?}: flow={}, legacy={}\nflow: {:?}\nlegacy: {:?}",
-                src, flow.len(), legacy.len(),
+                src,
+                flow.len(),
+                legacy.len(),
                 flow.iter().map(|t| &t.kind).collect::<Vec<_>>(),
                 legacy.iter().map(|t| &t.kind).collect::<Vec<_>>(),
             );
@@ -1283,41 +1205,25 @@ mod tests {
         compare_token_sets(&flow, &legacy, src);
     }
 
-    /// Test Flow lexer against a representative set of real-world files.
     #[test]
     fn test_flow_lexer_real_world_files() {
         let test_sources = [
-            // Empty
             "",
-            // Trivial programs
             " ",
             "\n",
             "func main() -> i32 { 0 }",
-            // Newlines and indentation
             "func f() {\n    1\n}\n",
-            // String with escapes
             r#""\n\t\r\\\"""#,
-            // F-string with interpolation
             r#"f"hello {name}""#,
-            // Blocks
             "func main() {\n    /* comment */\n    42\n}",
-            // Operators
             "func main() { a + b - c * d / e % f }",
-            // Comparison
             "func main() { a == b && c != d || e <= f }",
-            // Bitwise
             "func main() { a & b | c ^ d ~ e }",
-            // Shifts
             "func main() { a << b >> c }",
-            // Compound assignment
             "func main() { x += 1; y -= 2; z *= 3; w /= 4; x |= y; x &= y; x ^= y; }",
-            // Pipe arrow
             "func main() { x |> f |> g }",
-            // Colon colon
             "func main() { let x = std::io::print_line; }",
-            // Dollar paren
             "func main() { let x = $(command); }",
-            // Ellipsis and dotdot
             "func main() { 1..10; 1...10; }",
         ];
 
@@ -1328,7 +1234,6 @@ mod tests {
         }
     }
 
-    /// Test error cases match.
     #[test]
     fn test_flow_lexer_errors() {
         let error_cases = [
@@ -1343,7 +1248,7 @@ mod tests {
             let flow = flow_tokenize(src, LexerMode::Production);
             let legacy = tokenize_legacy(src, LexerMode::Production);
             match (&flow, &legacy) {
-                (Err(_), Err(_)) => {} // both error — acceptable
+                (Err(_), Err(_)) => {}
                 (Ok(f), Ok(l)) => compare_token_sets(f, l, src),
                 _ => panic!(
                     "error mismatch for {:?}: flow={:?}, legacy={:?}",

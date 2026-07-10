@@ -1386,16 +1386,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             false,
         );
         let alloca = self.build_alloca(BasicTypeEnum::StructType(ok_ty), "write_result")?;
-        let disc_gep = self.gep().build_struct_gep(ok_ty, alloca, 0, "wr_disc")
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 0, "wr_disc")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(disc_gep, bool_ty.const_int(1, false))?;
-        let ok_gep = self.gep().build_struct_gep(ok_ty, alloca, 1, "wr_ok")
+        let ok_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 1, "wr_ok")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(ok_gep, i64_ty.const_int(0, false))?;
-        let err_gep = self.gep().build_struct_gep(ok_ty, alloca, 2, "wr_err")
+        let err_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 2, "wr_err")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(err_gep, i64_ty.const_int(0, false))?;
-        self.build_load(BasicTypeEnum::StructType(ok_ty), alloca, "write_file_loaded")
+        self.build_load(
+            BasicTypeEnum::StructType(ok_ty),
+            alloca,
+            "write_file_loaded",
+        )
     }
 
     /// Print a single value to stdout for assert_eq diagnostics.

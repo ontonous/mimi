@@ -1705,7 +1705,10 @@ func main() -> i32 {
     use crate::parser::Parser;
     let tokens = Lexer::new(src).tokenize().expect("lex");
     let result = Parser::new(tokens).parse_file();
-    assert!(result.is_err(), "keyword 'if' should be rejected in pattern");
+    assert!(
+        result.is_err(),
+        "keyword 'if' should be rejected in pattern"
+    );
 }
 
 #[test]
@@ -1736,10 +1739,15 @@ func main() -> i32 {
 fn regr_le_h1_unterminated_string_position() {
     // The lexer should reject unterminated string and include position info.
     // This test verifies the error has usable position (not all-zero).
-    let err = crate::lexer::Lexer::new("\"unterminated").tokenize().unwrap_err();
+    let err = crate::lexer::Lexer::new("\"unterminated")
+        .tokenize()
+        .unwrap_err();
     let msg = err.to_string();
-    assert!(!msg.starts_with("unterminated string at 0:0"),
-        "unterminated string should have non-zero position: {}", msg);
+    assert!(
+        !msg.starts_with("unterminated string at 0:0"),
+        "unterminated string should have non-zero position: {}",
+        msg
+    );
 }
 
 #[test]

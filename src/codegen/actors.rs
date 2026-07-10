@@ -605,9 +605,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         method: &FuncDef,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
-            BasicTypeEnum::IntType(self.context.i64_type())
-        });
+        let ret_type = self
+            .current_fn_ret_type()
+            .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
             BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
@@ -653,9 +653,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut val = self.compile_expr(expr, vars)?;
                 val = self.adjust_int_val(
                     val,
-                    self.current_fn_ret_type().unwrap_or_else(|| {
-                        BasicTypeEnum::IntType(self.context.i64_type())
-                    }),
+                    self.current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
                 )?;
                 val = self.load_return_value_if_needed(val)?;
                 let ensures = self.ensures_stmts.clone();
@@ -754,8 +753,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if !obj_type.is_empty()
                                             && obj_type.as_str() != func_name.as_str()
                                         {
-                                            self.var_type_names
-                                                .insert(name.clone(), obj_type);
+                                            self.var_type_names.insert(name.clone(), obj_type);
                                         }
                                     } else if let Some(fdef) = self.func_defs.get(func_name) {
                                         if let Some(ret_ty) = &fdef.ret {
