@@ -590,7 +590,7 @@ fn formatting(
         None => return (server, None),
     };
     let formatted = fmt::Formatter::new().format(&text);
-    let line_count = text.lines().count();
+    let line_count = text.lines().count().saturating_sub(1);
     let last_line_len = text.lines().last().map(|l| l.len()).unwrap_or(0);
     (
         server,
@@ -669,6 +669,13 @@ fn code_action(
         Some(u) => u,
         None => return (server, None),
     };
+    server.last_cursor_line = msg
+        .get("params")
+        .and_then(|p| p.get("range"))
+        .and_then(|r| r.get("start"))
+        .and_then(|s| s.get("line"))
+        .and_then(|l| l.as_u64())
+        .unwrap_or(0) as usize;
     let context = match msg.get("params").and_then(|p| p.get("context")) {
         Some(c) => c,
         None => return (server, None),

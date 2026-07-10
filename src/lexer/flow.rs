@@ -748,7 +748,9 @@ impl<'a> LexerState<'a> {
                 if c == '/' {
                     if pos.chars.clone().next() == Some('*') {
                         let pos = pos.skip_block_comment()?;
-                        return state_continue!(LineStart {}, pos, mode, true, acc);
+                        // Block comment is mid-line, continue dispatching on same line
+                        // (LineStart indentation processing expects line-start position).
+                        return state_continue!(Dispatch {}, pos, mode, false, acc);
                     }
                     if pos.chars.clone().next() == Some('/') {
                         let pos = pos.skip_line_comment();
