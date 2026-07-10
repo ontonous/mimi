@@ -101,6 +101,9 @@ pub(crate) mod dual_backend;
 pub(crate) mod benchmarks;
 pub(crate) mod lsp_e2e;
 
+// === Audit regression tests ===
+pub(crate) mod audit_regression;
+
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;

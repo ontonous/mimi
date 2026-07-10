@@ -334,7 +334,6 @@ mod tests {
 
     #[test]
     fn test_flow_empty_file() {
-        use crate::ast::Import;
         let file = File {
             imports: Vec::new(),
             items: Vec::new(),
