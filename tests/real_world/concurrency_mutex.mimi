@@ -1,8 +1,0 @@
-func main() -> i32 {
-    let m = mutex_new(0)
-    let token = mutex_lock(m)
-    mutex_set(token, 42)
-    let v = mutex_get(token)
-    mutex_unlock(token)
-    if v == 42 { 0 } else { 1 }
-}

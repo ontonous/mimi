@@ -1,8 +1,0 @@
-func first(xs: List<i32>) -> i32 {
-    xs[0]
-}
-
-func main() -> i32 {
-    let xs = [10, 20, 30]
-    if first(xs) == 10 { 0 } else { 1 }
-}

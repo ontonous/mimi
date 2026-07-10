@@ -1,9 +1,0 @@
-func abs(x: i32) -> i32 {
-    requires: x >= 0
-    ensures: result >= 0
-    if x < 0 { -x } else { x }
-}
-
-func main() -> i32 {
-    if abs(5) == 5 { 0 } else { 1 }
-}

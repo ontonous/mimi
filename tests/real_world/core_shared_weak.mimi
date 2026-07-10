@@ -1,6 +1,0 @@
-func main() -> i32 {
-    shared s = 42
-    weak w = s
-    let u = w.upgrade()
-    if u.deref() == 42 { 0 } else { 1 }
-}

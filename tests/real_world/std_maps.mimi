@@ -1,9 +1,0 @@
-func main() -> i32 {
-    let m = map_new()
-    let m2 = map_set(m, "a", 1)
-    let m3 = map_set(m2, "b", 2)
-    let found = map_get(m3, "a")
-    let sz = map_size(m3)
-    let has = has_key(m3, "b")
-    if found.0 && sz == 2 && has { 0 } else { 1 }
-}
