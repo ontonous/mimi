@@ -74,11 +74,22 @@ impl LspServer {
                             };
                             if !pat_name.is_empty() {
                                 // Find the line with `let <pat_name>` that also has `=`
+                                // (skip `=` inside string literals)
                                 if let Some(let_line) = lines.iter().position(|l| {
                                     let trimmed = l.trim();
-                                    trimmed.starts_with("let")
-                                        && trimmed.contains(pat_name)
-                                        && l.contains('=')
+                                    if !trimmed.starts_with("let") || !trimmed.contains(pat_name) {
+                                        return false;
+                                    }
+                                    // Check for `=` outside of string literals
+                                    let mut in_str = false;
+                                    for ch in l.chars() {
+                                        if ch == '"' {
+                                            in_str = !in_str;
+                                        } else if ch == '=' && !in_str {
+                                            return true;
+                                        }
+                                    }
+                                    false
                                 }) {
                                     let line_text = lines[let_line];
                                     // Find the = sign, not in a comment

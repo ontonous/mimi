@@ -44,8 +44,15 @@ impl LspServer {
         self.documents.remove(uri);
     }
 
-    /// Parse text with error recovery, returning partial AST even on errors
+    /// Parse text with error recovery, returning partial AST even on errors.
+    /// Uses a simple cache to avoid re-parsing the same text on every keystroke.
     pub(crate) fn parse_with_recovery(&self, text: &str) -> Option<crate::ast::File> {
+        {
+            let cache = self.parse_cache_text.borrow();
+            if cache.0 == text {
+                return cache.1.clone();
+            }
+        }
         let tokens = match lexer::Lexer::new(text).tokenize() {
             Ok(t) => t,
             Err(e) => {
@@ -54,7 +61,9 @@ impl LspServer {
             }
         };
         let (file, _errors) = parser::Parser::new(tokens).parse_file_with_recovery();
-        Some(file)
+        let result = Some(file);
+        *self.parse_cache_text.borrow_mut() = (text.to_string(), result.clone());
+        result
     }
 
     /// Convert a `file://` URI to a filesystem path.
