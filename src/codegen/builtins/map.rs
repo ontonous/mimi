@@ -194,14 +194,73 @@ impl<'ctx> CodeGenerator<'ctx> {
         let value_handle = match args[2] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             BasicMetadataValueEnum::PointerValue(pv) => {
-                self.build_ptr_to_int(pv, self.context.i64_type(), "map_set_val_ptr")?
+                // Heap-copy string literal so mimi_any_to_string can detect it
+                let strlen_fn = self
+                    .module
+                    .get_function("strlen")
+                    .ok_or("strlen not declared")?;
+                let len = self
+                    .builder
+                    .build_call(strlen_fn, &[pv.into()], "strlen_s")
+                    .map_err(|e| format!("strlen call error: {}", e))?
+                    .try_as_basic_value_opt()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                let clone_fn = self
+                    .module
+                    .get_function("mimi_str_clone")
+                    .ok_or("mimi_str_clone not declared")?;
+                let result = self
+                    .builder
+                    .build_call(
+                        clone_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(pv),
+                            BasicMetadataValueEnum::IntValue(len),
+                        ],
+                        "str_clone_lit",
+                    )
+                    .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                call_try_basic_value(&result)
+                    .ok_or("mimi_str_clone returned void")?
+                    .into_int_value()
             }
             BasicMetadataValueEnum::StructValue(sv) => {
-                // Assume a Mimi string struct {i8*, i64}; store the data pointer as the handle.
                 let ptr = self
                     .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
                     .into_pointer_value();
-                self.build_ptr_to_int(ptr, self.context.i64_type(), "map_set_val_ptr")?
+                // Use strlen rather than extract field 1 (actor deserialization
+                // may leave the length field corrupt). This ensures correctness
+                // for both actor-deserialized and locally-constructed strings.
+                let strlen_fn = self
+                    .module
+                    .get_function("strlen")
+                    .ok_or("strlen not declared")?;
+                let len = self
+                    .builder
+                    .build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(ptr)], "strlen_s")
+                    .map_err(|e| format!("strlen call error: {}", e))?
+                    .try_as_basic_value_opt()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                let clone_fn = self
+                    .module
+                    .get_function("mimi_str_clone")
+                    .ok_or("mimi_str_clone not declared")?;
+                let result = self
+                    .builder
+                    .build_call(
+                        clone_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(ptr),
+                            BasicMetadataValueEnum::IntValue(len),
+                        ],
+                        "str_clone_var",
+                    )
+                    .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                call_try_basic_value(&result)
+                    .ok_or("mimi_str_clone returned void")?
+                    .into_int_value()
             }
             _ => return Err("map_set: third arg must be i64 value handle".into()),
         };

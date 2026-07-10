@@ -786,6 +786,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                // Track the "any" type for tuple elements from map_get
+                if let Pattern::Tuple(elements) = pat {
+                    if let Expr::Call(callee, _) = init {
+                        if let Expr::Ident(func_name) = callee.as_ref() {
+                            if func_name == "map_get" && elements.len() == 2 {
+                                // map_get returns (bool, any); mark the second element as "any"
+                                if let Pattern::Variable(name) = &elements[1] {
+                                    self.var_type_names.insert(name.clone(), "any".to_string());
+                                }
+                            }
+                        }
+                    }
+                }
                 // Track list element type for nested List<List<T>> indexing
                 if let Pattern::Variable(name) = pat {
                     if let Some(decl_ty) = &ty {
@@ -816,18 +829,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let merge_bb = self.context.append_basic_block(function, "ifcont");
                 self.build_cond_br(cond_bool, then_bb, else_bb)?;
                 self.builder.position_at_end(then_bb);
-                self.compile_block(then_, vars)?;
-                if !self.block_has_terminator() {
+                let mut then_vars = vars.clone();
+                let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+                let then_reaches = !self.block_has_terminator();
+                if then_reaches {
                     self.build_br(merge_bb)?;
                 }
+                let then_bb_end = then_reaches
+                    .then(|| self.builder.get_insert_block())
+                    .flatten();
                 self.builder.position_at_end(else_bb);
-                if let Some(else_block) = else_ {
-                    self.compile_block(else_block, vars)?;
-                }
-                if !self.block_has_terminator() {
-                    self.build_br(merge_bb)?;
-                }
+                let (else_val, else_reaches) = if let Some(else_block) = else_ {
+                    let mut else_vars = vars.clone();
+                    let v = self.compile_block_last_val(else_block, &mut else_vars)?;
+                    let reaches = !self.block_has_terminator();
+                    if reaches {
+                        self.build_br(merge_bb)?;
+                    }
+                    (Some(v), reaches)
+                } else {
+                    let reaches = !self.block_has_terminator();
+                    if reaches {
+                        self.build_br(merge_bb)?;
+                    }
+                    (None, reaches)
+                };
+                let else_bb_end = else_reaches
+                    .then(|| self.builder.get_insert_block())
+                    .flatten();
                 self.builder.position_at_end(merge_bb);
+                if then_val.get_type() == else_val.as_ref().map(|v| v.get_type()).unwrap_or(then_val.get_type()) {
+                    let phi = self
+                        .builder
+                        .build_phi(then_val.get_type(), "if_result")
+                        .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+                    if let Some(bb) = then_bb_end {
+                        phi.add_incoming(&[(&then_val as &dyn inkwell::values::BasicValue, bb)]);
+                    }
+                    if let (Some(bb), Some(ev)) = (else_bb_end, else_val) {
+                        phi.add_incoming(&[(&ev as &dyn inkwell::values::BasicValue, bb)]);
+                    }
+                    *last_val = phi.as_basic_value();
+                }
             }
             Stmt::For {
                 var,
@@ -982,7 +1025,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
             }
             let last_val = self.adjust_int_val(last_val, ret_type)?;
-            let last_val = self.load_return_value_if_needed(last_val)?;
+            // Same string-struct detection as emit_implicit_return (func.rs:1777-1809).
+            // When the return type is string struct {ptr,i64} but last_val is a raw C
+            // string pointer (from literal), wrap it into a proper struct before loading.
+            let last_val = match (last_val, ret_type) {
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
+                    let field_types = st.get_field_types();
+                    let is_string_struct = field_types.len() == 2
+                        && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
+                        && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                    if is_string_struct {
+                        self.wrap_c_string(pv)?
+                    } else {
+                        self.load_return_value_if_needed(BasicValueEnum::PointerValue(pv))?
+                    }
+                }
+                _ => self.load_return_value_if_needed(last_val)?,
+            };
             self.build_return(Some(&last_val))?;
         }
         Ok(())
