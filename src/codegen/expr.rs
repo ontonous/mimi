@@ -453,10 +453,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     [BasicTypeEnum::IntType(t), _] if t.get_bit_width() == 1 => {
                         Some("Option".to_string())
                     }
-                    // Result<T,E>: {i1 disc, T ok, i64 err}; approximate as Result
-                    [BasicTypeEnum::IntType(t), _, BasicTypeEnum::IntType(e)]
-                        if t.get_bit_width() == 1 && e.get_bit_width() == 64 =>
-                    {
+                    // Result<T, E>: {i1 disc, T ok, E err}; approximate as Result
+                    // When E = string (Result<T, string>), the err field is {i8*, i64}.
+                    // When E = i64 (Result<T, i64>), the err field is just i64.
+                    [BasicTypeEnum::IntType(t), _, _] if t.get_bit_width() == 1 => {
                         Some("Result".to_string())
                     }
                     _ => None,
