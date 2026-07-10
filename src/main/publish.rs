@@ -1,9 +1,16 @@
 use mimi::manifest;
 use mimi::pkg_registry;
 
+fn should_skip_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".gitignore" | "target" | "node_modules" | ".DS_Store" | "Cargo.lock" | ".opencode"
+    )
+}
+
 pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
-    let (_dir, manifest) = match manifest::Manifest::find(&cwd)? {
+    let (proj_dir, manifest) = match manifest::Manifest::find(&cwd)? {
         Some((d, m)) => (d, m),
         None => return Err("no mimi.toml found; run 'mimi init' first".into()),
     };
@@ -25,7 +32,7 @@ pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), S
         ));
     }
 
-    pkg_registry::copy_dir_recursive(&cwd, &pkg_dir)
+    pkg_registry::copy_dir_recursive_filtered(&proj_dir, &pkg_dir, &should_skip_entry)
         .map_err(|e| format!("failed to publish: {}", e))?;
 
     println!(
