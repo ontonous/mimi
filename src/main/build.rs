@@ -205,7 +205,8 @@ pub(crate) fn build(
     }
 
     let output_path_buf = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        let mut out = path.clone();
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
+        let mut out = std::path::PathBuf::from(name);
         let ext = output_extension(target, shared);
         if ext.is_empty() {
             out.set_extension("");

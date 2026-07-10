@@ -83,6 +83,11 @@ pub fn executor_run() {
             if guard.is_empty() {
                 return;
             }
+            // Remove all completed futures before looking for Deferred ones
+            guard.retain(|fut| {
+                let state = fut.lock().expect("future lock");
+                !matches!(&*state, PollFuture::Ready(_))
+            });
             let mut found = None;
             for i in 0..guard.len() {
                 let fut = &guard[i];
@@ -92,7 +97,8 @@ pub fn executor_run() {
                         found = Some(i);
                         break;
                     }
-                    PollFuture::Ready(_) | PollFuture::Pending(_) => {}
+                    PollFuture::Pending(_) => {}
+                    PollFuture::Ready(_) => {}
                 }
             }
             match found {
@@ -100,10 +106,7 @@ pub fn executor_run() {
                     let fut = guard.swap_remove(i);
                     Some(fut)
                 }
-                None => {
-                    guard.clear();
-                    return;
-                }
+                None => return,
             }
         };
         if let Some(fut) = entry {

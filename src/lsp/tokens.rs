@@ -83,7 +83,15 @@ impl LspServer {
                     | lexer::TokenKind::Invariant => (0, vec![]), // keyword
                     lexer::TokenKind::Int(_) | lexer::TokenKind::Float(_) => (4, vec![]), // number
                     lexer::TokenKind::String(_) | lexer::TokenKind::FString(_) => (5, vec![]), // string
-                    lexer::TokenKind::Ident(_) => (3, vec![]), // variable
+                    lexer::TokenKind::Ident(s) => {
+                        if s.starts_with(|c: char| c.is_uppercase()) {
+                            (2, vec![]) // type/constructor (semantic token type 2 = class)
+                        } else if s == "true" || s == "false" {
+                            (4, vec![]) // boolean literal (number type)
+                        } else {
+                            (3, vec![]) // variable/function
+                        }
+                    }
                     lexer::TokenKind::Plus
                     | lexer::TokenKind::Minus
                     | lexer::TokenKind::Star
