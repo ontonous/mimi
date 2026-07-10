@@ -429,6 +429,14 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+        self.check_depth()?;
+        self.inc_depth();
+        let result = self.parse_if_inner();
+        self.dec_depth();
+        result
+    }
+
+    fn parse_if_inner(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::If, "`if`")?;
         let cond = self.parse_expr(0)?;
         self.skip_newlines();
