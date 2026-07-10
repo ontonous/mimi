@@ -404,11 +404,16 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::And | BinOp::Or => {
+                // Logical operators are short-circuited at the expr level
+                // before reaching infer_binary. If we get here it means the
+                // dispatch missed a case. In debug builds the assertion fires;
+                // in release we degrade to `unknown` instead of panicking so
+                // the compiler can keep emitting diagnostics instead of ICE.
                 mimi_debug_assert!(
                     false,
                     "logical operators should be handled before infer_binary"
                 );
-                unreachable!("logical operators are handled before infer_binary")
+                Type::Name("unknown".into(), vec![])
             }
             BinOp::Assign => {
                 self.emit_code(
