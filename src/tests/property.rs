@@ -93,11 +93,16 @@ proptest! {
         let also_infer = Type::Infer;
         prop_assert!(core::same_type(&infer, &also_infer), "Infer should be compatible with itself");
         // Infer should NOT be compatible with non-Infer types (except the "unknown" placeholder
-        // and Newtype(_, Infer) which is transparently equivalent to Infer).
-        let is_infer_like = matches!(&t, Type::Infer)
-            || matches!(&t, Type::Name(n, _) if n == "unknown")
-            || matches!(&t, Type::Newtype(_, inner) if matches!(inner.as_ref(), Type::Infer));
-        if !is_infer_like {
+        // and Newtype(_, Infer) which is transparently equivalent to Infer, recursively).
+        fn is_infer_like(ty: &Type) -> bool {
+            match ty {
+                Type::Infer => true,
+                Type::Name(n, _) if n == "unknown" => true,
+                Type::Newtype(_, inner) => is_infer_like(inner),
+                _ => false,
+            }
+        }
+        if !is_infer_like(&t) {
             prop_assert!(!core::same_type(&infer, &t), "Infer should NOT be universally compatible with {:?}", t);
         }
     }

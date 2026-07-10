@@ -198,8 +198,17 @@ impl<'a> Interpreter<'a> {
                     v
                 }
                 _ => {
+                    // The caller in `eval_binary` (below) routes only the
+                    // arithmetic operators through `float_binop`. If we reach
+                    // here it means a new op was added to the type checker
+                    // without being routed here — a compiler bug. In debug
+                    // the assertion fires; in release we surface it as a
+                    // runtime error instead of ICE.
                     mimi_debug_assert!(false, "unsupported float binop {} reached float_binop", op);
-                    unreachable!("unsupported float binop {}", op)
+                    return Err(InterpError::float_error(format!(
+                        "unsupported float operator: {}",
+                        op
+                    )));
                 }
             };
             Ok(Value::Float(r))
