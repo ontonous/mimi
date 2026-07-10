@@ -64,6 +64,10 @@ pub struct LspServer {
     /// calling `process::exit`, which would kill the test runner when
     /// `handle_message` is exercised directly in unit tests.
     should_exit: bool,
+    /// Simple parse cache: stores the last parsed text and its AST.
+    /// Avoids re-parsing the same text multiple times per keystroke.
+    /// Cleared on textDocument/didChange.
+    parse_cache_text: std::cell::RefCell<(String, Option<crate::ast::File>)>,
 }
 
 impl Default for LspServer {
@@ -87,6 +91,7 @@ impl LspServer {
             stdlib_completions_raw: Vec::new(),
             stdlib_loaded: false,
             should_exit: false,
+            parse_cache_text: std::cell::RefCell::new((String::new(), None)),
         }
     }
 

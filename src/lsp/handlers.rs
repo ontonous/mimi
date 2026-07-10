@@ -119,6 +119,8 @@ pub(crate) fn handle_message(server: &mut LspServer, msg: &Value) -> Option<Valu
 
             let text = changes.first()?.get("text")?.as_str()?;
             server.cache_put(uri.to_string(), text.to_string());
+            // Clear parse cache since the source text changed
+            *server.parse_cache_text.borrow_mut() = (String::new(), None);
             let mut diagnostics = server.compute_diagnostics(text, Some(uri));
             let verif_diags =
                 server.compute_verification_diagnostics(text, server.last_cursor_line, uri);
