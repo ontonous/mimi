@@ -495,7 +495,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         if let BasicValueEnum::PointerValue(pv) = val {
-            let ret_type = self.current_fn_ret_type();
+            let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
+                // Fallback: use pointer type if no function context
+                BasicTypeEnum::IntType(self.context.i64_type())
+            });
             if let BasicTypeEnum::StructType(sty) = ret_type {
                 // Tuple/record/string allocas are emitted as pointers; a function
                 // returning the corresponding struct by value needs the loaded
@@ -902,10 +905,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Resolve a Mimi type to its LLVM representation, preferring registered
     /// type definitions (records, enums, actors) over the built-in name mapping.
-    fn current_fn_ret_type(&self) -> BasicTypeEnum<'ctx> {
+    fn current_fn_ret_type(&self) -> Option<BasicTypeEnum<'ctx>> {
         self.current_function()
             .and_then(|f| f.get_type().get_return_type())
-            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()))
     }
 
     pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {

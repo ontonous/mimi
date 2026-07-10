@@ -34,7 +34,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
-                    let ret_type = self.current_fn_ret_type();
+                    let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
+                        BasicTypeEnum::IntType(self.context.i64_type())
+                    });
                     val = self.adjust_int_val(val, ret_type)?;
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
@@ -904,7 +906,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(e)) => {
                     let mut val = self.compile_expr(e, vars)?;
-                    let ret_type = self.current_fn_ret_type();
+                    let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
+                        BasicTypeEnum::IntType(self.context.i64_type())
+                    });
                     val = self.adjust_int_val(val, ret_type)?;
                     // P0-4: heap-copy string returns so the caller
                     // doesn't later free() a .rodata literal pointer.
