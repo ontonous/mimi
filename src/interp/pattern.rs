@@ -78,9 +78,42 @@ impl<'a> Interpreter<'a> {
                         if pats.len() != vals.len() {
                             return false;
                         }
-                        for ((_, p), v) in pats.iter().zip(vals.iter()) {
-                            if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
-                                return false;
+                        // If field positions are known (named constructor pattern),
+                        // reorder values to match the pattern's field order.
+                        // This ensures Foo { x: 5, y: 6 } matches regardless of
+                        // the declaration order of x and y in the type definition.
+                        if let Some(positions) = self.variant_field_positions.get(name) {
+                            // Named constructor pattern: match by field name
+                            for (field_name, p) in pats.iter() {
+                                // Skip positional placeholder names (_0, _1, ...)
+                                if field_name.starts_with('_') && field_name[1..].parse::<usize>().is_ok() {
+                                    // Positional pattern — use index directly
+                                    let idx: usize = field_name[1..].parse().unwrap_or(0);
+                                    if idx >= vals.len() {
+                                        return false;
+                                    }
+                                    if !self.match_pattern_inner(p, &vals[idx], allow_constructor, bindings) {
+                                        return false;
+                                    }
+                                } else if let Some(&idx) = positions.get(field_name) {
+                                    // Named field — look up position from type definition
+                                    if idx >= vals.len() {
+                                        return false;
+                                    }
+                                    if !self.match_pattern_inner(p, &vals[idx], allow_constructor, bindings) {
+                                        return false;
+                                    }
+                                } else {
+                                    // Unknown field name — pattern can't match
+                                    return false;
+                                }
+                            }
+                        } else {
+                            // No field position info — match by position (legacy behavior)
+                            for ((_, p), v) in pats.iter().zip(vals.iter()) {
+                                if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
+                                    return false;
+                                }
                             }
                         }
                         true

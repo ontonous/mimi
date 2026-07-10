@@ -919,20 +919,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         crate::codegen::types::mimi_type_to_llvm(self.context, ty)
     }
 
-    /// Resolve a type to LLVM using extern ABI rules (i32 → LLVM i32, bool → i8).
-    /// Unlike `llvm_type_for`, this maps Mimi i32 to LLVM i32 instead of i64,
-    /// making it suitable for #[repr(C)] fields and FFI parameter types.
-    pub(super) fn llvm_type_for_extern(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
-        // First try registered types (user-defined structs/enums), bypassing i32→i64 fallback.
-        if let crate::ast::Type::Name(name, _) = ty {
-            if let Some(llvm) = self.type_llvm.get(name) {
-                return Some(*llvm);
-            }
-        }
-        // Fall through to extern-specific mapping for primitives.
-        crate::codegen::types::mimi_type_to_llvm_extern(self.context, ty)
-    }
-
     /// Register the element LLVM type for a `List<T>` variable so that
     /// compile_index_expr can reconstruct struct-typed elements from type-erased storage.
     pub(super) fn register_list_elem_type(&mut self, var_name: &str, decl_ty: &Type) {
