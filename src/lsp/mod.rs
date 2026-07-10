@@ -16,7 +16,6 @@ pub(crate) mod handlers;
 pub(crate) mod hierarchy;
 pub(crate) mod hover;
 pub(crate) mod inlay;
-pub(crate) mod json_rpc;
 pub(crate) mod lens;
 pub(crate) mod position;
 pub(crate) mod references;
