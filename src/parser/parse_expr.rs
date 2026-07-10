@@ -892,7 +892,8 @@ impl Parser {
             }
             Expr::Ident(_) | Expr::Field(_, _) => Ok(Expr::Call(Box::new(rhs), vec![lhs])),
             Expr::Turbofish(func_name, type_args, mut turbofish_args) => {
-                // a |> name::<T>(b, c) → Turbofish(name, [T], [a, b, c])
+                // PA-C2: a |> name::<T>(b, c) → Turbofish(name, [T], [a, b, c])
+                // lhs is inserted as the first argument of the turbofish call
                 turbofish_args.insert(0, lhs);
                 Ok(Expr::Turbofish(func_name, type_args, turbofish_args))
             }

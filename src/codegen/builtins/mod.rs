@@ -53,7 +53,7 @@ fn register_libc<'ctx>(
 ) {
     module.add_function(
         "printf",
-        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], true),
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], true), // CG-C7: return i32 (matches C int)
         Some(inkwell::module::Linkage::External),
     );
 
@@ -180,7 +180,7 @@ fn register_libc<'ctx>(
 
     module.add_function(
         "sprintf",
-        i32.fn_type(
+        i32.fn_type( // CG-C7: return i32 (matches C int, not i64)
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),

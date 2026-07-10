@@ -29,12 +29,17 @@ impl<'a> Interpreter<'a> {
 }
 
 /// Compute Levenshtein edit distance between two strings.
+/// IN-C5: uses char-count-based allocation (not byte-count) to prevent
+/// out-of-bounds access on multi-byte strings like "café" (5 bytes, 4 chars).
 #[allow(clippy::needless_range_loop)]
 pub(in crate::interp) fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     let a_len = a_chars.len();
     let b_len = b_chars.len();
+    // Assert: char count ≤ byte count for any valid UTF-8 string
+    debug_assert!(a.len() >= a_len, "char count must not exceed byte count");
+    debug_assert!(b.len() >= b_len, "char count must not exceed byte count");
     if a_len == 0 {
         return b_len;
     }

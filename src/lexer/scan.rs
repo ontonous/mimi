@@ -117,6 +117,7 @@ impl<'a> super::Lexer<'a> {
                             self.advance();
                         }
                         Some('x') => {
+                            // LE-C1: parse \xNN hex escape, produce byte value
                             let start_col = self.col;
                             self.advance();
                             let mut hex = String::with_capacity(2);
@@ -435,7 +436,7 @@ impl<'a> super::Lexer<'a> {
                 break;
             }
         }
-        // Scientific notation: 1e5, 1.5e-3, 2E+10
+        // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
         if let Some(ch) = self.peek() {
             if ch == 'e' || ch == 'E' {
                 s.push(ch);
