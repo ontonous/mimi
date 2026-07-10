@@ -209,8 +209,8 @@ pub fn colors_enabled() -> bool {
     if std::env::var("NO_COLOR").is_ok() {
         return false;
     }
-    // Check if stdout is a terminal (safe, no raw FFI)
-    std::io::stdout().is_terminal()
+    // Check if stderr is a terminal (diagnostics go to stderr, not stdout)
+    std::io::stderr().is_terminal()
 }
 
 /// Strip ANSI escape codes from a string.
