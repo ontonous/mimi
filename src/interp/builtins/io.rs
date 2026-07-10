@@ -331,10 +331,14 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(cmd) => {
+                // Reject embedded null bytes to prevent shell injection.
+                if cmd.contains('\0') {
+                    return Err(InterpError::new("exec: command contains null byte"));
+                }
                 // NOTE: `sh -c` enables shell builtins (exit, cd, etc.) and
                 // pipelines, but also allows shell injection if `cmd` comes
-                // from untrusted input. Use `exec_safe(args: List<string>)`
-                // for safer execution without shell interpretation.
+                // from untrusted input. Use `exec_safe(args)` for safer
+                // execution without shell interpretation.
                 let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
@@ -427,6 +431,9 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(cmd) => {
+                if cmd.contains('\0') {
+                    return Err(InterpError::new("exec_pipe: command contains null byte"));
+                }
                 let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
@@ -437,6 +444,47 @@ impl<'a> Interpreter<'a> {
                 }
             }
             _ => Err(InterpError::new("exec_pipe expects a string command")),
+        }
+    }
+
+    pub(crate) fn builtin_exec_safe(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.is_empty() {
+            return Err(InterpError::new("exec_safe expects at least 1 argument (program)"));
+        }
+        let prog = match &args[0] {
+            Value::String(s) => s.clone(),
+            _ => return Err(InterpError::new("exec_safe: first argument must be a string (program)")),
+        };
+        let mut cmd = std::process::Command::new(&prog);
+        for arg in args.iter().skip(1) {
+            match arg {
+                Value::String(s) => {
+                    cmd.arg(s);
+                }
+                _ => return Err(InterpError::new("exec_safe: all arguments must be strings")),
+            }
+        }
+        match cmd.output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let exit_code = out.status.code().unwrap_or(-1);
+                let mut fields = std::collections::HashMap::new();
+                fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+                fields.insert("stdout".to_string(), Value::String(stdout));
+                fields.insert("stderr".to_string(), Value::String(stderr));
+                Ok(Value::Record(Some("ExecResult".to_string()), fields))
+            }
+            Err(e) => {
+                let mut fields = std::collections::HashMap::new();
+                fields.insert("exit_code".to_string(), Value::Int(-1));
+                fields.insert("stdout".to_string(), Value::String(String::new()));
+                fields.insert(
+                    "stderr".to_string(),
+                    Value::String(format!("exec_safe error: {}", e)),
+                );
+                Ok(Value::Record(Some("ExecResult".to_string()), fields))
+            }
         }
     }
 

@@ -4847,6 +4847,10 @@ pub struct MimiExecResult {
 /// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
 /// WARNING: shell metacharacters in the command string are interpreted by sh.
 /// For safe execution, use `mimi_exec_safe` (not yet implemented).
+/// Execute a shell command via `sh -c`. Returns a `MimiExecResult` struct.
+/// Uses shell interpretation (pipelines, variables, redirections).
+/// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
+/// `mimi_exec_safe` instead which runs a single program without shell.
 /// Caller must free with `mimi_exec_free`.
 #[no_mangle]
 pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
@@ -4870,6 +4874,15 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
             return Box::into_raw(res);
         }
     };
+    // Reject embedded null bytes to prevent shell injection through truncated command.
+    if cmd_str.contains('\0') {
+        let res = Box::new(MimiExecResult {
+            exit_code: -1,
+            stdout: alloc_c_string(""),
+            stderr: alloc_c_string("exec error: command contains null byte"),
+        });
+        return Box::into_raw(res);
+    }
     const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB per stream
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -4944,6 +4957,8 @@ pub extern "C" fn mimi_exec_free_struct(res: *mut MimiExecResult) {
 /// Executes a command and returns just stdout. Simpler than mimi_exec.
 /// Returns an allocated C string (caller must free with mimi_string_free).
 /// On error, returns an empty string.
+/// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
+/// `mimi_exec_safe` instead which runs a single program without shell.
 #[no_mangle]
 pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     if cmd.is_null() {
@@ -4954,6 +4969,10 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
         Ok(s) => s,
         Err(_) => return alloc_c_string(""),
     };
+    // Reject embedded null bytes to prevent shell injection.
+    if cmd_str.contains('\0') {
+        return alloc_c_string("");
+    }
     const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -4970,6 +4989,105 @@ pub extern "C" fn mimi_exec_pipe(cmd: *const std::ffi::c_char) -> *mut std::ffi:
             alloc_c_string(&stdout)
         }
         Err(_) => alloc_c_string(""),
+    }
+}
+
+/// Execute a single program without shell interpretation.
+/// `prog` is the program path, `args` are the arguments (excluding argv[0]).
+/// Returns a `MimiExecResult` struct. Caller must free with `mimi_exec_free`.
+/// No shell injection risk: the program is executed directly via `execvp`.
+#[no_mangle]
+pub extern "C" fn mimi_exec_safe(
+    prog: *const std::ffi::c_char,
+    args: *mut MimiList,
+) -> *mut MimiExecResult {
+    let prog_str = if prog.is_null() {
+        let res = Box::new(MimiExecResult {
+            exit_code: -1,
+            stdout: alloc_c_string(""),
+            stderr: alloc_c_string("exec_safe error: null program"),
+        });
+        return Box::into_raw(res);
+    } else {
+        // SAFETY: prog was checked non-null above.
+        match unsafe { CStr::from_ptr(prog) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                let res = Box::new(MimiExecResult {
+                    exit_code: -1,
+                    stdout: alloc_c_string(""),
+                    stderr: alloc_c_string("exec_safe error: invalid program name"),
+                });
+                return Box::into_raw(res);
+            }
+        }
+    };
+    if args.is_null() {
+        // No args — just run the program with no arguments.
+        let output = std::process::Command::new(&prog_str).output();
+        return match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let exit_code = out.status.code().unwrap_or(-1);
+                Box::into_raw(Box::new(MimiExecResult {
+                    exit_code: exit_code as i64,
+                    stdout: alloc_c_string(&stdout),
+                    stderr: alloc_c_string(&stderr),
+                }))
+            }
+            Err(e) => Box::into_raw(Box::new(MimiExecResult {
+                exit_code: -1,
+                stdout: alloc_c_string(""),
+                stderr: alloc_c_string(&format!("exec_safe error: {}", e)),
+            })),
+        };
+    }
+    // SAFETY: args was checked non-null above.
+    let lst = unsafe { &*args };
+    let mut cmd = std::process::Command::new(&prog_str);
+    for i in 0..lst.len as isize {
+        // SAFETY: i is within bounds (0..lst.len).
+        let item_ptr = unsafe { *lst.data.offset(i) as *const std::ffi::c_char };
+        if item_ptr.is_null() {
+            continue;
+        }
+        // SAFETY: item_ptr is non-null (checked above).
+        let s = unsafe { cstr_to_string(item_ptr) };
+        cmd.arg(s);
+    }
+    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB per stream
+    let output = cmd.output();
+    match output {
+        Ok(out) => {
+            let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
+                &out.stdout[..MAX_EXEC_OUTPUT]
+            } else {
+                &out.stdout
+            };
+            let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
+                &out.stderr[..MAX_EXEC_OUTPUT]
+            } else {
+                &out.stderr
+            };
+            let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            let res = Box::new(MimiExecResult {
+                exit_code: exit_code as i64,
+                stdout: alloc_c_string(&stdout),
+                stderr: alloc_c_string(&stderr),
+            });
+            Box::into_raw(res)
+        }
+        Err(e) => {
+            let res = Box::new(MimiExecResult {
+                exit_code: -1,
+                stdout: alloc_c_string(""),
+                stderr: alloc_c_string(&format!("exec_safe error: {}", e)),
+            });
+            Box::into_raw(res)
+        }
     }
 }
 
