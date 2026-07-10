@@ -358,6 +358,32 @@ impl<'a> super::Lexer<'a> {
                 break;
             }
         }
+        // Scientific notation: 1e5, 1.5e-3, 2E+10
+        if let Some(ch) = self.peek() {
+            if ch == 'e' || ch == 'E' {
+                s.push(ch);
+                self.advance();
+                // Optional sign
+                if let Some(sign) = self.peek() {
+                    if sign == '+' || sign == '-' {
+                        s.push(sign);
+                        self.advance();
+                    }
+                }
+                // At least one digit required
+                if self.peek().map_or(false, |d| d.is_ascii_digit()) {
+                    is_float = true;
+                    while let Some(d) = self.peek() {
+                        if d.is_ascii_digit() || d == '_' {
+                            s.push(d);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if is_float {
             TokenKind::Float(s)
         } else {
