@@ -202,6 +202,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
                 if is_mimi_string {
+                    // CG-C3: store both ptr AND length into the heap-allocated
+                    // string struct {ptr, i64}. The ? operator in try_expr.rs
+                    // reconstructs from both fields, so no length is lost.
                     let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let string_struct_ty = self.context.struct_type(
                         &[

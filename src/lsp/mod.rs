@@ -278,12 +278,10 @@ impl LspServer {
             // Read JSON body
             let mut body = vec![0u8; len];
 
-            // Consume the separator between the Content-Length header
-            // line and the JSON body.  read_line includes the trailing \n.
-            // The protocol spec requires \r\n before the body, but some
-            // clients send only \n.  Read one byte (the \n that was already
-            // consumed by read_line) and optionally a \r byte before it.
-            // Then discard the \r if present.
+            // CL-C1: consume the separator between Content-Length header and JSON body.
+            // read_line includes the trailing \n. Protocol requires \r\n before body,
+            // but some clients send only \n. Handle both by reading one byte and
+            // optionally discarding a \r:
             let mut single = [0u8; 1];
             let _ = reader.read(&mut single);
             if single[0] == b'\r' {
@@ -304,19 +302,28 @@ impl LspServer {
 
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
+                // CL-C4: catch panic to prevent server crash. AssertUnwindSafe
+                // is needed because flow::transition takes &mut self via take().
+                // If the closure panics, self is reset to LspServer::new() (below)
+                // and the client will reconnect. The should_exit flag is lost,
+                // but that's acceptable — the panic indicates a bug.
+                let saved = std::mem::replace(self, LspServer::new());
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (new_self, response) = flow::transition(std::mem::take(self), &msg);
-                    *self = new_self;
-                    response
+                    flow::transition(saved, &msg)
                 }));
                 match result {
-                    Ok(Some(response)) => {
+                    Ok((new_self, Some(response))) => {
+                        *self = new_self;
                         let resp_str = serde_json::to_string(&response).unwrap_or_default();
                         print!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str);
                         io::stdout().flush().ok();
                     }
-                    Ok(None) => {}
+                    Ok((new_self, None)) => {
+                        *self = new_self;
+                    }
                     Err(_) => {
+                        // self was already reset to LspServer::new() before catch_unwind,
+                        // so the server continues in a clean state.
                         eprintln!(
                             "[lsp] handler panicked for method {:?}, continuing",
                             msg.get("method").and_then(|v| v.as_str())

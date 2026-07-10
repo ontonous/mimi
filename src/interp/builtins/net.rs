@@ -334,6 +334,8 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Read all data from a socket until the connection is closed.
+    /// IN-C6: uses dynamic Vec growth (extend_from_slice), not a fixed 64KB buffer.
+    /// Response data accumulates via extend_from_slice until the connection closes.
     fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
         let mut chunk = vec![0u8; 32768];
         loop {

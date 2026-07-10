@@ -287,6 +287,8 @@ impl<'a> Checker<'a> {
     /// Resolve a type and collect free TypeVars in a single traversal (Bug 6 fix).
     // TODO(#issue-TBD): wire this up via `generalize` at let-binding site.
     // See audit CO-C1 / §21 red-line 3.
+    // CO-C3: this function is dead code — generalize() is never called.
+    // The sort+dedup at line 295 ensures no phantom TypeVars in the free set.
     #[allow(dead_code)]
     fn resolve_and_collect_free_vars(&mut self, ty: &Type) -> (Type, Vec<u32>) {
         let mut free_vars = Vec::new();

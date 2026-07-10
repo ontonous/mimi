@@ -392,7 +392,7 @@ impl Parser {
         };
         let init = if self.at(&TokenKind::Eq) {
             self.advance();
-            self.skip_newlines();
+            self.skip_newlines(); // PA-C4: allow newline after `=` in let binding
             if self.at(&TokenKind::Semi) || self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof)
             {
                 return Err(ParseError::new(

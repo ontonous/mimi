@@ -97,7 +97,9 @@ pub struct Interpreter<'a> {
     /// CLI arguments forwarded to the program
     pub cli_args: Vec<String>,
     /// Registry to keep CStrings alive for FFI calls, preventing leaks.
-    /// Dropped when the Interpreter is dropped.
+    /// IN-C2: CString registry — stores CStrings created by str_to_c_str.
+    /// Dropped when the Interpreter is dropped, freeing all CStrings.
+    /// Uses ownership (not into_raw/from_raw) to guarantee no leaks.
     cstring_registry: std::cell::RefCell<Vec<std::ffi::CString>>,
 }
 

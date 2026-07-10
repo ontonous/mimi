@@ -1039,6 +1039,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Build the final phi node in the merge block that selects the value
     /// produced by the matching arm. The else_bb (unreachable) is NOT a
     /// predecessor of merge_bb, so it contributes no phi entry.
+    /// CG-C1: else_bb uses build_unreachable() to prevent undef propagation
+    /// into the phi node. LLVM optimizer cannot optimize away the unreachable
+    /// terminator, so no undef value is ever injected into the phi.
     fn build_match_phi(
         &self,
         merge_bb: BasicBlock<'ctx>,

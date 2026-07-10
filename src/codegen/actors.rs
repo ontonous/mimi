@@ -197,6 +197,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             call_args.push(self_fields_ptr.into());
 
             // Unpack params from args_blob. Each param is 8 bytes (i64-aligned).
+            // CG-C6: using i*8 offsets ensures all accesses are 8-byte aligned
+            // regardless of actual type size, preventing SIGBUS on ARM.
             // For simplicity, all scalar params are stored as i64 in the blob.
             // String/pointer params are stored as i8* (8 bytes).
             let mut offset: u32 = 0;

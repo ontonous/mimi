@@ -227,7 +227,7 @@ pub(crate) mod legacy {
                 return Err(format!("circular dependency: {}", path.display()));
             }
             let result = self.load_file_inner(path);
-            self.visiting.remove(path);
+            self.visiting.remove(path); // CL-C3: always clean up, even on error
             result
         }
 
