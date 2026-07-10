@@ -724,8 +724,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// + null-init is added by a future refactor (the existing Ptr→PtrSlot
     ///   transition is partially in place for the slot-load based consumers).
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
-        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::Ptr(ptr));
+        } else {
+            mimi_debug_assert!(false, "register_heap_alloc called with no active scope");
+            guard.push(vec![HeapEntry::Ptr(ptr)]);
         }
     }
 
@@ -746,8 +750,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Null-initialise the pointer field in the entry block so that
         // free_heap_allocs on a never-allocated path is a safe no-op free(null).
         self.emit_null_field_store_at_entry(base, struct_ty, field);
-        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+        let mut guard = self.heap_allocs.borrow_mut();
+        if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::Slot(base, struct_ty, field));
+        } else {
+            mimi_debug_assert!(false, "register_heap_slot called with no active scope");
+            guard.push(vec![HeapEntry::Slot(base, struct_ty, field)]);
         }
     }
 
