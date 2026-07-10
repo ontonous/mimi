@@ -150,10 +150,11 @@ func main() -> i32 {
 #[test]
 fn parse_let_missing_initializer_errors() {
     // Regression: `let x =` with no expression should be a parse error.
+    // Note: newlines after `=` are now skipped, so `let x =\n42` is valid.
+    // Only truly empty let bindings should error.
     let src = r#"
 func main() -> i32 {
     let x =
-    42
 }
 "#;
     let tokens = lexer::Lexer::new(src).tokenize().unwrap();
@@ -165,4 +166,29 @@ func main() -> i32 {
         "expected parse error for missing initializer, got: {:?}",
         errors
     );
+}
+
+#[test]
+fn parse_let_multiline_initializer() {
+    // `let x =\n42` should parse 42 as the initializer (newlines after = are skipped).
+    let src = r#"
+func main() -> i32 {
+    let x =
+    42
+    x
+}
+"#;
+    let tokens = lexer::Lexer::new(src).tokenize().unwrap();
+    let (file, errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    assert!(errors.is_empty(), "multiline let initializer should not error, got: {:?}", errors);
+    // Verify the let binding exists with initializer
+    use crate::ast::{Item, Stmt};
+    let has_let = file.items.iter().any(|item| {
+        if let Item::Func(func) = item {
+            func.body.iter().any(|stmt| matches!(stmt, Stmt::Let { init: Some(_), .. }))
+        } else {
+            false
+        }
+    });
+    assert!(has_let, "expected let with initializer");
 }

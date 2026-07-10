@@ -12,7 +12,8 @@ impl<'a> Interpreter<'a> {
                 // The pointer is the raw pointer to the CString data
                 let c_str = std::ffi::CString::new(s.as_str())
                     .map_err(|e| InterpError::new(format!("failed to create C string: {}", e)))?;
-                let ptr = c_str.into_raw() as i64;
+                let ptr = c_str.as_ptr() as i64;
+                self.cstring_registry.borrow_mut().push(c_str);
                 Ok(Value::Tuple(vec![
                     Value::Int(ptr),
                     Value::Int(s.len() as i64),
