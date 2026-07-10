@@ -127,6 +127,9 @@ impl crate::verifier::Verifier {
             Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
             Expr::Literal(Lit::Float(f)) => {
                 if *f == 0.0 {
+                    // -0.0 and 0.0 both encode to the same Z3 value (zero).
+                    // This is mathematically correct (0.0 == -0.0 in IEEE 754
+                    // except for the sign bit), so no special handling needed.
                     Some(Z3Real::from_int(&Z3Int::from_i64(0)))
                 } else if f.is_infinite() || f.is_nan() {
                     None
