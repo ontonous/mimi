@@ -234,6 +234,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return matches!(&args[0], Type::Name(inner, _) if inner == "string");
             }
         }
+        // Last resort: use infer_object_type which knows about builtin return types.
+        let inferred = self.infer_object_type(iterable, vars);
+        if inferred.starts_with("List<") && inferred.contains("string") {
+            return true;
+        }
         false
     }
 
