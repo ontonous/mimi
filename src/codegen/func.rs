@@ -437,6 +437,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// is tracked by `heap_allocs`.  Such expressions need their heap pointer
     /// popped from the tracking stack before `free_heap_allocs` runs, otherwise
     /// the string data gets freed before the caller can use it.
+    ///
+    /// Note: the `str_*` / `format` / `to_string` matchers assume those names
+    /// are the Mimi builtins. If a user shadows one of these names with their
+    /// own function, this check will mis-classify the result. The names are
+    /// hardcoded rather than `starts_with("str_")` (audit CG-H12) precisely
+    /// to avoid the prefix-collision case; the remaining risk is a deliberate
+    /// user name collision.
     fn is_string_temp_expr(expr: &Expr, val: &BasicValueEnum<'ctx>) -> bool {
         match expr {
             Expr::Binary(BinOp::Add, _, _) => true,

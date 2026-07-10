@@ -786,105 +786,95 @@ impl<'ctx> CodeGenerator<'ctx> {
         r: BasicValueEnum<'ctx>,
     ) -> Option<BasicValueEnum<'ctx>> {
         use crate::ast::BinOp;
-        match (l, r) {
-            (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
-                let result = match op {
-                    BinOp::Add => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant()
-                            .unwrap_or(0)
-                            .wrapping_add(b.get_zero_extended_constant().unwrap_or(0)),
-                        false,
-                    ),
-                    BinOp::Sub => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant()
-                            .unwrap_or(0)
-                            .wrapping_sub(b.get_zero_extended_constant().unwrap_or(0)),
-                        false,
-                    ),
-                    BinOp::Mul => self.context.i64_type().const_int(
-                        a.get_zero_extended_constant()
-                            .unwrap_or(0)
-                            .wrapping_mul(b.get_zero_extended_constant().unwrap_or(0)),
-                        false,
-                    ),
-                    BinOp::Div => {
-                        let rb = b.get_zero_extended_constant().unwrap_or(0);
-                        if rb == 0 {
-                            return None;
-                        }
-                        self.context
-                            .i64_type()
-                            .const_int(a.get_zero_extended_constant().unwrap_or(0) / rb, false)
-                    }
-                    BinOp::Mod => {
-                        let rb = b.get_zero_extended_constant().unwrap_or(0);
-                        if rb == 0 {
-                            return None;
-                        }
-                        self.context
-                            .i64_type()
-                            .const_int(a.get_zero_extended_constant().unwrap_or(0) % rb, false)
-                    }
-                    BinOp::EqCmp => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            == b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::NeCmp => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            != b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::Lt => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            < b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::Le => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            <= b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::Gt => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            > b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::Ge => self.context.bool_type().const_int(
-                        (a.get_zero_extended_constant().unwrap_or(0)
-                            >= b.get_zero_extended_constant().unwrap_or(0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::And | BinOp::BitAnd => self.context.bool_type().const_int(
-                        ((a.get_zero_extended_constant().unwrap_or(0) != 0)
-                            && (b.get_zero_extended_constant().unwrap_or(0) != 0))
-                            as u64,
-                        false,
-                    ),
-                    BinOp::Or | BinOp::BitOr => self.context.bool_type().const_int(
-                        ((a.get_zero_extended_constant().unwrap_or(0) != 0)
-                            || (b.get_zero_extended_constant().unwrap_or(0) != 0))
-                            as u64,
-                        false,
-                    ),
-                    _ => return None,
-                };
-                Some(BasicValueEnum::IntValue(result))
+        // Helper: only fold when BOTH operands are compile-time constants.
+        // If either is a runtime value, the fold must refuse rather than
+        // silently substituting 0 — that would be a silent miscompilation.
+        let (a, b) = match (l, r) {
+            (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => (
+                a.get_zero_extended_constant()?,
+                b.get_zero_extended_constant()?,
+            ),
+            _ => return None,
+        };
+        match op {
+            BinOp::Add => Some(
+                self.context
+                    .i64_type()
+                    .const_int(a.wrapping_add(b), false)
+                    .into(),
+            ),
+            BinOp::Sub => Some(
+                self.context
+                    .i64_type()
+                    .const_int(a.wrapping_sub(b), false)
+                    .into(),
+            ),
+            BinOp::Mul => Some(
+                self.context
+                    .i64_type()
+                    .const_int(a.wrapping_mul(b), false)
+                    .into(),
+            ),
+            BinOp::Div => {
+                if b == 0 {
+                    return None;
+                }
+                Some(self.context.i64_type().const_int(a / b, false).into())
             }
-            (BasicValueEnum::FloatValue(_), BasicValueEnum::FloatValue(_)) => {
-                // v0.28.21: float constant fold not yet supported (inkwell's
-                // get_constant() returns an opaque LLVMValueRef, not the
-                // raw f64). Float arithmetic in `quote! { ... }` still
-                // requires interpreter evaluation; covered by the
-                // fold_comptime_block path for `comptime { ... }`.
-                None
+            BinOp::Mod => {
+                if b == 0 {
+                    return None;
+                }
+                Some(self.context.i64_type().const_int(a % b, false).into())
             }
+            BinOp::EqCmp => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a == b) as u64, false)
+                    .into(),
+            ),
+            BinOp::NeCmp => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a != b) as u64, false)
+                    .into(),
+            ),
+            BinOp::Lt => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a < b) as u64, false)
+                    .into(),
+            ),
+            BinOp::Le => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a <= b) as u64, false)
+                    .into(),
+            ),
+            BinOp::Gt => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a > b) as u64, false)
+                    .into(),
+            ),
+            BinOp::Ge => Some(
+                self.context
+                    .bool_type()
+                    .const_int((a >= b) as u64, false)
+                    .into(),
+            ),
+            BinOp::And | BinOp::BitAnd => Some(
+                self.context
+                    .bool_type()
+                    .const_int(((a != 0) && (b != 0)) as u64, false)
+                    .into(),
+            ),
+            BinOp::Or | BinOp::BitOr => Some(
+                self.context
+                    .bool_type()
+                    .const_int(((a != 0) || (b != 0)) as u64, false)
+                    .into(),
+            ),
             _ => None,
         }
     }
@@ -899,7 +889,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         match op {
             UnOp::Neg => match v {
                 BasicValueEnum::IntValue(iv) => {
-                    let n = iv.get_zero_extended_constant().unwrap_or(0);
+                    // Only fold if the operand is a compile-time constant.
+                    // If `get_zero_extended_constant` returns None, the value
+                    // is a runtime computation and we must not pretend to
+                    // know its value — returning Some(0) here would be a
+                    // silent miscompilation.
+                    let n = iv.get_zero_extended_constant()?;
                     Some(BasicValueEnum::IntValue(
                         self.context
                             .i64_type()
@@ -915,7 +910,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             },
             UnOp::Not => match v {
                 BasicValueEnum::IntValue(iv) => {
-                    let n = iv.get_zero_extended_constant().unwrap_or(0);
+                    // Only fold if the operand is a compile-time constant;
+                    // see §21 red line 2 (silent error swallow).
+                    let n = iv.get_zero_extended_constant()?;
                     Some(BasicValueEnum::IntValue(
                         self.context.i64_type().const_int((n == 0) as u64, false),
                     ))
@@ -1347,16 +1344,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.build_alloca(i8_ty.array_type(items.len() as u32), "q_children")?;
         for (i, item) in items.iter().enumerate() {
             let child = self.compile_quote_runtime_expr(item)?;
-            let gep = unsafe {
-                self.builder
-                    .build_in_bounds_gep(
-                        i8_ty,
-                        alloca,
-                        &[i64_ty.const_int(i as u64, false)],
-                        "q_child_gep",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("q child gep: {}", e)))?
-            };
+            // SAFETY: ptr is the alloca just above, indices are compile-time
+            // constant in-bounds values into that array, and result_type
+            // matches. Delegates to CheckedGepBuilder to absorb the unsafe
+            // boundary in one place.
+            let gep = self
+                .gep()
+                .build_in_bounds_gep(
+                    i8_ty,
+                    alloca,
+                    &[i64_ty.const_int(i as u64, false)],
+                    "q_child_gep",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("q child gep: {}", e)))?;
             self.build_store(gep, child)?;
         }
         Ok(self
