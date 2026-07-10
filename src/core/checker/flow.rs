@@ -16,6 +16,8 @@ pub enum FlowEvent {
 #[derive(Debug, Clone)]
 pub struct FlowAcc {
     pub errors: Vec<Diagnostic>,
+    /// Warnings accumulated during type checking (reserved for future use).
+    #[allow(dead_code)]
     pub warnings: Vec<Diagnostic>,
 }
 
