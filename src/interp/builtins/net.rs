@@ -87,25 +87,38 @@ impl<'a> Interpreter<'a> {
                 host
             )));
         }
-        // SAFETY: fd/domain and addrinfo result are validated before use.
-        let ret = unsafe { libc::connect(fd as i32, (*res).ai_addr, (*res).ai_addrlen) };
-        // SAFETY: res is non-null and was returned by getaddrinfo, so freeaddrinfo is safe.
-        unsafe { libc::freeaddrinfo(res) };
-        if ret == 0 {
-            // Disable Nagle's algorithm for responsive small-message communication
-            let nodelay: libc::c_int = 1;
-            // SAFETY: fd is valid and option value pointer/size are correct.
+        // Iterate through addrinfo results to support IPv4/IPv6 fallback
+        let mut ret = -1i64;
+        let mut ai = res;
+        while !ai.is_null() && ret != 0 {
+            // SAFETY: ai is a valid addrinfo from getaddrinfo linked list.
             unsafe {
-                libc::setsockopt(
-                    fd as i32,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_NODELAY,
-                    &nodelay as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&nodelay) as libc::socklen_t,
-                );
+                // Create a new socket for this address family
+                let new_fd = libc::socket((*ai).ai_family, (*ai).ai_socktype, (*ai).ai_protocol);
+                if new_fd >= 0 {
+                    ret = libc::connect(new_fd, (*ai).ai_addr, (*ai).ai_addrlen) as i64;
+                    if ret == 0 {
+                        let nodelay: libc::c_int = 1;
+                        libc::setsockopt(
+                            new_fd,
+                            libc::IPPROTO_TCP,
+                            libc::TCP_NODELAY,
+                            &nodelay as *const _ as *const libc::c_void,
+                            std::mem::size_of_val(&nodelay) as libc::socklen_t,
+                        );
+                        // Replace fd with the successfully connected one
+                        libc::dup2(new_fd, fd as i32);
+                        libc::close(new_fd);
+                    } else {
+                        libc::close(new_fd);
+                    }
+                }
+                ai = (*ai).ai_next;
             }
         }
-        Ok(Value::Int(ret as i64))
+        // SAFETY: res is non-null and was returned by getaddrinfo, so freeaddrinfo is safe.
+        unsafe { libc::freeaddrinfo(res) };
+        Ok(Value::Int(ret))
     }
 
     pub(crate) fn builtin_bind(&self, args: Vec<Value>) -> Result<Value, InterpError> {
