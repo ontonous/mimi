@@ -93,9 +93,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let llvm_ty = match &t.kind {
             crate::ast::TypeDefKind::Record(fields) => {
+                let extern_mapping = t.attributes.contains(&TypeAttribute::ReprC);
                 let mut field_tys = Vec::new();
                 for f in fields {
-                    let ty = self.llvm_type_for(&f.ty).ok_or_else(|| {
+                    let ty = if extern_mapping {
+                        self.llvm_type_for_extern(&f.ty)
+                    } else {
+                        self.llvm_type_for(&f.ty)
+                    }
+                    .ok_or_else(|| {
                         CompileError::LlvmError(format!(
                             "cannot map record field '{}' type to LLVM",
                             crate::core::fmt_type(&f.ty)
