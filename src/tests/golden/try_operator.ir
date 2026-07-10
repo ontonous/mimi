@@ -27,7 +27,7 @@ declare ptr @mimi_list_push_grow(ptr, i64)
 
 declare i32 @fprintf(ptr, ptr, ...)
 
-declare i64 @sprintf(ptr, ptr, ...)
+declare i32 @sprintf(ptr, ptr, ...)
 
 declare void @exit(i32)
 
