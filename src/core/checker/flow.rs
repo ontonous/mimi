@@ -45,6 +45,13 @@ impl<'a> CheckerState<'a> {
         }
     }
 
+    /// Create Collecting state with strict mode enabled.
+    pub fn new_strict(file: &'a File) -> Self {
+        let mut checker = Checker::new(file);
+        checker.strict = true;
+        CheckerState::Collecting { checker }
+    }
+
     /// Transition: process one phase or one item per Step event.
     pub fn transition(self, _event: FlowEvent) -> Result<Self, String> {
         match self {
@@ -127,6 +134,21 @@ fn run_to_done<'a>(mut state: CheckerState<'a>) -> Result<CheckerState<'a>, Stri
 /// interface as `core::check`.
 pub fn flow_check(file: &File) -> Result<(), Vec<Diagnostic>> {
     let state = CheckerState::new(file);
+    let state = match run_to_done(state) {
+        Ok(s) => s,
+        Err(e) => return Err(vec![Diagnostic::error(e, Span::single(0, 0))]),
+    };
+    let acc = state.into_output();
+    if acc.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(acc.errors)
+    }
+}
+
+/// Run the Flow checker in strict mode. Same interface as `core::check_strict`.
+pub fn flow_check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
+    let state = CheckerState::new_strict(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
         Err(e) => return Err(vec![Diagnostic::error(e, Span::single(0, 0))]),

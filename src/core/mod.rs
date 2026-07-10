@@ -21,14 +21,11 @@ pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion, same_t
 pub(crate) use helpers::{is_int, is_numeric, is_string};
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
-    let mut checker = Checker::new(file);
-    checker.check()
+    checker::flow::flow_check(file)
 }
 
 pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
-    let mut checker = Checker::new(file);
-    checker.strict = true;
-    checker.check()
+    checker::flow::flow_check_strict(file)
 }
 
 /// Verify that MMS rule attachments are consistent.
