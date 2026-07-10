@@ -4,7 +4,7 @@ impl<'a> Interpreter<'a> {
     /// Suggest a similar variable or function name for an undefined identifier.
     pub(in crate::interp) fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut candidates: Vec<String> = Vec::new();
-        for scope in self.env.iter().rev() {
+        for scope in self.scope_env.env.iter().rev() {
             for var_name in scope.keys() {
                 if levenshtein_distance(name, var_name) <= 2 && name != var_name {
                     candidates.push(var_name.clone());

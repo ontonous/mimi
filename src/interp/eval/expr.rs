@@ -1214,7 +1214,7 @@ impl<'a> Interpreter<'a> {
         let free_vars = collect_free_vars(body, &param_names);
         // Only capture variables that are actually used
         let mut captured = HashMap::new();
-        for scope in self.env.iter().rev() {
+        for scope in self.scope_env.env.iter().rev() {
             for (name, val) in scope {
                 if free_vars.contains(name) && !captured.contains_key(name) {
                     captured.insert(name.clone(), val.clone());
