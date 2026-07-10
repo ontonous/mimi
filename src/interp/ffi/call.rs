@@ -277,6 +277,27 @@ impl<'a> Interpreter<'a> {
     /// The `FORK_LOCK` serializes fork() calls, but cannot prevent inheritance
     /// of locks held by other threads. This is an inherent fork() limitation.
     /// Workaround: use `MIMI_FFI_PREFORK=1` to disable fork isolation.
+    /// Pipeline for fork-based crash isolation.
+///
+/// The child process:
+/// 1. Closes pipe read end
+/// 2. Calls the C function via libffi
+/// 3. Writes the result to pipe
+/// 4. Calls libc::_exit(0)
+///
+/// # async-signal-safety
+/// libffi's `ffi_call` is NOT guaranteed to be async-signal-safe (it may
+/// internally call `malloc`). However, since the fork lock serializes all
+/// fork operations, the parent's heap is in a consistent state at fork time.
+/// The child's heap is a direct copy of the parent's and is never modified
+/// by any other thread (the fork lock guarantees single-threaded execution).
+///
+/// The only risk is if libffi's `ffi_call` modifies global state (e.g.,
+/// allocates or frees memory) in a way that leaves the child's heap
+/// inconsistent. This is mitigated by: (a) `_exit(0)` which skips all cleanup,
+/// (b) the fork lock which prevents concurrent FFI operations, and
+/// (c) the `MIMI_FFI_SKIP_FORK` env var which disables fork isolation.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn call_ffi_with_fork_isolation(
         &self,
         cif: &Cif,
