@@ -5,6 +5,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::{Token, TokenKind};
 use crate::span::Span;
 
+mod flow;
 mod helpers;
 mod parse_expr;
 mod parse_stmt;
@@ -114,6 +115,22 @@ impl Parser {
             pos: 0,
             mode: ParseMode::Production,
             recovery_mode: true,
+            recursion_depth: std::cell::Cell::new(0),
+            errors: Vec::new(),
+            allow_record_literal: true,
+        }
+    }
+
+    /// Create a parser from a token slice, starting at `pos`.
+    /// Used by the Flow parser prototype to create temporary parsers
+    /// within state transitions.
+    #[doc(hidden)]
+    pub(crate) fn splice(tokens: &[Token], pos: usize, mode: ParseMode) -> Self {
+        Self {
+            tokens: tokens.to_vec(),
+            pos,
+            mode,
+            recovery_mode: false,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
             allow_record_literal: true,
