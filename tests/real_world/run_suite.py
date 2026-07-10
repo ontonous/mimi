@@ -41,7 +41,8 @@ def run_one(path: Path):
     cg_out = c.stdout + c.stderr
 
     # If codegen produced an executable, run it
-    exe = path.parent / path.stem
+    # mimi build defaults to ./<stem> (CWD), not next to the source
+    exe = REPO_ROOT / path.stem
     exe_ok = None
     exe_out = ""
     if cg_ok and exe.exists():
