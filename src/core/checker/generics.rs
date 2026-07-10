@@ -87,24 +87,45 @@ impl<'a> Checker<'a> {
                             .or_insert_with(|| actual.clone());
                     }
                 } else if !p_args.is_empty() {
-                    if let Type::Name(_, a_args) = actual {
-                        if p_args.len() == a_args.len() {
+                    match actual {
+                        Type::Name(_, a_args) if p_args.len() == a_args.len() => {
                             for (pa, aa) in p_args.iter().zip(a_args.iter()) {
                                 self.infer_type_params(pa, aa, generics, type_map);
                             }
                         }
+                        // Dual representation: Name("Option", [T]) <-> Option(T)
+                        Type::Option(a_inner) if name == "Option" && p_args.len() == 1 => {
+                            self.infer_type_params(&p_args[0], a_inner, generics, type_map);
+                        }
+                        Type::Result(a_ok, a_err) if name == "Result" && p_args.len() == 2 => {
+                            self.infer_type_params(&p_args[0], a_ok, generics, type_map);
+                            self.infer_type_params(&p_args[1], a_err, generics, type_map);
+                        }
+                        _ => {}
                     }
                 }
             }
-            Type::Option(inner) => {
-                if let Type::Option(a_inner) = actual {
-                    self.infer_type_params(inner, a_inner, generics, type_map);
+            Type::Option(p_inner) => {
+                match actual {
+                    Type::Option(a_inner) => self.infer_type_params(p_inner, a_inner, generics, type_map),
+                    // Dual representation: Option(T) <-> Name("Option", [T])
+                    Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                        self.infer_type_params(p_inner, &args[0], generics, type_map);
+                    }
+                    _ => {}
                 }
             }
             Type::Result(p_ok, p_err) => {
-                if let Type::Result(a_ok, a_err) = actual {
-                    self.infer_type_params(p_ok, a_ok, generics, type_map);
-                    self.infer_type_params(p_err, a_err, generics, type_map);
+                match actual {
+                    Type::Result(a_ok, a_err) => {
+                        self.infer_type_params(p_ok, a_ok, generics, type_map);
+                        self.infer_type_params(p_err, a_err, generics, type_map);
+                    }
+                    Type::Name(n, args) if n == "Result" && args.len() == 2 => {
+                        self.infer_type_params(p_ok, &args[0], generics, type_map);
+                        self.infer_type_params(p_err, &args[1], generics, type_map);
+                    }
+                    _ => {}
                 }
             }
             Type::Tuple(p_elems) => {
