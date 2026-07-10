@@ -748,7 +748,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .insert(name.clone(), "Option".to_string());
                                 }
                                 _ => {
-                                    if let Some(fdef) = self.func_defs.get(func_name) {
+                                    // Builtin functions: use infer_object_type for return type
+                                    if crate::codegen::builtins::is_builtin(func_name) {
+                                        let obj_type = self.infer_object_type(init, vars);
+                                        if !obj_type.is_empty()
+                                            && obj_type.as_str() != func_name.as_str()
+                                        {
+                                            self.var_type_names
+                                                .insert(name.clone(), obj_type);
+                                        }
+                                    } else if let Some(fdef) = self.func_defs.get(func_name) {
                                         if let Some(ret_ty) = &fdef.ret {
                                             match ret_ty {
                                                 Type::ImplTrait(traits) => {
@@ -758,8 +767,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     );
                                                 }
                                                 Type::Name(tn, _) => {
+                                                    let resolved =
+                                                        self.substitute_type_params(ret_ty);
+                                                    let type_name = if let Some(full) =
+                                                        self.get_full_type_name(&resolved)
+                                                    {
+                                                        full
+                                                    } else {
+                                                        tn.clone()
+                                                    };
                                                     self.var_type_names
-                                                        .insert(name.clone(), tn.clone());
+                                                        .insert(name.clone(), type_name);
                                                 }
                                                 _ => {}
                                             }
