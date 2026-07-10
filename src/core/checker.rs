@@ -549,6 +549,7 @@ impl<'a> Checker<'a> {
 }
 
 mod borrow;
+pub(crate) mod flow;
 mod func;
 mod generics;
 mod items;
