@@ -865,6 +865,16 @@ pub extern "C" fn mimi_map_set(
 pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
     // Check bit-0 tag (codegen tags integers with bit 0 = 1).
     if value & 1 == 1 {
+        // Negative i64 values also have bit-0 = 1 and would be misidentified
+        // as tagged integers with the wrong decoded value. Check the sign bit:
+        // if the high bit is set, treat as raw signed i64 rather than tagged.
+        // This handles untagged negative computation results correctly.
+        // Limitation: tagged integers >= 2^62 also have the high bit set and
+        // will be formatted as raw i64 instead of decoded. This is extremely
+        // rare in practice.
+        if (value as i64) < 0 {
+            return alloc_c_string(&(value as i64).to_string());
+        }
         return alloc_c_string(&((value >> 1) as i64).to_string());
     }
 
@@ -1058,6 +1068,29 @@ unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
         return String::new();
     }
     CStr::from_ptr(ptr).to_string_lossy().into_owned()
+}
+
+/// Heap-copy a C string with known length into a new allocation.
+/// Returns a ValueHandle (pointer) suitable for storage in a map and
+/// later detection by `mimi_any_to_string` (aligned heap pointer >= 1MB).
+/// The caller (codegen side) is responsible for freeing via `mimi_string_free`.
+#[no_mangle]
+pub extern "C" fn mimi_str_clone(
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> ValueHandle {
+    if ptr.is_null() || len <= 0 {
+        return 0;
+    }
+    let buf = unsafe { libc::malloc((len + 1) as usize) as *mut u8 };
+    if buf.is_null() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(ptr as *const u8, buf, len as usize);
+        *buf.add(len as usize) = 0;
+    }
+    buf as ValueHandle
 }
 
 #[no_mangle]

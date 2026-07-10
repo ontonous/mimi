@@ -391,6 +391,18 @@ fn register_string_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::FloatType(ctx.f64_type())], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_clone(i8*, i64) → i64 (heap-allocated string handle for map storage)
+    module.add_function(
+        "mimi_str_clone",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 fn register_regex_fns<'ctx>(

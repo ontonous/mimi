@@ -14,83 +14,179 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "to_string expects 1 argument".to_string(),
             ));
         }
+        let is_any = self.pending_to_string_is_any;
+        self.pending_to_string_is_any = false;
         match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
-                // Reset the flag unconditionally so we don't affect subsequent calls
-                self.pending_to_string_is_any = false;
-                // v0.28.30: route all i64 through `mimi_any_to_string` which
-                // uses a heuristic address-range check to distinguish C string
-                // pointers (map values) from integers. This is simpler and
-                // more robust than the bit-0 tag protocol which conflicted
-                // with raw ptrtoint map values stored by `mimi_map_set`.
-                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let any_fn_ty = i8_ptr.fn_type(
-                    &[BasicMetadataTypeEnum::IntType(self.context.i64_type())],
-                    false,
-                );
-                let fn_any = self
-                    .module
-                    .get_function("mimi_any_to_string")
-                    .unwrap_or_else(|| {
-                        self.module.add_function(
-                            "mimi_any_to_string",
-                            any_fn_ty,
-                            Some(inkwell::module::Linkage::External),
+                if is_any {
+                    // Route i64 through `mimi_any_to_string` which uses a heuristic
+                    // address-range check to distinguish C string pointers (map values)
+                    // from integers, and handles tagged integers via bit-0 protocol.
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let any_fn_ty = i8_ptr.fn_type(
+                        &[BasicMetadataTypeEnum::IntType(self.context.i64_type())],
+                        false,
+                    );
+                    let fn_any = self
+                        .module
+                        .get_function("mimi_any_to_string")
+                        .unwrap_or_else(|| {
+                            self.module.add_function(
+                                "mimi_any_to_string",
+                                any_fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                    let raw = self
+                        .builder
+                        .build_call(
+                            fn_any,
+                            &[BasicMetadataValueEnum::IntValue(iv)],
+                            "any_to_string",
                         )
-                    });
-                let raw = self
-                    .builder
-                    .build_call(
-                        fn_any,
-                        &[BasicMetadataValueEnum::IntValue(iv)],
-                        "any_to_string",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("any_to_string: {}", e)))?
-                    .try_as_basic_value_opt()
-                    .ok_or("mimi_any_to_string returned void")?
-                    .into_pointer_value();
-                let str_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::PointerType(i8_ptr),
-                        BasicTypeEnum::IntType(self.context.i64_type()),
-                    ],
-                    false,
-                );
-                let alloca = self.build_entry_alloca(str_ty, "any_str")?;
-                let ptr_gep = self
-                    .gep()
-                    .build_struct_gep(str_ty, alloca, 0, "any_str_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                self.builder
-                    .build_store(ptr_gep, raw)
-                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                let strlen_fn = self
-                    .module
-                    .get_function("strlen")
-                    .ok_or_else(|| "strlen not declared".to_string())?;
-                let len = self
-                    .builder
-                    .build_call(
-                        strlen_fn,
-                        &[BasicMetadataValueEnum::PointerValue(raw)],
-                        "any_strlen",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("strlen: {}", e)))?
-                    .try_as_basic_value_opt()
-                    .ok_or("strlen returned void")?
-                    .into_int_value();
-                let len_gep = self
-                    .gep()
-                    .build_struct_gep(str_ty, alloca, 1, "any_str_len")
-                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                self.builder
-                    .build_store(len_gep, len)
-                    .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                let result = self
-                    .builder
-                    .build_load(BasicTypeEnum::StructType(str_ty), alloca, "any_str")
-                    .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
-                Ok(result)
+                        .map_err(|e| CompileError::LlvmError(format!("any_to_string: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_any_to_string returned void")?
+                        .into_pointer_value();
+                    let str_ty = self.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            BasicTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    );
+                    let alloca = self.build_entry_alloca(str_ty, "any_str")?;
+                    let ptr_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 0, "any_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    self.builder
+                        .build_store(ptr_gep, raw)
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    let strlen_fn = self
+                        .module
+                        .get_function("strlen")
+                        .ok_or_else(|| "strlen not declared".to_string())?;
+                    let len = self
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(raw)],
+                            "any_strlen",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("strlen: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("strlen returned void")?
+                        .into_int_value();
+                    let len_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 1, "any_str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    self.builder
+                        .build_store(len_gep, len)
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                    let result = self
+                        .builder
+                        .build_load(BasicTypeEnum::StructType(str_ty), alloca, "any_str")
+                        .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?;
+                    Ok(result)
+                } else {
+                    // Known integer type: format directly with sprintf to avoid
+                    // mimi_any_to_string's tagged-integer heuristic which would
+                    // misidentify odd positive integers (e.g. 5 → 5>>1 = 2).
+                    let alloc_size = self.context.i64_type().const_int(32, false);
+                    let malloc_fn = self
+                        .module
+                        .get_function("malloc")
+                        .ok_or_else(|| "malloc not declared".to_string())?;
+                    let buf = self
+                        .builder
+                        .build_call(
+                            malloc_fn,
+                            &[BasicMetadataValueEnum::IntValue(alloc_size)],
+                            "malloc_int_str",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or("malloc returned void")?
+                        .into_pointer_value();
+                    let fmt_global = self
+                        .builder
+                        .build_global_string_ptr("%ld", "int_fmt")
+                        .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let sprintf_ty = i8_ptr.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        ],
+                        true,
+                    );
+                    let sprintf_fn = self
+                        .module
+                        .get_function("sprintf")
+                        .unwrap_or_else(|| {
+                            self.module.add_function(
+                                "sprintf",
+                                sprintf_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                    self.builder
+                        .build_call(
+                            sprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
+                                BasicMetadataValueEnum::IntValue(iv),
+                            ],
+                            "sprintf_int",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                    let str_ty = self.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            BasicTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    );
+                    let alloca = self.build_entry_alloca(str_ty, "int_str")?;
+                    let ptr_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 0, "int_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.builder
+                        .build_store(ptr_gep, buf)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    self.register_heap_slot(alloca, str_ty, 0);
+                    let strlen_fn = self
+                        .module
+                        .get_function("strlen")
+                        .ok_or_else(|| "strlen not declared".to_string())?;
+                    let len = self
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(buf)],
+                            "strlen_int",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| CompileError::LlvmError("strlen returned void".to_string()))?
+                        .into_int_value();
+                    let len_gep = self
+                        .gep()
+                        .build_struct_gep(str_ty, alloca, 1, "int_str_len")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.builder
+                        .build_store(len_gep, len)
+                        .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+                    let result = self
+                        .builder
+                        .build_load(BasicTypeEnum::StructType(str_ty), alloca, "int_str")
+                        .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                    Ok(result)
+                }
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 let alloc_size = self.context.i64_type().const_int(32, false);
