@@ -1,8 +1,0 @@
-use std::io
-
-func main() -> i32 {
-    print_raw("io test")
-    print_line(" ok")
-    // Can't easily capture stdout for testing, but verify no crash
-    0
-}

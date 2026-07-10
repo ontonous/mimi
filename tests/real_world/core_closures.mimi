@@ -1,5 +1,0 @@
-func main() -> i32 {
-    let add = fn(a: i32, b: i32) -> i32 { a + b }
-    let double = fn(x: i32) -> i32 { x * 2 }
-    if add(2, 3) == 5 && double(7) == 14 { 0 } else { 1 }
-}

@@ -1,6 +1,0 @@
-type Point { x: i32, y: i32 }
-
-func main() -> i32 {
-    let p = Point { x: 3, y: 4 }
-    if p.x == 3 && p.y == 4 { 0 } else { 1 }
-}

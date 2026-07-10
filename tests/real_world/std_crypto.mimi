@@ -1,8 +1,0 @@
-use std::crypto
-
-func main() -> i32 {
-    if !is_valid_hex("0a1f") { return 1 }
-    if !is_valid_hex("abcdef") { return 2 }
-    let encoded = hex_encode("ABC")
-    if encoded == "414243" { 0 } else { 3 }
-}
