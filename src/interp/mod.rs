@@ -97,6 +97,9 @@ pub struct Interpreter<'a> {
     globals: HashMap<String, Value>,
     /// CLI arguments forwarded to the program
     pub cli_args: Vec<String>,
+    /// Registry to keep CStrings alive for FFI calls, preventing leaks.
+    /// Dropped when the Interpreter is dropped.
+    cstring_registry: std::cell::RefCell<Vec<std::ffi::CString>>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -185,6 +188,7 @@ impl<'a> Interpreter<'a> {
             actor_index,
             globals: HashMap::new(),
             cli_args: Vec::new(),
+            cstring_registry: std::cell::RefCell::new(Vec::new()),
         }
     }
 

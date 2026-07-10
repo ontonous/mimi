@@ -110,9 +110,80 @@ impl<'a> super::Lexer<'a> {
                             s.push('"');
                             self.advance();
                         }
-                        Some(c) => {
-                            s.push(c);
+                        Some('0') => {
+                            s.push('\0');
                             self.advance();
+                        }
+                        Some('x') => {
+                            let start_col = self.col;
+                            self.advance();
+                            let mut hex = String::with_capacity(2);
+                            for _ in 0..2 {
+                                match self.peek() {
+                                    Some(c) if c.is_ascii_hexdigit() => {
+                                        hex.push(c);
+                                        self.advance();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if hex.len() != 2 {
+                                return Err(invalid_escape("\\x", self.line, start_col));
+                            }
+                            let value = u8::from_str_radix(&hex, 16).unwrap();
+                            s.push(value as char);
+                        }
+                        Some('u') => {
+                            let start_col = self.col;
+                            self.advance();
+                            let mut code = String::new();
+                            match self.peek() {
+                                Some('{') => {
+                                    self.advance();
+                                    while let Some(c) = self.peek() {
+                                        if c.is_ascii_hexdigit() || c == '_' {
+                                            code.push(c);
+                                            self.advance();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    if self.peek() != Some('}') {
+                                        return Err(invalid_escape("\\u{", self.line, start_col));
+                                    }
+                                    if code.is_empty() {
+                                        return Err(invalid_escape("\\u{}", self.line, start_col));
+                                    }
+                                    self.advance();
+                                }
+                                _ => {
+                                    for _ in 0..4 {
+                                        match self.peek() {
+                                            Some(c) if c.is_ascii_hexdigit() => {
+                                                code.push(c);
+                                                self.advance();
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    if code.len() != 4 {
+                                        return Err(invalid_escape("\\u", self.line, start_col));
+                                    }
+                                }
+                            }
+                            let cleaned: String = code.chars().filter(|c| *c != '_').collect();
+                            let value = u32::from_str_radix(&cleaned, 16).unwrap();
+                            match char::from_u32(value) {
+                                Some(ch) => s.push(ch),
+                                None => return Err(invalid_escape("\\u", self.line, start_col)),
+                            }
+                        }
+                        Some(c) => {
+                            return Err(invalid_escape(
+                                &format!("\\{}", c),
+                                self.line,
+                                self.col,
+                            ));
                         }
                         None => return Err(unterminated_escape(self.line, self.col)),
                     }

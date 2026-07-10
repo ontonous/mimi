@@ -31,8 +31,10 @@ impl<'a> Interpreter<'a> {
 /// Compute Levenshtein edit distance between two strings.
 #[allow(clippy::needless_range_loop)]
 pub(in crate::interp) fn levenshtein_distance(a: &str, b: &str) -> usize {
-    let a_len = a.len();
-    let b_len = b.len();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
     if a_len == 0 {
         return b_len;
     }
@@ -47,9 +49,9 @@ pub(in crate::interp) fn levenshtein_distance(a: &str, b: &str) -> usize {
         prev[j] = j;
     }
 
-    for (i, ca) in a.chars().enumerate() {
+    for (i, ca) in a_chars.iter().enumerate() {
         curr[0] = i + 1;
-        for (j, cb) in b.chars().enumerate() {
+        for (j, cb) in b_chars.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
             curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
