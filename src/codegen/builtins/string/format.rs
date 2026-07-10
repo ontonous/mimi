@@ -185,7 +185,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let pv = if let BasicMetadataValueEnum::PointerValue(p) = args[0] {
                     p
                 } else {
-                    unreachable!()
+                    return Err(CompileError::Generic(
+                        "fstring format: expected pointer value".to_string(),
+                    ));
                 };
                 let alloc_size = self.context.i64_type().const_int(2, false);
                 let malloc_fn = self

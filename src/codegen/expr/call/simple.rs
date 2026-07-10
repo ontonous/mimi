@@ -91,7 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let all_meta: Vec<_> = compiled_args
             .iter()
             .map(|arg| basic_value_to_metadata_type(arg))
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         let ret_type = i64_ty;
         let indirect_fn_type = ret_type.fn_type(&all_meta, false);
         let fn_ptr_typed = self.build_pointer_cast(
@@ -1353,8 +1353,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 }
 
 /// Convert a BasicValueEnum to its metadata type for indirect calls.
-fn basic_value_to_metadata_type<'ctx>(val: &BasicValueEnum<'ctx>) -> BasicMetadataTypeEnum<'ctx> {
-    match val {
+fn basic_value_to_metadata_type<'ctx>(
+    val: &BasicValueEnum<'ctx>,
+) -> Result<BasicMetadataTypeEnum<'ctx>, CompileError> {
+    Ok(match val {
         BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
         BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
         BasicValueEnum::PointerValue(pv) => BasicMetadataTypeEnum::PointerType(pv.get_type()),
@@ -1362,12 +1364,12 @@ fn basic_value_to_metadata_type<'ctx>(val: &BasicValueEnum<'ctx>) -> BasicMetada
         BasicValueEnum::ArrayValue(av) => BasicMetadataTypeEnum::ArrayType(av.get_type()),
         BasicValueEnum::VectorValue(vv) => BasicMetadataTypeEnum::VectorType(vv.get_type()),
         BasicValueEnum::ScalableVectorValue(_) => {
-            BasicMetadataTypeEnum::IntType(iv_type_unavailable())
+            return Err(CompileError::Generic(
+                "scalable vector not supported in Mimi codegen".to_string(),
+            ));
         }
-    }
+    })
 }
-
-/// Build an LLVM function type from a basic return type and parameter types.
 fn fn_type_for_basic_type<'ctx>(
     ret_ty: BasicTypeEnum<'ctx>,
     params: &[BasicMetadataTypeEnum<'ctx>],
@@ -1384,6 +1386,4 @@ fn fn_type_for_basic_type<'ctx>(
     }
 }
 
-fn iv_type_unavailable<'ctx>() -> inkwell::types::IntType<'ctx> {
-    unreachable!("scalable vector not supported in Mimi codegen")
-}
+
