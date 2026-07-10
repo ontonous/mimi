@@ -626,13 +626,49 @@ impl<'ctx> CodeGenerator<'ctx> {
             )),
             Value::Unit => Ok(BasicValueEnum::IntValue(i64_ty.const_int(0, false))),
             Value::String(s) => {
-                let global = self
+                // Allocate a heap copy of the string instead of a .rodata global,
+                // so that the memory can be safely freed by free_heap_allocs.
+                let len = self.context.i64_type().const_int(s.len() as u64, false);
+                let malloc_fn = self.get_runtime_fn("malloc")?;
+                let heap_ptr = self
+                    .build_call(
+                        malloc_fn,
+                        &[BasicMetadataValueEnum::IntValue(len)],
+                        "comptime_str_malloc",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("comptime_str malloc returned void".into())
+                    })?
+                    .into_pointer_value();
+                let i8_ty = self.context.i8_type();
+                for (idx, &byte) in s.as_bytes().iter().enumerate() {
+                    let gep = self.build_in_bounds_gep(
+                        i8_ty,
+                        heap_ptr,
+                        &[self.context.i64_type().const_int(idx as u64, false)],
+                        "comptime_str_gep",
+                    )?;
+                    self.build_store(gep, i8_ty.const_int(byte as u64, false))?;
+                }
+                let struct_ty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                );
+                let sv = self
                     .builder
-                    .build_global_string_ptr(s, "comptime_str")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("comptime string global: {}", e))
-                    })?;
-                Ok(BasicValueEnum::PointerValue(global.as_pointer_value()))
+                    .build_insert_value(struct_ty.get_undef(), heap_ptr, 0, "comptime_str_data")
+                    .map_err(|e| CompileError::LlvmError(format!("insert str data: {}", e)))?
+                    .into_struct_value();
+                let sv = self
+                    .builder
+                    .build_insert_value(sv, len, 1, "comptime_str_len")
+                    .map_err(|e| CompileError::LlvmError(format!("insert str len: {}", e)))?
+                    .into_struct_value();
+                Ok(BasicValueEnum::StructValue(sv))
             }
             other => Err(CompileError::Generic(format!(
                 "comptime fold: unsupported runtime value type {:?}; \
