@@ -46,6 +46,8 @@ pub struct Interpreter<'a> {
     type_variants: HashMap<String, Vec<String>>,
     /// Maps variant name to its parent ADT type name
     variant_parent: HashMap<String, String>,
+    /// Maps variant name to field-name → position index (for named constructor patterns)
+    variant_field_positions: HashMap<String, HashMap<String, usize>>,
     /// Variants that represent "failure" (Err, None, *Error, *Fail)
     failure_variants: HashMap<String, bool>,
     /// Capability definitions: cap_name -> list of component caps
@@ -105,6 +107,7 @@ impl<'a> Interpreter<'a> {
         let mut newtype_constructors = HashMap::new();
         let mut type_variants: HashMap<String, Vec<String>> = HashMap::new();
         let mut variant_parent: HashMap<String, String> = HashMap::new();
+        let mut variant_field_positions: HashMap<String, HashMap<String, usize>> = HashMap::new();
         let mut failure_variants: HashMap<String, bool> = HashMap::new();
         let mut cap_defs: HashMap<String, Vec<String>> = HashMap::new();
         for item in &file.items {
@@ -114,6 +117,7 @@ impl<'a> Interpreter<'a> {
                 &mut newtype_constructors,
                 &mut type_variants,
                 &mut variant_parent,
+                &mut variant_field_positions,
                 &mut failure_variants,
             );
             Self::collect_caps(item, &mut cap_defs);
@@ -159,6 +163,7 @@ impl<'a> Interpreter<'a> {
             newtype_constructors,
             type_variants,
             variant_parent,
+            variant_field_positions,
             failure_variants,
             cap_defs,
             compensation_stack: Vec::new(),
@@ -286,6 +291,7 @@ impl<'a> Interpreter<'a> {
         newtype_constructors: &mut HashMap<String, bool>,
         type_variants: &mut HashMap<String, Vec<String>>,
         variant_parent: &mut HashMap<String, String>,
+        variant_field_positions: &mut HashMap<String, HashMap<String, usize>>,
         failure_variants: &mut HashMap<String, bool>,
     ) {
         match item {
@@ -297,7 +303,15 @@ impl<'a> Interpreter<'a> {
                             let arity = match &v.payload {
                                 None => 0,
                                 Some(VariantPayload::Tuple(types)) => types.len(),
-                                Some(VariantPayload::Record(fields)) => fields.len(),
+                                Some(VariantPayload::Record(fields)) => {
+                                    // Store field name → position for named constructor patterns
+                                    let mut positions = HashMap::new();
+                                    for (i, f) in fields.iter().enumerate() {
+                                        positions.insert(f.name.clone(), i);
+                                    }
+                                    variant_field_positions.insert(v.name.clone(), positions);
+                                    fields.len()
+                                }
                             };
                             out.insert(v.name.clone(), arity);
                             variant_names.push(v.name.clone());
@@ -329,6 +343,7 @@ impl<'a> Interpreter<'a> {
                         newtype_constructors,
                         type_variants,
                         variant_parent,
+                        variant_field_positions,
                         failure_variants,
                     );
                 }
