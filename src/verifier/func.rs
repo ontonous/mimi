@@ -37,7 +37,7 @@ impl crate::verifier::Verifier {
         }
     }
 
-    fn collect_func_defs(&mut self, items: &[Item]) {
+    pub(crate) fn collect_func_defs(&mut self, items: &[Item]) {
         for item in items {
             match item {
                 Item::Func(f) => {
@@ -49,7 +49,7 @@ impl crate::verifier::Verifier {
         }
     }
 
-    fn verify_extern_func(&mut self, func: &ExternFunc) -> VerificationResult {
+    pub(crate) fn verify_extern_func(&mut self, func: &ExternFunc) -> VerificationResult {
         let start = Instant::now();
         // 2.3: reset() clears all assertions. Z3's Params (incl. timeout) are NOT
         // affected by reset() — they persist across calls. The solver is clean
@@ -197,7 +197,7 @@ impl crate::verifier::Verifier {
         }
     }
 
-    fn verify_func(&mut self, func: &FuncDef) -> VerificationResult {
+    pub(crate) fn verify_func(&mut self, func: &FuncDef) -> VerificationResult {
         let start = Instant::now();
 
         // Shared parameters use abstract heap encoding:

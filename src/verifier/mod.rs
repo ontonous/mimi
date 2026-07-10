@@ -2,6 +2,7 @@
 
 mod ctx;
 mod expr;
+mod flow;
 mod func;
 mod helpers;
 
@@ -10,6 +11,7 @@ pub mod ffi;
 pub(crate) use ctx::Z3VarMap;
 #[allow(unused_imports)]
 pub use ctx::{Counterexample, VerifStatus, VerificationResult, Verifier};
+pub use flow::{flow_verify_file, flow_verify_source, FlowAcc, FlowEvent, VerifierState};
 
 use crate::ast::File;
 
