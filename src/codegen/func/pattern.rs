@@ -90,7 +90,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(td) = self.type_defs.get(name) {
                     if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
                         if sub_patterns.len() == 1 {
-                            self.compile_pattern_bind(&sub_patterns[0], val, vars)?;
+                            self.compile_pattern_bind(&sub_patterns[0].1, val, vars)?;
                         }
                         return Ok(());
                     }
@@ -134,9 +134,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| {
                             CompileError::LlvmError(format!("extract payload error: {}", e))
                         })?;
-                    self.compile_pattern_bind(&sub_patterns[0], payload, vars)?;
+                    self.compile_pattern_bind(&sub_patterns[0].1, payload, vars)?;
                 } else {
-                    for (i, sub_pat) in sub_patterns.iter().enumerate() {
+                    for (i, (_, sub_pat)) in sub_patterns.iter().enumerate() {
                         let field_val = self
                             .builder
                             .build_extract_value(

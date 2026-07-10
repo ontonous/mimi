@@ -430,7 +430,7 @@ impl LspServer {
             Pattern::Variable(name) => name.as_str(),
             Pattern::Literal(lit) => return Self::format_lit(lit),
             Pattern::Constructor(name, args) => {
-                let args_str: Vec<String> = args.iter().map(Self::format_pat).collect();
+                let args_str: Vec<String> = args.iter().map(|(_, p)| Self::format_pat(p)).collect();
                 return format!("{}({})", name, args_str.join(", "));
             }
             Pattern::Tuple(pats) => {

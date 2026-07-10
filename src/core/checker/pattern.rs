@@ -82,7 +82,7 @@ impl<'a> Checker<'a> {
                                     format!("'Some' expects 1 argument, got {}", pats.len()),
                                 );
                             } else {
-                                self.check_pattern(&pats[0], inner, scopes);
+                                self.check_pattern(&pats[0].1, inner, scopes);
                             }
                         } else if !pats.is_empty() {
                             self.emit_code(
@@ -109,7 +109,7 @@ impl<'a> Checker<'a> {
                                 format!("'{}' expects 1 argument, got {}", name, pats.len()),
                             );
                         } else {
-                            self.check_pattern(&pats[0], expected_ty, scopes);
+                            self.check_pattern(&pats[0].1, expected_ty, scopes);
                         }
                         return;
                     }
@@ -155,7 +155,7 @@ impl<'a> Checker<'a> {
                                                 ),
                                             );
                                         } else {
-                                            for (p, t) in pats.iter().zip(types.iter()) {
+                                            for ((_, p), t) in pats.iter().zip(types.iter()) {
                                                 self.check_pattern(
                                                     p,
                                                     &self.resolve_type(t),
@@ -180,7 +180,7 @@ impl<'a> Checker<'a> {
                                                 .iter()
                                                 .map(|f| self.resolve_type(&f.ty))
                                                 .collect();
-                                            for (p, t) in pats.iter().zip(resolved.iter()) {
+                                            for ((_, p), t) in pats.iter().zip(resolved.iter()) {
                                                 self.check_pattern(p, t, scopes);
                                             }
                                         }
@@ -203,7 +203,7 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             } else {
-                                self.check_pattern(&pats[0], &self.resolve_type(inner), scopes);
+                                self.check_pattern(&pats[0].1, &self.resolve_type(inner), scopes);
                             }
                         }
                         _ => {

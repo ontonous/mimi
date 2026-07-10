@@ -55,7 +55,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(td) = self.type_defs.get(name) {
                     if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
                         if let Some(first) = inner_patterns.first() {
-                            self.compile_pattern_bind(first, scrutinee_val, &mut local_vars)?;
+                            self.compile_pattern_bind(&first.1, scrutinee_val, &mut local_vars)?;
                         }
                         return Ok(local_vars);
                     }
@@ -193,7 +193,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_struct_value();
                     let payload_ptr = self.build_alloca(packed_ty_enum, "multi_payload_alloca")?;
                     self.build_store(payload_ptr, payload_sv)?;
-                    for (j, inner_pat) in inner_patterns.iter().enumerate() {
+                    for (j, (_, inner_pat)) in inner_patterns.iter().enumerate() {
                         if let Pattern::Variable(pname) = inner_pat {
                             if j >= arg_tys.len() {
                                 break;
@@ -215,7 +215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 } else {
-                    for inner_pat in inner_patterns {
+                    for (_, inner_pat) in inner_patterns {
                         if let Pattern::Variable(name) = inner_pat {
                             self.bind_pattern_var(&mut local_vars, name, payload, payload_ty)?;
                         }

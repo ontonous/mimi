@@ -229,7 +229,7 @@ pub(crate) fn collect_pattern_names(pat: &Pattern, names: &mut std::collections:
             }
         }
         Pattern::Constructor(_, pats) => {
-            for p in pats {
+            for (_, p) in pats {
                 collect_pattern_names(p, names);
             }
         }
