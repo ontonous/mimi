@@ -132,7 +132,11 @@ impl<'a> super::Lexer<'a> {
                             if hex.len() != 2 {
                                 return Err(invalid_escape("\\x", self.line, start_col));
                             }
-                            let value = u8::from_str_radix(&hex, 16).unwrap();
+                            // SAFETY: hex.len() == 2 and all chars are ASCII hexdigits
+                            // (checked above), so from_str_radix is infallible here.
+                            let value = u8::from_str_radix(&hex, 16).map_err(|e| {
+                                invalid_escape(&format!("\\x{}", e), self.line, start_col)
+                            })?;
                             s.push(value as char);
                         }
                         Some('u') => {
@@ -174,7 +178,12 @@ impl<'a> super::Lexer<'a> {
                                 }
                             }
                             let cleaned: String = code.chars().filter(|c| *c != '_').collect();
-                            let value = u32::from_str_radix(&cleaned, 16).unwrap();
+                            // SAFETY: cleaned contains only ASCII hex digits and
+                            // has a length validated by the caller, so the parse
+                            // is infallible.
+                            let value = u32::from_str_radix(&cleaned, 16).map_err(|e| {
+                                invalid_escape(&format!("\\u{}", e), self.line, start_col)
+                            })?;
                             match char::from_u32(value) {
                                 Some(ch) => s.push(ch),
                                 None => return Err(invalid_escape("\\u", self.line, start_col)),
@@ -573,7 +582,9 @@ impl<'a> super::Lexer<'a> {
             }
             '0'..='9' => Ok(self.scan_number()),
             'a'..='z' | 'A'..='Z' | '_' => {
-                let first = self.advance().unwrap_or('\0');
+                // SAFETY: dispatch matched `peek() == Some(first_char)`, so the
+                // stream cannot be empty here.
+                let first = self.advance().expect("dispatch on peek guaranteed Some");
                 let name = self.scan_ident(first);
                 Ok(keyword_or_ident(&name))
             }
