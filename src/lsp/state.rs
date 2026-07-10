@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::ast::Stmt;
 use crate::lsp::diagnostic;
@@ -56,7 +57,33 @@ impl LspServer {
         Some(file)
     }
 
-    pub fn compute_diagnostics(&self, text: &str) -> Vec<Value> {
+    /// Convert a `file://` URI to a filesystem path.
+    fn uri_to_path(uri: &str) -> Option<PathBuf> {
+        let path_str = uri.strip_prefix("file://")?;
+        // On some platforms the path starts with / (absolute path).
+        // URI like file:///home/user/file.mimi → /home/user/file.mimi
+        Some(PathBuf::from(path_str))
+    }
+
+    /// Resolve imports if the file has any, using the workspace root.
+    fn resolve_imports(file: &mut crate::ast::File, file_path: &std::path::Path) {
+        if file.imports.is_empty() {
+            return;
+        }
+        let base_dir = file_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let mut loader = crate::loader::ModuleLoader::new(base_dir);
+        if loader.load_main(file_path).is_ok() {
+            if let Ok(merged) = loader.merge_all() {
+                *file = merged;
+            }
+        }
+        crate::loader::merge_prelude_into(file);
+    }
+
+    pub fn compute_diagnostics(&self, text: &str, uri: Option<&str>) -> Vec<Value> {
         let mut diagnostics = Vec::new();
 
         // Parse
@@ -69,11 +96,20 @@ impl LspServer {
         };
 
         // Use recovery parser to get partial AST + all parse errors
-        let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+        let (mut file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
 
         // Report all parse errors
         for e in &parse_errors {
             diagnostics.push(diagnostic::parse_error_to_lsp(e));
+        }
+
+        // Resolve imports so `use std::xxx` functions are visible to type checking
+        if let Some(uri_str) = uri {
+            if let Some(file_path) = Self::uri_to_path(uri_str) {
+                Self::resolve_imports(&mut file, file_path.as_path());
+            }
+        } else {
+            crate::loader::merge_prelude_into(&mut file);
         }
 
         // Type check the partial AST (even if parse had errors)

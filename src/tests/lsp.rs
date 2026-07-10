@@ -221,10 +221,10 @@ fn lsp_unknown_method_no_response() {
 #[test]
 fn lsp_compute_diagnostics_direct() {
     let server = LspServer::new();
-    let diags = server.compute_diagnostics("func main() -> i32 { 42 }");
+    let diags = server.compute_diagnostics("func main() -> i32 { 42 }", None);
     assert!(diags.is_empty(), "valid code should have 0 diagnostics");
 
-    let diags = server.compute_diagnostics("func $$$ bad");
+    let diags = server.compute_diagnostics("func $$$ bad", None);
     assert!(!diags.is_empty(), "invalid code should have diagnostics");
 }
 
@@ -277,7 +277,7 @@ fn lsp_folding_range_empty() {
 fn lsp_diagnostics_severity_warning() {
     let server = LspServer::new();
     // Valid code should produce no diagnostics
-    let diags = server.compute_diagnostics("func main() -> i32 { 42 }");
+    let diags = server.compute_diagnostics("func main() -> i32 { 42 }", None);
     assert!(diags.is_empty(), "valid code should have 0 diagnostics");
 }
 

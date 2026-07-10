@@ -644,7 +644,7 @@ fn folding_range_multiple_functions() {
 fn code_action_undefined_variable() {
     let server = LspServer::new();
     let text = "func main() {\n    foo\n}";
-    let diags = server.compute_diagnostics(text);
+    let diags = server.compute_diagnostics(text, None);
     let context = serde_json::json!({ "diagnostics": diags });
     let actions = server.compute_code_actions("file:///test.mimi", &context);
     let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
@@ -658,7 +658,7 @@ fn code_action_undefined_variable() {
 fn code_action_undefined_function() {
     let server = LspServer::new();
     let text = "func main() {\n    bar()\n}";
-    let diags = server.compute_diagnostics(text);
+    let diags = server.compute_diagnostics(text, None);
     let context = serde_json::json!({ "diagnostics": diags });
     let actions = server.compute_code_actions("file:///test.mimi", &context);
     let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
@@ -673,7 +673,7 @@ fn code_action_undefined_type() {
     let server = LspServer::new();
     // Use `type Foo = Bar` — `Bar` is an undefined type
     let text = "type Foo = Bar";
-    let diags = server.compute_diagnostics(text);
+    let diags = server.compute_diagnostics(text, None);
     assert!(
         !diags.is_empty(),
         "should have diagnostics for undefined type 'Bar': {:?}",
@@ -716,7 +716,7 @@ fn code_action_handle_message_roundtrip() {
     server.handle_message(&open_msg);
 
     // Get diagnostics first (will be pushed as notification)
-    let diags = server.compute_diagnostics("func main() {\n    x\n}");
+    let diags = server.compute_diagnostics("func main() {\n    x\n}", None);
     assert!(
         !diags.is_empty(),
         "should have undefined variable diagnostic"
@@ -1197,7 +1197,7 @@ fn lsp_hash_func_body_1indexed() {
 fn lsp_code_actions_uri_key_correct() {
     let server = LspServer::new();
     let text = "func main() {\n    foo\n}"; // foo is undefined
-    let diags = server.compute_diagnostics(text);
+    let diags = server.compute_diagnostics(text, None);
     let context = serde_json::json!({ "diagnostics": diags });
     let actions = server.compute_code_actions("file:///test.mimi", &context);
     assert!(!actions.is_empty(), "should produce code action");
@@ -1316,7 +1316,7 @@ fn lsp_symbol_impl_kind_is_namespace() {
 #[test]
 fn lsp_parse_error_range_valid() {
     let server = LspServer::new();
-    let diags = server.compute_diagnostics("func $"); // Invalid token
+    let diags = server.compute_diagnostics("func $", None); // Invalid token
     assert!(!diags.is_empty(), "should have parse error");
     let range = &diags[0]["range"];
     let start = range["start"].as_object().expect("start should be object");
@@ -1601,7 +1601,7 @@ fn lsp_diagnostic_has_code_and_source() {
     // Verify that diagnostics from type-check errors contain `code` and `source`.
     let server = LspServer::new();
     let text = "func main() -> i32 { let x: NonExistentType = 42 }";
-    let diagnostics = server.compute_diagnostics(text);
+    let diagnostics = server.compute_diagnostics(text, None);
     assert!(
         !diagnostics.is_empty(),
         "should produce diagnostics for type error"
