@@ -4,20 +4,27 @@ pub(crate) mod keywords;
 mod scan;
 pub mod token;
 
+#[cfg(test)]
 pub(crate) use errors::unexpected_character;
 pub use errors::LexerError;
+pub use flow::flow_tokenize;
 pub use keywords::is_keyword_kind;
 pub use token::{LexerMode, Token, TokenKind};
 
 pub struct Lexer<'a> {
-    #[allow(dead_code)]
     source: &'a str,
+    #[cfg_attr(not(test), allow(dead_code))]
     chars: std::str::Chars<'a>,
+    #[cfg_attr(not(test), allow(dead_code))]
     line: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     col: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     peeked: Option<char>,
     mode: LexerMode,
+    #[cfg_attr(not(test), allow(dead_code))]
     at_line_start: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     indent_stack: Vec<usize>,
 }
 
@@ -45,7 +52,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn tokenize(mut self) -> Result<Vec<Token>, LexerError> {
+    pub fn tokenize(self) -> Result<Vec<Token>, LexerError> {
+        flow_tokenize(self.source, self.mode)
+    }
+
+    /// Legacy tokenize implementation, kept for test equivalence comparison.
+    #[cfg(test)]
+    pub fn legacy_tokenize(mut self) -> Result<Vec<Token>, LexerError> {
         let mut tokens = Vec::new();
         // Skip shebang line at the very beginning of the file (e.g. #!/usr/bin/env mimi)
         if self.peek() == Some('#') && self.chars.clone().next() == Some('!') {

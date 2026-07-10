@@ -1385,5 +1385,3 @@ fn fn_type_for_basic_type<'ctx>(
         )),
     }
 }
-
-

@@ -39,10 +39,7 @@ impl ThreadPool {
             workers.push(worker);
         }
 
-        ThreadPool {
-            workers,
-            sender,
-        }
+        ThreadPool { workers, sender }
     }
 
     pub(crate) fn execute<F: FnOnce() + Send + 'static>(&self, job: F) {

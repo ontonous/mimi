@@ -143,9 +143,7 @@ pub unsafe extern "C" fn callback_trampoline(
                 // integer values being passed as pointers.
                 let userdata_i64 = if userdata.is_null() {
                     0i64
-                } else if (userdata as usize) >= 1024 * 1024
-                    && (userdata as usize) % 8 == 0
-                {
+                } else if (userdata as usize) >= 1024 * 1024 && (userdata as usize) % 8 == 0 {
                     userdata as i64
                 } else {
                     // Suspicious userdata — likely an integer mistaken for a pointer.

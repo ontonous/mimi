@@ -655,7 +655,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let struct_ty = self.context.struct_type(
                     &[
-                        BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+                        BasicTypeEnum::PointerType(
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                        ),
                         BasicTypeEnum::IntType(self.context.i64_type()),
                     ],
                     false,

@@ -107,7 +107,9 @@ impl<'a> Checker<'a> {
             }
             Type::Option(p_inner) => {
                 match actual {
-                    Type::Option(a_inner) => self.infer_type_params(p_inner, a_inner, generics, type_map),
+                    Type::Option(a_inner) => {
+                        self.infer_type_params(p_inner, a_inner, generics, type_map)
+                    }
                     // Dual representation: Option(T) <-> Name("Option", [T])
                     Type::Name(n, args) if n == "Option" && args.len() == 1 => {
                         self.infer_type_params(p_inner, &args[0], generics, type_map);
@@ -115,19 +117,17 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             }
-            Type::Result(p_ok, p_err) => {
-                match actual {
-                    Type::Result(a_ok, a_err) => {
-                        self.infer_type_params(p_ok, a_ok, generics, type_map);
-                        self.infer_type_params(p_err, a_err, generics, type_map);
-                    }
-                    Type::Name(n, args) if n == "Result" && args.len() == 2 => {
-                        self.infer_type_params(p_ok, &args[0], generics, type_map);
-                        self.infer_type_params(p_err, &args[1], generics, type_map);
-                    }
-                    _ => {}
+            Type::Result(p_ok, p_err) => match actual {
+                Type::Result(a_ok, a_err) => {
+                    self.infer_type_params(p_ok, a_ok, generics, type_map);
+                    self.infer_type_params(p_err, a_err, generics, type_map);
                 }
-            }
+                Type::Name(n, args) if n == "Result" && args.len() == 2 => {
+                    self.infer_type_params(p_ok, &args[0], generics, type_map);
+                    self.infer_type_params(p_err, &args[1], generics, type_map);
+                }
+                _ => {}
+            },
             Type::Tuple(p_elems) => {
                 if let Type::Tuple(a_elems) = actual {
                     for (pe, ae) in p_elems.iter().zip(a_elems.iter()) {

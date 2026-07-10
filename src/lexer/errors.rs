@@ -91,7 +91,11 @@ impl fmt::Display for LexerError {
                 write!(f, "unterminated escape in f-string at {}:{}", line, col)
             }
             LexerError::UnterminatedInterpolation { line, col } => {
-                write!(f, "unterminated interpolation in f-string at {}:{}", line, col)
+                write!(
+                    f,
+                    "unterminated interpolation in f-string at {}:{}",
+                    line, col
+                )
             }
             LexerError::UnterminatedBlockComment { line, col } => {
                 write!(f, "unterminated block comment at {}:{}", line, col)

@@ -6,6 +6,7 @@ use crate::lexer::{Token, TokenKind};
 use crate::span::Span;
 
 mod flow;
+pub use flow::{flow_parse, flow_parse_with_recovery};
 mod helpers;
 mod parse_expr;
 mod parse_stmt;
@@ -125,19 +126,24 @@ impl Parser {
     /// Used by the Flow parser prototype to create temporary parsers
     /// within state transitions.
     #[doc(hidden)]
-    pub(crate) fn splice(tokens: &[Token], pos: usize, mode: ParseMode) -> Self {
+    pub(crate) fn splice(tokens: &[Token], pos: usize, mode: ParseMode, recovery: bool) -> Self {
         Self {
             tokens: tokens.to_vec(),
             pos,
             mode,
-            recovery_mode: false,
+            recovery_mode: recovery,
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
             allow_record_literal: true,
         }
     }
 
-    pub fn parse_file(mut self) -> Result<File, ParseError> {
+    pub fn parse_file(self) -> Result<File, ParseError> {
+        flow_parse(self.tokens, self.mode)
+    }
+
+    #[cfg(test)]
+    pub fn legacy_parse_file(mut self) -> Result<File, ParseError> {
         self.skip_newlines();
         let mut imports = Vec::new();
         while self.at(&TokenKind::Use) {
@@ -157,7 +163,12 @@ impl Parser {
 
     /// Parse a file with error recovery, collecting multiple errors.
     /// Returns the parsed file (possibly partial) and all errors encountered.
-    pub fn parse_file_with_recovery(mut self) -> (File, Vec<ParseError>) {
+    pub fn parse_file_with_recovery(self) -> (File, Vec<ParseError>) {
+        flow_parse_with_recovery(self.tokens, self.mode)
+    }
+
+    #[cfg(test)]
+    pub fn legacy_parse_file_with_recovery(mut self) -> (File, Vec<ParseError>) {
         self.recovery_mode = true;
         let mut errors = Vec::new();
 

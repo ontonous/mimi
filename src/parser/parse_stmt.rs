@@ -389,9 +389,7 @@ impl Parser {
         let init = if self.at(&TokenKind::Eq) {
             self.advance();
             self.skip_newlines();
-            if self.at(&TokenKind::Semi)
-                || self.at(&TokenKind::RBrace)
-                || self.at(&TokenKind::Eof)
+            if self.at(&TokenKind::Semi) || self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof)
             {
                 return Err(ParseError::new(
                     "expected expression after `=` in let binding",

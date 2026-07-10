@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use crate::lexer::errors::{
     dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
     unexpected_character, unexpected_dollar, unterminated_block_comment, unterminated_escape,
@@ -179,11 +181,7 @@ impl<'a> super::Lexer<'a> {
                             }
                         }
                         Some(c) => {
-                            return Err(invalid_escape(
-                                &format!("\\{}", c),
-                                self.line,
-                                self.col,
-                            ));
+                            return Err(invalid_escape(&format!("\\{}", c), self.line, self.col));
                         }
                         None => return Err(unterminated_escape(self.line, self.col)),
                     }
@@ -311,11 +309,7 @@ impl<'a> super::Lexer<'a> {
                             }
                         }
                         Some(c) => {
-                            return Err(invalid_escape(
-                                &format!("\\{}", c),
-                                self.line,
-                                self.col,
-                            ));
+                            return Err(invalid_escape(&format!("\\{}", c), self.line, self.col));
                         }
                         None => return Err(unterminated_fstring_escape(self.line, self.col)),
                     }
