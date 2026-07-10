@@ -4846,7 +4846,7 @@ pub struct MimiExecResult {
 
 /// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
 /// WARNING: shell metacharacters in the command string are interpreted by sh.
-/// For safe execution, use `mimi_exec_safe` (not yet implemented).
+/// For safer execution that avoids shell injection, use `mimi_exec_safe`.
 /// Execute a shell command via `sh -c`. Returns a `MimiExecResult` struct.
 /// Uses shell interpretation (pipelines, variables, redirections).
 /// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
