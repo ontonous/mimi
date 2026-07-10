@@ -8057,3 +8057,40 @@ fn dual_regr_deep_else_if() {
         "5\n-1"
     );
 }
+
+// ─── Regression: for-loop over keys() → map_get with loop variable ───
+// Covers the chain: let m = map_new(); m = map_set(m, k, v);
+// let ks = keys(m); for x in ks { map_get(m, x) } — the loop variable
+// 'x' must be a Mimi string struct {i8*, i64}, not an i64 handle.
+#[test]
+fn dual_for_keys_map_get_string_key() {
+    if !can_link() {
+        return;
+    }
+    if !can_link() {
+        return;
+    }
+    // Covers the chain: keys() → for-loop variable → map_get(m, loop_var).
+    // The loop variable 'x' must be a Mimi string struct {i8*, i64}
+    // in codegen, not an i64 handle, for map_get to extract the pointer.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut m = map_new()
+            m = map_set(m, "a", 1)
+            m = map_set(m, "b", 2)
+            let ks = keys(m)
+            let mut total = 0
+            for x in ks {
+                let (found, val) = map_get(m, x)
+                if found {
+                    total = total + 1
+                }
+            }
+            println(to_string(total))
+            0
+        }
+        "#,
+        "2"
+    );
+}
