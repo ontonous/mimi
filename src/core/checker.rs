@@ -294,7 +294,6 @@ impl<'a> Checker<'a> {
                 let root = self.unification.find(*id);
                 if let Some(bound) = self.unification.get_binding(root).cloned() {
                     let resolved = self.resolve_and_collect_inner(&bound, free_vars);
-                    free_vars.push(root);
                     resolved
                 } else {
                     free_vars.push(root);

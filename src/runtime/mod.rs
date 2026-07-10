@@ -870,26 +870,33 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         return Box::into_raw(list);
     }
 
-    let mut items: Vec<*mut std::ffi::c_char> = Vec::with_capacity(len as usize);
-    for (k, v) in &map.inner {
-        if collect_values {
-            // S10: ValueHandle is an opaque integer; cast to pointer for FFI transport.
-            // Caller must NOT free these pointers — they are not heap-allocated strings.
-            let val_ptr = *v as *mut std::ffi::c_char;
-            items.push(val_ptr);
-        } else {
-            items.push(alloc_c_string(k.as_str()));
+    // Use libc::malloc for the data pointer to ensure it is compatible with
+    // libc::free (which mimi_list_free uses). Rust Vec uses jemalloc/allocator
+    // which may not be compatible with libc::free on all platforms (e.g. MSVC).
+    let data_size = (len as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+    let data_ptr = if data_size > 0 {
+        // SAFETY: data_size is positive and within reasonable bounds.
+        unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char }
+    } else {
+        std::ptr::null_mut()
+    };
+    if !data_ptr.is_null() {
+        for (i, (k, v)) in map.inner.iter().enumerate() {
+            let entry = if collect_values {
+                // S10: ValueHandle is an opaque integer; cast to pointer for FFI transport.
+                // Caller must NOT free these pointers — they are not heap-allocated strings.
+                *v as *mut std::ffi::c_char
+            } else {
+                alloc_c_string(k.as_str())
+            };
+            // SAFETY: data_ptr is valid, i is within bounds.
+            unsafe { *data_ptr.add(i) = entry; }
         }
     }
-
-    let data_ptr = items.as_mut_ptr();
-    // FFI-2: If collect_values=true, data contains opaque handles (not owned by Rust).
-    // If collect_values=false, data contains alloc_c_string results (owned by Rust).
-    std::mem::forget(items);
     let list = Box::new(MimiList {
         len,
         data: data_ptr,
-        owns_data: !collect_values, // only own data when strings are allocated
+        owns_data: !collect_values,
     });
     Box::into_raw(list)
 }
