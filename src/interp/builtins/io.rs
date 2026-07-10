@@ -331,6 +331,10 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::String(cmd) => {
+                // NOTE: `sh -c` enables shell builtins (exit, cd, etc.) and
+                // pipelines, but also allows shell injection if `cmd` comes
+                // from untrusted input. Use `exec_safe(args: List<string>)`
+                // for safer execution without shell interpretation.
                 let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
