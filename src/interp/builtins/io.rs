@@ -345,6 +345,8 @@ impl<'a> Interpreter<'a> {
                         fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
                         fields.insert("stdout".to_string(), Value::String(stdout));
                         fields.insert("stderr".to_string(), Value::String(stderr));
+                        // Not registered in type_defs — pattern matching on
+                        // ExecResult { .. } will fail at type-checker level.
                         Ok(Value::Record(Some("ExecResult".to_string()), fields))
                     }
                     Err(e) => {
@@ -355,6 +357,8 @@ impl<'a> Interpreter<'a> {
                             "stderr".to_string(),
                             Value::String(format!("exec error: {}", e)),
                         );
+                        // Not registered in type_defs — pattern matching on
+                        // ExecResult { .. } will fail at type-checker level.
                         Ok(Value::Record(Some("ExecResult".to_string()), fields))
                     }
                 }

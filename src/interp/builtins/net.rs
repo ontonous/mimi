@@ -290,29 +290,65 @@ impl<'a> Interpreter<'a> {
         Ok(domain as i64)
     }
 
+    /// Wrapper for libc::send that retries on EINTR.
+    fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpError> {
+        let mut sent: isize = 0;
+        while (sent as usize) < len {
+            // SAFETY: fd is valid, buf points to valid memory of at least len bytes.
+            let n = unsafe {
+                libc::send(
+                    fd,
+                    (buf as *const u8).add(sent as usize) as *const libc::c_void,
+                    len - sent as usize,
+                    0,
+                )
+            };
+            if n < 0 {
+                let err = unsafe { *libc::__errno_location() };
+                if err == libc::EINTR {
+                    continue;
+                }
+                return Err(InterpError::new(format!("send error: {}", err)));
+            }
+            sent += n;
+        }
+        Ok(())
+    }
+
+    /// Wrapper for libc::recv that retries on EINTR.
+    fn recv_all(fd: i32, buf: &mut [u8]) -> Result<usize, InterpError> {
+        loop {
+            // SAFETY: fd is valid, buf is a writable slice.
+            let n = unsafe {
+                libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+            };
+            if n < 0 {
+                let err = unsafe { *libc::__errno_location() };
+                if err == libc::EINTR {
+                    continue;
+                }
+                return Err(InterpError::new(format!("recv error: {}", err)));
+            }
+            return Ok(n as usize);
+        }
+    }
+
     fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
         let c_req = std::ffi::CString::new(request)
             .map_err(|e| InterpError::new(format!("http: invalid request: {}", e)))?;
-        // SAFETY: send() writes from a CString buffer (null-terminated, valid memory).
-        // recv() writes into a Rust Vec buffer (valid writable memory, 64KB).
-        // close() uses the validated fd from http_connect().
-        unsafe {
-            libc::send(
-                fd as i32,
-                c_req.as_ptr() as *const libc::c_void,
-                request.len(),
-                0,
-            )
-        };
+        Self::send_all(
+            fd as i32,
+            c_req.as_ptr() as *const libc::c_void,
+            request.len(),
+        )?;
         let mut buf: Vec<u8> = vec![0u8; 65536];
-        // SAFETY: fd is valid and buf is a writable Vec of sufficient size.
-        let n = unsafe { libc::recv(fd as i32, buf.as_mut_ptr() as *mut libc::c_void, 65536, 0) };
+        let n = Self::recv_all(fd as i32, &mut buf)?;
         // SAFETY: fd/domain was validated by prior socket/connect calls.
         unsafe { libc::close(fd as i32) };
-        if n <= 0 {
+        if n == 0 {
             return Err(InterpError::new("http: empty response"));
         }
-        buf.truncate(n as usize);
+        buf.truncate(n);
         Ok(String::from_utf8_lossy(&buf).to_string())
     }
 
