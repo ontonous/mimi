@@ -158,6 +158,14 @@ impl Parser {
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        self.check_depth()?;
+        self.inc_depth();
+        let result = self.parse_if_expr_inner();
+        self.dec_depth();
+        result
+    }
+
+    fn parse_if_expr_inner(&mut self) -> Result<Expr, ParseError> {
         self.advance(); // consume `if`
         let cond = self.parse_expr(0)?;
         self.skip_newlines();
@@ -655,14 +663,13 @@ impl Parser {
             } else if self.at(&TokenKind::LBracket) {
                 e = self.parse_slice_or_index(e)?;
             } else if self.at(&TokenKind::LBrace) && self.allow_record_literal {
-                if let Expr::Ident(ty_name) = &e {
+                if let Some(ty_name) = record_literal_type_name(&e) {
                     if ty_name
                         .chars()
                         .next()
                         .map(|c| c.is_uppercase())
                         .unwrap_or(false)
                     {
-                        let ty_name = ty_name.clone();
                         self.advance();
                         let fields = self.parse_record_expr_fields()?;
                         self.expect(TokenKind::RBrace, "`}`")?;
@@ -901,6 +908,19 @@ impl Parser {
                 ))
             }
         }
+    }
+}
+
+/// Extract the type name from an expression that could start a record literal.
+/// Handles `MyStruct`, `MyModule::MyStruct`, etc.
+fn record_literal_type_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(name) => Some(name.clone()),
+        Expr::Field(obj, field) => {
+            let prefix = record_literal_type_name(obj)?;
+            Some(format!("{}::{}", prefix, field))
+        }
+        _ => None,
     }
 }
 
