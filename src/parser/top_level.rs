@@ -534,20 +534,29 @@ impl Parser {
         } else {
             None
         };
-        // Parse where clause if present
+        // Parse where clause(s) if present: `where T: Bound1 + Bound2, U: Bound3`
         let where_clause = if self.at(&TokenKind::Where) {
             self.advance();
-            let type_param = self.expect_ident()?;
-            self.expect(TokenKind::Colon, "`:`")?;
-            let mut bounds = Vec::new();
-            bounds.push(self.expect_ident()?);
-            while self.at(&TokenKind::Plus) {
-                self.advance();
+            let mut clauses = Vec::new();
+            loop {
+                let type_param = self.expect_ident()?;
+                self.expect(TokenKind::Colon, "`:`")?;
+                let mut bounds = Vec::new();
                 bounds.push(self.expect_ident()?);
+                while self.at(&TokenKind::Plus) {
+                    self.advance();
+                    bounds.push(self.expect_ident()?);
+                }
+                clauses.push(WhereClause { type_param, bounds });
+                if self.at(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            Some(WhereClause { type_param, bounds })
+            clauses
         } else {
-            None
+            Vec::new()
         };
         self.skip_newlines();
         if self.is_sketch() {

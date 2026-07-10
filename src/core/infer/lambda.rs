@@ -25,7 +25,14 @@ impl<'a> Checker<'a> {
                     body_type = self.infer_expr(e, scopes);
                     break;
                 }
-                _ => {}
+                other => {
+                    // Process let/if/while/for/match etc. for their side effects
+                    // on scope bindings. Only the last expression determines the
+                    // lambda's return type; these statements return unit.
+                    let unit = Type::Name("unit".into(), vec![]);
+                    self.check_stmt(other, &unit, scopes);
+                    body_type = Type::Name("unit".into(), vec![]);
+                }
             }
         }
         scopes.pop();
