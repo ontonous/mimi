@@ -177,7 +177,12 @@ impl<'a> LexerPos<'a> {
                             if hex.len() != 2 {
                                 return Err(invalid_escape("\\x", pos.line, start_col));
                             }
-                            s.push(u8::from_str_radix(&hex, 16).unwrap() as char);
+                            // SAFETY: hex.len() == 2 with only ASCII hexdigits
+                            // (validated above), so from_str_radix is infallible.
+                            let value = u8::from_str_radix(&hex, 16).map_err(|e| {
+                                invalid_escape(&format!("\\x{}", e), pos.line, start_col)
+                            })?;
+                            s.push(value as char);
                         }
                         Some('u') => {
                             let start_col = pos.col;
@@ -218,7 +223,12 @@ impl<'a> LexerPos<'a> {
                                 }
                             }
                             let cleaned: String = code.chars().filter(|c| *c != '_').collect();
-                            let value = u32::from_str_radix(&cleaned, 16).unwrap();
+                            // SAFETY: cleaned contains only ASCII hexdigits and
+                            // its length is bounded by the caller, so the parse
+                            // cannot fail.
+                            let value = u32::from_str_radix(&cleaned, 16).map_err(|e| {
+                                invalid_escape(&format!("\\u{}", e), pos.line, start_col)
+                            })?;
                             match char::from_u32(value) {
                                 Some(ch) => s.push(ch),
                                 None => return Err(invalid_escape("\\u", pos.line, start_col)),
@@ -661,7 +671,9 @@ impl<'a> LexerState<'a> {
                         if !spaces.is_multiple_of(4) {
                             return Err(indent_not_multiple_of_four(pos.line, pos.col));
                         }
-                        let current = *acc.indent_stack.last().unwrap_or(&0);
+                        // SAFETY: FlowAcc::new seeds indent_stack with [0], and
+                        // we only push values, so .last() is always Some here.
+                        let current = *acc.indent_stack.last().expect("indent_stack seeded with 0");
                         if spaces > current {
                             acc.indent_stack.push(spaces);
                             acc.tokens.push(Token {
@@ -671,7 +683,9 @@ impl<'a> LexerState<'a> {
                             });
                             return state_continue!(Dispatch {}, pos, mode, false, acc);
                         } else if spaces < current {
-                            while *acc.indent_stack.last().unwrap_or(&0) > spaces {
+                            while *acc.indent_stack.last().expect("indent_stack seeded with 0")
+                                > spaces
+                            {
                                 acc.indent_stack.pop();
                                 acc.tokens.push(Token {
                                     kind: TokenKind::Dedent,
@@ -680,7 +694,9 @@ impl<'a> LexerState<'a> {
                                 });
                                 return state_continue!(Dispatch {}, pos, mode, false, acc);
                             }
-                            if *acc.indent_stack.last().unwrap_or(&0) != spaces {
+                            if *acc.indent_stack.last().expect("indent_stack seeded with 0")
+                                != spaces
+                            {
                                 return Err(dedent_mismatch(pos.line, pos.col));
                             }
                         }
@@ -797,7 +813,10 @@ fn lex_scan_token(
         '0'..='9' => Ok(pos.scan_number()),
         'a'..='z' | 'A'..='Z' | '_' => {
             let (pos, first_ch) = consume!(pos);
-            let (pos, name) = pos.scan_ident(first_ch.unwrap_or('\0'));
+            // SAFETY: dispatch matched `peek() == Some(first_char)`, so the
+            // position cannot be at end-of-stream.
+            let first_ch = first_ch.expect("dispatch on peek guaranteed Some");
+            let (pos, name) = pos.scan_ident(first_ch);
             Ok((pos, keyword_or_ident(&name)))
         }
         '+' => {

@@ -103,6 +103,8 @@ pub enum TokenKind {
     Ge,
     AndAnd,
     OrOr,
+    // Reserved: lexed as `Bang` (the actual `!` operator); kept here for parser
+    // forward-compat so a future lexer revision can emit it explicitly.
     #[allow(dead_code)]
     NotOp,
     BitAnd,

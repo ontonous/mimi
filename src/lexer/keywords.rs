@@ -35,19 +35,29 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Dyn
             | TokenKind::Where
             | TokenKind::Extern
+            | TokenKind::If
+            | TokenKind::Else
+            | TokenKind::For
+            | TokenKind::In
+            | TokenKind::While
+            | TokenKind::Return
+            | TokenKind::Break
+            | TokenKind::Continue
+            | TokenKind::Match
             | TokenKind::Unsafe
             | TokenKind::Use
             | TokenKind::Pub
-            | TokenKind::In
             | TokenKind::Drop
             | TokenKind::Steps
             | TokenKind::Parasteps
             | TokenKind::Failure
             | TokenKind::Requires
             | TokenKind::Ensures
+            | TokenKind::Invariant
             | TokenKind::Math
             | TokenKind::Desc
             | TokenKind::Rule
+            | TokenKind::Old
             | TokenKind::Mms
             | TokenKind::With
             | TokenKind::And
@@ -136,5 +146,45 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "i32" | "i64" | "f64" | "bool" | "string" => TokenKind::Ident(name.into()),
         "nothing" => TokenKind::Nothing,
         _ => TokenKind::Ident(name.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_keyword_kind_covers_statement_keywords() {
+        // Regression: `is_keyword_kind` previously omitted statement-start
+        // keywords (if/else/for/while/return/break/continue/match/old/invariant),
+        // so the parser treated them as valid bare identifiers in expression
+        // position. (audit LE-MEDIUM: is_keyword_kind 缺失多个关键字)
+        for kind in [
+            TokenKind::If,
+            TokenKind::Else,
+            TokenKind::For,
+            TokenKind::While,
+            TokenKind::Return,
+            TokenKind::Break,
+            TokenKind::Continue,
+            TokenKind::Match,
+            TokenKind::Old,
+            TokenKind::Invariant,
+        ] {
+            assert!(is_keyword_kind(&kind), "{kind:?} should be a keyword");
+        }
+    }
+
+    #[test]
+    fn keyword_or_ident_round_trip() {
+        // Spot-check that the lookup table is symmetric with is_keyword_kind
+        // for the keys we know must round-trip.
+        assert_eq!(keyword_or_ident("if"), TokenKind::If);
+        assert_eq!(keyword_or_ident("else"), TokenKind::Else);
+        assert_eq!(keyword_or_ident("old"), TokenKind::Old);
+        assert_eq!(keyword_or_ident("invariant"), TokenKind::Invariant);
+        assert_eq!(keyword_or_ident("nothing"), TokenKind::Nothing);
+        // Type names remain identifiers (they're not reserved at lex time).
+        assert_eq!(keyword_or_ident("i32"), TokenKind::Ident("i32".into()));
     }
 }
