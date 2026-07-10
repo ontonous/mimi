@@ -1729,24 +1729,25 @@ impl<'a> Checker<'a> {
             let mut type_map: HashMap<String, Type> = HashMap::new();
 
             if !generics.is_empty() {
-                // Infer type parameters from argument types
+                // Infer type parameters from argument types (one pass)
+                let mut arg_tys: Vec<Type> = Vec::with_capacity(args.len());
                 for (arg, param) in args.iter().zip(params.iter()) {
                     let at = self.infer_expr(arg, scopes);
                     self.infer_type_params(param, &at, &generics, &mut type_map);
+                    arg_tys.push(at);
                 }
 
                 // Check where constraints (before substitution)
                 if let Some((type_param, bounds)) = self.where_clauses.get(name).cloned() {
-                    for (arg, param) in args.iter().zip(params.iter()) {
-                        let at = self.infer_expr(arg, scopes);
+                    for (at, param) in arg_tys.iter().zip(params.iter()) {
                         if self.type_uses_type_param(param, &type_param) {
                             for bound in &bounds {
-                                if !self.type_implements_trait(&at, bound) {
+                                if !self.type_implements_trait(at, bound) {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0253,
                                         format!(
                                             "where constraint violated: type '{}' does not implement trait '{}' (required by function '{}')",
-                                            fmt_type(&at),
+                                            fmt_type(at),
                                             bound,
                                             name
                                         ),
@@ -1779,9 +1780,8 @@ impl<'a> Checker<'a> {
                     }
                 }
 
-                // Check arguments with substituted types
-                for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
-                    let at = self.infer_expr(arg, scopes);
+                // Check arguments with substituted types (reuse cached types)
+                for (i, (at, param)) in arg_tys.iter().zip(params.iter()).enumerate() {
                     let subst_param = subst_type_params(param, &generics, &type_map);
                     // C2: use unification for generic argument type checking
                     let coerced = is_numeric_coercion(&subst_param, &at);
