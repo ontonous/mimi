@@ -142,14 +142,23 @@ impl ModuleLoader {
         }
 
         // Cycle detection
-        if !self.visiting.insert(path.to_path_buf()) {
+        let is_new = self.visiting.insert(path.to_path_buf());
+        if !is_new {
             return Err(format!(
                 "circular dependency detected: {} imports itself",
                 path.display()
             ));
         }
 
-        // Read and parse
+        // Use a scope guard to ensure visiting is cleaned up on all paths
+        // (including early returns from lex/parse/import errors).
+        let result = self.load_file_inner(path);
+
+        self.visiting.remove(path);
+        result
+    }
+
+    fn load_file_inner(&mut self, path: &Path) -> Result<LoadedModule, String> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let tokens = lexer::Lexer::new(&source)
@@ -174,8 +183,6 @@ impl ModuleLoader {
             let dep_name = self.module_key(&import_path);
             self.modules.insert(dep_name, dep);
         }
-
-        self.visiting.remove(path);
 
         self.modules.insert(module_name, loaded.clone());
         self.loaded.insert(path.to_path_buf(), loaded.clone());

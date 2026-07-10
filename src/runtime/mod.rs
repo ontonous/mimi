@@ -778,9 +778,8 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
     // integer; anything at or above 1MB is likely a valid heap pointer.
     // This is not foolproof (a heap that mmap's below 1MB would break it),
     // but it's safer than a too-broad range that catches values like 200000.
-    const PTR_THRESHOLD: usize = 1_048_576; // 1MB
-    let val_usize = value as usize;
-    if val_usize < PTR_THRESHOLD || val_usize >= usize::MAX - 4096 {
+    const PTR_RANGE: std::ops::Range<usize> = 1_048_576..usize::MAX - 4096; // 1MB .. top-4KB
+    if !PTR_RANGE.contains(&value) {
         // Format as integer: sprintf(buf, "%ld", (i64)value)
         let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
         if buf.is_null() {
@@ -4483,6 +4482,8 @@ pub struct MimiExecResult {
 }
 
 /// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
+/// WARNING: shell metacharacters in the command string are interpreted by sh.
+/// For safe execution, use `mimi_exec_safe` (not yet implemented).
 /// Caller must free with `mimi_exec_free`.
 #[no_mangle]
 pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
