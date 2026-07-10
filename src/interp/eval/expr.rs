@@ -765,17 +765,23 @@ impl<'a> Interpreter<'a> {
             if name == "self" {
                 // Look up self from scope
                 if let Some(Value::Actor(handle)) = self.lookup("self") {
-                    let actor = handle
-                        .inner
-                        .read()
-                        .map_err(|e| InterpError::new(format!("actor lock failed: {}", e)))?;
-                    if let Some(value) = actor.fields.get(field) {
-                        return Ok(value.clone());
-                    }
-                    return Err(InterpError::new(format!(
-                        "actor field '{}' not found",
-                        field
-                    )));
+                    // Clone the value immediately and drop the read lock to prevent
+                    // deadlock when an assignment like `self.x = self.x + 1` tries to
+                    // acquire a write lock on the same RwLock.
+                    let value = {
+                        let actor = handle
+                            .inner
+                            .read()
+                            .map_err(|e| InterpError::new(format!("actor lock failed: {}", e)))?;
+                        actor.fields.get(field).cloned()
+                    };
+                    return match value {
+                        Some(v) => Ok(v),
+                        None => Err(InterpError::new(format!(
+                            "actor field '{}' not found",
+                            field
+                        ))),
+                    };
                 }
                 // For non-actor self values (records, etc.), fall through to normal field access
             }
