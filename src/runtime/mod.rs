@@ -7230,8 +7230,9 @@ pub extern "C" fn mimi_actor_method_id(
 /// v0.29.25: broadcast method_name to an array of actor handles.
 ///
 /// For each non-null handle, resolve method name → id and call mimi_actor_call
-/// with empty args. Results: heap-allocated i64 array of length `count`
-/// (0 on fault/error). Caller owns the returned pointer.
+/// with empty args. Results: heap-allocated i64 array of length `count`.
+/// v0.29.35: PeerFault slots use sentinel -1 (distinguishable from 0 result).
+/// Caller owns the returned pointer.
 #[no_mangle]
 pub extern "C" fn mimi_broadcast(
     handles: *const *mut std::ffi::c_void,
@@ -7250,12 +7251,14 @@ pub extern "C" fn mimi_broadcast(
     let mut results: Vec<i64> = Vec::with_capacity(n);
     for &h in slice {
         if h.is_null() {
-            results.push(0);
+            // v0.29.35: PeerFault sentinel = -1
+            results.push(-1);
             continue;
         }
         let mid = mimi_actor_method_id(h, method_name);
         if mid < 0 {
-            results.push(0);
+            // v0.29.35: unknown method → PeerFault sentinel
+            results.push(-1);
             continue;
         }
         let mut result_buf = [0u8; MIMI_ACTOR_BLOB_SIZE];
@@ -7270,7 +7273,8 @@ pub extern "C" fn mimi_broadcast(
             let v = i64::from_le_bytes(result_buf[0..8].try_into().unwrap_or([0; 8]));
             results.push(v);
         } else {
-            results.push(0);
+            // v0.29.35: call failed → PeerFault sentinel
+            results.push(-1);
         }
     }
     if !out_len.is_null() {

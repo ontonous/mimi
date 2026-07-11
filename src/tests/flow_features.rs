@@ -3668,6 +3668,36 @@ func main() -> i32 {
     assert_eq!(out.trim(), "15");
 }
 
+// ── v0.29.35 broadcast PeerFault sentinel ─────────────────────────────
+
+#[test]
+fn broadcast_peerfault_sentinel_dual_backend() {
+    // L1: broadcast with unknown method → PeerFault sentinel -1 (both backends).
+    let src = r#"
+actor S {
+    v: i32
+    func read() -> i32 { self.v }
+    func set(n: i32) { self.v = n }
+}
+func main() -> i32 {
+    let a = S.spawn()
+    a.set(42)
+    let targets = [a]
+    let ok = broadcast(targets, "read")
+    println(ok[0])
+    let bad = broadcast(targets, "nonexistent")
+    println(bad[0])
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "42", "read result");
+    assert_eq!(lines[1], "-1", "PeerFault sentinel");
+}
+
 // ── v0.29.31 per-actor-type spawn quota + mailbox auto-depth ───────────
 
 #[test]

@@ -488,10 +488,8 @@ impl<'a> Interpreter<'a> {
             match target {
                 Value::Actor(handle) => {
                     if handle.is_faulted() {
-                        results.push(peer_fault_result(
-                            &handle.id.to_string(),
-                            "actor mailbox short-circuited (Fault)",
-                        ));
+                        // v0.29.35: PeerFault sentinel = -1
+                        results.push(Value::Int(-1));
                         continue;
                     }
                     // Dispatch via existing method-call path (mailbox / self).
@@ -500,20 +498,23 @@ impl<'a> Interpreter<'a> {
                         &method,
                         vec![],
                     ) {
-                        Ok(v) => results.push(v),
-                        Err(e) => {
-                            results.push(peer_fault_result(
-                                &handle.id.to_string(),
-                                &e.message().to_string(),
-                            ));
+                        Ok(v) => {
+                            // v0.29.35: normalize to i64 for List<i64> result.
+                            // If the method returned a non-i64, coerce to i64.
+                            match v {
+                                Value::Int(n) => results.push(Value::Int(n)),
+                                _ => results.push(Value::Int(0)),
+                            }
+                        }
+                        Err(_) => {
+                            // v0.29.35: PeerFault sentinel = -1
+                            results.push(Value::Int(-1));
                         }
                     }
                 }
                 other => {
-                    results.push(peer_fault_result(
-                        "?",
-                        &format!("broadcast target is not an actor: {:?}", other),
-                    ));
+                    // v0.29.35: non-actor target → PeerFault sentinel
+                    results.push(Value::Int(-1));
                 }
             }
         }
