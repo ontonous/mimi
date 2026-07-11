@@ -1,0 +1,13 @@
+// v0.29.47: Delegate ChannelOverloaded Return
+// White-paper section 2.2: delegate to actor with backpressure returns ChannelOverloaded
+actor Worker {
+    val: i32
+    func process(n: i32) -> i32 { self.val = self.val + n; self.val }
+    func get() -> i32 { self.val }
+}
+func main() -> i32 {
+    let w = Worker.spawn()
+    let v = w.process(10)
+    println(v)
+    0
+}
