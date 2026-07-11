@@ -127,6 +127,8 @@ pub const W007: &str = "W007"; // redundant parentheses
 pub const W008: &str = "W008"; // `== true` / `== false` anti-pattern
 pub const W009: &str = "W009"; // recursion depth hint
 pub const W010: &str = "W010"; // unused import
+pub const W0400: &str = "W0400"; // flow state unreachable (no transition targets to it)
+pub const W0401: &str = "W0401"; // flow state has no outgoing transitions (terminal state)
 
 /// Warning codes (E06xx) — kept for backward compatibility
 pub const E0600: &str = "E0600"; // variable shadows outer variable

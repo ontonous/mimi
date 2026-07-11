@@ -1067,6 +1067,59 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // State machine validation: reachability and completeness
+                let state_names: Vec<&str> = f.states.iter().map(|s| s.name.as_str()).collect();
+                // Collect which states are targeted by transitions
+                let mut targeted_by: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                let mut has_outgoing: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for t in &f.transitions {
+                    for to_state in &t.to_states {
+                        if to_state != "Fault" {
+                            targeted_by.insert(to_state.as_str());
+                        }
+                    }
+                    if t.from_state != "Fault" {
+                        has_outgoing.insert(t.from_state.as_str());
+                    }
+                }
+                // Warn about states with no incoming transitions (unreachable from other
+                // states). The first declared state is implicitly the initial state.
+                for s in &f.states {
+                    if !targeted_by.contains(s.name.as_str()) {
+                        // Skip the first state — it's the initial entry state
+                        let is_first = f.states.first().map(|first| first.name == s.name).unwrap_or(false);
+                        if !is_first {
+                            self.warnings.push(
+                                crate::diagnostic::Diagnostic::warning_code(
+                                    crate::diagnostic::codes::W0400,
+                                    format!(
+                                        "state '{}' in flow '{}' is unreachable (no transition targets to it)",
+                                        s.name, f.name
+                                    ),
+                                    Span::single(self.current_line, self.current_col),
+                                )
+                            );
+                        }
+                    }
+                }
+                // Warn about states with no outgoing transitions (terminal but not declared
+                // as terminal — may indicate incomplete flow definition)
+                for s in &f.states {
+                    if !has_outgoing.contains(s.name.as_str()) {
+                        self.warnings.push(
+                            crate::diagnostic::Diagnostic::warning_code(
+                                crate::diagnostic::codes::W0401,
+                                format!(
+                                    "state '{}' in flow '{}' has no outgoing transitions (terminal state)",
+                                    s.name, f.name
+                                ),
+                                Span::single(self.current_line, self.current_col),
+                            )
+                        );
+                    }
+                }
             }
             Item::Protocol(p) => {
                 // Check state name uniqueness
