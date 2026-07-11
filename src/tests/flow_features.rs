@@ -1079,6 +1079,113 @@ flow GoodFlow {
     );
 }
 
+// ===================== Delegate execution tests =====================
+
+#[test]
+fn flow_exec_delegate_view() {
+    let src = r#"
+flow MyFlow {
+    state Active { val: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            let sub = 42
+            delegate view(self.val) to sub;
+            return Active { val: self.val }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = MyFlow::process(s)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn flow_exec_delegate_consume() {
+    let src = r#"
+flow MyFlow {
+    state Active { val: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            let sub = 42
+            delegate consume(self.val) to sub;
+            return Active { val: 99 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = MyFlow::process(s)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn flow_exec_delegate_mutate() {
+    let src = r#"
+flow MyFlow {
+    state Active { val: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            let sub = 42
+            delegate mutate(self.val) to sub;
+            return Active { val: self.val }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = MyFlow::process(s)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn flow_exec_delegate_undefined_target() {
+    let src = r#"
+flow MyFlow {
+    state Active { val: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            delegate view(self.val) to nonexistent;
+            return Active { val: self.val }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = MyFlow::process(s)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    assert!(
+        result.is_err(),
+        "expected error for undefined delegate target, got {:?}",
+        result
+    );
+    let err = result.unwrap_err();
+    assert!(err.contains("nonexistent"), "error should mention target name: {}", err);
+}
+
 #[test]
 fn flow_exec_chain() {
     let src = r#"

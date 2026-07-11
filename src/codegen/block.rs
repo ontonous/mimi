@@ -690,6 +690,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
                 }
+                Stmt::Do(..) => {
+                    return Err(CompileError::Generic(
+                        "do blocks inside flow transitions cannot be compiled yet; use 'mimi run' instead".to_string(),
+                    ));
+                }
+                Stmt::Delegate { .. } => {
+                    return Err(CompileError::Generic(
+                        "delegate statements cannot be compiled yet; use 'mimi run' instead".to_string(),
+                    ));
+                }
+                Stmt::Pinned { .. } => {
+                    return Err(CompileError::Generic(
+                        "pinned blocks cannot be compiled yet; use 'mimi run' instead".to_string(),
+                    ));
+                }
                 // Defensive wildcard: compile_block handles all current Stmt variants
                 // explicitly; this arm guards against future variants causing a
                 // non-exhaustive match error during development.

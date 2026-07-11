@@ -245,8 +245,28 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
-            Stmt::Delegate { expr, .. } => {
-                self.eval_expr(expr)?;
+            Stmt::Delegate { kind, expr, target } => {
+                let val = self.eval_expr(expr)?;
+                // Look up the target subflow in scope (validates it exists)
+                let _target_val = self.scope_env.lookup(target).ok_or_else(|| {
+                    InterpError::new(format!("delegate target '{}' not found in scope", target))
+                })?;
+                match kind {
+                    DelegateKind::Consume => {
+                        // Consume: ownership transferred to subflow — explicitly drop
+                        // In a full implementation this would route to the subflow's
+                        // transition. For now, consuming means the resource moves.
+                        drop(val);
+                    }
+                    DelegateKind::View | DelegateKind::Mutate => {
+                        // View/Mutate: resource stays in the parent flow.
+                        // Evaluate the expression (side effects if any) but keep
+                        // the value alive by storing in a temp that lives for the
+                        // scope. In practice, self.field access just reads — the
+                        // value remains bound in the flow state.
+                        let _kept = val;
+                    }
+                }
             }
             Stmt::Pinned { expr, var, body, .. } => {
                 let val = self.eval_expr(expr)?;
