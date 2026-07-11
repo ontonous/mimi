@@ -4069,3 +4069,147 @@ flow FFI {
     assert!(flow.transitions.iter().any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned" && t.is_ffi_pinned));
     assert!(flow.transitions.iter().any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned" && t.is_fallback));
 }
+
+// ── v0.29.43: Pinned Delayed Fault Semantics ──────────────────────────
+
+#[test]
+fn pinned_timeout_produces_fault_value() {
+    // L1 interp: pinned timeout=0 produces a Fault value directly (not Err).
+    // The Fault carries the correct last_state from the flow context.
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition expire(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 0) |p| { let _ = p }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("data".into(), interp::Value::Int(7));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let out = interp
+        .eval_flow_transition(
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            }).expect("Buf flow"),
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
+                _ => None,
+            }).expect("expire"),
+            &[active],
+        )
+        .expect("expire should produce Fault value");
+    match out {
+        interp::Value::Record(Some(name), f) => {
+            assert_eq!(name, "Fault");
+            let last = f.get("last_state").map(|v| format!("{}", v));
+            assert_eq!(last.as_deref(), Some("Active"), "last_state={:?}", last);
+        }
+        other => panic!("expected Fault record, got {:?}", other),
+    }
+}
+
+#[test]
+fn pinned_timeout_fault_has_trace() {
+    // L2: delayed Fault from pinned timeout carries SystemTrace with
+    // last_state_name and unexpected_event containing "pinned_timeout".
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition expire(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 0) |p| { let _ = p }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("data".into(), interp::Value::Int(7));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let out = interp
+        .eval_flow_transition(
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            }).expect("Buf flow"),
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
+                _ => None,
+            }).expect("expire"),
+            &[active],
+        )
+        .expect("expire should produce Fault value");
+    if let interp::Value::Record(Some(name), f) = &out {
+        assert_eq!(name, "Fault");
+        let trace = f.get("trace").expect("trace field");
+        if let interp::Value::Record(_, tf) = trace {
+            let lsn = tf.get("last_state_name").map(|v| format!("{}", v));
+            assert_eq!(lsn.as_deref(), Some("Active"));
+            let ev = tf.get("unexpected_event").map(|v| format!("{}", v));
+            let evs = ev.unwrap_or_default();
+            assert!(evs.contains("pinned_timeout"), "unexpected_event={}", evs);
+        } else {
+            panic!("trace is not a record: {:?}", trace);
+        }
+    } else {
+        panic!("expected Fault, got {:?}", out);
+    }
+}
+
+#[test]
+fn pinned_body_panic_produces_delayed_fault() {
+    // L1 interp: if pinned body itself panics (e.g. div by zero),
+    // the error is caught and a delayed Fault is produced (not propagated).
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition crash(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 5000) |p| {
+                let x = 1 / 0
+            }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("data".into(), interp::Value::Int(7));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let out = interp
+        .eval_flow_transition(
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            }).expect("Buf flow"),
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "crash"),
+                _ => None,
+            }).expect("crash"),
+            &[active],
+        )
+        .expect("crash should produce delayed Fault");
+    match out {
+        interp::Value::Record(Some(name), _) => {
+            assert_eq!(name, "Fault");
+        }
+        other => panic!("expected Fault from pinned body panic, got {:?}", other),
+    }
+}

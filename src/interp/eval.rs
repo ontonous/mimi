@@ -311,9 +311,10 @@ impl<'a> Interpreter<'a> {
                 ..
             } => {
                 // v0.29.32: cooperative wall-clock timeout watchdog.
-                // timeout <= 0 → immediate ContractViolation (absorbed as Fault).
-                // timeout > 0 → record wall-clock start, execute body, then check
-                // elapsed. If elapsed > timeout → ContractViolation → Fault.
+                // v0.29.43: delayed Fault semantics — timeout/crash produces a Fault
+                // value (via `make_fault_value`) rather than aborting the process.
+                // The Fault is generated AFTER the body completes/fails, honoring the
+                // white-paper's "delay until C call safely returns" requirement.
                 let _pinned_timeout_ms: Option<i64> = if let Some(to_expr) = timeout {
                     let tv = self.eval_expr(to_expr)?;
                     let ms = match tv {
@@ -325,10 +326,22 @@ impl<'a> Interpreter<'a> {
                         }
                     };
                     if ms <= 0 {
-                        return Err(InterpError::contract_violation(format!(
+                        // v0.29.43: zero/negative timeout → immediate delayed Fault.
+                        let from_state = self
+                            .current_flow_state
+                            .as_deref()
+                            .unwrap_or("FFI_Pinned");
+                        let event = format!("pinned_timeout:{}ms", ms);
+                        let snapshot = format!(
                             "pinned timeout expired (timeout={}ms): FFI anchor watchdog",
                             ms
-                        )));
+                        );
+                        let fault = crate::flow_matrix::make_fault_value(
+                            from_state,
+                            &event,
+                            &snapshot,
+                        );
+                        return Ok(Some(fault));
                     }
                     Some(ms)
                 } else {
@@ -349,8 +362,36 @@ impl<'a> Interpreter<'a> {
                 if let Some(var_name) = var {
                     self.scope_env.bind(var_name, val)?;
                 }
+                // v0.29.43: Execute body. If body itself errors with a runtime panic,
+                // we delay Fault generation until after scope cleanup — the body's
+                // error is caught here, scope is popped, THEN Fault is generated.
                 let body_res = self.eval_block(body);
                 self.scope_env.pop_scope();
+
+                // Check if body itself panicked (e.g., FFI crash simulated by div0).
+                // If so, generate delayed Fault with the panic context.
+                if let Err(ref e) = body_res {
+                    if is_runtime_panic(e) {
+                        let from_state = self
+                            .current_flow_state
+                            .as_deref()
+                            .unwrap_or("FFI_Pinned");
+                        let event = format!("pinned_panic:{}", e.code());
+                        let snapshot = format!(
+                            "pinned body panic: {} — FFI anchor delayed Fault",
+                            e
+                        );
+                        let fault = crate::flow_matrix::make_fault_value(
+                            from_state,
+                            &event,
+                            &snapshot,
+                        );
+                        return Ok(Some(fault));
+                    }
+                    // Non-runtime errors propagate as-is.
+                    return Err(e.clone());
+                }
+
                 // v0.29.32: cooperative wall-clock expiry check after body.
                 if let Some(to_ms) = _pinned_timeout_ms {
                     let now_ms = std::time::SystemTime::now()
@@ -359,13 +400,25 @@ impl<'a> Interpreter<'a> {
                         .unwrap_or(_pinned_start_ms);
                     let elapsed = now_ms - _pinned_start_ms;
                     if elapsed > to_ms {
-                        return Err(InterpError::contract_violation(format!(
+                        // v0.29.43: timeout → delayed Fault (not abort).
+                        let from_state = self
+                            .current_flow_state
+                            .as_deref()
+                            .unwrap_or("FFI_Pinned");
+                        let event = format!("pinned_timeout:{}ms", to_ms);
+                        let snapshot = format!(
                             "pinned timeout expired ({}ms > {}ms): FFI anchor watchdog",
                             elapsed, to_ms
-                        )));
+                        );
+                        let fault = crate::flow_matrix::make_fault_value(
+                            from_state,
+                            &event,
+                            &snapshot,
+                        );
+                        return Ok(Some(fault));
                     }
                 }
-                if let Some(v) = body_res? {
+                if let Ok(Some(v)) = body_res {
                     return Ok(Some(v));
                 }
             }
@@ -482,6 +535,11 @@ impl<'a> Interpreter<'a> {
             InterpError::new(format!("transition '{}' has no body", t.name))
         })?;
 
+        // v0.29.43: set flow state context for delayed Fault from pinned blocks.
+        // Restored at every return point below.
+        let prev_flow_state = self.current_flow_state.take();
+        self.current_flow_state = Some(t.from_state.clone());
+
         // v0.29.14: snapshot persistent fields at turn entry (WAL + dirty check).
         if let Some(from_payload) = vals.first() {
             self.begin_persistent_tx(&flow.name, flow, from_payload);
@@ -515,12 +573,14 @@ impl<'a> Interpreter<'a> {
                 // Already in Fault: do not re-wrap (avoid infinite absorption).
                 if t.from_state == "Fault" {
                     self.abort_persistent_tx(&flow.name);
+                    self.current_flow_state = prev_flow_state;
                     return Err(e);
                 }
                 // v0.29.12: only absorb true runtime panics (div0/overflow/OOB/…),
                 // not programming errors like undefined names or type mismatches.
                 if !is_runtime_panic(&e) {
                     self.abort_persistent_tx(&flow.name);
+                    self.current_flow_state = prev_flow_state;
                     return Err(e);
                 }
                 let event = format!("panic:{}", e.code());
@@ -539,6 +599,7 @@ impl<'a> Interpreter<'a> {
                 } else {
                     self.abort_persistent_tx(&flow.name);
                 }
+                self.current_flow_state = prev_flow_state;
                 return Ok(fault);
             }
         };
@@ -562,6 +623,7 @@ impl<'a> Interpreter<'a> {
                     );
                 }
                 drop_fault_payload_except(&restored, &flow.persistent_fields);
+                self.current_flow_state = prev_flow_state;
                 return Ok(out_fault);
             }
             self.abort_persistent_tx(&flow.name);
@@ -592,6 +654,7 @@ impl<'a> Interpreter<'a> {
             self.flow_tx.remove(&flow.name);
         }
 
+        self.current_flow_state = prev_flow_state;
         Ok(final_out)
     }
 
