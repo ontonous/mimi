@@ -90,10 +90,12 @@ impl Linter {
                 in_block_comment = false;
             }
             if !in_block_comment {
+                let mut prev_ch = ' ';
                 for ch in line.chars() {
-                    if ch == '"' {
+                    if ch == '"' && prev_ch != '\\' {
                         in_string = !in_string;
                     }
+                    prev_ch = ch;
                 }
             }
         }
@@ -692,7 +694,7 @@ fn detect_redundant_parens(source: &str, diagnostics: &mut Vec<Diagnostic>) {
             col += 2;
             continue;
         }
-        if ch == '"' {
+        if ch == '"' && prev_char != '\\' {
             in_string = !in_string;
         } else if ch == '\n' {
             line += 1;
