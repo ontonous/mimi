@@ -1,11 +1,15 @@
-// MCDD real_world: Flow pinned — FFI anchor syntax (v0.29.16)
-// Exercises pinned block: value side-effect through ptr, timeout evaluation.
+// MCDD real_world: Flow pinned — FFI anchor + cooperative watchdog (v0.29.32)
+// Exercises pinned block: value side-effect through ptr, cooperative timeout.
+// Success path: pinned block completes within timeout → normal continuation.
+// Timeout path: timeout=0 → ContractViolation → Fault absorption (interp).
+//   In codegen, timeout=0 calls mimi_runtime_abort (process fatal).
+//   So we only test the success path in dual-backend mode.
 flow Buffer {
     state Active { data: i32 }
 
     transition use_pinned(Active) -> Active {
         do {
-            pinned(self.data, timeout = 1) |ptr| {
+            pinned(self.data, timeout = 5000) |ptr| {
                 // In real FFI, ptr would be passed to a C function.
                 // Here we just verify ptr binding + scope isolation.
                 let _ = ptr
@@ -25,6 +29,7 @@ flow Buffer {
 }
 
 func main() -> i32 {
+    // Success path with generous timeout
     let s0 = Active { data: 100 }
     let s1 = Buffer::use_pinned(s0)
     println(s1.data)

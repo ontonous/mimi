@@ -3449,6 +3449,65 @@ func main() -> i32 {
     );
 }
 
+// ── v0.29.32 cooperative wall-clock timeout watchdog ─────────────────
+
+#[test]
+fn pinned_cooperative_wall_clock_success() {
+    // L1: positive timeout with fast body → normal continuation (both backends).
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition use_pin(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 5000) |p| {
+                let _ = p
+            }
+            return Active { data: self.data + 1 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 40 }
+    let r = Buf::use_pin(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "41");
+}
+
+#[test]
+fn pinned_cooperative_wall_clock_elapsed_check() {
+    // L1: interp path — positive timeout, body completes fast, no expiry.
+    // Verifies that the wall-clock check does not falsely trigger.
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition use_pin(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 99999) |p| {
+                let _ = p
+            }
+            return Active { data: self.data + 42 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 0 }
+    let r = Buf::use_pin(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok());
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "42");
+}
+
 // ── v0.29.29 mutate parameter hardening ────────────────────────────────
 
 #[test]
