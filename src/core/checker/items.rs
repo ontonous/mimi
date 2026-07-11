@@ -1176,10 +1176,65 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    // 3. Payload structural subtyping (view-covariance): protocol
-                    //    `state S { T }` requires flow state S to have at least one
-                    //    field of type T (extra fields allowed — width subtyping).
-                    //    Checked above in step 1; this step documents the rule.
+                    // 3. v0.29.36: Payload covariance / invariance rules.
+                    //    - view-borrowed protocol fields: covariant (flow may have
+                    //      wider payload type — extra fields allowed, width subtyping)
+                    //    - mutate-borrowed protocol fields: invariant (flow must
+                    //      exactly match protocol payload type)
+                    //    The width subtyping (extra fields OK) is already enforced
+                    //    in step 1. Here we add the invariant check for protocol
+                    //    states with `mutate`-marked payload types.
+                    //    Currently all protocol payload types are view-covariant
+                    //    (the default), so this is a documentation point.
+                    //
+                    // 4. v0.29.36: Conservative projection (E0418).
+                    //    If a flow state payload contains a subflow (nested flow
+                    //    state record), the projection to the flat protocol topology
+                    //    must be conservative: the subflow's transitions must not
+                    //    conflict with the protocol's transition set.
+                    //    We check: if a flow state's payload field type matches
+                    //    another flow's state name (subflow nesting), the protocol
+                    //    must not declare transitions that would require observing
+                    //    the inner subflow's state.
+                    for ps in &proto.states {
+                        let flow_state = f.states.iter().find(|s| s.name == ps.name);
+                        if let Some(fs) = flow_state {
+                            if let Some(ref payload) = fs.payload {
+                                for field in payload {
+                                    let field_ty_name = match &field.ty {
+                                        crate::ast::Type::Name(n, _) => n.clone(),
+                                        _ => continue,
+                                    };
+                                    // Check if this field type is a subflow state
+                                    // (i.e., another flow's state record name)
+                                    let is_subflow_state = self.file.items.iter().any(|item| {
+                                        if let crate::ast::Item::Flow(other_flow) = item {
+                                            other_flow.states.iter().any(|s| s.name == field_ty_name)
+                                                && other_flow.name != f.name
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if is_subflow_state {
+                                        // Conservative projection: subflow state in
+                                        // protocol payload → E0418 if protocol has
+                                        // transitions that target this state
+                                        let proto_targets_this = proto.transitions.iter()
+                                            .any(|pt| pt.to_state == field_ty_name);
+                                        if proto_targets_this {
+                                            self.emit_code(
+                                                crate::diagnostic::codes::E0418,
+                                                format!(
+                                                    "conservative projection failure: flow '{}' state '{}' nests subflow state '{}' which is also a protocol transition target — flat projection is ambiguous",
+                                                    f.name, ps.name, field_ty_name
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 // State machine validation: reachability and completeness.
                 // Only count user-written transitions — auto-injected Fault
