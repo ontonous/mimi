@@ -3901,3 +3901,65 @@ func main() -> i32 {
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "");
 }
+
+// ── v0.29.40 Linear type inference optimization ───────────────────────
+
+#[test]
+fn multi_target_transition_typecheck() {
+    // L2: transition returning multiple states (B | A) typechecks.
+    let src = r#"
+flow C {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition go(A) -> B | A {
+        do {
+            if self.v > 0 {
+                return B { v: self.v }
+            }
+            return A { v: 0 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = A { v: 5 }
+    let r = C::go(s)
+    println(r.v)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn transition_return_with_subflow_payload() {
+    // L2: transition with subflow payload in return type.
+    let src = r#"
+flow Inner {
+    state IActive { n: i32 }
+    transition bump(IActive) -> IActive {
+        do { return IActive { n: self.n + 1 } }
+    }
+}
+flow Outer {
+    state Working { child: IActive }
+    transition step(Working) -> Working {
+        do {
+            let c = Inner::bump(self.child)
+            return Working { child: c }
+        }
+    }
+}
+func main() -> i32 {
+    let c0 = IActive { n: 0 }
+    let w0 = Working { child: c0 }
+    let w1 = Outer::step(w0)
+    println(w1.child.n)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "1");
+}
