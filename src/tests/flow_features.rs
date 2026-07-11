@@ -1216,3 +1216,125 @@ func main() -> i32 {
     let result = run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(42)));
 }
+
+// ===================== Codegen error tests =====================
+
+#[test]
+fn flow_codegen_error_transition_call() {
+    // Verify that compiling a flow transition call produces a clear error
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Active { count: i32 }
+    state Done
+
+    transition inc(Zero) -> Active {
+        do {
+            return Active { count: 0 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Zero { count: 0 }
+    let _a = Counter::inc(s, 7)
+    42
+}
+"#;
+    let err = compile_only(src).unwrap_err();
+    assert!(
+        err.contains("cannot be compiled yet"),
+        "expected codegen error about flow transition calls, got: {}",
+        err
+    );
+}
+
+#[test]
+fn flow_codegen_error_delegate() {
+    // Flow transition calls error first, before reaching delegate body compilation.
+    // This verifies the defensive error path for delegate in codegen.
+    let src = r#"
+flow Parent {
+    state Active { val: i32 }
+
+    transition run(Active) -> Active {
+        do {
+            let sub = 42
+            delegate view(self.val) to sub;
+            return Active { val: self.val }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let _r = Parent::run(s)
+    0
+}
+"#;
+    let err = compile_only(src).unwrap_err();
+    // The first error encountered is the transition call itself
+    assert!(
+        err.contains("cannot be compiled yet"),
+        "expected codegen error about flow transition, got: {}",
+        err
+    );
+}
+
+#[test]
+fn flow_codegen_error_pinned() {
+    let src = r#"
+flow SafeFFI {
+    state Active { buffer: List<u8> }
+
+    transition process(Active) -> Active {
+        do {
+            pinned(self.buffer) |ptr| {
+                let _x = ptr
+            }
+            return Active { buffer: self.buffer }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { buffer: [] }
+    let _r = SafeFFI::process(s)
+    0
+}
+"#;
+    let err = compile_only(src).unwrap_err();
+    assert!(
+        err.contains("cannot be compiled yet"),
+        "expected codegen error about flow transition, got: {}",
+        err
+    );
+}
+
+#[test]
+fn flow_codegen_error_do_block() {
+    let src = r#"
+flow F {
+    state A
+    state B
+
+    transition go(A) -> B {
+        do {
+            return B { }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = A { }
+    let _r = F::go(s)
+    0
+}
+"#;
+    let err = compile_only(src).unwrap_err();
+    assert!(
+        err.contains("cannot be compiled yet"),
+        "expected codegen error about flow transition, got: {}",
+        err
+    );
+}
