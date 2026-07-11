@@ -2202,3 +2202,164 @@ func main() -> i32 {
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "42");
 }
+
+
+// ── v0.29.17 Subflow synchronous nesting ──────────────────────────────
+
+#[test]
+fn flow_exec_subflow_nested_transition() {
+    // Parent payload holds child state; parent transition drives child.
+    let src = r#"
+flow Child {
+    state CIdle { n: i32 }
+    state CDone { n: i32 }
+    transition step(CIdle) -> CDone {
+        do { return CDone { n: self.n + 1 } }
+    }
+}
+flow Parent {
+    state Working { child: CIdle }
+    state Finished { result: i32 }
+    transition run(Working) -> Finished {
+        do {
+            let c2 = Child::step(self.child)
+            return Finished { result: c2.n }
+        }
+    }
+}
+func main() -> i32 {
+    let c0 = CIdle { n: 10 }
+    let p0 = Working { child: c0 }
+    let p1 = Parent::run(p0)
+    println(p1.result)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "11");
+}
+
+#[test]
+fn flow_exec_subflow_nested_field_access() {
+    // Nested state field construction + field access (no transition).
+    let src = r#"
+flow Child {
+    state CIdle { n: i32 }
+}
+flow Parent {
+    state Working { child: CIdle, tag: i32 }
+}
+func main() -> i32 {
+    let c0 = CIdle { n: 7 }
+    let p0 = Working { child: c0, tag: 3 }
+    println(p0.child.n)
+    println(p0.tag)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "7\n3");
+}
+
+#[test]
+fn flow_exec_subflow_reset_nested_defaults() {
+    // reset/recover inject zeroed nested subflow payload (not unit).
+    let src = r#"
+flow Child {
+    state CIdle { n: i32 }
+}
+flow Parent {
+    state Working { child: CIdle }
+    transition boom(Working) -> Fault {
+        do {
+            return Fault {
+                last_state: "Working",
+                unexpected_event: "boom",
+                snapshot: "user",
+                trace: SystemTrace {
+                    last_state_name: "Working",
+                    unexpected_event: "boom",
+                    snapshot: "user"
+                }
+            }
+        }
+    }
+}
+func main() -> i32 {
+    let c0 = CIdle { n: 99 }
+    let p0 = Working { child: c0 }
+    let f = Parent::boom(p0)
+    let r = Parent::reset(f)
+    // After reset, nested child is zero-default CIdle { n: 0 }
+    println(r.child.n)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "0");
+}
+
+#[test]
+fn flow_check_subflow_unknown_nested_type() {
+    // L2: payload field must name a known type (state or record).
+    let src = r#"
+flow Parent {
+    state Working { child: NotARealState }
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected type error for unknown nested type");
+}
+
+#[test]
+fn flow_parse_subflow_payload_shape() {
+    // Parser + matrix: nested state field preserved; reset body uses nested default.
+    let src = r#"
+flow Child { state CIdle { n: i32 } }
+flow Parent { state Working { child: CIdle } }
+"#;
+    let file = parse(src);
+    let parent = file.items.iter().find_map(|i| match i {
+        Item::Flow(f) if f.name == "Parent" => Some(f),
+        _ => None,
+    }).expect("Parent");
+    let working = parent.states.iter().find(|s| s.name == "Working").unwrap();
+    let fields = working.payload.as_ref().unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name, "child");
+    match &fields[0].ty {
+        Type::Name(n, _) => assert_eq!(n, "CIdle"),
+        other => panic!("expected Name(CIdle), got {:?}", other),
+    }
+    // Injected reset must rebuild Working { child: CIdle { n: 0 } }, not unit.
+    let reset = parent
+        .transitions
+        .iter()
+        .find(|t| t.name == "reset" && t.from_state == "Fault")
+        .expect("reset");
+    let body = reset.body.as_ref().expect("reset body");
+    match body.first() {
+        Some(Stmt::Return(Some(Expr::Record { ty: Some(t), fields }))) => {
+            assert_eq!(t, "Working");
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "child");
+            match &fields[0].value {
+                Expr::Record { ty: Some(ct), fields: cfields } => {
+                    assert_eq!(ct, "CIdle");
+                    assert_eq!(cfields.len(), 1);
+                    assert_eq!(cfields[0].name, "n");
+                    assert!(matches!(cfields[0].value, Expr::Literal(Lit::Int(0))));
+                }
+                other => panic!("expected nested CIdle record default, got {:?}", other),
+            }
+        }
+        other => panic!("unexpected reset body: {:?}", other),
+    }
+}
