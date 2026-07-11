@@ -525,6 +525,13 @@ fn register_regex_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+
+    // mimi_match_panic(): abort on non-exhaustive match (CG-C1)
+    module.add_function(
+        "mimi_match_panic",
+        void.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 fn register_ffi_fns_defined_in_rust_ffi_rt_rs<'ctx>(

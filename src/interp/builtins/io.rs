@@ -342,8 +342,19 @@ impl<'a> Interpreter<'a> {
                 let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
                 match output {
                     Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024; // 10MB
+                        let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
+                            &out.stdout[..MAX_EXEC_OUTPUT]
+                        } else {
+                            &out.stdout
+                        };
+                        let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
+                            &out.stderr[..MAX_EXEC_OUTPUT]
+                        } else {
+                            &out.stderr
+                        };
+                        let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
+                        let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
                         let exit_code = out.status.code().unwrap_or(-1);
                         let mut fields = std::collections::HashMap::new();
                         fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
