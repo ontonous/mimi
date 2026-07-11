@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
-use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, Z3VarMap};
+use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, VerifierCtx, SolverSession, Z3VarMap};
 use crate::verifier::expr;
 use crate::verifier::helpers::{
     block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr,
@@ -13,8 +13,8 @@ use z3::ast::String as Z3String;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 
-impl crate::verifier::Verifier {
-    pub(crate) fn verify_items(&mut self, items: &[Item], results: &mut Vec<VerificationResult>) {
+impl VerifierCtx {
+    pub(crate) fn verify_items(&mut self, session: &mut SolverSession, items: &[Item], results: &mut Vec<VerificationResult>) {
         // Pre-populate func_defs so call-site verification can look up
         // callee ensures (cross-module contract propagation).
         self.collect_func_defs(items);
@@ -22,14 +22,14 @@ impl crate::verifier::Verifier {
             match item {
                 Item::Func(f) => {
                     if !f.body.is_empty() {
-                        results.push(self.verify_func(f));
+                        results.push(self.verify_func(session, f));
                     }
                 }
-                Item::Module(m) => self.verify_items(&m.items, results),
+                Item::Module(m) => self.verify_items(session, &m.items, results),
                 Item::ExternBlock(block) => {
                     for func in &block.funcs {
                         if func.requires.is_some() || func.ensures.is_some() {
-                            results.push(self.verify_extern_func(func));
+                            results.push(self.verify_extern_func(session, func));
                         }
                     }
                 }
@@ -38,25 +38,13 @@ impl crate::verifier::Verifier {
         }
     }
 
-    pub(crate) fn collect_func_defs(&mut self, items: &[Item]) {
-        for item in items {
-            match item {
-                Item::Func(f) => {
-                    self.func_defs.insert(f.name.clone(), f.clone());
-                }
-                Item::Module(m) => self.collect_func_defs(&m.items),
-                _ => {}
-            }
-        }
-    }
-
-    pub(crate) fn verify_extern_func(&mut self, func: &ExternFunc) -> VerificationResult {
+    pub(crate) fn verify_extern_func(&mut self, session: &mut SolverSession, func: &ExternFunc) -> VerificationResult {
         let start = Instant::now();
         // 2.3: reset() clears all assertions. Z3's Params (incl. timeout) are NOT
         // affected by reset() — they persist across calls. The solver is clean
         // for each extern verification, preventing cross-contamination from
         // prior verify_func calls.
-        self.solver.reset();
+        session.reset();
 
         let requires_expr = func.requires.as_ref();
         let ensures_expr = func.ensures.as_ref();
@@ -97,11 +85,11 @@ impl crate::verifier::Verifier {
 
         if let Some(req) = requires_expr {
             if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
-                self.solver.assert(&z3_bool);
+                session.assert(&z3_bool);
             }
         }
 
-        match self.check_safe() {
+        match session.check() {
             SatResult::Unsat => VerificationResult {
                 func_name: format!("extern {}", func.name),
                 status: VerifStatus::Failed,
@@ -119,7 +107,7 @@ impl crate::verifier::Verifier {
             },
             SatResult::Unknown => {
                 let elapsed = start.elapsed();
-                let msg = if elapsed.as_millis() >= self.timeout_ms as u128 {
+                let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
                     format!(
                         "extern precondition check timed out after {}ms for '{}'",
                         elapsed.as_millis(),
@@ -142,13 +130,13 @@ impl crate::verifier::Verifier {
             }
             SatResult::Sat => {
                 if let Some(ens) = ensures_expr {
-                    self.solver_push();
+                    session.push();
                     if let Some(z3_not_ens) = expr::expr_to_z3_bool(ens, &mut vars).map(|b| b.not())
                     {
-                        self.solver.assert(&z3_not_ens);
-                        match self.check_safe() {
+                        session.assert(&z3_not_ens);
+                        match session.check() {
                             SatResult::Unsat => {
-                                self.solver_pop();
+                                session.pop();
                                 VerificationResult {
                                     func_name: format!("extern {}", func.name),
                                     status: VerifStatus::Verified,
@@ -160,7 +148,7 @@ impl crate::verifier::Verifier {
                                 }
                             }
                             SatResult::Sat | SatResult::Unknown => {
-                                self.solver_pop();
+                                session.pop();
                                 VerificationResult {
                                 func_name: format!("extern {}", func.name),
                                 status: VerifStatus::Unknown, // P2.3 fix: Unknown (not Verified) since we found a counterexample
@@ -174,7 +162,7 @@ impl crate::verifier::Verifier {
                             }
                         }
                     } else {
-                        self.solver_pop();
+                        session.pop();
                         VerificationResult {
                             func_name: format!("extern {}", func.name),
                             status: VerifStatus::Unknown,
@@ -198,14 +186,14 @@ impl crate::verifier::Verifier {
         }
     }
 
-    pub(crate) fn verify_func(&mut self, func: &FuncDef) -> VerificationResult {
+    pub(crate) fn verify_func(&mut self, session: &mut SolverSession, func: &FuncDef) -> VerificationResult {
         let start = Instant::now();
 
         // Shared parameters use abstract heap encoding:
         // shared identity → opaque Int variable,
         // field accesses → fresh Z3 variables (handled by Expr::Field encoding).
         // This allows verifying scalar-field contracts on shared params.
-        self.solver.reset();
+        session.reset();
 
         let mut requires_exprs: Vec<Expr> = Vec::new();
         let mut ensures_exprs: Vec<Expr> = Vec::new();
@@ -257,7 +245,7 @@ impl crate::verifier::Verifier {
                 .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
                 .collect();
             let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-            self.check_callee_requires_in_block(
+            self.check_callee_requires_in_block(session, 
                 &expanded_body,
                 &mut vars,
                 func.name.as_str(),
@@ -356,14 +344,14 @@ impl crate::verifier::Verifier {
             if matches!(&p.ty, Type::Name(n, _) if n == "string") {
                 if let Some(z3_s) = vars.get_string_var(p.name.as_str()) {
                     if let Some(len_var) = vars.get_string_len(p.name.as_str()) {
-                        self.solver.assert(z3_s.length().eq(len_var));
+                        session.assert(z3_s.length().eq(len_var));
                     }
                     let Ok(empty) = Z3String::from_str("") else {
                         continue;
                     };
                     let nonempty_check = z3_s.ne(&empty);
                     if let Some(ne_var) = vars.get_string_nonempty(p.name.as_str()) {
-                        self.solver.assert(ne_var.eq(&nonempty_check));
+                        session.assert(ne_var.eq(&nonempty_check));
                     }
                 }
             }
@@ -374,14 +362,14 @@ impl crate::verifier::Verifier {
                 let old_name = old_names[i].as_str();
                 if let Some(z3_s) = vars.get_string_var(old_name) {
                     if let Some(len_var) = vars.get_string_len(old_name) {
-                        self.solver.assert(z3_s.length().eq(len_var));
+                        session.assert(z3_s.length().eq(len_var));
                     }
                     let Ok(empty) = Z3String::from_str("") else {
                         continue;
                     };
                     let nonempty_check = z3_s.ne(&empty);
                     if let Some(ne_var) = vars.get_string_nonempty(old_name) {
-                        self.solver.assert(ne_var.eq(&nonempty_check));
+                        session.assert(ne_var.eq(&nonempty_check));
                     }
                 }
             }
@@ -399,7 +387,7 @@ impl crate::verifier::Verifier {
 
         for req in &requires_exprs {
             if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
-                self.solver.assert(z3_bool);
+                session.assert(z3_bool);
             } else {
                 parse_errors.push(format!("could not encode requires: {}", format_expr(req)));
             }
@@ -407,7 +395,7 @@ impl crate::verifier::Verifier {
 
         for math in &math_exprs {
             if let Some(z3_bool) = expr::expr_to_z3_bool(math, &mut vars) {
-                self.solver.assert(z3_bool);
+                session.assert(z3_bool);
             } else {
                 parse_errors.push(format!(
                     "could not encode math constraint: {}",
@@ -418,7 +406,7 @@ impl crate::verifier::Verifier {
 
         for inv in &invariant_exprs {
             if let Some(z3_bool) = expr::expr_to_z3_bool(inv, &mut vars) {
-                self.solver.assert(z3_bool);
+                session.assert(z3_bool);
             } else {
                 parse_errors.push(format!("could not encode invariant: {}", format_expr(inv)));
             }
@@ -429,7 +417,7 @@ impl crate::verifier::Verifier {
             let param_z3 = vars.get_int(p.name.as_str()).cloned();
             let old_z3 = vars.get_int(old_name).cloned();
             if let (Some(pv), Some(ov)) = (param_z3, old_z3) {
-                self.solver.assert(ov.eq(&pv));
+                session.assert(ov.eq(&pv));
             }
         }
 
@@ -438,7 +426,7 @@ impl crate::verifier::Verifier {
             let param_z3 = vars.get_real(p.name.as_str()).cloned();
             let old_z3 = vars.get_real(old_name).cloned();
             if let (Some(pv), Some(ov)) = (param_z3, old_z3) {
-                self.solver.assert(ov.eq(&pv));
+                session.assert(ov.eq(&pv));
             }
         }
 
@@ -446,7 +434,7 @@ impl crate::verifier::Verifier {
             if returns_real {
                 if let Some(body_z3) = expr::expr_to_z3_real(return_expr, &mut vars) {
                     if let Some(r) = vars.get_real("result") {
-                        self.solver.assert(r.eq(&body_z3));
+                        session.assert(r.eq(&body_z3));
                     }
                 } else {
                     parse_errors.push(
@@ -455,14 +443,14 @@ impl crate::verifier::Verifier {
                 }
             } else if let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) {
                 if let Some(i) = vars.get_int("result") {
-                    self.solver.assert(i.eq(&body_z3));
+                    session.assert(i.eq(&body_z3));
                 }
                 // Link result length to body return length for sort/reverse.
                 // This ensures len(result) == len(sort(xs)) == len(xs).
                 if let Some(body_len) = expr::resolve_list_len(return_expr, &mut vars) {
                     let len_key = expr::call_var_key("len", &[Expr::Ident("result".to_string())]);
                     let result_len = vars.get_or_create_int(&len_key);
-                    self.solver.assert(result_len.eq(&body_len));
+                    session.assert(result_len.eq(&body_len));
                 }
             } else {
                 parse_errors.push(
@@ -475,10 +463,10 @@ impl crate::verifier::Verifier {
             if returns_real {
                 if let Some(r) = vars.get_real("result") {
                     let zero = Z3Real::from_int(&Z3Int::from_i64(0));
-                    self.solver.assert(r.eq(&zero));
+                    session.assert(r.eq(&zero));
                 }
             } else if let Some(i) = vars.get_int("result") {
-                self.solver.assert(i.eq(Z3Int::from_i64(0)));
+                session.assert(i.eq(Z3Int::from_i64(0)));
             }
         }
 
@@ -494,24 +482,24 @@ impl crate::verifier::Verifier {
         // ensuring callee ensures are propagated even when the call result is
         // stored in a let-bound variable.
         if let Some(ref return_expr) = body_return {
-            self.assert_callee_ensures_in_expr(return_expr, &mut vars);
+            self.assert_callee_ensures_in_expr(session, return_expr, &mut vars);
         }
         let expanded_body: Vec<Stmt> = func
             .body
             .iter()
             .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
             .collect();
-        self.assert_callee_ensures_in_block(&expanded_body, &mut vars);
+        self.assert_callee_ensures_in_block(session, &expanded_body, &mut vars);
 
         // Model length-preserving builtins (sort, reverse) so that
         // postconditions like len(result) == len(xs) can be verified.
-        self.assert_builtin_length_preserving_in_block(&expanded_body, &mut vars);
+        self.assert_builtin_length_preserving_in_block(session, &expanded_body, &mut vars);
 
         // P1-18: check call-site requires satisfaction. For each function
         // call in the body, verify that the callee's requires (preconditions)
         // are satisfiable given the current symbolic state.
         let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-        self.check_callee_requires_in_block(
+        self.check_callee_requires_in_block(session, 
             &expanded_body,
             &mut vars,
             func.name.as_str(),
@@ -561,21 +549,21 @@ impl crate::verifier::Verifier {
                 }
             };
 
-        match self.check_safe() {
+        match session.check() {
             SatResult::Sat => {
                 if !ensures_exprs.is_empty() {
-                    self.solver_push();
+                    session.push();
                     for ens in &ensures_exprs {
                         if let Some(z3_bool) = expr::expr_to_z3_bool(ens, &mut vars) {
-                            self.solver.assert(z3_bool.not());
+                            session.assert(z3_bool.not());
                         } else {
                             parse_errors
                                 .push(format!("could not encode ensures: {}", format_expr(ens)));
                         }
                     }
-                    match self.check_safe() {
+                    match session.check() {
                         SatResult::Unsat => {
-                            self.solver_pop();
+                            session.pop();
                             VerificationResult {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Verified,
@@ -586,10 +574,10 @@ impl crate::verifier::Verifier {
                             }
                         }
                         SatResult::Sat => {
-                            let model = self.solver.get_model();
+                            let model = session.get_model();
                             let counterexample =
                                 self.extract_counterexample(&model, &vars, &ensures_exprs);
-                            self.solver_pop();
+                            session.pop();
                             let diagnostic = self.build_failure_narrative(
                                 func,
                                 &counterexample,
@@ -608,9 +596,9 @@ impl crate::verifier::Verifier {
                             }
                         }
                         SatResult::Unknown => {
-                            self.solver_pop();
+                            session.pop();
                             let elapsed = start.elapsed();
-                            let msg = if elapsed.as_millis() >= self.timeout_ms as u128 {
+                            let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
                                 format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
                                     elapsed.as_millis(), func.name, constraint_count)
                             } else {
@@ -659,7 +647,7 @@ impl crate::verifier::Verifier {
             }
             SatResult::Unknown => {
                 let elapsed = start.elapsed();
-                let msg = if elapsed.as_millis() >= self.timeout_ms as u128 {
+                let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
                     format!("precondition check timed out after {}ms for '{}' — try simplifying requires or reducing constraint count ({})",
                         elapsed.as_millis(), func.name, constraint_count)
                 } else {
@@ -1238,7 +1226,7 @@ impl crate::verifier::Verifier {
     /// and, for each call to a known function, assert the callee's ensures
     /// as Z3 constraints. This enables cross-module contract reasoning
     /// (e.g., caller can rely on callee's postconditions).
-    fn assert_callee_ensures_in_expr(&mut self, expr: &Expr, vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_expr(&mut self, session: &mut SolverSession, expr: &Expr, vars: &mut Z3VarMap) {
         match expr {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
@@ -1269,56 +1257,56 @@ impl crate::verifier::Verifier {
                                 &call_key,
                             );
                             if let Some(z3_bool) = expr::expr_to_z3_bool(&substituted, vars) {
-                                self.solver.assert(z3_bool);
+                                session.assert(z3_bool);
                             }
                         }
                     }
                 }
                 // Recurse into call arguments
                 for arg in call_args {
-                    self.assert_callee_ensures_in_expr(arg, vars);
+                    self.assert_callee_ensures_in_expr(session, arg, vars);
                 }
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.assert_callee_ensures_in_expr(lhs, vars);
-                self.assert_callee_ensures_in_expr(rhs, vars);
+                self.assert_callee_ensures_in_expr(session, lhs, vars);
+                self.assert_callee_ensures_in_expr(session, rhs, vars);
             }
-            Expr::Unary(_, inner) => self.assert_callee_ensures_in_expr(inner, vars),
-            Expr::Field(obj, _) => self.assert_callee_ensures_in_expr(obj, vars),
-            Expr::TupleIndex(obj, _) => self.assert_callee_ensures_in_expr(obj, vars),
-            Expr::Old(inner) => self.assert_callee_ensures_in_expr(inner, vars),
+            Expr::Unary(_, inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
+            Expr::Field(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
+            Expr::TupleIndex(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
+            Expr::Old(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
             Expr::If { cond, then_, else_ } => {
-                self.assert_callee_ensures_in_expr(cond, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars);
                 for stmt in then_ {
                     if let Stmt::Expr(e) = stmt {
-                        self.assert_callee_ensures_in_expr(e, vars);
+                        self.assert_callee_ensures_in_expr(session, e, vars);
                     }
                 }
                 if let Some(else_block) = else_ {
                     for stmt in else_block {
                         if let Stmt::Expr(e) = stmt {
-                            self.assert_callee_ensures_in_expr(e, vars);
+                            self.assert_callee_ensures_in_expr(session, e, vars);
                         }
                     }
                 }
             }
             Expr::Match(_, arms) => {
                 for arm in arms {
-                    self.assert_callee_ensures_in_expr(&arm.body, vars);
+                    self.assert_callee_ensures_in_expr(session, &arm.body, vars);
                 }
             }
             Expr::Block(stmts) => {
                 for stmt in stmts {
                     if let Stmt::Expr(e) = stmt {
-                        self.assert_callee_ensures_in_expr(e, vars);
+                        self.assert_callee_ensures_in_expr(session, e, vars);
                     }
                 }
             }
-            Expr::Spawn(inner) => self.assert_callee_ensures_in_expr(inner, vars),
-            Expr::Await(inner) => self.assert_callee_ensures_in_expr(inner, vars),
+            Expr::Spawn(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
+            Expr::Await(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
             Expr::Lambda { body, .. } => {
                 for s in body {
-                    self.assert_callee_ensures_in_stmt(s, vars);
+                    self.assert_callee_ensures_in_stmt(session, s, vars);
                 }
             }
             _ => {}
@@ -1328,7 +1316,7 @@ impl crate::verifier::Verifier {
     /// Walk an expression tree modeling length-preserving builtins (sort, reverse).
     /// For each `sort(xs)` or `reverse(xs)` call, assert that the output length
     /// equals the input length: len(result) == len(xs).
-    fn assert_builtin_length_preserving(&mut self, expr: &Expr, vars: &mut Z3VarMap) {
+    fn assert_builtin_length_preserving(&mut self, session: &mut SolverSession, expr: &Expr, vars: &mut Z3VarMap) {
         match expr {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
@@ -1337,38 +1325,38 @@ impl crate::verifier::Verifier {
                         if let Some(input_len) = expr::resolve_list_len(&call_args[0], vars) {
                             let len_key = expr::call_var_key("len", std::slice::from_ref(expr));
                             let output_len = vars.get_or_create_int(&len_key);
-                            self.solver.assert(output_len.eq(&input_len));
+                            session.assert(output_len.eq(&input_len));
                         }
                     }
                 }
                 for arg in call_args {
-                    self.assert_builtin_length_preserving(arg, vars);
+                    self.assert_builtin_length_preserving(session, arg, vars);
                 }
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.assert_builtin_length_preserving(lhs, vars);
-                self.assert_builtin_length_preserving(rhs, vars);
+                self.assert_builtin_length_preserving(session, lhs, vars);
+                self.assert_builtin_length_preserving(session, rhs, vars);
             }
-            Expr::Unary(_, inner) => self.assert_builtin_length_preserving(inner, vars),
+            Expr::Unary(_, inner) => self.assert_builtin_length_preserving(session, inner, vars),
             Expr::If { cond, then_, else_ } => {
-                self.assert_builtin_length_preserving(cond, vars);
+                self.assert_builtin_length_preserving(session, cond, vars);
                 if let Some(tail) = block_tail_expr(then_) {
-                    self.assert_builtin_length_preserving(&tail, vars);
+                    self.assert_builtin_length_preserving(session, &tail, vars);
                 }
                 if let Some(eb) = else_ {
                     if let Some(tail) = block_tail_expr(eb) {
-                        self.assert_builtin_length_preserving(&tail, vars);
+                        self.assert_builtin_length_preserving(session, &tail, vars);
                     }
                 }
             }
             Expr::Block(stmts) => {
                 if let Some(tail) = block_tail_expr(stmts) {
-                    self.assert_builtin_length_preserving(&tail, vars);
+                    self.assert_builtin_length_preserving(session, &tail, vars);
                 }
             }
             Expr::Match(_, arms) => {
                 for arm in arms {
-                    self.assert_builtin_length_preserving(&arm.body, vars);
+                    self.assert_builtin_length_preserving(session, &arm.body, vars);
                 }
             }
             _ => {}
@@ -1376,42 +1364,42 @@ impl crate::verifier::Verifier {
     }
 
     /// Walk function body statements modeling length-preserving builtins.
-    fn assert_builtin_length_preserving_in_block(&mut self, block: &[Stmt], vars: &mut Z3VarMap) {
+    fn assert_builtin_length_preserving_in_block(&mut self, session: &mut SolverSession, block: &[Stmt], vars: &mut Z3VarMap) {
         for stmt in block {
             match stmt {
-                Stmt::Expr(e) => self.assert_builtin_length_preserving(e, vars),
-                Stmt::Return(Some(e)) => self.assert_builtin_length_preserving(e, vars),
+                Stmt::Expr(e) => self.assert_builtin_length_preserving(session, e, vars),
+                Stmt::Return(Some(e)) => self.assert_builtin_length_preserving(session, e, vars),
                 Stmt::If { cond, then_, else_ } => {
-                    self.assert_builtin_length_preserving(cond, vars);
-                    self.assert_builtin_length_preserving_in_block(then_, vars);
+                    self.assert_builtin_length_preserving(session, cond, vars);
+                    self.assert_builtin_length_preserving_in_block(session, then_, vars);
                     if let Some(eb) = else_ {
-                        self.assert_builtin_length_preserving_in_block(eb, vars);
+                        self.assert_builtin_length_preserving_in_block(session, eb, vars);
                     }
                 }
                 Stmt::Block(inner) | Stmt::Arena(inner) => {
-                    self.assert_builtin_length_preserving_in_block(inner, vars);
+                    self.assert_builtin_length_preserving_in_block(session, inner, vars);
                 }
                 Stmt::While { cond, body } => {
-                    self.assert_builtin_length_preserving(cond, vars);
-                    self.assert_builtin_length_preserving_in_block(body, vars);
+                    self.assert_builtin_length_preserving(session, cond, vars);
+                    self.assert_builtin_length_preserving_in_block(session, body, vars);
                 }
                 Stmt::WhileLet { init, body, .. } => {
-                    self.assert_builtin_length_preserving(init, vars);
-                    self.assert_builtin_length_preserving_in_block(body, vars);
+                    self.assert_builtin_length_preserving(session, init, vars);
+                    self.assert_builtin_length_preserving_in_block(session, body, vars);
                 }
                 Stmt::Loop(body) | Stmt::Parasteps(body) => {
-                    self.assert_builtin_length_preserving_in_block(body, vars);
+                    self.assert_builtin_length_preserving_in_block(session, body, vars);
                 }
                 Stmt::For { iterable, body, .. } => {
-                    self.assert_builtin_length_preserving(iterable, vars);
-                    self.assert_builtin_length_preserving_in_block(body, vars);
+                    self.assert_builtin_length_preserving(session, iterable, vars);
+                    self.assert_builtin_length_preserving_in_block(session, body, vars);
                 }
                 Stmt::Let { init: Some(e), .. } => {
-                    self.assert_builtin_length_preserving(e, vars);
+                    self.assert_builtin_length_preserving(session, e, vars);
                 }
                 Stmt::Assign { target, value } => {
-                    self.assert_builtin_length_preserving(target, vars);
-                    self.assert_builtin_length_preserving(value, vars);
+                    self.assert_builtin_length_preserving(session, target, vars);
+                    self.assert_builtin_length_preserving(session, value, vars);
                 }
                 _ => {}
             }
@@ -1422,31 +1410,31 @@ impl crate::verifier::Verifier {
     /// propagate callee ensures. This complements `assert_callee_ensures_in_expr`
     /// which only walks the tail expression tree. Together they ensure that
     /// calls in let-bindings, assignments, if-branches, etc. are also covered.
-    fn assert_callee_ensures_in_block(&mut self, stmts: &[Stmt], vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_block(&mut self, session: &mut SolverSession, stmts: &[Stmt], vars: &mut Z3VarMap) {
         for stmt in stmts {
-            self.assert_callee_ensures_in_stmt(stmt, vars);
+            self.assert_callee_ensures_in_stmt(session, stmt, vars);
         }
     }
 
-    fn assert_callee_ensures_in_stmt(&mut self, stmt: &Stmt, vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_stmt(&mut self, session: &mut SolverSession, stmt: &Stmt, vars: &mut Z3VarMap) {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
-                self.assert_callee_ensures_in_expr(e, vars);
+                self.assert_callee_ensures_in_expr(session, e, vars);
             }
             Stmt::Let {
                 init: Some(init), ..
             }
             | Stmt::Assign { value: init, .. } => {
-                self.assert_callee_ensures_in_expr(init, vars);
+                self.assert_callee_ensures_in_expr(session, init, vars);
             }
             Stmt::SharedLet { init, .. } => {
-                self.assert_callee_ensures_in_expr(init, vars);
+                self.assert_callee_ensures_in_expr(session, init, vars);
             }
             Stmt::If { cond, then_, else_ } => {
-                self.assert_callee_ensures_in_expr(cond, vars);
-                self.assert_callee_ensures_in_block(then_, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars);
+                self.assert_callee_ensures_in_block(session, then_, vars);
                 if let Some(else_block) = else_ {
-                    self.assert_callee_ensures_in_block(else_block, vars);
+                    self.assert_callee_ensures_in_block(session, else_block, vars);
                 }
             }
             Stmt::While { cond, body, .. }
@@ -1455,17 +1443,17 @@ impl crate::verifier::Verifier {
                 body,
                 ..
             } => {
-                self.assert_callee_ensures_in_expr(cond, vars);
-                self.assert_callee_ensures_in_block(body, vars);
+                self.assert_callee_ensures_in_expr(session, cond, vars);
+                self.assert_callee_ensures_in_block(session, body, vars);
             }
             Stmt::Loop(body) => {
-                self.assert_callee_ensures_in_block(body, vars);
+                self.assert_callee_ensures_in_block(session, body, vars);
             }
             Stmt::Block(body) | Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Parasteps(body) => {
-                self.assert_callee_ensures_in_block(body, vars);
+                self.assert_callee_ensures_in_block(session, body, vars);
             }
             Stmt::Alloc { body, .. } => {
-                self.assert_callee_ensures_in_block(body, vars);
+                self.assert_callee_ensures_in_block(session, body, vars);
             }
             _ => {}
         }
@@ -1475,18 +1463,20 @@ impl crate::verifier::Verifier {
     /// known callee satisfies the callee's requires (preconditions).
     fn check_callee_requires_in_block(
         &mut self,
+        session: &mut SolverSession,
         stmts: &[Stmt],
         vars: &mut Z3VarMap,
         caller_name: &str,
         errors: &mut Vec<(String, String, crate::span::Span)>,
     ) {
         for stmt in stmts {
-            self.check_callee_requires_in_stmt(stmt, vars, caller_name, errors);
+            self.check_callee_requires_in_stmt(session, stmt, vars, caller_name, errors);
         }
     }
 
     fn check_callee_requires_in_stmt(
         &mut self,
+        session: &mut SolverSession,
         stmt: &Stmt,
         vars: &mut Z3VarMap,
         caller_name: &str,
@@ -1494,33 +1484,33 @@ impl crate::verifier::Verifier {
     ) {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => {
-                self.check_callee_requires_in_expr(e, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, e, vars, caller_name, errors);
             }
             Stmt::Let {
                 init: Some(init), ..
             } => {
-                self.check_callee_requires_in_expr(init, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, init, vars, caller_name, errors);
             }
             Stmt::If { cond, then_, else_ } => {
-                self.check_callee_requires_in_expr(cond, vars, caller_name, errors);
-                self.check_callee_requires_in_block(then_, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, cond, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, then_, vars, caller_name, errors);
                 if let Some(eb) = else_ {
-                    self.check_callee_requires_in_block(eb, vars, caller_name, errors);
+                    self.check_callee_requires_in_block(session, eb, vars, caller_name, errors);
                 }
             }
             Stmt::While { cond, body, .. } => {
-                self.check_callee_requires_in_expr(cond, vars, caller_name, errors);
-                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, cond, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
             }
             Stmt::Loop(body)
             | Stmt::Block(body)
             | Stmt::Arena(body)
             | Stmt::Unsafe(body)
             | Stmt::Parasteps(body) => {
-                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
             }
             Stmt::Alloc { body, .. } => {
-                self.check_callee_requires_in_block(body, vars, caller_name, errors);
+                self.check_callee_requires_in_block(session, body, vars, caller_name, errors);
             }
             _ => {}
         }
@@ -1528,6 +1518,7 @@ impl crate::verifier::Verifier {
 
     fn check_callee_requires_in_expr(
         &mut self,
+        session: &mut SolverSession,
         expr: &Expr,
         vars: &mut Z3VarMap,
         caller_name: &str,
@@ -1562,10 +1553,10 @@ impl crate::verifier::Verifier {
                                 &format!("call_{}", name),
                             );
                             if let Some(z3_req) = expr::expr_to_z3_bool(&substituted, vars) {
-                                self.solver_push();
-                                self.solver.assert(z3_req.not());
-                                if self.check_safe() == z3::SatResult::Sat {
-                                    self.solver_pop();
+                                session.push();
+                                session.assert(z3_req.not());
+                                if session.check() == z3::SatResult::Sat {
+                                    session.pop();
                                     errors.push((
                                         caller_name.to_string(),
                                         format!("call to '{}' may violate precondition", name),
@@ -1573,24 +1564,24 @@ impl crate::verifier::Verifier {
                                     ));
                                     return;
                                 }
-                                self.solver_pop();
+                                session.pop();
                             }
                         }
                     }
                 }
                 for arg in call_args {
-                    self.check_callee_requires_in_expr(arg, vars, caller_name, errors);
+                    self.check_callee_requires_in_expr(session, arg, vars, caller_name, errors);
                 }
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.check_callee_requires_in_expr(lhs, vars, caller_name, errors);
-                self.check_callee_requires_in_expr(rhs, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, lhs, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, rhs, vars, caller_name, errors);
             }
             Expr::Unary(_, inner) => {
-                self.check_callee_requires_in_expr(inner, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, inner, vars, caller_name, errors);
             }
             Expr::Field(obj, _) => {
-                self.check_callee_requires_in_expr(obj, vars, caller_name, errors);
+                self.check_callee_requires_in_expr(session, obj, vars, caller_name, errors);
             }
             _ => {}
         }

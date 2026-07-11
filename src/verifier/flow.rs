@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::verifier::ctx::{VerificationResult, Verifier};
+use crate::verifier::ctx::{SolverSession, VerificationResult, Verifier, VerifierCtx};
 use crate::verifier::helpers;
 
 /// Flow event driving the verifier state machine.
@@ -35,11 +35,13 @@ pub enum StepKind {
 /// Verifier state machine — strict Flow.
 ///
 /// Each transition processes exactly one function (body or extern) and yields
-/// the next state. The Z3 solver is owned by the state and is only mutated
-/// inside transition(), eliminating `&mut self` at the state-machine level.
+/// the next state. The Z3 solver is owned by the state (SolverSession) and is
+/// only mutated inside transition(), eliminating `&mut self` at the
+/// state-machine level.
 pub enum VerifierState {
     Ready {
-        verifier: Verifier,
+        session: SolverSession,
+        ctx: VerifierCtx,
         queue: Vec<StepKind>,
         acc: FlowAcc,
     },
@@ -50,12 +52,13 @@ impl VerifierState {
     /// Create initial Ready state from a parsed File AST.
     /// Collects func_defs and flattens all items into the verification queue.
     pub fn new(file: &File) -> Result<Self, String> {
-        let mut verifier = Verifier::new()?;
-        // Pre-collect func_defs for cross-module call-site reasoning
-        verifier.collect_func_defs(&file.items);
+        let session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
+        let mut ctx = VerifierCtx::default();
+        ctx.collect_func_defs(&file.items);
         let queue = flatten_items(&file.items);
         Ok(VerifierState::Ready {
-            verifier,
+            session,
+            ctx,
             queue,
             acc: FlowAcc::new(),
         })
@@ -63,11 +66,13 @@ impl VerifierState {
 
     /// Create Ready state with a specific Z3 timeout (milliseconds).
     pub fn with_timeout(file: &File, timeout_ms: u64) -> Result<Self, String> {
-        let mut verifier = Verifier::with_timeout(timeout_ms)?;
-        verifier.collect_func_defs(&file.items);
+        let session = SolverSession::new(timeout_ms)?;
+        let mut ctx = VerifierCtx::default();
+        ctx.collect_func_defs(&file.items);
         let queue = flatten_items(&file.items);
         Ok(VerifierState::Ready {
-            verifier,
+            session,
+            ctx,
             queue,
             acc: FlowAcc::new(),
         })
@@ -79,7 +84,8 @@ impl VerifierState {
         match (self, event) {
             (
                 VerifierState::Ready {
-                    mut verifier,
+                    mut session,
+                    mut ctx,
                     mut queue,
                     mut acc,
                 },
@@ -87,22 +93,24 @@ impl VerifierState {
             ) => match queue.pop() {
                 Some(StepKind::Func(func)) => {
                     if !func.body.is_empty() {
-                        let result = verifier.verify_func(&func);
+                        let result = ctx.verify_func(&mut session, &func);
                         acc.results.push(result);
                     }
                     Ok(VerifierState::Ready {
-                        verifier,
+                        session,
+                        ctx,
                         queue,
                         acc,
                     })
                 }
                 Some(StepKind::Extern(func)) => {
                     if func.requires.is_some() || func.ensures.is_some() {
-                        let result = verifier.verify_extern_func(&func);
+                        let result = ctx.verify_extern_func(&mut session, &func);
                         acc.results.push(result);
                     }
                     Ok(VerifierState::Ready {
-                        verifier,
+                        session,
+                        ctx,
                         queue,
                         acc,
                     })
@@ -172,16 +180,20 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
 }
 
 /// Verify FFI call sites using the Flow wrapper.
-/// Calls `Verifier::verify_ffi_call_sites` — a one-shot operation (no per-func stepping).
+/// One-shot operation (no per-func stepping).
 pub fn flow_verify_ffi_call_sites(file: &File) -> Result<Vec<VerificationResult>, String> {
-    let mut verifier = Verifier::new()?;
-    Ok(verifier.verify_ffi_call_sites(file))
+    let mut session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
+    let mut ctx = VerifierCtx::default();
+    Ok(ctx.verify_ffi_call_sites(&mut session, file))
 }
 
 /// Verify FFI call sites, falling back to mock if Z3 is unavailable.
 pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
-    match Verifier::new() {
-        Ok(mut v) => Ok(v.verify_ffi_call_sites(file)),
+    match SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS) {
+        Ok(mut session) => {
+            let mut ctx = VerifierCtx::default();
+            Ok(ctx.verify_ffi_call_sites(&mut session, file))
+        }
         Err(_) => Ok(helpers::mock_verify_file(file)),
     }
 }
@@ -192,18 +204,20 @@ pub fn flow_verify_source(source: &str) -> Result<Vec<VerificationResult>, Strin
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
-    match Verifier::new() {
-        Ok(_) => flow_verify_file(&file),
-        Err(_) => Ok(helpers::mock_verify_file(&file)),
+    if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_ok() {
+        flow_verify_file(&file)
+    } else {
+        Ok(helpers::mock_verify_file(&file))
     }
 }
 
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
 pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
-    match Verifier::new() {
-        Ok(_) => flow_verify_file(file),
-        Err(_) => Ok(helpers::mock_verify_file(file)),
+    if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_ok() {
+        flow_verify_file(file)
+    } else {
+        Ok(helpers::mock_verify_file(file))
     }
 }
 
@@ -223,7 +237,9 @@ mod tests {
     /// Assert that Flow verifier produces equivalent results to legacy.
     fn assert_verify_equivalent(source: &str) {
         // Skip if source doesn't parse or Z3 is unavailable
-        if parse_source(source).is_err() || Verifier::new().is_err() {
+        if parse_source(source).is_err()
+            || SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err()
+        {
             return;
         }
         // Run legacy verifier
@@ -399,7 +415,7 @@ mod tests {
             Ok(f) => f,
             Err(_) => return,
         };
-        if Verifier::new().is_err() {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
             return;
         }
         let state = VerifierState::new(&file).unwrap();
@@ -414,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_flow_state_step_after_done() {
-        if Verifier::new().is_err() {
+        if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
             return;
         }
         let source = "func a(x: int) -> int { x }";
