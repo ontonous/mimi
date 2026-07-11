@@ -1,0 +1,47 @@
+// MCDD real_world: Protocol interface abstraction — dual-backend (v0.29.18)
+// Flow implements a flat protocol topology; extra payload fields allowed
+// (width subtyping). Compiler validates states + transitions cover the protocol.
+
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+    transition read(Active) -> Active
+    transition stop(Active) -> Idle
+}
+
+flow LidarDriver {
+    impl Sensor
+    state Idle
+    state Active { data: i32, internal: i32 }
+
+    transition start(Idle) -> Active {
+        do {
+            return Active { data: 0, internal: 42 }
+        }
+    }
+    transition read(Active) -> Active {
+        do {
+            return Active { data: self.data + 1, internal: self.internal }
+        }
+    }
+    transition stop(Active) -> Idle {
+        do {
+            return Idle { }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Idle { }
+    let s1 = LidarDriver::start(s0)
+    let s2 = LidarDriver::read(s1)
+    let s3 = LidarDriver::read(s2)
+    println(s3.data)
+    println(s3.internal)
+    let s4 = LidarDriver::stop(s3)
+    // After stop, back to Idle — construct a fresh Active via start again
+    let s5 = LidarDriver::start(s4)
+    println(s5.data)
+    0
+}

@@ -694,27 +694,43 @@ impl<'a> Checker<'a> {
             }
             Item::Protocol(p) => {
                 let qualified = format!("proto::{}", p.name);
+                // Always register a protocol marker so empty-state protocols
+                // (no payload fields) still resolve under `impl ProtocolName`.
+                // Existence check uses `types` keys with prefix `proto::{name}`.
+                if !self.types.contains_key(&qualified) {
+                    let marker = TypeDef {
+                        name: qualified.clone(),
+                        pub_: false,
+                        kind: TypeDefKind::Record(vec![]),
+                        generics: vec![],
+                        derives: vec![],
+                        attributes: vec![],
+                    };
+                    self.types.insert(qualified.clone(), marker);
+                }
                 for state in &p.states {
                     let state_key = format!("{}::{}", qualified, state.name);
                     self.funcs
                         .insert(state_key, (Vec::new(), Type::Name("unit".into(), vec![])));
-                    // Register protocol state payload types
-                    if let Some(ref payload_ty) = state.payload_type {
-                        let type_name = format!("{}::{}", qualified, state.name);
-                        if !self.types.contains_key(&type_name) {
-                            let td = TypeDef {
-                                name: type_name.clone(),
-                                pub_: false,
-                                kind: TypeDefKind::Record(vec![Field {
-                                    name: "value".to_string(),
-                                    ty: payload_ty.clone(),
-                                }]),
-                                generics: vec![],
-                                derives: vec![],
-                                attributes: vec![],
-                            };
-                            self.types.insert(type_name, td);
-                        }
+                    // Register every protocol state as a (possibly empty) record type.
+                    let type_name = format!("{}::{}", qualified, state.name);
+                    if !self.types.contains_key(&type_name) {
+                        let fields = match &state.payload_type {
+                            Some(payload_ty) => vec![Field {
+                                name: "value".to_string(),
+                                ty: payload_ty.clone(),
+                            }],
+                            None => vec![],
+                        };
+                        let td = TypeDef {
+                            name: type_name.clone(),
+                            pub_: false,
+                            kind: TypeDefKind::Record(fields),
+                            generics: vec![],
+                            derives: vec![],
+                            attributes: vec![],
+                        };
+                        self.types.insert(type_name, td);
                     }
                 }
             }
@@ -1096,7 +1112,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    // 2. Verify flow defines all protocol transitions
+                    // 2. Verify flow defines all protocol transitions (topology cover).
+                    // Multi-target transitions cover a protocol edge if the required
+                    // to_state is among the declared targets (conservative projection).
                     for pt in &proto.transitions {
                         let has_transition = f.transitions.iter().any(|t| {
                             t.name == pt.name
@@ -1113,6 +1131,10 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                    // 3. Payload structural subtyping (view-covariance): protocol
+                    //    `state S { T }` requires flow state S to have at least one
+                    //    field of type T (extra fields allowed — width subtyping).
+                    //    Checked above in step 1; this step documents the rule.
                 }
                 // State machine validation: reachability and completeness.
                 // Only count user-written transitions — auto-injected Fault
@@ -1198,18 +1220,35 @@ impl<'a> Checker<'a> {
                             &resolved,
                             &format!("state '{}' payload type in protocol '{}'", s.name, p.name),
                         );
+                        // v0.29.18 flatness: protocol payloads must not nest other
+                        // protocol states (session subtyping is undecidable on nested
+                        // pushdown automata). Reject Type::Name matching a peer state.
+                        if let Type::Name(n, _) = &resolved {
+                            if p.states.iter().any(|ps| ps.name == *n) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0412,
+                                    format!(
+                                        "protocol '{}' must be flat: state '{}' payload type '{}' nests protocol state '{}' (nested subflow topology is not allowed in protocols)",
+                                        p.name, s.name, n, n
+                                    ),
+                                );
+                            }
+                        }
                     }
                 }
-                // Check transition name uniqueness and state references
+                // Uniqueness by (name, from_state) — same event may overload across sources.
                 let proto_state_names: Vec<&str> =
                     p.states.iter().map(|s| s.name.as_str()).collect();
-                let mut seen_transitions: std::collections::HashSet<&str> =
+                let mut seen_transitions: std::collections::HashSet<(&str, &str)> =
                     std::collections::HashSet::new();
                 for t in &p.transitions {
-                    if !seen_transitions.insert(t.name.as_str()) {
+                    if !seen_transitions.insert((t.name.as_str(), t.from_state.as_str())) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
-                            format!("duplicate transition '{}' in protocol '{}'", t.name, p.name),
+                            format!(
+                                "duplicate transition '{}({})' in protocol '{}'",
+                                t.name, t.from_state, p.name
+                            ),
                         );
                     }
                     if !proto_state_names.contains(&t.from_state.as_str()) {

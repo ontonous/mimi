@@ -110,6 +110,7 @@ pub const E0408: &str = "E0408"; // missing method in trait impl
 pub const E0409: &str = "E0409"; // type alias cycle
 pub const E0410: &str = "E0410"; // cannot infer record type without explicit type name
 pub const E0411: &str = "E0411"; // weak requires a shared value
+pub const E0412: &str = "E0412"; // protocol must be flat (no nested protocol-state payloads)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -312,6 +313,7 @@ pub fn describe(code: &str) -> &'static str {
         E0409 => "type alias cycle",
         E0410 => "cannot infer record type without explicit type name",
         E0411 => "weak requires a shared value",
+        E0412 => "protocol must be flat (no nested protocol-state payloads)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

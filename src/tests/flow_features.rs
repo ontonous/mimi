@@ -2363,3 +2363,189 @@ flow Parent { state Working { child: CIdle } }
         other => panic!("unexpected reset body: {:?}", other),
     }
 }
+
+
+// ── v0.29.18 Protocol interface abstraction ───────────────────────────
+
+#[test]
+fn flow_exec_protocol_impl_dual_backend() {
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+    transition read(Active) -> Active
+    transition stop(Active) -> Idle
+}
+flow LidarDriver {
+    impl Sensor
+    state Idle
+    state Active { data: i32, internal: i32 }
+    transition start(Idle) -> Active {
+        do { return Active { data: 0, internal: 42 } }
+    }
+    transition read(Active) -> Active {
+        do { return Active { data: self.data + 1, internal: self.internal } }
+    }
+    transition stop(Active) -> Idle {
+        do { return Idle { } }
+    }
+}
+func main() -> i32 {
+    let s0 = Idle { }
+    let s1 = LidarDriver::start(s0)
+    let s2 = LidarDriver::read(s1)
+    println(s2.data)
+    println(s2.internal)
+    let s3 = LidarDriver::stop(s2)
+    let s4 = LidarDriver::start(s3)
+    println(s4.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "1\n42\n0");
+}
+
+#[test]
+fn flow_exec_protocol_empty_states() {
+    // Empty-state protocol (no payload) must still resolve under impl.
+    let src = r#"
+protocol Toggle {
+    state Off
+    state On
+    transition flip(Off) -> On
+    transition flip(On) -> Off
+}
+flow Switch {
+    impl Toggle
+    state Off
+    state On
+    transition flip(Off) -> On {
+        do { return On { } }
+    }
+    transition flip(On) -> Off {
+        do { return Off { } }
+    }
+}
+func main() -> i32 {
+    let s0 = Off { }
+    let s1 = Switch::flip(s0)
+    let s2 = Switch::flip(s1)
+    println(1)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "empty protocol: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "1");
+}
+
+#[test]
+fn flow_check_protocol_nested_state_payload_rejected() {
+    // L2 flatness: protocol payload must not nest another protocol state.
+    let src = r#"
+protocol Nested {
+    state Inner { n: i32 }
+    state Outer { data: Inner }
+    transition go(Outer) -> Outer
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected flatness error for nested protocol payload");
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msgs.contains("must be flat") || msgs.contains("E0412") || msgs.contains("nests"),
+        "expected flatness diagnostic, got: {}",
+        msgs
+    );
+}
+
+#[test]
+fn flow_check_protocol_missing_transition_target() {
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+}
+flow Bad {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Idle {
+        do { return Idle { } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_err(), "wrong transition target must fail");
+}
+
+#[test]
+fn flow_check_protocol_extra_payload_fields_ok() {
+    // Width subtyping: flow may have extra fields beyond protocol payload.
+    let src = r#"
+protocol Sensor {
+    state Active { data: i32 }
+    transition tick(Active) -> Active
+}
+flow Rich {
+    impl Sensor
+    state Active { data: i32, extra: i32, more: i32 }
+    transition tick(Active) -> Active {
+        do { return Active { data: self.data + 1, extra: self.extra, more: self.more } }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 1, extra: 2, more: 3 }
+    let t = Rich::tick(s)
+    println(t.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "extra fields: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "2");
+}
+
+#[test]
+fn flow_check_protocol_multi_target_covers_edge() {
+    // Multi-target transition covers protocol edge if required to_state is listed.
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+}
+flow F {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+    state Extra
+    transition start(Idle) -> Active | Extra {
+        do { return Active { data: 7 } }
+    }
+}
+func main() -> i32 {
+    let s = Idle { }
+    let a = F::start(s)
+    println(a.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "multi-target: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "7");
+}
