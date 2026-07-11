@@ -1003,6 +1003,7 @@ impl Parser {
             body,
             pos,
             is_fallback: false,
+            is_ffi_pinned: false,
         })
     }
 

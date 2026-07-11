@@ -62,6 +62,7 @@ fn make_implicit_main_flow() -> FlowDef {
             body: Some(run_body),
             pos: (0, 0),
             is_fallback: false,
+            is_ffi_pinned: false,
         }],
         impl_protocols: vec![],
         persistent_fields: vec![],

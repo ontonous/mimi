@@ -653,6 +653,9 @@ pub struct TransitionDef {
     /// True when this transition was injected by transfer-matrix auto-completion
     /// (`(state, event) → Fault`). User-written transitions always have `false`.
     pub is_fallback: bool,
+    /// v0.29.42: True for injected FFI_Pinned enter/exit/crash transitions.
+    /// User-written transitions always have `false`.
+    pub is_ffi_pinned: bool,
 }
 
 #[derive(Debug, Clone)]
