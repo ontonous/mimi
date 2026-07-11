@@ -2028,7 +2028,7 @@ impl<'a> Checker<'a> {
                     if let Some(v) = var {
                         self.set_residual(&v, next);
                     }
-                    return payload_ty.unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
+                    return payload_ty.unwrap_or_else(|| Type::Name("i32".into(), vec![]));
                 }
                 Err(e) => {
                     self.emit_code(
@@ -2039,8 +2039,13 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        self.infer_expr(&args[0], scopes);
-        Type::Name("unknown".into(), vec![])
+        // v0.29.34: when the argument is a plain i64 channel handle (not a
+        // SessionChan<S> variable), session_recv returns i32 (runtime mode).
+        let arg_ty = self.infer_expr(&args[0], scopes);
+        if same_type(&arg_ty, &Type::Name("i64".into(), vec![])) {
+            return Type::Name("i32".into(), vec![]);
+        }
+        Type::Name("i32".into(), vec![])
     }
 
     pub(in crate::core) fn check_session_close(

@@ -949,6 +949,87 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(BasicValueEnum::PointerValue(list_out))
     }
 
+    /// v0.29.34: session_send(ch, val) — delegates to mimi_channel_send.
+    pub(super) fn compile_session_send(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err("session_send expects 2 arguments".into());
+        }
+        let h = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("session_send: handle must be i64".into()),
+        };
+        let v = match args[1] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("session_send: value must be i64".into()),
+        };
+        let func = self
+            .module
+            .get_function("mimi_channel_send")
+            .ok_or("mimi_channel_send not declared")?;
+        self.builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(h),
+                    BasicMetadataValueEnum::IntValue(v),
+                ],
+                "session_send",
+            )
+            .map_err(|e| format!("session_send error: {}", e))?;
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
+    }
+
+    /// v0.29.34: session_recv(ch) — delegates to mimi_channel_recv.
+    pub(super) fn compile_session_recv(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err("session_recv expects 1 argument".into());
+        }
+        let h = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("session_recv: handle must be i64".into()),
+        };
+        let func = self
+            .module
+            .get_function("mimi_channel_recv")
+            .ok_or("mimi_channel_recv not declared")?;
+        let result = self
+            .builder
+            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_recv")
+            .map_err(|e| format!("session_recv error: {}", e))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_channel_recv returned void")?)
+    }
+
+    /// v0.29.34: session_close(ch) — delegates to mimi_channel_drop.
+    pub(super) fn compile_session_close(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 1 {
+            return Err("session_close expects 1 argument".into());
+        }
+        let h = match args[0] {
+            BasicMetadataValueEnum::IntValue(iv) => iv,
+            _ => return Err("session_close: handle must be i64".into()),
+        };
+        let func = self
+            .module
+            .get_function("mimi_channel_drop")
+            .ok_or("mimi_channel_drop not declared")?;
+        self.builder
+            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_close")
+            .map_err(|e| format!("session_close error: {}", e))?;
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
+    }
 
     pub(super) fn compile_session_open(&self, _args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
         let f = self.module.get_function("mimi_session_pair").ok_or("mimi_session_pair not declared")?;
