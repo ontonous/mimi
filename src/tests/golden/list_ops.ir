@@ -71,6 +71,8 @@ declare ptr @mimi_to_string_i64(i64)
 
 declare ptr @mimi_to_string_f64(double)
 
+declare i64 @mimi_str_clone(ptr, i64)
+
 declare i32 @mimi_regex_match(ptr, ptr)
 
 declare ptr @mimi_regex_find(ptr, ptr)
@@ -88,6 +90,8 @@ declare void @mimi_sort_str_inplace(ptr, i64)
 declare void @mimi_try_exit(i64)
 
 declare void @mimi_try_exit_str(ptr, i64)
+
+declare void @mimi_match_panic()
 
 declare i64 @mimi_shared_retain(i64)
 

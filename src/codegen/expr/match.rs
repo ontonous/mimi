@@ -755,11 +755,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             incoming_bbs.push(body_bb);
         }
 
-        // Unreachable else block. Use LLVM unreachable to prevent undef
-        // propagation — if the match is truly exhaustive this is never reached.
-        // If it IS reached (non-exhaustive match), this triggers UB at runtime.
-        // The type checker should guarantee exhaustiveness.
+        // Unreachable else block. Call mimi_match_panic (runtime trap) before
+        // build_unreachable() so that if a non-exhaustive match is reached at
+        // runtime, the program prints a diagnostic and aborts instead of UB.
         self.builder.position_at_end(else_bb);
+        let match_panic_fn = self
+            .module
+            .get_function("mimi_match_panic")
+            .ok_or("mimi_match_panic not declared")?;
+        self.builder
+            .build_call(match_panic_fn, &[], "match_panic")
+            .map_err(|e| CompileError::LlvmError(format!("match_panic call: {}", e)))?;
         self.builder
             .build_unreachable()
             .map_err(|e| CompileError::LlvmError(format!("match else unreachable: {}", e)))?;
@@ -1037,11 +1043,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build the final phi node in the merge block that selects the value
-    /// produced by the matching arm. The else_bb (unreachable) is NOT a
+    /// produced by the matching arm. The else_bb calls mimi_match_panic
+    /// before build_unreachable() so that a non-exhaustive match at runtime
+    /// triggers a diagnostic + abort instead of UB. The else_bb is NOT a
     /// predecessor of merge_bb, so it contributes no phi entry.
-    /// CG-C1: else_bb uses build_unreachable() to prevent undef propagation
-    /// into the phi node. LLVM optimizer cannot optimize away the unreachable
-    /// terminator, so no undef value is ever injected into the phi.
+    /// CG-C1: Fixed — mimi_match_panic traps instead of silent undef.
     fn build_match_phi(
         &self,
         merge_bb: BasicBlock<'ctx>,

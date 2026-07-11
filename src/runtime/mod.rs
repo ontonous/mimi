@@ -1535,6 +1535,14 @@ pub extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> !
     std::process::exit(1);
 }
 
+/// CG-C1: Runtime trap for non-exhaustive match. Called by codegen when a match
+/// fails to cover all cases — prevents UB by printing a diagnostic and aborting.
+#[no_mangle]
+pub extern "C" fn mimi_match_panic() -> ! {
+    eprintln!("panic: non-exhaustive match — all cases must be covered");
+    std::process::abort();
+}
+
 // ---------------------------------------------------------------------------
 // Time functions
 // ---------------------------------------------------------------------------
@@ -2890,27 +2898,21 @@ pub extern "C" fn mimi_sort_str_inplace(data: *mut *mut std::ffi::c_char, count:
     let n = count as usize;
     // SAFETY: `data` is non-null and caller must ensure it points to `count` valid C string pointers.
     let slice = unsafe { std::slice::from_raw_parts_mut(data, n) };
-    // Bubble sort: stable, O(n^2) but fine for typical small lists.
-    for i in 0..n {
-        for j in 0..(n - 1 - i) {
-            let a = slice[j];
-            let b = slice[j + 1];
-            if a.is_null() || b.is_null() {
-                // Treat null as greater than any real string to keep them at the tail.
-                if a.is_null() && !b.is_null() {
-                    slice.swap(j, j + 1);
-                }
-                continue;
-            }
-            // SAFETY: `a` is non-null (checked above).
-            let a_str = unsafe { CStr::from_ptr(a) };
-            // SAFETY: `b` is non-null (checked above).
-            let b_str = unsafe { CStr::from_ptr(b) };
-            if a_str > b_str {
-                slice.swap(j, j + 1);
-            }
+    // RT-H12: use sort_unstable_by for O(n log n) instead of bubble sort O(n²)
+    slice.sort_unstable_by(|a, b| {
+        if a.is_null() && b.is_null() {
+            std::cmp::Ordering::Equal
+        } else if a.is_null() {
+            std::cmp::Ordering::Greater
+        } else if b.is_null() {
+            std::cmp::Ordering::Less
+        } else {
+            // SAFETY: both a and b are non-null (checked above)
+            let a_str = unsafe { CStr::from_ptr(*a) };
+            let b_str = unsafe { CStr::from_ptr(*b) };
+            a_str.cmp(b_str)
         }
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
