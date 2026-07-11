@@ -900,6 +900,76 @@ flow GoodFlow {
     assert!(result.is_ok(), "valid protocol implementation should pass: {:?}", result.err());
 }
 
+// ===================== Pinned block tests =====================
+
+#[test]
+fn flow_check_pinned_var_binding() {
+    let src = r#"
+flow TestFlow {
+    state Ready { buf: i32 }
+    state Active { result: i32 }
+
+    transition process(Ready) -> Active {
+        do {
+            pinned(self.buf) |ptr| {
+                let _x = ptr
+            }
+            return Active { result: self.buf + 1 }
+        }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "pinned with var binding should type-check: {:?}", result.err());
+}
+
+#[test]
+fn flow_check_pinned_timeout_non_int() {
+    let src = r#"
+flow TestFlow {
+    state Ready
+    state Active
+
+    transition go(Ready) -> Active {
+        do {
+            pinned(self, timeout = "hello") |_ptr| {
+                return Active { }
+            }
+        }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "pinned with non-int timeout should error");
+}
+
+#[test]
+fn flow_exec_pinned_var_binding() {
+    let src = r#"
+flow TestFlow {
+    state Ready { val: i32 }
+    state Active { result: i32 }
+
+    transition process(Ready) -> Active {
+        do {
+            pinned(self.val) |ptr| {
+                let _ = ptr
+            }
+            return Active { result: self.val + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Ready { val: 10 }
+    let a = TestFlow::process(s)
+    a.result
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(11)));
+}
+
 #[test]
 fn flow_exec_chain() {
     let src = r#"

@@ -1269,9 +1269,24 @@ impl<'a> Checker<'a> {
             Stmt::Delegate { expr, .. } => {
                 self.infer_expr(expr, scopes);
             }
-            Stmt::Pinned { expr, body, .. } => {
-                self.infer_expr(expr, scopes);
-                self.check_block(body, ret, scopes);
+            Stmt::Pinned { expr, var, body, timeout, .. } => {
+                let val_ty = self.infer_expr(expr, scopes);
+                // Validate timeout is an integer if present
+                if let Some(timeout_expr) = timeout {
+                    let t_ty = self.infer_expr(timeout_expr, scopes);
+                    if !same_type(&t_ty, &Type::Name("i32".into(), vec![])) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0209,
+                            "pinned timeout must be an integer".to_string(),
+                        );
+                    }
+                }
+                // Bind the variable in scope for the body
+                let mut inner_scopes = scopes.clone();
+                if let Some(var_name) = var {
+                    inner_scopes[0].insert(var_name.clone(), val_ty);
+                }
+                self.check_block(body, ret, &mut inner_scopes);
             }
         }
     }
