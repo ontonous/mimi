@@ -627,12 +627,18 @@ impl ActorHandle {
                         // Read method definition
                         let (func, _actor_name) = {
                             let actor = worker_inner.read().expect("actor worker lock");
-                            let func = actor
+                            let Some(func) = actor
                                 .methods
                                 .iter()
                                 .find(|f| f.name == msg.method)
                                 .cloned()
-                                .expect("actor method not found");
+                            else {
+                                let _ = msg.response.send(Err(InterpError::new(format!(
+                                    "actor method '{}' not found",
+                                    msg.method
+                                ))));
+                                continue;
+                            };
                             (func, actor.actor_name.clone())
                         };
                         // v0.28.28: reuse the spawning program's AST so

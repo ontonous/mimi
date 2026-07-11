@@ -778,4 +778,174 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("actor_max_children error: {}", e))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_actor_max_children returned void")?)
     }
+
+    /// v0.29.25: broadcast(targets: List, method: string) -> List<i64>
+    ///
+    /// Type-erased polymorphic dispatch over a list of actor handles.
+    /// List slots store actor handles as ptrtoint(i64). Method resolved by name.
+    pub(super) fn compile_broadcast(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        use inkwell::IntPredicate;
+        if args.len() != 2 {
+            return Err("broadcast expects 2 arguments (targets, method_name)".into());
+        }
+        let list_ptr = self.require_list_pointer(args[0], "broadcast")?;
+        let method_basic: BasicValueEnum = match args[1] {
+            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+            BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+            other => {
+                return Err(format!("broadcast: unexpected method arg {:?}", other).into())
+            }
+        };
+        let method_c = self
+            .extract_string_ptr(&method_basic)
+            .ok_or("broadcast: method name must be a string")?;
+
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let len = self.load_list_len(list_ptr)?;
+        let data_i64 = self.load_list_data_i64(list_ptr)?;
+
+        // handles: i8** = malloc(len * 8)
+        let bytes = self
+            .builder
+            .build_int_mul(len, i64_ty.const_int(8, false), "handles_bytes")
+            .map_err(|e| format!("mul: {}", e))?;
+        let malloc_fn = self
+            .module
+            .get_function("malloc")
+            .ok_or("malloc not declared")?;
+        let handles_raw = self
+            .builder
+            .build_call(
+                malloc_fn,
+                &[BasicMetadataValueEnum::IntValue(bytes)],
+                "handles_malloc",
+            )
+            .map_err(|e| format!("malloc: {}", e))?;
+        let handles_arr = call_try_basic_value(&handles_raw)
+            .ok_or("malloc void")?
+            .into_pointer_value();
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .ok_or("broadcast: no insert block")?
+            .get_parent()
+            .ok_or("broadcast: no parent function")?;
+        let loop_bb = self.context.append_basic_block(function, "bc_loop");
+        let body_bb = self.context.append_basic_block(function, "bc_body");
+        let exit_bb = self.context.append_basic_block(function, "bc_exit");
+        let idx_a = self
+            .builder
+            .build_alloca(i64_ty, "bc_idx")
+            .map_err(|e| format!("alloca: {}", e))?;
+        self.builder
+            .build_store(idx_a, i64_ty.const_int(0, false))
+            .map_err(|e| format!("store: {}", e))?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| format!("br: {}", e))?;
+
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_a, "idx")
+            .map_err(|e| format!("load: {}", e))?
+            .into_int_value();
+        let cond = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "bc_cmp")
+            .map_err(|e| format!("cmp: {}", e))?;
+        self.builder
+            .build_conditional_branch(cond, body_bb, exit_bb)
+            .map_err(|e| format!("cbr: {}", e))?;
+
+        self.builder.position_at_end(body_bb);
+        let elem_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(i64_ty, data_i64, &[idx], "elem_ptr")
+                .map_err(|e| format!("gep: {}", e))?
+        };
+        let elem = self
+            .builder
+            .build_load(i64_ty, elem_ptr, "elem")
+            .map_err(|e| format!("load: {}", e))?
+            .into_int_value();
+        let hptr = self
+            .builder
+            .build_int_to_ptr(elem, i8_ptr, "handle")
+            .map_err(|e| format!("i2p: {}", e))?;
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ptr, handles_arr, &[idx], "hslot")
+                .map_err(|e| format!("gep: {}", e))?
+        };
+        self.builder
+            .build_store(slot, hptr)
+            .map_err(|e| format!("store: {}", e))?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "next")
+            .map_err(|e| format!("add: {}", e))?;
+        self.builder
+            .build_store(idx_a, next)
+            .map_err(|e| format!("store: {}", e))?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| format!("br: {}", e))?;
+
+        self.builder.position_at_end(exit_bb);
+        let out_len_a = self
+            .builder
+            .build_alloca(i64_ty, "out_len")
+            .map_err(|e| format!("alloca: {}", e))?;
+        self.builder
+            .build_store(out_len_a, i64_ty.const_int(0, false))
+            .map_err(|e| format!("store: {}", e))?;
+
+        let bc_fn = self
+            .module
+            .get_function("mimi_broadcast")
+            .ok_or("mimi_broadcast not declared")?;
+        let results_call = self
+            .builder
+            .build_call(
+                bc_fn,
+                &[
+                    handles_arr.into(),
+                    len.into(),
+                    method_c.into(),
+                    out_len_a.into(),
+                ],
+                "broadcast_call",
+            )
+            .map_err(|e| format!("broadcast: {}", e))?;
+        let results_ptr = call_try_basic_value(&results_call)
+            .ok_or("mimi_broadcast void")?
+            .into_pointer_value();
+        let out_len = self
+            .builder
+            .build_load(i64_ty, out_len_a, "out_len_v")
+            .map_err(|e| format!("load: {}", e))?
+            .into_int_value();
+        if let Some(free_fn) = self.module.get_function("free") {
+            let _ = self.builder.build_call(
+                free_fn,
+                &[handles_arr.into()],
+                "free_handles",
+            );
+        }
+        // results_ptr is *mut i64; store as list data (i8*)
+        let data_out = self
+            .builder
+            .build_bit_cast(results_ptr, i8_ptr, "results_i8")
+            .map_err(|e| format!("cast: {}", e))?
+            .into_pointer_value();
+        let list_out = self.alloc_list_result(out_len, data_out)?;
+        Ok(BasicValueEnum::PointerValue(list_out))
+    }
 }

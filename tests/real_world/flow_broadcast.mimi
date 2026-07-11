@@ -1,0 +1,26 @@
+// MCDD real_world: Flow polymorphic broadcast (v0.29.25)
+// Type-erased list of actor handles + method-name dispatch.
+// No 2PC — returns List of per-target results.
+
+actor Sensor {
+    v: i32
+    func read() -> i32 {
+        self.v
+    }
+    func set(n: i32) {
+        self.v = n
+    }
+}
+
+func main() -> i32 {
+    let a = Sensor.spawn()
+    let b = Sensor.spawn()
+    a.set(10)
+    b.set(20)
+    let targets = [a, b]
+    let results = broadcast(targets, "read")
+    println(len(results))
+    println(results[0])
+    println(results[1])
+    0
+}
