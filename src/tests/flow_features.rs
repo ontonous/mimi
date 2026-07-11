@@ -3670,6 +3670,70 @@ func main() -> i32 {
 
 // ── v0.29.35 broadcast PeerFault sentinel ─────────────────────────────
 
+// ── v0.29.38 Test engineering: assert_state + inject_fault ────────────
+
+#[test]
+fn assert_state_correct_state() {
+    // L2: assert_state passes when state matches.
+    let src = r#"
+flow C {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition go(A) -> B { do { return B { v: self.v + 1 } } }
+}
+func main() -> i32 {
+    let s0 = A { v: 0 }
+    assert_state(s0, "A")
+    let s1 = C::go(s0)
+    assert_state(s1, "B")
+    println(s1.v)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn assert_state_wrong_state() {
+    // L2: assert_state fails when state doesn't match.
+    let src = r#"
+flow C {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition go(A) -> B { do { return B { v: self.v + 1 } } }
+}
+func main() -> i32 {
+    let s0 = A { v: 0 }
+    assert_state(s0, "B")
+    0
+}
+"#;
+    let err = run_source_result(src);
+    assert!(err.is_err(), "assert_state should fail on mismatch");
+    let msg = format!("{}", err.unwrap_err());
+    assert!(msg.contains("assert_state failed"), "got: {}", msg);
+}
+
+#[test]
+fn inject_fault_constructs_fault() {
+    // L2: inject_fault returns a Fault record with SystemTrace.
+    let src = r#"
+flow C {
+    state A { v: i32 }
+}
+func main() -> i32 {
+    let s0 = A { v: 42 }
+    let f = inject_fault(s0)
+    println(f.last_state)
+    println(f.trace.last_state_name)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+}
+
 // ── v0.29.37 Actor lifecycle: SystemKill + spawn detached ─────────────
 
 #[test]

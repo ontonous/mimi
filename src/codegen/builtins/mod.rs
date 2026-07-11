@@ -1401,6 +1401,8 @@ pub fn is_builtin(name: &str) -> bool {
         | "actor_set_max_children" | "actor_spawn_count" | "actor_max_children"
         | "broadcast"
         | "spawn_detached"
+        | "assert_state"
+        | "inject_fault"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1676,6 +1678,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // For codegen, spawn_detached calls the same spawn path as regular spawn.
                 // The detached flag is a runtime concept; in codegen we return a handle
                 // just like regular spawn. The interp path handles the detached flag.
+                Ok(self.context.i64_type().const_int(0, false).into())
+            }
+            // v0.29.38: assert_state — test utility, returns unit (no-op in codegen)
+            "assert_state" => {
+                Ok(self.context.i64_type().const_int(0, false).into())
+            }
+            // v0.29.38: inject_fault — test utility, returns Fault record (0 in codegen)
+            "inject_fault" => {
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
             "channel_try_recv" => self.compile_channel_try_recv(args),

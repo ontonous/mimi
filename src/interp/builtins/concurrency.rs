@@ -468,6 +468,67 @@ impl<'a> Interpreter<'a> {
         self.spawn_detached_actor(&name)
     }
 
+    /// v0.29.38: assert_state(flow_instance, state_name) — verify that a
+    /// flow state record has the expected state name. Panics (returns Err)
+    /// if the state doesn't match.
+    pub(crate) fn builtin_assert_state(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "assert_state expects 2 arguments (flow_instance, state_name)",
+            ));
+        }
+        let actual_state = match &args[0] {
+            Value::Record(Some(name), _) => name.clone(),
+            Value::Record(None, _) => "<anonymous>".to_string(),
+            other => format!("{:?}", other),
+        };
+        let expected_state = match &args[1] {
+            Value::String(s) => s.clone(),
+            _ => return Err(InterpError::new("assert_state: state_name must be a string")),
+        };
+        if actual_state != expected_state {
+            return Err(InterpError::new(&format!(
+                "assert_state failed: expected '{}', got '{}'",
+                expected_state, actual_state
+            )));
+        }
+        Ok(Value::Unit)
+    }
+
+    /// v0.29.38: inject_fault(flow_instance) — inject a Fault into a flow
+    /// instance by returning a Fault record with SystemTrace.
+    /// This is a test utility: it constructs a minimal Fault payload.
+    pub(crate) fn builtin_inject_fault(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.is_empty() {
+            return Err(InterpError::new(
+                "inject_fault expects 1 argument (flow_instance)",
+            ));
+        }
+        // Get the state name from the flow instance
+        let state_name = match &args[0] {
+            Value::Record(Some(name), _) => name.clone(),
+            _ => "unknown".to_string(),
+        };
+        // Construct a Fault record
+        let mut fault_fields = HashMap::new();
+        fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
+        fault_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+        fault_fields.insert("snapshot".to_string(), Value::String(String::new()));
+        // SystemTrace sub-record
+        let mut trace_fields = HashMap::new();
+        trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
+        trace_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+        trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
+        fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
+        Ok(Value::Record(Some("Fault".to_string()), fault_fields))
+    }
+
     /// v0.29.25: broadcast(targets, method_name) -> List of results.
     ///
     /// `targets` is a List of Actor handles (type-erased protocol set).

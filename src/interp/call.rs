@@ -431,6 +431,8 @@ impl<'a> Interpreter<'a> {
             "actor_max_children" => self.builtin_actor_max_children(args),
             "broadcast" => self.builtin_broadcast(args),
             "spawn_detached" => self.builtin_spawn_detached(args),
+            "assert_state" => self.builtin_assert_state(args),
+            "inject_fault" => self.builtin_inject_fault(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),

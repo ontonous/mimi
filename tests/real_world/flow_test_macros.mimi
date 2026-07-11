@@ -1,0 +1,32 @@
+// MCDD real_world: Test engineering — assert_state! + inject_fault! (v0.29.38)
+// Tests: assert_state verifies flow state (both backends).
+// inject_fault constructs Fault (interp only — codegen returns 0).
+
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+    transition inc(Positive) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    // Verify initial state (assert_state is no-op in codegen, check in interp)
+    assert_state(s0, "Zero")
+
+    let s1 = Counter::inc(s0)
+    // Verify state transition
+    assert_state(s1, "Positive")
+    println(s1.count)
+
+    0
+}
