@@ -1,0 +1,18 @@
+// v0.29.46: Full-Actor Muting (Producer-Side)
+// White-paper section 6.7: "采用全 Actor 静默策略（与 Pony 一致）"
+// When consumer actor enters mute, producers are push-muted.
+
+actor Consumer {
+    n: i32
+    func bump() -> i32 { self.n = self.n + 1; self.n }
+}
+func main() -> i32 {
+    let c = Consumer.spawn()
+    actor_set_mailbox_depth(c, 2)
+    let _ = c.bump()
+    let _ = c.bump()
+    let _ = c.bump()
+    let m = actor_is_muted(c)
+    println(m)
+    0
+}
