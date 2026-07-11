@@ -8,6 +8,7 @@ pub mod ffi;
 
 pub(crate) use ctx::Z3VarMap;
 pub use ctx::{Counterexample, VerifStatus, VerificationResult, Verifier};
+pub(crate) use ctx::{SolverSession, VerifierCtx};
 pub use flow::{
     flow_verify_ffi_call_sites, flow_verify_ffi_call_sites_or_mock, flow_verify_file,
     flow_verify_file_or_mock, flow_verify_source, FlowAcc, FlowEvent, VerifierState,

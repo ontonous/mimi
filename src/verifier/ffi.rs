@@ -9,8 +9,8 @@ use z3::ast::String as Z3String;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 
-impl super::Verifier {
-    pub fn verify_ffi_call_sites(&mut self, file: &File) -> Vec<VerificationResult> {
+impl VerifierCtx {
+    pub fn verify_ffi_call_sites(&mut self, session: &mut SolverSession, file: &File) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         let mut externs: HashMap<String, ExternFunc> = HashMap::new();
         Self::collect_externs(&file.items, &mut externs);
@@ -25,14 +25,14 @@ impl super::Verifier {
                 if calls.is_empty() {
                     continue;
                 }
-                self.solver_push();
-                let mut vars = self.setup_ffi_func_vars(func);
-                self.assert_func_requires(func, &mut vars);
+                session.push();
+                let mut vars = self.setup_ffi_func_vars(session, func);
+                self.assert_func_requires(session, func, &mut vars);
 
                 let caller_span = Span::single(func.pos.0, func.pos.1);
                 for (extern_name, args) in &calls {
                     if let Some(extern_func) = externs.get(extern_name.as_str()) {
-                        let result = self.check_extern_call(
+                        let result = self.check_extern_call(session, 
                             &func.name,
                             extern_func,
                             args,
@@ -42,7 +42,7 @@ impl super::Verifier {
                         results.push(result);
                     }
                 }
-                self.solver_pop();
+                session.pop();
             }
         }
         results
@@ -161,7 +161,7 @@ impl super::Verifier {
         }
     }
 
-    fn setup_ffi_func_vars(&mut self, func: &FuncDef) -> Z3VarMap {
+    fn setup_ffi_func_vars(&mut self, session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
         let mut vars = Z3VarMap::new();
         for p in &func.params {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
@@ -184,11 +184,11 @@ impl super::Verifier {
         vars
     }
 
-    fn assert_func_requires(&mut self, func: &FuncDef, vars: &mut Z3VarMap) {
+    fn assert_func_requires(&mut self, session: &mut SolverSession, func: &FuncDef, vars: &mut Z3VarMap) {
         for stmt in &func.body {
             if let Stmt::Requires(expr, _) = stmt {
                 if let Some(z3_bool) = expr::expr_to_z3_bool(expr, vars) {
-                    self.solver.assert(&z3_bool);
+                    session.assert(&z3_bool);
                 }
             }
         }
@@ -196,6 +196,7 @@ impl super::Verifier {
 
     fn check_extern_call(
         &mut self,
+        session: &mut SolverSession,
         caller_name: &str,
         extern_func: &ExternFunc,
         args: &[Expr],
@@ -235,13 +236,13 @@ impl super::Verifier {
             }
         };
 
-        self.solver_push();
-        self.solver.assert(z3_requires.not());
+        session.push();
+        session.assert(z3_requires.not());
         let constraint_count = 1;
 
-        match self.check_safe() {
+        match session.check() {
             SatResult::Unsat => {
-                self.solver_pop();
+                session.pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Verified,
@@ -252,7 +253,7 @@ impl super::Verifier {
                 }
             }
             SatResult::Sat => {
-                self.solver_pop();
+                session.pop();
                 let diag = Diagnostic::error(
                     format!(
                         "call to extern '{}' may violate precondition: {:?}",
@@ -274,7 +275,7 @@ impl super::Verifier {
                 }
             }
             SatResult::Unknown => {
-                self.solver_pop();
+                session.pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Unknown,

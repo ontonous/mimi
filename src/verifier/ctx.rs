@@ -1,4 +1,4 @@
-use crate::ast::{Expr, File};
+use crate::ast::{Expr, File, Item};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 use z3::ast::String as Z3String;
@@ -6,7 +6,7 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 use z3::Solver;
 
-const DEFAULT_TIMEOUT_MS: u64 = 5000;
+pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -167,11 +167,83 @@ impl Z3VarMap {
     }
 }
 
-pub struct Verifier {
+/// Wraps a Z3 Solver with crash-recovery tracking.
+/// Flow paradigm: the state machine owns SolverSession directly instead of
+/// hiding it behind &mut self on Verifier. Push/pop/replace are explicit
+/// transitions on the solver rather than implicit side effects.
+pub struct SolverSession {
     pub(crate) solver: Solver,
+    /// True after check() replaces the solver on crash. When set, pop() is a
+    /// no-op — the fresh solver starts at Z3 depth 0; pending old-solver pops
+    /// are moot. Cleared on the next successful check() or reset().
+    pub(crate) replaced: bool,
     pub(crate) timeout_ms: u64,
-    /// Function definitions indexed by name, collected from the merged file.
-    /// Used by cross-module verification to look up callee ensures.
+}
+
+impl SolverSession {
+    pub fn new(timeout_ms: u64) -> Result<Self, String> {
+        let solver = std::panic::catch_unwind(Solver::new)
+            .map_err(|_| "failed to initialize Z3 solver (is libz3 installed?)".to_string())?;
+        let mut params = z3::Params::new();
+        params.set_u32("timeout", timeout_ms as u32);
+        solver.set_params(&params);
+        Ok(Self { solver, replaced: false, timeout_ms })
+    }
+
+    /// Check satisfiability with timeout and crash protection.
+    /// Returns Unknown on timeout/crash instead of panicking.
+    /// On crash: replaces the solver (Z3's C API may be corrupt after crash)
+    /// and sets replaced = true so pending pop() calls are skipped.
+    /// On Sat/Unsat: clears replaced flag.
+    pub fn check(&mut self) -> SatResult {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())).ok();
+        match result {
+            Some(SatResult::Sat) => { self.replaced = false; SatResult::Sat }
+            Some(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
+            _ => {
+                let mut params = z3::Params::new();
+                params.set_u32("timeout", self.timeout_ms as u32);
+                let new_solver = Solver::new();
+                new_solver.set_params(&params);
+                let _ = std::mem::replace(&mut self.solver, new_solver);
+                self.replaced = true;
+                SatResult::Unknown
+            }
+        }
+    }
+
+    pub fn reset(&mut self) { self.solver.reset(); self.replaced = false; }
+
+    pub fn push(&mut self) { self.solver.push(); }
+
+    /// Pop solver scope. NO-OP if the solver was replaced by check() (fresh
+    /// solver starts at Z3 depth 0; pending old-solver pops are irrelevant).
+    pub fn pop(&mut self) {
+        if !self.replaced {
+            let _ = self.solver.pop(1);
+        }
+    }
+
+    /// Assert a boolean constraint into the solver.
+    /// Uses z3's `Borrow<Bool>` bound — all callers pass boolean comparisons.
+    pub fn assert<T: std::borrow::Borrow<z3::ast::Bool>>(&self, ast: T) {
+        self.solver.assert(ast);
+    }
+
+    pub fn get_model(&self) -> Option<z3::Model> { self.solver.get_model() }
+
+    pub fn set_params(&self, params: &z3::Params) { self.solver.set_params(params); }
+
+    pub fn dump_smt2(&self) -> Option<String> {
+        let s = self.solver.to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+}
+
+/// Context for verification lookups (func_defs, let_subst).
+/// Owned by VerifierState in the Flow path — contains no Z3 solver state.
+pub struct VerifierCtx {
     pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
     /// Mapping from let-variable names to their init expressions.
     /// Populated during verify_func to enable substitution of local variables
@@ -184,11 +256,13 @@ pub struct Verifier {
     // path so the substitution survives function boundaries.
     #[allow(dead_code)]
     pub(crate) let_subst: HashMap<String, Expr>,
-    /// Flow: tracks whether check_safe replaced the solver (crash recovery).
-    /// When true, solver_pop is a no-op — the fresh solver starts at depth 0
-    /// and all pending pops from the old solver (which was replaced) become
-    /// unnecessary. Cleared on the next successful check_safe or reset.
-    pub(crate) solver_replaced: bool,
+}
+
+/// Backward-compatible verifier with its own solver session.
+/// Legacy API: LSP, main/verify.rs, tests.
+pub struct Verifier {
+    pub(crate) ctx: VerifierCtx,
+    pub(crate) session: SolverSession,
 }
 
 impl Verifier {
@@ -197,92 +271,49 @@ impl Verifier {
     }
 
     pub fn with_timeout(timeout_ms: u64) -> Result<Self, String> {
-        let solver = std::panic::catch_unwind(Solver::new)
-            .map_err(|_| "failed to initialize Z3 solver (is libz3 installed?)".to_string())?;
-        let mut params = z3::Params::new();
-        params.set_u32("timeout", timeout_ms as u32);
-        solver.set_params(&params);
-        Ok(Self {
-            solver,
-            timeout_ms,
-            func_defs: HashMap::new(),
-            let_subst: HashMap::new(),
-            solver_replaced: false,
+        SolverSession::new(timeout_ms).map(|session| Self {
+            ctx: VerifierCtx::default(),
+            session,
         })
-    }
-
-    /// Check satisfiability with timeout and crash protection.
-    /// Returns Unknown on timeout/crash instead of panicking.
-    /// On crash: recreates the solver (Z3's C API does not guarantee a usable
-    /// state after crash), sets solver_replaced = true so pending pops are
-    /// skipped (fresh solver starts at depth 0).
-    /// On Sat/Unsat: clears solver_replaced.
-    pub(crate) fn check_safe(&mut self) -> SatResult {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())).ok();
-        match result {
-            Some(SatResult::Sat) => {
-                self.solver_replaced = false;
-                SatResult::Sat
-            }
-            Some(SatResult::Unsat) => {
-                self.solver_replaced = false;
-                SatResult::Unsat
-            }
-            _ => {
-                // 2.1/2.2: Z3 crashed or timed out — solver may be corrupt.
-                // Replace with a fresh solver. Params (incl. timeout) are
-                // re-applied because the new solver starts with defaults.
-                // Callers must check SatResult and return/abort on Unknown
-                // rather than continuing to use the solver's assertion stack
-                // (which is now empty after replacement).
-                let mut params = z3::Params::new();
-                params.set_u32("timeout", self.timeout_ms as u32);
-                let new_solver = Solver::new();
-                new_solver.set_params(&params);
-                let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.solver_replaced = true;
-                SatResult::Unknown
-            }
-        }
-    }
-
-    /// Update the solver timeout. Useful for LSP dynamic timeout adjustment.
-    pub fn set_timeout(&mut self, timeout_ms: u64) {
-        self.timeout_ms = timeout_ms;
-        let mut params = z3::Params::new();
-        params.set_u32("timeout", timeout_ms as u32);
-        self.solver.set_params(&params);
-    }
-
-    /// Push a new solver scope. Tracks depth implicitly via the solver's
-    /// internal stack — solver_replaced flag ensures safe pop after crash.
-    pub(crate) fn solver_push(&mut self) {
-        self.solver.push();
-    }
-
-    /// Pop solver scope. NO-OP if solver was replaced by check_safe (the
-    /// fresh solver starts at depth 0; pending old-solver pops are moot).
-    pub(crate) fn solver_pop(&mut self) {
-        if !self.solver_replaced {
-            let _ = self.solver.pop(1);
-        }
     }
 
     pub fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
         let mut results = Vec::new();
-        self.verify_items(&file.items, &mut results);
+        VerifierCtx::verify_items(&mut self.ctx, &mut self.session, &file.items, &mut results);
         results
     }
 
-    /// Dump the current solver state as an SMT-LIB2 string.
-    /// Returns `None` if the solver has no assertions.
+    pub fn set_timeout(&mut self, timeout_ms: u64) {
+        self.session.timeout_ms = timeout_ms;
+        let mut params = z3::Params::new();
+        params.set_u32("timeout", timeout_ms as u32);
+        self.session.set_params(&params);
+    }
+
     pub fn dump_smt2(&self) -> Option<String> {
-        let s = self.solver.to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
+        self.session.dump_smt2()
+    }
+}
+
+impl VerifierCtx {
+    pub fn collect_func_defs(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Func(f) => {
+                    self.func_defs.insert(f.name.clone(), f.clone());
+                }
+                Item::Module(m) => self.collect_func_defs(&m.items),
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Default for VerifierCtx {
+    fn default() -> Self {
+        Self {
+            func_defs: HashMap::new(),
+            let_subst: HashMap::new(),
         }
     }
 }
