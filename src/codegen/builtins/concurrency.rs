@@ -948,4 +948,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         let list_out = self.alloc_list_result(out_len, data_out)?;
         Ok(BasicValueEnum::PointerValue(list_out))
     }
-}
+
+
+    pub(super) fn compile_session_open(&self, _args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
+        let f = self.module.get_function("mimi_session_pair").ok_or("mimi_session_pair not declared")?;
+        let pair = self.builder.build_call(f, &[], "sp").map_err(|e| format!("sp: {}", e))?;
+        let packed = call_try_basic_value(&pair).ok_or("sp void")?.into_int_value();
+        let lo_f = self.module.get_function("mimi_session_lo").ok_or("lo")?;
+        let hi_f = self.module.get_function("mimi_session_hi").ok_or("hi")?;
+        let lo = call_try_basic_value(&self.builder.build_call(lo_f, &[packed.into()], "lo").map_err(|e| format!("lo: {}", e))?).ok_or("lo void")?.into_int_value();
+        let hi = call_try_basic_value(&self.builder.build_call(hi_f, &[packed.into()], "hi").map_err(|e| format!("hi: {}", e))?).ok_or("hi void")?.into_int_value();
+        let i64_ty = self.context.i64_type();
+        let data = self.builder.build_array_malloc(i64_ty, i64_ty.const_int(2, false), "spd").map_err(|e| format!("malloc: {}", e))?;
+        unsafe {
+            self.builder.build_store(self.builder.build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(0, false)], "s0").map_err(|e| format!("gep: {}", e))?, lo).map_err(|e| format!("st: {}", e))?;
+            self.builder.build_store(self.builder.build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(1, false)], "s1").map_err(|e| format!("gep: {}", e))?, hi).map_err(|e| format!("st: {}", e))?;
+        }
+        let di8 = self.builder.build_bit_cast(data, self.context.ptr_type(inkwell::AddressSpace::default()), "spi8").map_err(|e| format!("cast: {}", e))?.into_pointer_value();
+        Ok(BasicValueEnum::PointerValue(self.alloc_list_result(i64_ty.const_int(2, false), di8)?))
+    }}

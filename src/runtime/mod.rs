@@ -7752,6 +7752,25 @@ pub extern "C" fn mimi_channel_drop(handle: i64) {
     // pending `recv` unblocks promptly without needing the global lock.
     *rx_arc.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
+#[no_mangle]
+pub extern "C" fn mimi_session_pair() -> i64 {
+    let pair1 = std::sync::mpsc::channel::<i64>();
+    let pair2 = std::sync::mpsc::channel::<i64>();
+    // Cross-wire: A sends to B's rx, B sends to A's rx
+    let ha = alloc_channel(ConcurrencyChannel {
+        tx: pair1.0,
+        rx: std::sync::Arc::new(std::sync::Mutex::new(Some(pair2.1))),
+    }) as u64;
+    let hb = alloc_channel(ConcurrencyChannel {
+        tx: pair2.0,
+        rx: std::sync::Arc::new(std::sync::Mutex::new(Some(pair1.1))),
+    }) as u64;
+    ((hb << 32) | (ha & 0xFFFF_FFFFu64)) as i64
+}
+#[no_mangle]
+pub extern "C" fn mimi_session_lo(pair: i64) -> i64 { (pair as u64 & 0xFFFF_FFFFu64) as i64 }
+#[no_mangle]
+pub extern "C" fn mimi_session_hi(pair: i64) -> i64 { ((pair as u64) >> 32) as i64 }
 
 // =========================================================================
 // v0.28.21 — QuotedAst runtime representation
