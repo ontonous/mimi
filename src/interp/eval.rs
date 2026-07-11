@@ -659,15 +659,30 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Snapshot persistent fields from `self` at turn entry.
+    /// v0.29.45: `@metadata_shadow` fields only snapshot their length (O(1)),
+    /// not the full data — white-paper §6.3 Metadata Shadowing.
     fn begin_persistent_tx(&mut self, flow_name: &str, flow: &FlowDef, self_val: &Value) {
         if flow.persistent_fields.is_empty() {
             return;
         }
         let mut snap = HashMap::new();
+        let mut meta_snap = HashMap::new();
         if let Value::Record(_, fields) = self_val {
             for name in &flow.persistent_fields {
                 if let Some(v) = fields.get(name) {
-                    snap.insert(name.clone(), v.clone());
+                    // v0.29.45: metadata_shadow fields snapshot only length.
+                    if flow.metadata_shadow_fields.contains(name) {
+                        let len = match v {
+                            Value::List(items) => items.len(),
+                            Value::Set(items) => items.len(),
+                            Value::Array(items) => items.len(),
+                            Value::Record(_, m) => m.len(),
+                            _ => 0, // scalars: no metadata to snapshot
+                        };
+                        meta_snap.insert(name.clone(), len);
+                    } else {
+                        snap.insert(name.clone(), v.clone());
+                    }
                 }
             }
         }
@@ -675,6 +690,7 @@ impl<'a> Interpreter<'a> {
             flow_name.to_string(),
             super::FlowPersistentTx {
                 snapshot: snap,
+                metadata_snapshot: meta_snap,
                 committed: false,
             },
         );
@@ -694,6 +710,9 @@ impl<'a> Interpreter<'a> {
     /// Abort transaction and restore `@transactional` fields from WAL snapshot
     /// onto a clone of `from_payload`. Non-transactional fields keep current
     /// values (dirty flag checked later on recover).
+    /// v0.29.45: `@metadata_shadow` fields restore only their length — the
+    /// underlying data buffer is kept, but the length is reset to the
+    /// snapshotted value (white-paper §6.3 Metadata Shadowing).
     fn abort_persistent_tx_restore(
         &mut self,
         flow_name: &str,
@@ -705,13 +724,38 @@ impl<'a> Interpreter<'a> {
         let Some(tx) = tx else {
             return restored;
         };
-        if flow.transactional_fields.is_empty() {
-            return restored;
-        }
         if let Value::Record(_, fields) = &mut restored {
+            // Restore @transactional fields (full WAL).
             for name in &flow.transactional_fields {
                 if let Some(v) = tx.snapshot.get(name) {
                     fields.insert(name.clone(), v.clone());
+                }
+            }
+            // v0.29.45: Restore @metadata_shadow fields (metadata only).
+            for (name, &orig_len) in &tx.metadata_snapshot {
+                if let Some(v) = fields.get_mut(name) {
+                    match v {
+                        Value::List(items) => {
+                            items.truncate(orig_len);
+                            while items.len() < orig_len {
+                                items.push(Value::Int(0));
+                            }
+                        }
+                        Value::Array(items) => {
+                            items.truncate(orig_len);
+                            while items.len() < orig_len {
+                                items.push(Value::Int(0));
+                            }
+                        }
+                        Value::Set(items) => {
+                            items.truncate(orig_len);
+                        }
+                        Value::Record(_, m) => {
+                            // Can't easily restore field count for records;
+                            // leave as-is (metadata shadow is primarily for Lists).
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -735,6 +779,10 @@ impl<'a> Interpreter<'a> {
                     for name in &flow.persistent_fields {
                         if flow.transactional_fields.iter().any(|t| t == name) {
                             continue; // WAL-restored, always clean
+                        }
+                        // v0.29.45: metadata_shadow fields are metadata-restored
+                        if flow.metadata_shadow_fields.contains(name) {
+                            continue;
                         }
                         match (fields.get(name), tx.snapshot.get(name)) {
                             (Some(cur), Some(old)) if !crate::interp::value::values_equal(cur, old) => {

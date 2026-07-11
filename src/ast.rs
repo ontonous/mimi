@@ -625,6 +625,11 @@ pub struct FlowDef {
     /// shadow-copy on turn entry; restored on Fault (v0.29.14).
     /// Remaining persistent fields use dirty/version check (recover→reset).
     pub transactional_fields: Vec<String>,
+    /// v0.29.45: Fields marked `@metadata_shadow` — only metadata (length,
+    /// field count) is snapshotted, not the full data. For large buffers
+    /// where deep clone is too expensive. On restore, metadata is reset
+    /// but underlying data buffer is kept (white-paper §6.3).
+    pub metadata_shadow_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
