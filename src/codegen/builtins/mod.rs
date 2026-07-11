@@ -1657,16 +1657,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             "channel_new" => self.compile_channel_new(args),
             "channel_send" => self.compile_channel_send(args),
             "channel_recv" => self.compile_channel_recv(args),
-            // v0.29.19 session endpoint stubs — order checked at typecheck.
-            "session_send" | "session_close" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
-            }
+            // v0.29.34: session endpoint runtime — delegates to channel builtins.
+            "session_send" => self.compile_session_send(args),
+            "session_recv" => self.compile_session_recv(args),
+            "session_close" => self.compile_session_close(args),
             "session_open" | "session_pair" => self.compile_session_open(args),
             "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()),
-            "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()), // stub: return 0
-            "session_recv" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
-            }
             "actor_mailbox_depth" => self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth"),
             "actor_is_muted" => self.compile_actor_mailbox_query(args, "mimi_actor_is_muted"),
             "actor_set_mailbox_depth" => self.compile_actor_set_mailbox_depth(args),

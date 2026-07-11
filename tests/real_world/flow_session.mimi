@@ -1,27 +1,28 @@
-// MCDD real_world: Session Types skeleton — compile-time order check (v0.29.19)
-// Declares a linear session protocol and validates send/recv/close order.
-// Runtime channel pairing is deferred; this program exercises the static skeleton.
+// MCDD real_world: Session Types — dual-endpoint runtime (v0.29.34)
+// Declares a linear session protocol and exercises send/recv/close
+// with actual channel communication (not just static order check).
+// session_pair() returns two cross-wired channels:
+//   pair[0] (lo) and pair[1] (hi) are cross-wired:
+//   send on [0] → recv on [1]; send on [1] → recv on [0].
 
 session ClientProto = !i32 . ?i32 . end
 session ServerProto = dual(ClientProto)
 
-func client(ch: SessionChan<ClientProto>) -> i32 {
-    session_send(ch, 10)
-    let reply = session_recv(ch)
-    session_close(ch)
-    reply
-}
-
-func server(ch: SessionChan<ServerProto>) -> i32 {
-    let n = session_recv(ch)
-    session_send(ch, n + 1)
-    session_close(ch)
-    n
-}
-
 func main() -> i32 {
-    // Static order check only — no live endpoints required for mimi check.
-    // Dual of ClientProto is ?i32 . !i32 . end, which server follows.
-    println(1)
+    let pair = session_pair()
+    let ch0 = pair[0]
+    let ch1 = pair[1]
+
+    // Client sends 10 on ch0 → server receives on ch1
+    session_send(ch0, 10)
+    let n = session_recv(ch1)
+    // Server sends n+1 on ch1 → client receives on ch0
+    session_send(ch1, n + 1)
+    let reply = session_recv(ch0)
+    session_close(ch0)
+    session_close(ch1)
+
+    println(n)
+    println(reply)
     0
 }

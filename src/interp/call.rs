@@ -412,7 +412,9 @@ impl<'a> Interpreter<'a> {
             "channel_recv" => self.builtin_channel_recv(args),
             "channel_try_recv" => self.builtin_channel_try_recv(args),
             "channel_drop" => self.builtin_channel_drop(args),
-            "session_send" | "session_close" => Ok(Value::Unit),
+            "session_send" => self.builtin_session_send(args),
+            "session_recv" => self.builtin_session_recv(args),
+            "session_close" => self.builtin_session_close(args),
             "session_pair" => self.builtin_session_pair(args),
             "protocol_methods" => self.builtin_protocol_methods(args),
 
