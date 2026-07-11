@@ -954,6 +954,10 @@ impl<'a> Checker<'a> {
                         // Add transition params to scope
                         for p in &t.params {
                             let resolved = self.resolve_type(&p.ty);
+                            self.check_type_well_formed(
+                                &resolved,
+                                &format!("transition '{}' param '{}' in flow '{}'", t.name, p.name, f.name),
+                            );
                             scopes[0].insert(p.name.clone(), resolved);
                         }
                         let prev_ret = self.current_ret.take();
