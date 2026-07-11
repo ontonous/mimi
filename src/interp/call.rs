@@ -412,6 +412,8 @@ impl<'a> Interpreter<'a> {
             "channel_recv" => self.builtin_channel_recv(args),
             "channel_try_recv" => self.builtin_channel_try_recv(args),
             "channel_drop" => self.builtin_channel_drop(args),
+            "session_send" | "session_close" => Ok(Value::Unit),
+            "session_recv" | "session_open" => Ok(Value::Int(0)),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),

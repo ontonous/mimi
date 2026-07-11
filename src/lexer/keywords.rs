@@ -86,6 +86,9 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Consume
             | TokenKind::Do
             | TokenKind::Subflow
+            | TokenKind::Session
+            | TokenKind::Dual
+            | TokenKind::End
     )
 }
 
@@ -158,6 +161,9 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "consume" => TokenKind::Consume,
         "do" => TokenKind::Do,
         "subflow" => TokenKind::Subflow,
+        "session" => TokenKind::Session,
+        "dual" => TokenKind::Dual,
+        "end" => TokenKind::End,
         "with" => TokenKind::With,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,

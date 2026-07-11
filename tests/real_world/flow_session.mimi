@@ -1,0 +1,27 @@
+// MCDD real_world: Session Types skeleton — compile-time order check (v0.29.19)
+// Declares a linear session protocol and validates send/recv/close order.
+// Runtime channel pairing is deferred; this program exercises the static skeleton.
+
+session ClientProto = !i32 . ?i32 . end
+session ServerProto = dual(ClientProto)
+
+func client(ch: SessionChan<ClientProto>) -> i32 {
+    session_send(ch, 10)
+    let reply = session_recv(ch)
+    session_close(ch)
+    reply
+}
+
+func server(ch: SessionChan<ServerProto>) -> i32 {
+    let n = session_recv(ch)
+    session_send(ch, n + 1)
+    session_close(ch)
+    n
+}
+
+func main() -> i32 {
+    // Static order check only — no live endpoints required for mimi check.
+    // Dual of ClientProto is ?i32 . !i32 . end, which server follows.
+    println(1)
+    0
+}

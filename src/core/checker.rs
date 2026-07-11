@@ -75,6 +75,11 @@ pub(crate) struct Checker<'a> {
     /// is not used for return validation — each return is checked against all
     /// allowed types.
     pub(crate) flow_return_targets: Vec<Type>,
+    /// Declared session types: name → body (v0.29.19).
+    pub(crate) session_types: HashMap<String, crate::ast::SessionType>,
+    /// Residual protocol for variables typed as `SessionChan<S>` within the
+    /// current function body (order checking for session_send/recv/close).
+    pub(crate) session_residuals: HashMap<String, crate::ast::SessionType>,
 }
 
 #[allow(dead_code)]
@@ -116,6 +121,8 @@ impl<'a> Checker<'a> {
             const_types: HashMap::new(),
             current_ret: None,
             flow_return_targets: Vec::new(),
+            session_types: HashMap::new(),
+            session_residuals: HashMap::new(),
         }
     }
 

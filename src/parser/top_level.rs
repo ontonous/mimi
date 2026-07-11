@@ -131,6 +131,11 @@ impl Parser {
                 Ok(Item::Flow(f))
             }
             TokenKind::Protocol => Ok(Item::Protocol(self.parse_protocol_def()?)),
+            TokenKind::Session => {
+                let mut s = self.parse_session_def()?;
+                s.pub_ = pub_;
+                Ok(Item::Session(s))
+            }
             TokenKind::Unsafe => {
                 // unsafe extern "C" { ... } — bypass passport-type checking
                 self.advance(); // consume `unsafe`
@@ -1046,6 +1051,72 @@ impl Parser {
             states,
             transitions,
         })
+    }
+
+    /// Parse `session Name = SessionTypeExpr ;`
+    ///
+    /// Session type grammar (v0.29.19):
+    /// ```text
+    /// S ::= ! Type . S | ? Type . S | dual ( S ) | end | Name
+    /// ```
+    fn parse_session_def(&mut self) -> Result<SessionDef, ParseError> {
+        self.expect_keyword(TokenKind::Session)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Eq, "`=` after session name")?;
+        self.skip_newlines();
+        let body = self.parse_session_type()?;
+        self.match_semi();
+        Ok(SessionDef {
+            name,
+            pub_: false,
+            body,
+        })
+    }
+
+    /// Parse a session type expression starting at the current token.
+    pub(crate) fn parse_session_type(&mut self) -> Result<SessionType, ParseError> {
+        // `!T . cont`  or  `?T . cont`  or  `dual(...)`  or  `end`  or  `Name`
+        if self.at(&TokenKind::Bang) || self.at(&TokenKind::NotOp) {
+            self.advance(); // consume `!`
+            let payload = self.parse_type()?;
+            self.expect(TokenKind::Dot, "`.` after send payload type")?;
+            self.skip_newlines();
+            let cont = self.parse_session_type()?;
+            return Ok(SessionType::Send(payload, Box::new(cont)));
+        }
+        if self.at(&TokenKind::Question) {
+            self.advance(); // consume `?`
+            let payload = self.parse_type()?;
+            self.expect(TokenKind::Dot, "`.` after recv payload type")?;
+            self.skip_newlines();
+            let cont = self.parse_session_type()?;
+            return Ok(SessionType::Recv(payload, Box::new(cont)));
+        }
+        if self.at(&TokenKind::Dual) {
+            self.advance();
+            self.expect(TokenKind::LParen, "`(` after dual")?;
+            let inner = self.parse_session_type()?;
+            self.expect(TokenKind::RParen, "`)` after dual(...)")?;
+            return Ok(SessionType::Dual(Box::new(inner)));
+        }
+        if self.at(&TokenKind::End) {
+            self.advance();
+            return Ok(SessionType::End);
+        }
+        // Named session reference
+        if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            let name = self.expect_ident()?;
+            return Ok(SessionType::Name(name));
+        }
+        let tok = self.peek();
+        Err(ParseError::new(
+            format!(
+                "expected session type (`!T . S`, `?T . S`, `dual(S)`, `end`, or name), found {}",
+                tok.kind
+            ),
+            tok.line,
+            tok.col,
+        ))
     }
 
     fn parse_item_block(&mut self) -> Result<Vec<Item>, ParseError> {

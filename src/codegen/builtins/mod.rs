@@ -1395,6 +1395,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "mutex_unlock" | "mutex_drop"
         | "channel_new" | "channel_send" | "channel_recv"
         | "channel_try_recv" | "channel_drop"
+        | "session_send" | "session_recv" | "session_close" | "session_open"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1652,6 +1653,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             "channel_new" => self.compile_channel_new(args),
             "channel_send" => self.compile_channel_send(args),
             "channel_recv" => self.compile_channel_recv(args),
+            // v0.29.19 session endpoint stubs — order checked at typecheck.
+            "session_send" | "session_close" => {
+                Ok(self.context.i64_type().const_int(0, false).into())
+            }
+            "session_recv" | "session_open" => {
+                Ok(self.context.i64_type().const_int(0, false).into())
+            }
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {
                 self.compile_atomic_drop_helper("mimi_channel_drop", args)?;

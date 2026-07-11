@@ -667,6 +667,18 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.check_pattern(pat, &final_ty, scopes);
+                // v0.29.19: seed session residual for SessionChan<S> bindings.
+                if let (Pattern::Variable(name), Type::Name(n, args)) = (pat, &final_ty) {
+                    if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                        if let Type::Name(sname, _) = &args[0] {
+                            if let Some(body) = self.session_types.get(sname).cloned() {
+                                let resolved = crate::session::resolve(&body, &self.session_types)
+                                    .unwrap_or(body);
+                                self.session_residuals.insert(name.clone(), resolved);
+                            }
+                        }
+                    }
+                }
                 // Track cap variables for linear type checking and introduce effects
                 if let Type::Cap(cap_name) = &final_ty {
                     if let Pattern::Variable(name) = pat {
