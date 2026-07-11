@@ -143,6 +143,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Cache the flow definition for transition compilation.
                     self.flow_defs.insert(f.name.clone(), f.clone());
+                    // v0.29.24: first @max_children(N) wins as process spawn quota.
+                    if self.max_children.is_none() {
+                        for a in &f.annotations {
+                            if let crate::ast::FlowAnnotation::MaxChildren(n) = a {
+                                self.max_children = Some(*n);
+                                break;
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }

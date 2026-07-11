@@ -2002,6 +2002,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
+        // v0.29.24: apply @max_children(N) process quota when compiling main.
+        if func.name == "main" {
+            if let Some(max) = self.max_children {
+                if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_max_children") {
+                    let n = self.context.i64_type().const_int(max as u64, false);
+                    let _ = self.build_call(
+                        set_fn,
+                        &[n.into()],
+                        "set_max_children",
+                    );
+                }
+            }
+        }
+
         // Push scopes for function body
         self.push_cap_scope();
         self.push_comp_scope();
