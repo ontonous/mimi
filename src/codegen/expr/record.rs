@@ -33,6 +33,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_field_type_at_index(i as u32)
                 .ok_or_else(|| CompileError::LlvmError(format!("field {} type", i)))?;
             let store_val = self.maybe_load_compound_field_value(val, field_ty, field, vars)?;
+            // CG-C4: truncate/extend the stored value to match the field type.
+            // #[repr(C)] records use extern field types (i32 for i32 fields), so
+            // an i64 value from the expression must be truncated to i32 before storing.
+            let store_val = self.adjust_int_val(store_val, field_ty)?;
             self.build_store(gep, store_val)?;
         }
         Ok(alloca.into())

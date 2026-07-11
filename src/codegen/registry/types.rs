@@ -95,7 +95,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             crate::ast::TypeDefKind::Record(fields) => {
                 let mut field_tys = Vec::new();
                 for f in fields {
-                    let ty = self.llvm_type_for(&f.ty).ok_or_else(|| {
+                    // CG-C4: Use extern type mapping for #[repr(C)] record fields
+                    // so i32 maps to LLVM i32 (4 bytes) instead of i64 (8 bytes),
+                    // matching the C ABI struct layout.
+                    let ty = if t.attributes.contains(&TypeAttribute::ReprC) {
+                        crate::codegen::types::mimi_type_to_llvm_extern(self.context, &f.ty)
+                    } else {
+                        self.llvm_type_for(&f.ty)
+                    }
+                    .ok_or_else(|| {
                         CompileError::LlvmError(format!(
                             "cannot map record field '{}' type to LLVM",
                             crate::core::fmt_type(&f.ty)
