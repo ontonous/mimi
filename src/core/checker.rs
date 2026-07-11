@@ -84,6 +84,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) view_params: std::collections::HashSet<String>,
     /// v0.29.23: names of `mutate`-borrowed params in the current function.
     pub(crate) mutate_params: std::collections::HashSet<String>,
+    /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
+    pub(crate) in_pinned_depth: usize,
 }
 
 #[allow(dead_code)]
@@ -129,6 +131,7 @@ impl<'a> Checker<'a> {
             session_residuals: HashMap::new(),
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
+            in_pinned_depth: 0,
         }
     }
 
@@ -198,6 +201,16 @@ impl<'a> Checker<'a> {
                     "cannot {} while view/mutate borrow of [{}] is active (lexical borrow ends at function return)",
                     what,
                     names.join(", ")
+                ),
+            );
+        }
+        // v0.29.27: FFI pinned region freezes transitions (Active→FFI_Pinned semantics).
+        if self.in_pinned_depth > 0 {
+            self.emit_code(
+                crate::diagnostic::codes::E0416,
+                format!(
+                    "cannot {} while inside `pinned {{ }}` (FFI anchor: no state transfer until unpin)",
+                    what
                 ),
             );
         }

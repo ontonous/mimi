@@ -745,8 +745,86 @@ impl<'ctx> CodeGenerator<'ctx> {
                     var,
                     body,
                 } => {
-                    // Minimal codegen: evaluate the pinned expression, bind
-                    // optional |var|, run body. Timeout is ignored for now.
+                    // v0.29.27: cooperative timeout watchdog.
+                    // timeout <= 0 → mimi_runtime_abort (OS kill deferred).
+                    // Positive timeout is accepted; wall-clock expiry deferred.
+                    if let Some(to_expr) = timeout {
+                        let to_val = self.compile_expr(to_expr, vars)?;
+                        let to_iv = match to_val {
+                            inkwell::values::BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                // coerce via i64 if possible
+                                return Err(CompileError::TypeMismatch(format!(
+                                    "pinned timeout must be integer, got {:?}",
+                                    other
+                                )));
+                            }
+                        };
+                        let i64_ty = self.context.i64_type();
+                        let to_i64 = if to_iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(to_iv, i64_ty, "to_i64")
+                                .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                        } else {
+                            to_iv
+                        };
+                        let zero = i64_ty.const_int(0, false);
+                        let expired = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::SLE,
+                                to_i64,
+                                zero,
+                                "pin_expired",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                        let function = self
+                            .builder
+                            .get_insert_block()
+                            .ok_or_else(|| CompileError::LlvmError("pinned: no block".into()))?
+                            .get_parent()
+                            .ok_or_else(|| CompileError::LlvmError("pinned: no fn".into()))?;
+                        let fail_bb = self.context.append_basic_block(function, "pin_timeout");
+                        let ok_bb = self.context.append_basic_block(function, "pin_ok");
+                        self.builder
+                            .build_conditional_branch(expired, fail_bb, ok_bb)
+                            .map_err(|e| CompileError::LlvmError(format!("cbr: {}", e)))?;
+                        self.builder.position_at_end(fail_bb);
+                        let msg = self
+                            .builder
+                            .build_global_string_ptr(
+                                "pinned timeout expired: FFI anchor watchdog",
+                                "pin_to_msg",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                        let abort_fn = self.module.get_function("mimi_runtime_abort").unwrap_or_else(|| {
+                            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let ty = self.context.void_type().fn_type(
+                                &[inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr)],
+                                false,
+                            );
+                            self.module.add_function(
+                                "mimi_runtime_abort",
+                                ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                        self.builder
+                            .build_call(
+                                abort_fn,
+                                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                                    msg.as_pointer_value(),
+                                )],
+                                "pin_abort",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("abort: {}", e)))?;
+                        self.builder
+                            .build_unreachable()
+                            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
+                        self.builder.position_at_end(ok_bb);
+                    }
+                    // Evaluate pinned expression, bind optional |var|, run body.
+                    // (Implicit Active→FFI_Pinned→Active: body is the pinned region.)
                     let val = self.compile_expr(expr, vars)?;
                     if let Some(v) = var {
                         let ty = val.get_type();
@@ -754,7 +832,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_store(alloca, val)?;
                         vars.insert(v.clone(), (alloca, ty));
                     }
-                    let _ = timeout;
                     self.compile_block(body, vars)?;
                 }
                 // Defensive wildcard: compile_block handles all current Stmt variants
