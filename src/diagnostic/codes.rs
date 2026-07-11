@@ -117,6 +117,7 @@ pub const E0415: &str = "E0415"; // view/mutate borrow violation
 pub const E0416: &str = "E0416"; // transition under pinned (FFI anchor)
 pub const E0417: &str = "E0417"; // mutate parameter reassign (not individual element mutation)
 pub const E0418: &str = "E0418"; // conservative projection failure (subflow → flat protocol)
+pub const E0420: &str = "E0420"; // multi-target transition result must be exhaustively matched
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment

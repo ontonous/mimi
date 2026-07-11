@@ -85,6 +85,22 @@ impl<'a> Checker<'a> {
         field: &str,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // v0.29.49: reject direct field access on multi-target transition results.
+        if let Expr::Ident(name) = obj {
+            if self.multi_target_vars.contains_key(name) {
+                self.errors.push(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0420,
+                        format!(
+                            "multi-target transition result '{}' must be exhaustively matched before accessing field '{}'",
+                            name, field
+                        ),
+                        Span::single(self.current_line, self.current_col),
+                    )
+                    .with_help("use `match` to handle all possible return states"),
+                );
+            }
+        }
         let obj_ty = self.infer_expr(obj, scopes);
         self.infer_field_access_on_type(&obj_ty, field, scopes)
     }
