@@ -377,6 +377,10 @@ impl<'a> Interpreter<'a> {
     /// body runs (auto-destruct of the abandoned state's resources). Actors nested
     /// in that payload have their mailboxes short-circuited so subsequent messages
     /// are discarded without waking the worker.
+    ///
+    /// v0.29.12: runtime Panic inside a transition body is absorbed into Fault
+    /// with a full SystemTrace (last_state / unexpected_event=`panic:<code>` /
+    /// snapshot with message + call stack). Already-Fault sources re-raise.
     pub(in crate::interp) fn eval_flow_transition(
         &mut self,
         _flow: &FlowDef,
@@ -405,10 +409,32 @@ impl<'a> Interpreter<'a> {
 
         // Execute the transition body
         let result = self.eval_block(body);
+        let call_stack = self.scope_env.call_stack.clone();
 
         self.pop_scope();
 
-        let out = result.map(|v| v.unwrap_or(Value::Unit))?;
+        let out = match result {
+            Ok(v) => v.unwrap_or(Value::Unit),
+            Err(e) => {
+                // Already in Fault: do not re-wrap (avoid infinite absorption).
+                if t.from_state == "Fault" {
+                    return Err(e);
+                }
+                // v0.29.12: only absorb true runtime panics (div0/overflow/OOB/…),
+                // not programming errors like undefined names or type mismatches.
+                if !is_runtime_panic(&e) {
+                    return Err(e);
+                }
+                let event = format!("panic:{}", e.code());
+                let snapshot = format_panic_snapshot(&e, &call_stack);
+                let fault =
+                    crate::flow_matrix::make_fault_value(&t.from_state, &event, &snapshot);
+                if let Some(from_payload) = vals.first() {
+                    drop_fault_payload(from_payload);
+                }
+                return Ok(fault);
+            }
+        };
 
         // Fault absorption: drop abandoned from-state payload (+ mailbox short-circuit).
         let enters_fault = t.is_fallback
@@ -422,6 +448,31 @@ impl<'a> Interpreter<'a> {
 
         Ok(out)
     }
+}
+
+fn format_panic_snapshot(e: &InterpError, call_stack: &[String]) -> String {
+    let stack = if call_stack.is_empty() {
+        String::from("<empty>")
+    } else {
+        call_stack.join(" <- ")
+    };
+    format!("{} [{}] stack: {}", e.message(), e.code(), stack)
+}
+
+/// True for runtime panics that map to Fault (white-paper §6.4).
+/// Excludes Generic / FieldNotFound / WrongArgCount etc. so legitimate
+/// programming errors still surface to the caller.
+fn is_runtime_panic(e: &InterpError) -> bool {
+    matches!(
+        e,
+        InterpError::DivisionByZero(_)
+            | InterpError::IntegerOverflow(_)
+            | InterpError::IndexOutOfBounds(_)
+            | InterpError::NonExhaustiveMatch(_)
+            | InterpError::FloatError(_)
+            | InterpError::SliceError(_)
+            | InterpError::ContractViolation(_)
+    )
 }
 
 /// Recursively release resources held by a from-state payload when entering Fault.

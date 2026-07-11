@@ -83,6 +83,32 @@ impl<'a> Checker<'a> {
             };
             self.types.insert("StatResult".to_string(), td);
         }
+        // v0.29.12 SystemTrace — structured Fault crash context
+        // { last_state_name: string, unexpected_event: string, snapshot: string }
+        if !self.types.contains_key("SystemTrace") {
+            let td = TypeDef {
+                name: "SystemTrace".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field {
+                        name: "last_state_name".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "unexpected_event".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "snapshot".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("SystemTrace".to_string(), td);
+        }
     }
 
     /// Detect type alias cycles: type A = B; type B = A;
