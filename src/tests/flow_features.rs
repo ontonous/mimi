@@ -3535,3 +3535,51 @@ func bad(data: mutate i32, other: i32) -> i32 {
     let msgs = format!("{:?}", err);
     assert!(msgs.contains("E0417") || msgs.contains("mutate"), "got {}", msgs);
 }
+
+// ── v0.29.31 per-actor-type spawn quota + mailbox auto-depth ───────────
+
+#[test]
+fn per_type_max_children_quota() {
+    let src = r#"
+flow W {
+    @max_children(1)
+    state Idle
+}
+actor W { n: i32; func read() -> i32 { self.n } }
+func main() -> i32 {
+    let a = W.spawn()
+    let b = W.spawn()
+    0
+}
+"#;
+    let err = run_source_result(src);
+    assert!(err.is_err(), "expected QuotaExceeded, got ok");
+    let msg = format!("{}", err.unwrap_err());
+    assert!(
+        msg.contains("QuotaExceeded") || msg.contains("max_children"),
+        "got {}",
+        msg
+    );
+}
+
+#[test]
+fn mailbox_auto_depth_applied() {
+    // Flow with @mailbox(depth=N) → auto-applied to spawned actor of same name.
+    // The limit is applied but reading it requires builtin parity.
+    // Just verify spawn succeeds (no crash from auto-apply code).
+    let src = r#"
+flow W {
+    @mailbox(depth = 50)
+    state Idle
+}
+actor W { n: i32; func read() -> i32 { self.n } }
+func main() -> i32 {
+    let a = W.spawn()
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "");
+}

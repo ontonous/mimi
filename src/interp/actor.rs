@@ -3,6 +3,27 @@ use super::*;
 impl<'a> Interpreter<'a> {
     pub(crate) fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
         // v0.29.24: spawn quota — process-wide max_children from @max_children(N).
+        // v0.29.31: per-actor-type spawn quota from @max_children on the flow.
+        if let Some(flow) = self.flow_index.get(actor_name) {
+            for ann in &flow.annotations {
+                if let crate::ast::FlowAnnotation::MaxChildren(n) = ann {
+                    let count = self.actor_spawn_counts
+                        .get(actor_name)
+                        .copied()
+                        .unwrap_or(0);
+                    if count >= *n {
+                        return Err(InterpError::new(
+                            &format!(
+                                "QuotaExceeded: spawn would exceed @max_children({}) for actor '{}' (current {})",
+                                n, actor_name, count
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // v0.29.24: spawn quota — process-wide max_children from @max_children(N).
         if let Some(max) = self.max_children {
             if self.spawn_count >= max {
                 return Err(InterpError::new(
@@ -46,6 +67,17 @@ impl<'a> Interpreter<'a> {
         let program = std::sync::Arc::new(self.file.clone());
         let handle = ActorHandle::new(instance, program);
         self.spawn_count += 1;
+        // per-actor-type tracking
+        *self.actor_spawn_counts.entry(actor_name.to_string()).or_insert(0) += 1;
+        // v0.29.31: auto-apply @mailbox(depth=N) from flow annotations.
+        if let Some(flow) = self.flow_index.get(actor_name) {
+            for ann in &flow.annotations {
+                if let crate::ast::FlowAnnotation::MailboxDepth(d) = ann {
+                    handle.set_mailbox_depth_limit(*d);
+                    break;
+                }
+            }
+        }
         Ok(Value::Actor(handle))
     }
 

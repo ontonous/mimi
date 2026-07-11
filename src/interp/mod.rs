@@ -116,6 +116,8 @@ pub struct Interpreter<'a> {
     max_children: Option<usize>,
     /// v0.29.24: number of actors spawned by this interpreter process.
     spawn_count: usize,
+    /// v0.29.31: per-actor-type spawn count for per-type max_children quota.
+    actor_spawn_counts: std::collections::HashMap<String, usize>,
     /// v0.29.14: per-flow persistent-payload transaction state.
     /// Keyed by flow name. Snapshotted at turn entry; committed on success /
     /// used for dirty detection + WAL restore on Fault.
@@ -228,6 +230,7 @@ impl<'a> Interpreter<'a> {
             flow_index,
             max_children,
             spawn_count: 0,
+            actor_spawn_counts: std::collections::HashMap::new(),
             flow_tx: HashMap::new(),
             globals: HashMap::new(),
             cli_args: Vec::new(),
