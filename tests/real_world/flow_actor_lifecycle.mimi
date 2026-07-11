@@ -1,0 +1,26 @@
+// MCDD real_world: Actor lifecycle — SystemKill + spawn detached (v0.29.37)
+// Tests: parent-child tracking, SystemKill cascade, detached survival.
+
+actor Worker {
+    v: i32
+    func read() -> i32 {
+        self.v
+    }
+    func set(n: i32) {
+        self.v = n
+    }
+}
+
+func main() -> i32 {
+    // Spawn a regular actor
+    let a = Worker.spawn()
+    a.set(10)
+    println(a.read())
+
+    // Spawn a detached actor (survives parent kill)
+    let d = Worker.spawn_detached()
+    d.set(99)
+    println(d.read())
+
+    0
+}

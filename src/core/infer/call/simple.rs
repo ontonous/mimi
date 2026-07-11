@@ -681,6 +681,18 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
+            // v0.29.37: spawn_detached(name) -> actor handle (i64)
+            "spawn_detached" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "spawn_detached expects 1 argument (actor type name)".to_string(),
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("i64".into(), vec![]);
+            }
             "atomic_i32_load"
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"

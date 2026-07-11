@@ -450,6 +450,24 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Int(self.max_children.map(|n| n as i64).unwrap_or(0)))
     }
 
+    /// v0.29.37: spawn_detached(actor_name) — spawn a detached actor
+    /// that survives parent SystemKill.
+    pub(crate) fn builtin_spawn_detached(
+        &mut self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new(
+                "spawn_detached expects 1 argument (actor type name)",
+            ));
+        }
+        let name = match &args[0] {
+            Value::String(s) => s.clone(),
+            _ => return Err(InterpError::new("spawn_detached expects a string")),
+        };
+        self.spawn_detached_actor(&name)
+    }
+
     /// v0.29.25: broadcast(targets, method_name) -> List of results.
     ///
     /// `targets` is a List of Actor handles (type-erased protocol set).

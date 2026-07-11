@@ -113,6 +113,10 @@ impl<'a> Checker<'a> {
             if method_name == "spawn" {
                 return Type::Name(type_name.clone(), vec![]);
             }
+            // v0.29.37: Actor.spawn_detached() — returns actor handle
+            if method_name == "spawn_detached" {
+                return Type::Name(type_name.clone(), vec![]);
+            }
             // Check module-qualified function call: Module::func(args)
             let qualified_func = format!("{}::{}", type_name, method_name);
             if self.funcs.contains_key(&qualified_func) {

@@ -59,6 +59,11 @@ impl<'a> Interpreter<'a> {
             methods: actor_def.methods.clone(),
             faulted: false,
             peer_links: Vec::new(),
+            parent_id: crate::interp::value::CURRENT_ACTOR_ID.with(|id| {
+                let id = id.get();
+                if id == 0 { None } else { Some(id) }
+            }),
+            is_detached: false,
         };
 
         // v0.28.28 fix for #1: share the spawning program's AST so the
@@ -89,5 +94,51 @@ impl<'a> Interpreter<'a> {
     /// v0.29.24: set process-wide max children (for tests / runtime reconfigure).
     pub(crate) fn set_max_children(&mut self, n: Option<usize>) {
         self.max_children = n;
+    }
+
+    /// v0.29.37: spawn a detached actor — survives parent SystemKill.
+    pub(crate) fn spawn_detached_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
+        let handle_val = self.spawn_actor(actor_name)?;
+        if let Value::Actor(ref handle) = handle_val {
+            // Mark as detached
+            if let Ok(mut instance) = handle.inner.write() {
+                instance.is_detached = true;
+                instance.parent_id = None;
+            }
+        }
+        Ok(handle_val)
+    }
+
+    /// v0.29.37: SystemKill — cascade terminate all non-detached children
+    /// of the given parent actor id. Called when parent faults or is dropped.
+    pub(crate) fn system_kill_children(&self, parent_id: usize) {
+        let handles = crate::interp::value::actor_handles();
+        let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
+        let child_ids: Vec<usize> = registry
+            .iter()
+            .filter(|(_, h)| {
+                if let Ok(instance) = h.inner.read() {
+                    instance.parent_id == Some(parent_id) && !instance.is_detached
+                } else {
+                    false
+                }
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        drop(registry);
+        // Kill each child
+        for child_id in child_ids {
+            let handles = crate::interp::value::actor_handles();
+            let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(child) = registry.get(&child_id) {
+                // Mark as faulted (short-circuit mailbox)
+                if let Ok(mut instance) = child.inner.write() {
+                    instance.faulted = true;
+                }
+                // Recursively kill grandchildren
+                drop(registry);
+                self.system_kill_children(child_id);
+            }
+        }
     }
 }
