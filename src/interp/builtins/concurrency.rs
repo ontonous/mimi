@@ -599,6 +599,89 @@ impl<'a> Interpreter<'a> {
         }
         Ok(Value::List(results))
     }
+
+    // ── v0.29.44: Shadow memory tagging builtins ──────────────────────
+
+    /// shadow_alloc(size: i64, tag: i32, label: string) -> i64 (pointer as int)
+    pub(crate) fn builtin_shadow_alloc(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 3 {
+            return Err(InterpError::new("shadow_alloc expects 3 arguments (size, tag, label)"));
+        }
+        let size = match &args[0] {
+            Value::Int(n) => *n as usize,
+            _ => return Err(InterpError::new("shadow_alloc: size must be integer")),
+        };
+        let tag = match &args[1] {
+            Value::Int(n) => *n as u8,
+            _ => return Err(InterpError::new("shadow_alloc: tag must be integer")),
+        };
+        let label = match &args[2] {
+            Value::String(s) => s.clone(),
+            _ => return Err(InterpError::new("shadow_alloc: label must be string")),
+        };
+        let c_label = std::ffi::CString::new(label).unwrap_or_default();
+        let ptr = crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr());
+        Ok(Value::Int(ptr as i64))
+    }
+
+    /// shadow_tag(ptr: i64, tag: i32) -> i32 (0=ok, -1=err)
+    pub(crate) fn builtin_shadow_tag(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("shadow_tag expects 2 arguments (ptr, tag)"));
+        }
+        let ptr = match &args[0] {
+            Value::Int(n) => *n as *const u8,
+            _ => return Err(InterpError::new("shadow_tag: ptr must be integer")),
+        };
+        let tag = match &args[1] {
+            Value::Int(n) => *n as u8,
+            _ => return Err(InterpError::new("shadow_tag: tag must be integer")),
+        };
+        let result = crate::runtime::mimi_shadow_tag(ptr, tag);
+        Ok(Value::Int(result as i64))
+    }
+
+    /// shadow_check(ptr: i64, expected_tag: i32) -> bool
+    pub(crate) fn builtin_shadow_check(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("shadow_check expects 2 arguments (ptr, tag)"));
+        }
+        let ptr = match &args[0] {
+            Value::Int(n) => *n as *const u8,
+            _ => return Err(InterpError::new("shadow_check: ptr must be integer")),
+        };
+        let tag = match &args[1] {
+            Value::Int(n) => *n as u8,
+            _ => return Err(InterpError::new("shadow_check: tag must be integer")),
+        };
+        let result = crate::runtime::mimi_shadow_check(ptr, tag);
+        Ok(Value::Bool(result == 1))
+    }
+
+    /// shadow_free(ptr: i64) -> unit
+    pub(crate) fn builtin_shadow_free(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("shadow_free expects 1 argument (ptr)"));
+        }
+        let ptr = match &args[0] {
+            Value::Int(n) => *n as *mut u8,
+            _ => return Err(InterpError::new("shadow_free: ptr must be integer")),
+        };
+        crate::runtime::mimi_shadow_free(ptr);
+        Ok(Value::Unit)
+    }
 }
 
 fn peer_fault_result(peer_id: &str, reason: &str) -> Value {

@@ -707,6 +707,31 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("Fault".into(), vec![]);
             }
+            // v0.29.44: shadow memory tagging builtins
+            "shadow_alloc" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("i64".into(), vec![]);
+            }
+            "shadow_tag" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
+            "shadow_check" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "shadow_free" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("unit".into(), vec![]);
+            }
             "atomic_i32_load"
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"

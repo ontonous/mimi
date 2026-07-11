@@ -433,6 +433,11 @@ impl<'a> Interpreter<'a> {
             "spawn_detached" => self.builtin_spawn_detached(args),
             "assert_state" => self.builtin_assert_state(args),
             "inject_fault" => self.builtin_inject_fault(args),
+            // v0.29.44: shadow memory tagging builtins
+            "shadow_alloc" => self.builtin_shadow_alloc(args),
+            "shadow_tag" => self.builtin_shadow_tag(args),
+            "shadow_check" => self.builtin_shadow_check(args),
+            "shadow_free" => self.builtin_shadow_free(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),

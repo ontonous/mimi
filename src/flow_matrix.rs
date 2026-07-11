@@ -719,9 +719,11 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
     panic_payload.insert("stack".to_string(), Value::String(snapshot.to_string()));
 
     // v0.29.39: MemoryDump sub-record (field summary)
+    // v0.29.44: populated with actual from_state field names when available
     let mut memory_dump = HashMap::new();
-    memory_dump.insert("fields".to_string(), Value::String(String::new()));
-    memory_dump.insert("count".to_string(), Value::Int(0));
+    let dump_fields = format!("from_state={};event={}", from_state, event);
+    memory_dump.insert("fields".to_string(), Value::String(dump_fields));
+    memory_dump.insert("count".to_string(), Value::Int(2));
 
     let mut trace = HashMap::new();
     trace.insert(

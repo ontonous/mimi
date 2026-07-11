@@ -4213,3 +4213,97 @@ func main() -> i32 { 0 }
         other => panic!("expected Fault from pinned body panic, got {:?}", other),
     }
 }
+
+// ── v0.29.44: Shadow Memory Tagging ───────────────────────────────────
+
+#[test]
+fn shadow_alloc_tag_check() {
+    // L1 interp: allocate tagged memory, check with correct/wrong tag.
+    let src = r#"
+func main() -> i32 {
+    let ptr = shadow_alloc(64, 1, "test_buf")
+    let ok = shadow_check(ptr, 1)
+    let bad = shadow_check(ptr, 2)
+    println(ok)
+    println(bad)
+    shadow_free(ptr)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let r = run_source_result(src).expect("run");
+    assert_eq!(r, interp::Value::Int(0));
+}
+
+#[test]
+fn shadow_check_rejects_untagged() {
+    // L1 interp: checking a random untracked pointer returns false.
+    let src = r#"
+func main() -> i32 {
+    let ok = shadow_check(99999, 1)
+    println(ok)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    let r = run_source_result(src).expect("run");
+    assert_eq!(r, interp::Value::Int(0));
+}
+
+#[test]
+fn fault_memory_dump_populated() {
+    // L1 interp: Fault from a transition should have non-empty memory_dump.
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition crash(Active) -> Active {
+        do {
+            let x = 1 / 0
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("data".into(), interp::Value::Int(42));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let out = interp
+        .eval_flow_transition(
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            }).expect("Buf flow"),
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "crash"),
+                _ => None,
+            }).expect("crash"),
+            &[active],
+        )
+        .expect("crash should produce Fault");
+    if let interp::Value::Record(Some(name), f) = &out {
+        assert_eq!(name, "Fault");
+        let trace = f.get("trace").expect("trace");
+        if let interp::Value::Record(_, tf) = trace {
+            let md = tf.get("memory_dump").expect("memory_dump");
+            if let interp::Value::Record(_, mdf) = md {
+                let fields_val = mdf.get("fields").map(|v| format!("{}", v));
+                let count_val = mdf.get("count").map(|v| format!("{}", v));
+                let fs = fields_val.unwrap_or_default();
+                assert!(!fs.is_empty(), "memory_dump.fields should be non-empty");
+                assert!(fs.contains("from_state=Active"), "fields={}", fs);
+                let c = count_val.unwrap_or_default();
+                assert!(c != "0", "memory_dump.count should be non-zero, got {}", c);
+            } else {
+                panic!("memory_dump is not a record: {:?}", md);
+            }
+        } else {
+            panic!("trace is not a record: {:?}", trace);
+        }
+    } else {
+        panic!("expected Fault, got {:?}", out);
+    }
+}
