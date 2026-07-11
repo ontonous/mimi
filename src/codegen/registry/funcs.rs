@@ -1667,6 +1667,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
 
         // Build the internal struct by inserting fields into an undef value.
+        // CG-C4: The internal struct now uses extern field types (i32 for i32 fields),
+        // matching the C layout. Use the actual struct field type for insertion.
         let mut agg: inkwell::values::AggregateValueEnum<'ctx> =
             internal_sty.const_named_struct(&[]).into();
         for (fi, f) in fields.iter().enumerate() {
@@ -1674,7 +1676,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_extract_value(c_sv, fi as u32, &format!("{}_{}_cfield", type_name, f.name))
                 .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
-            let internal_field = self.convert_c_field_to_internal(c_field, &f.ty)?;
+            // Convert C field to the internal struct field type (which is extern layout
+            // for repr(C) records, so i32 fields are already the correct width).
+            let field_ty = internal_sty
+                .get_field_type_at_index(fi as u32)
+                .ok_or_else(|| CompileError::LlvmError(format!("field {} type missing", fi)))?;
+            let internal_field = self.adjust_int_val(c_field, field_ty)?;
             agg = self
                 .builder
                 .build_insert_value(

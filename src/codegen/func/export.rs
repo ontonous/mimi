@@ -358,11 +358,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_int_truncate(shifted, i32_ty, &format!("{}_{}_hi", name, f.name))
                         .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
                 };
-                let ext = self
-                    .builder
-                    .build_int_s_extend(raw_i32, i64_ty, &format!("{}_{}_ext", name, f.name))
-                    .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?;
-                field_vals.push(ext.into());
+                // CG-C4: internal struct now uses extern field types (i32 for i32 fields),
+                // so push the raw i32 directly without sign-extending to i64.
+                field_vals.push(raw_i32.into());
             }
             Ok(internal_sty
                 .const_named_struct(&field_vals)
@@ -391,7 +389,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &format!("{}_field_{}", name, fi),
                     )
                     .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?;
-                field_vals.push(self.convert_c_field_to_internal(raw, &f.ty)?);
+                // CG-C4: internal struct uses extern field types (i32 for i32 fields),
+                // so adjust the C field value to match the internal struct field type.
+                let field_ty = internal_sty
+                    .get_field_type_at_index(fi as u32)
+                    .ok_or_else(|| CompileError::LlvmError(format!("field {} type missing", fi)))?;
+                field_vals.push(self.adjust_int_val(raw, field_ty)?);
             }
             Ok(internal_sty
                 .const_named_struct(&field_vals)
