@@ -236,13 +236,11 @@ impl VerifierCtx {
             }
         };
 
-        session.push();
-        session.assert(z3_requires.not());
+        let (result, _model) = session.check_scope(z3_requires.not());
         let constraint_count = 1;
 
-        match session.check() {
+        match result {
             SatResult::Unsat => {
-                session.pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Verified,
@@ -253,7 +251,6 @@ impl VerifierCtx {
                 }
             }
             SatResult::Sat => {
-                session.pop();
                 let diag = Diagnostic::error(
                     format!(
                         "call to extern '{}' may violate precondition: {:?}",
@@ -275,7 +272,6 @@ impl VerifierCtx {
                 }
             }
             SatResult::Unknown => {
-                session.pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Unknown,

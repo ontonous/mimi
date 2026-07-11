@@ -1553,10 +1553,8 @@ impl VerifierCtx {
                                 &format!("call_{}", name),
                             );
                             if let Some(z3_req) = expr::expr_to_z3_bool(&substituted, vars) {
-                                session.push();
-                                session.assert(z3_req.not());
-                                if session.check() == z3::SatResult::Sat {
-                                    session.pop();
+                                let (result, _) = session.check_scope(z3_req.not());
+                                if result == z3::SatResult::Sat {
                                     errors.push((
                                         caller_name.to_string(),
                                         format!("call to '{}' may violate precondition", name),
@@ -1564,7 +1562,6 @@ impl VerifierCtx {
                                     ));
                                     return;
                                 }
-                                session.pop();
                             }
                         }
                     }
