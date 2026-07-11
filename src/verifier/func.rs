@@ -129,14 +129,11 @@ impl VerifierCtx {
             }
             SatResult::Sat => {
                 if let Some(ens) = ensures_expr {
-                    session.push();
-                    if let Some(z3_not_ens) = expr::expr_to_z3_bool(ens, &mut vars).map(|b| b.not())
-                    {
-                        session.assert(&z3_not_ens);
-                        match session.check() {
-                            SatResult::Unsat => {
-                                session.pop();
-                                VerificationResult {
+                    match expr::expr_to_z3_bool(ens, &mut vars) {
+                        Some(z3_bool) => {
+                            let (result, _) = session.check_scope(z3_bool.not());
+                            match result {
+                                SatResult::Unsat => VerificationResult {
                                     func_name: format!("extern {}", func.name),
                                     status: VerifStatus::Verified,
                                     message: "postconditions always satisfied given preconditions"
@@ -144,32 +141,27 @@ impl VerifierCtx {
                                     diagnostic: None,
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
-                                }
-                            }
-                            SatResult::Sat | SatResult::Unknown => {
-                                session.pop();
-                                VerificationResult {
-                                func_name: format!("extern {}", func.name),
-                                status: VerifStatus::Unknown, // P2.3 fix: Unknown (not Verified) since we found a counterexample
+                                },
+                                SatResult::Sat | SatResult::Unknown => VerificationResult {
+                                    func_name: format!("extern {}", func.name),
+                                    status: VerifStatus::Unknown,
                                     message:
                                         "extern contracts are consistent (preconditions do not statically guarantee postconditions; runtime verification required)"
                                             .into(),
                                     diagnostic: None,
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
-                                }
+                                },
                             }
                         }
-                    } else {
-                        session.pop();
-                        VerificationResult {
+                        None => VerificationResult {
                             func_name: format!("extern {}", func.name),
                             status: VerifStatus::Unknown,
                             message: "could not encode ensures for Z3".into(),
                             diagnostic: None,
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
-                        }
+                        },
                     }
                 } else {
                     VerificationResult {
