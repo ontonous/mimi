@@ -497,6 +497,27 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let handle_val = call_try_basic_value(&handle).unwrap_or(i8_ptr.const_null().into());
 
+        // v0.29.31: auto-apply @mailbox(depth=N) from flow annotations.
+        if let Some(flow) = self.flow_defs.get(&actor.name) {
+            for ann in &flow.annotations {
+                if let crate::ast::FlowAnnotation::MailboxDepth(d) = ann {
+                    if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_mailbox_depth") {
+                        let depth_val = self.context.i64_type().const_int(*d as u64, false);
+                        let hv = match handle_val {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            _ => i8_ptr.const_null(),
+                        };
+                        let _ = self.build_call(
+                            set_fn,
+                            &[hv.into(), depth_val.into()],
+                            "set_mailbox_depth",
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
         // v0.29.25: register method names so broadcast can resolve by name.
         if !actor.methods.is_empty() {
             if let Ok(set_names) = self.get_runtime_fn("mimi_actor_set_method_names") {
