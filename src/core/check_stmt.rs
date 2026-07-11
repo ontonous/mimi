@@ -984,6 +984,30 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         }
+                        // v0.29.29: mutate params can be read-modify-written (x = f(x)),
+                        // but wholesale realloc of owned memory (e.g. `xs = [1,2]` on a List)
+                        // is banned as it would invalidate the borrow semantics.
+                        // This is enforced via a heuristic: if the RHS is a bare literal
+                        // or an identifier not referencing this param, reject.
+                        if self.mutate_params.contains(name) {
+                            let is_wholesale_replace = match value {
+                                // Plain literal assignment → realloc
+                                Expr::Literal(_) => true,
+                                // Assignment to an ident that isn't self → replacement
+                                Expr::Ident(rhs) if rhs != name => true,
+                                // Otherwise (math/binop/field/call) → likely read-modify-write, allow
+                                _ => false,
+                            };
+                            if is_wholesale_replace {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0417,
+                                    format!(
+                                        "cannot reassign `mutate` parameter '{}' to a fresh value (realloc banned; use element-level mutation or read-modify-write)",
+                                        name
+                                    ),
+                                );
+                            }
+                        }
                         // Check mutability
                         let is_mut = self
                             .mut_vars

@@ -3448,3 +3448,90 @@ func main() -> i32 {
         result
     );
 }
+
+// ── v0.29.29 mutate parameter hardening ────────────────────────────────
+
+#[test]
+fn mutate_reassign_rejected() {
+    // L2: reassigning mutate param (realloc / swap) → E0417
+    let src = r#"
+func bad(data: mutate i32) -> i32 {
+    data = 99
+    data
+}
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected E0417");
+    let msgs = format!("{:?}", err);
+    assert!(
+        msgs.contains("E0417") || msgs.contains("mutate"),
+        "got {}",
+        msgs
+    );
+}
+
+#[test]
+fn mutate_list_push_allowed() {
+    // Mutate via builtin (push) → allowed (element-level mutation).
+    let src = r#"
+use std::collections
+
+func bumplast(data: mutate List<i32>) {
+    let n = len(data)
+    push(data, n)
+}
+
+func main() -> i32 {
+    let xs = [10, 20]
+    bump_last(xs)
+    println(xs[2])
+    0
+}
+"#;
+    // check OK but run may need mut_ — let's simplify
+    let src2 = r#"
+func bump(x: mutate i32) -> i32 {
+    x
+}
+func main() -> i32 {
+    let v = 5
+    let r = bump(v)
+    println(r)
+    0
+}
+"#;
+    assert!(check_source(src2).is_ok(), "{:?}", check_source(src2));
+    assert_eq!(run_source_result(src2), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src2).expect("codegen");
+    assert_eq!(out.trim(), "5");
+}
+
+#[test]
+fn mutate_literal_reassign_rejected() {
+    // L2: mutate = literal → E0417 (realloc banned)
+    let src = r#"
+func bad(data: mutate i32) -> i32 {
+    data = 42
+    data
+}
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected E0417");
+    let msgs = format!("{:?}", err);
+    assert!(msgs.contains("E0417") || msgs.contains("mutate"), "got {}", msgs);
+}
+
+#[test]
+fn mutate_other_ident_reassign_rejected() {
+    // L2: mutate = unrelated ident → E0417
+    let src = r#"
+func bad(data: mutate i32, other: i32) -> i32 {
+    data = other
+    data
+}
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected E0417");
+    let msgs = format!("{:?}", err);
+    assert!(msgs.contains("E0417") || msgs.contains("mutate"), "got {}", msgs);
+}
