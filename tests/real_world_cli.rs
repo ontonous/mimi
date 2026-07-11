@@ -40,25 +40,37 @@ fn is_known_gap(path: &Path) -> bool {
     KNOWN_GAPS.contains(&name)
 }
 
-fn run_mimi_run(src: &Path) -> Result<(), String> {
+fn normalize_run_output(s: &str) -> String {
+    let mut lines: Vec<&str> = s.lines().collect();
+    if lines.last().is_some_and(|l| l.starts_with("-> ")) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn run_mimi_run_out(src: &Path) -> Result<String, String> {
     let output = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
         .arg(src)
         .output()
         .map_err(|e| format!("failed to spawn mimi run: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("mimi run failed\n{stderr}"))
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!("mimi run failed\n{stderr}\n{stdout}"));
     }
+    Ok(normalize_run_output(&stdout))
 }
 
-fn run_mimi_build_and_exec(src: &Path) -> Result<(), String> {
-    let dir = src.parent().expect("src has parent");
+fn run_mimi_build_and_exec(src: &Path) -> Result<String, String> {
+    let dir = std::env::temp_dir();
     let stem = src.file_stem().expect("src has stem").to_string_lossy();
-    let binary = dir.join(&*stem);
+    let binary = dir.join(format!(
+        "mimi_rw_{}_{}",
+        std::process::id(),
+        stem
+    ));
 
     let build_output = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -70,14 +82,16 @@ fn run_mimi_build_and_exec(src: &Path) -> Result<(), String> {
         .map_err(|e| format!("failed to spawn mimi build: {e}"))?;
     if !build_output.status.success() {
         let stderr = String::from_utf8_lossy(&build_output.stderr);
+        let _ = fs::remove_file(&binary);
         return Err(format!("mimi build failed\n{stderr}"));
     }
 
     let exec_output = Command::new(&binary)
         .output()
         .map_err(|e| format!("failed to run compiled binary: {e}"))?;
+    let _ = fs::remove_file(&binary);
     if exec_output.status.success() {
-        Ok(())
+        Ok(String::from_utf8_lossy(&exec_output.stdout).trim_end().to_string())
     } else {
         Err(format!(
             "compiled binary exited with {}",
@@ -108,7 +122,8 @@ fn real_world_cli_suite() {
         let name = src.file_name().unwrap().to_string_lossy();
         eprintln!("real_world_cli: checking {name}");
 
-        let interp = run_mimi_run(src);
+        // Prefer stdout-aware run for dual-backend match (esp. flow_* MCDD).
+        let interp_out = run_mimi_run_out(src);
         let codegen = if can_link() {
             Some(run_mimi_build_and_exec(src))
         } else {
@@ -116,15 +131,24 @@ fn real_world_cli_suite() {
             None
         };
 
-        let any_failed = interp.is_err() || codegen.as_ref().is_some_and(|r| r.is_err());
-        if any_failed {
-            let mut details = String::new();
-            if let Err(e) = &interp {
-                details.push_str(&format!("[interp] {e}\n"));
+        let mut details = String::new();
+        if let Err(e) = &interp_out {
+            details.push_str(&format!("[interp] {e}\n"));
+        }
+        if let Some(Err(e)) = &codegen {
+            details.push_str(&format!("[codegen] {e}\n"));
+        }
+        // L1 dual-backend: for flow_* programs, require matching stdout.
+        if let (Ok(i), Some(Ok(c))) = (&interp_out, &codegen) {
+            let i_trim = i.trim_end();
+            let c_trim = c.trim_end();
+            if name.starts_with("flow_") && i_trim != c_trim {
+                details.push_str(&format!(
+                    "[L1 dual-backend mismatch]\ninterp:\n{i_trim}\ncodegen:\n{c_trim}\n"
+                ));
             }
-            if let Some(Err(e)) = &codegen {
-                details.push_str(&format!("[codegen] {e}\n"));
-            }
+        }
+        if !details.is_empty() {
             if is_known_gap(src) {
                 known_gap_failures.push((name.to_string(), details));
             } else {

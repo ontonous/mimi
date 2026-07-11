@@ -1,10 +1,38 @@
 # Mimi 真实代码可用性评估结果
 
-**评估时间**：2026-07-09  
-**Mimi 版本**：0.28.30-dev  
-**最后更新**：2026-07-09  
-**评估命令**：`python3 tests/real_world/run_suite.py`  
+**评估时间**：2026-07-11  
+**Mimi 版本**：0.29.26-dev  
+**最后更新**：2026-07-11  
+**评估命令**：`python3 tests/real_world/run_suite.py` + flow dual-backend smoke  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
+
+## Flow 范式 MCDD（v0.29.9–0.29.25）
+
+| 指标 | 通过/总数 | 比例 |
+|------|----------|------|
+| flow_*.mimi 解释器 | 15 / 15 | 100% |
+| flow_*.mimi build+exec | 15 / 15 | 100% |
+| flow_*.mimi L1 双后端 stdout | 15 / 15 | 100% |
+
+| 测试文件 | 解释器 | Build | 执行 | L1 | 覆盖版本 |
+|---------|--------|-------|------|----|---------|
+| flow_counter.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.9 |
+| flow_matrix_fault.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.10 |
+| flow_fault_absorb.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.11 |
+| flow_system_trace.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.12 |
+| flow_reset_recover.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.13–14 |
+| flow_pinned.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.16 |
+| flow_subflow.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.17 |
+| flow_protocol.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.18 |
+| flow_session.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.19 |
+| flow_peer_fault.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.20 |
+| flow_mailbox_bp.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.21 |
+| flow_progressive.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.22 |
+| flow_view_mutate.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.23 |
+| flow_spawn_quota.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.24 |
+| flow_broadcast.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.25 |
+
+## 历史评估（v0.28.30-era 基线）
 
 ## 汇总
 
