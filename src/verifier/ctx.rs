@@ -259,6 +259,37 @@ impl SolverSession {
         (result, model)
     }
 
+    /// Multi-assertion version of check_scope. Pushes a scope, asserts all
+    /// constraints, checks, and pops. Useful for ensures checks where
+    /// multiple NOT(ensures) are asserted simultaneously.
+    ///
+    /// Returns Sat if any constraint is satisfiable (i.e., a postcondition
+    /// may be violated). Returns Unsat if all constraints are unsatisfiable
+    /// (all postconditions hold). Returns Unknown on timeout/crash.
+    ///
+    /// If constraints is empty, returns Sat immediately (no-op) — matching
+    /// Z3's behavior that an empty assertion set is trivially satisfiable.
+    pub fn check_scope_multi<T: std::borrow::Borrow<z3::ast::Bool>>(
+        &mut self,
+        constraints: Vec<T>,
+    ) -> (SatResult, Option<z3::Model>) {
+        if constraints.is_empty() {
+            return (SatResult::Sat, None);
+        }
+        self.push();
+        for c in constraints {
+            self.assert(c);
+        }
+        let result = self.check();
+        let model = if matches!(result, SatResult::Sat) {
+            self.get_model()
+        } else {
+            None
+        };
+        self.pop();
+        (result, model)
+    }
+
     pub fn dump_smt2(&self) -> Option<String> {
         let s = self.solver.to_string();
         if s.is_empty() { None } else { Some(s) }

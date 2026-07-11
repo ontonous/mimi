@@ -542,18 +542,13 @@ impl VerifierCtx {
         match session.check() {
             SatResult::Sat => {
                 if !ensures_exprs.is_empty() {
-                    session.push();
-                    for ens in &ensures_exprs {
-                        if let Some(z3_bool) = expr::expr_to_z3_bool(ens, &mut vars) {
-                            session.assert(z3_bool.not());
-                        } else {
-                            parse_errors
-                                .push(format!("could not encode ensures: {}", format_expr(ens)));
-                        }
-                    }
-                    match session.check() {
+                    let not_ensures: Vec<Z3Bool> = ensures_exprs
+                        .iter()
+                        .filter_map(|e| expr::expr_to_z3_bool(e, &mut vars).map(|b| b.not()))
+                        .collect();
+                    let (result, model) = session.check_scope_multi(not_ensures);
+                    match result {
                         SatResult::Unsat => {
-                            session.pop();
                             VerificationResult {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Verified,
@@ -564,10 +559,8 @@ impl VerifierCtx {
                             }
                         }
                         SatResult::Sat => {
-                            let model = session.get_model();
                             let counterexample =
                                 self.extract_counterexample(&model, &vars, &ensures_exprs);
-                            session.pop();
                             let diagnostic = self.build_failure_narrative(
                                 func,
                                 &counterexample,
@@ -586,7 +579,6 @@ impl VerifierCtx {
                             }
                         }
                         SatResult::Unknown => {
-                            session.pop();
                             let elapsed = start.elapsed();
                             let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
                                 format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
