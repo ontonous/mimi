@@ -3963,3 +3963,109 @@ func main() -> i32 {
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "1");
 }
+
+// ── v0.29.42: Explicit FFI_Pinned State Declaration ──────────────────
+
+#[test]
+fn ffi_pinned_state_declaration() {
+    // L2: declaring `state FFI_Pinned` in a flow should be accepted and
+    // trigger injection of enter_ffi / exit_ffi / ffi_crash transitions.
+    let src = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+
+    transition process(Active) -> Active {
+        do { return Active { buffer: self.buffer + 1 } }
+    }
+}
+func main() -> i32 {
+    let s = Active { buffer: 42 }
+    let fp = FFI::enter_ffi(s)
+    let back = FFI::exit_ffi(fp)
+    back.buffer
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+}
+
+#[test]
+fn ffi_pinned_roundtrip_dual_backend() {
+    // L1: enter_ffi then exit_ffi preserves payload data.
+    let src = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+
+    transition process(Active) -> Active {
+        do { return Active { buffer: self.buffer + 1 } }
+    }
+}
+func main() -> i32 {
+    let s = Active { buffer: 99 }
+    let fp = FFI::enter_ffi(s)
+    let back = FFI::exit_ffi(fp)
+    println(back.buffer)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "99");
+}
+
+#[test]
+fn ffi_pinned_crash_to_fault() {
+    // L1: ffi_crash from FFI_Pinned produces a Fault value.
+    let src = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+
+    transition process(Active) -> Active {
+        do { return Active { buffer: self.buffer + 1 } }
+    }
+}
+func main() -> i32 {
+    let s = Active { buffer: 7 }
+    let fp = FFI::enter_ffi(s)
+    let faulted = FFI::ffi_crash(fp)
+    println(faulted.last_state)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "FFI_Pinned");
+}
+
+#[test]
+fn ffi_pinned_transitions_injected() {
+    // L2: verify that enter_ffi, exit_ffi, and ffi_crash are injected
+    // when state FFI_Pinned is declared.
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::flow_matrix::expand_file;
+    let src = r#"
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+    transition process(Active) -> Active {
+        do { return Active { buffer: self.buffer } }
+    }
+}
+"#;
+    let tokens = Lexer::new(src).tokenize().expect("lex");
+    let mut file = Parser::new(tokens).parse_file().expect("parse");
+    expand_file(&mut file);
+    let flow = file.items.iter().find_map(|i| match i {
+        Item::Flow(f) => Some(f),
+        _ => None,
+    }).expect("flow");
+    assert!(flow.states.iter().any(|s| s.name == "FFI_Pinned"));
+    assert!(flow.transitions.iter().any(|t| t.name == "enter_ffi" && t.from_state == "Active" && t.is_ffi_pinned));
+    assert!(flow.transitions.iter().any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned" && t.is_ffi_pinned));
+    assert!(flow.transitions.iter().any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned" && t.is_fallback));
+}

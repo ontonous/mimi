@@ -120,6 +120,7 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
                 body: Some(body),
                 pos: (0, 0),
                 is_fallback: true,
+                is_ffi_pinned: false,
             });
         }
     }
@@ -130,6 +131,9 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
     // v0.29.20: inject peer_fault(State) → Fault for every non-Fault state
     // that does not already define peer_fault (user self-loop breaks the chain).
     inject_peer_fault_verbs(flow, shapes);
+    // v0.29.42: inject FFI_Pinned enter/exit/crash transitions when user
+    // explicitly declares `state FFI_Pinned { ... }` in a flow.
+    inject_ffi_pinned_transitions(flow, shapes);
 }
 
 /// Root (initial) state of a flow: first non-Fault declared state.
@@ -265,12 +269,124 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             body: Some(body),
             pos: (0, 0),
             is_fallback: true,
+            is_ffi_pinned: false,
         });
     }
     flow.transitions.extend(injected);
 }
 
-/// Inject `reset` and `recover` transitions from Fault → root when absent.
+/// v0.29.42: Inject FFI_Pinned enter/exit/crash transitions when the user
+/// explicitly declares `state FFI_Pinned { ... }` in a flow.
+///
+/// White-paper §4.2: "对于需要精细控制 FFI 生命周期的底层库作者，显式的
+/// FFI_Pinned 状态声明仍然可用，且与块级语法糖完全共存"
+///
+/// Injects:
+///   - `transition enter_ffi(Active) -> FFI_Pinned` — payload passthrough
+///   - `transition exit_ffi(FFI_Pinned) -> Active` — payload passthrough
+///   - `transition ffi_crash(FFI_Pinned) -> Fault` — fallback (is_fallback=true)
+///
+/// User-written transitions from FFI_Pinned are never overridden.
+fn inject_ffi_pinned_transitions(
+    flow: &mut FlowDef,
+    shapes: &HashMap<String, Vec<Field>>,
+) {
+    // Only act if the user explicitly declared an FFI_Pinned state.
+    if !flow.states.iter().any(|s| s.name == "FFI_Pinned") {
+        return;
+    }
+
+    // Determine the "Active" state: first non-Fault, non-FFI_Pinned state.
+    let active = flow
+        .states
+        .iter()
+        .find(|s| s.name != "Fault" && s.name != "FFI_Pinned")
+        .map(|s| s.name.clone());
+    let Some(active) = active else {
+        return; // No active state to wire transitions from/to.
+    };
+
+    // Build payload-passthrough body: return Target { field: self.field, ... }
+    let make_passthrough_body = |target: &str| -> Block {
+        let fields = flow
+            .states
+            .iter()
+            .find(|s| s.name == target)
+            .and_then(|s| s.payload.as_ref())
+            .map(|payload| {
+                payload
+                    .iter()
+                    .map(|f| RecordFieldExpr {
+                        name: f.name.clone(),
+                        value: Expr::Field(
+                            Box::new(Expr::Ident("self".to_string())),
+                            f.name.clone(),
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        vec![Stmt::Return(Some(Expr::Record {
+            ty: Some(target.to_string()),
+            fields,
+        }))]
+    };
+
+    // enter_ffi: Active → FFI_Pinned (if not already user-defined)
+    let has_enter = flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "enter_ffi" && t.from_state == active);
+    if !has_enter {
+        flow.transitions.push(TransitionDef {
+            name: "enter_ffi".to_string(),
+            from_state: active.clone(),
+            params: vec![],
+            to_states: vec!["FFI_Pinned".to_string()],
+            body: Some(make_passthrough_body("FFI_Pinned")),
+            pos: (0, 0),
+            is_fallback: false,
+            is_ffi_pinned: true,
+        });
+    }
+
+    // exit_ffi: FFI_Pinned → Active (if not already user-defined)
+    let has_exit = flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned");
+    if !has_exit {
+        flow.transitions.push(TransitionDef {
+            name: "exit_ffi".to_string(),
+            from_state: "FFI_Pinned".to_string(),
+            params: vec![],
+            to_states: vec![active.clone()],
+            body: Some(make_passthrough_body(&active)),
+            pos: (0, 0),
+            is_fallback: false,
+            is_ffi_pinned: true,
+        });
+    }
+
+    // ffi_crash: FFI_Pinned → Fault (fallback — always injected if missing)
+    let has_crash = flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned");
+    if !has_crash {
+        let body = fault_return_body(flow, "FFI_Pinned", "ffi_crash", shapes);
+        flow.transitions.push(TransitionDef {
+            name: "ffi_crash".to_string(),
+            from_state: "FFI_Pinned".to_string(),
+            params: vec![],
+            to_states: vec!["Fault".to_string()],
+            body: Some(body),
+            pos: (0, 0),
+            is_fallback: true,
+            is_ffi_pinned: true,
+        });
+    }
+}
 fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
     let Some(root) = root_state_name(flow) else {
         return;
@@ -295,6 +411,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             body: Some(body),
             pos: (0, 0),
             is_fallback: true,
+            is_ffi_pinned: false,
         });
     }
     if !has_recover {
@@ -310,6 +427,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             body: Some(body),
             pos: (0, 0),
             is_fallback: true,
+            is_ffi_pinned: false,
         });
     }
 }
@@ -692,6 +810,7 @@ mod tests {
                 }))]),
                 pos: (1, 1),
                 is_fallback: false,
+                is_ffi_pinned: false,
             }],
             impl_protocols: vec![],
             persistent_fields: vec![],
@@ -746,6 +865,7 @@ mod tests {
             }))]),
             pos: (2, 1),
             is_fallback: false,
+            is_ffi_pinned: false,
         });
         expand_flow(&mut flow);
         // Positive+inc is user-defined — not a fallback.

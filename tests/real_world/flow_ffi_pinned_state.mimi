@@ -1,0 +1,29 @@
+// v0.29.42: Explicit FFI_Pinned State Declaration
+// White-paper §4.2: "对于需要精细控制 FFI 生命周期的底层库作者，
+// 显式的 FFI_Pinned 状态声明仍然可用，且与块级语法糖完全共存"
+
+flow FFI {
+    state Active { buffer: i32 }
+    state FFI_Pinned { buffer: i32 }
+
+    transition process(Active) -> Active {
+        do { return Active { buffer: self.buffer + 1 } }
+    }
+}
+
+func main() -> i32 {
+    // Enter explicit FFI_Pinned state
+    let s = Active { buffer: 42 }
+    let fp = FFI::enter_ffi(s)
+    // Exit back to Active — payload preserved
+    let back = FFI::exit_ffi(fp)
+    println(back.buffer)
+
+    // Simulate FFI crash: FFI_Pinned -> Fault
+    let s2 = Active { buffer: 7 }
+    let fp2 = FFI::enter_ffi(s2)
+    let faulted = FFI::ffi_crash(fp2)
+    println(faulted.last_state)
+
+    0
+}
