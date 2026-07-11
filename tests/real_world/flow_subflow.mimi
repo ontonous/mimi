@@ -1,0 +1,46 @@
+// MCDD real_world: Subflow synchronous nesting — dual-backend (v0.29.17)
+// Parent state payload holds a child flow state instance; parent transitions
+// drive the child synchronously and read nested fields. Structured drop is
+// field-order (child fields drop with the parent payload).
+
+flow Child {
+    state CIdle { n: i32 }
+    state CDone { n: i32 }
+
+    transition step(CIdle) -> CDone {
+        do {
+            return CDone { n: self.n + 1 }
+        }
+    }
+    transition bump(CDone) -> CDone {
+        do {
+            return CDone { n: self.n + 10 }
+        }
+    }
+}
+
+flow Parent {
+    state Working { child: CIdle, tag: i32 }
+    state Finished { result: i32 }
+
+    transition run(Working) -> Finished {
+        do {
+            let c1 = Child::step(self.child)
+            let c2 = Child::bump(c1)
+            return Finished { result: c2.n + self.tag }
+        }
+    }
+}
+
+func main() -> i32 {
+    let c0 = CIdle { n: 10 }
+    let p0 = Working { child: c0, tag: 100 }
+    let p1 = Parent::run(p0)
+    println(p1.result)
+    // Nested field construction + field access without transition
+    let c3 = CIdle { n: 1 }
+    let p2 = Working { child: c3, tag: 2 }
+    println(p2.child.n)
+    println(p2.tag)
+    0
+}

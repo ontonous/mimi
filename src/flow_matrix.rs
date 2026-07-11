@@ -13,15 +13,53 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 /// Expand every `flow` in `file` in place (including nested modules).
+///
+/// v0.29.17: collects all flow-state record shapes first so injected
+/// reset/recover/Fault bodies can default nested subflow payloads correctly.
 pub fn expand_file(file: &mut File) {
-    expand_items(&mut file.items);
+    let shapes = collect_record_shapes(&file.items);
+    expand_items(&mut file.items, &shapes);
 }
 
-fn expand_items(items: &mut [Item]) {
+/// Collect unqualified state-name → payload fields for every flow state in `items`.
+/// First declaration wins (same rule as checker unqualified state registration).
+fn collect_record_shapes(items: &[Item]) -> HashMap<String, Vec<Field>> {
+    let mut shapes = HashMap::new();
+    collect_record_shapes_items(items, &mut shapes);
+    shapes
+}
+
+fn collect_record_shapes_items(items: &[Item], shapes: &mut HashMap<String, Vec<Field>>) {
+    for item in items {
+        match item {
+            Item::Flow(flow) => {
+                for state in &flow.states {
+                    if state.name == "Fault" {
+                        continue;
+                    }
+                    shapes
+                        .entry(state.name.clone())
+                        .or_insert_with(|| state.payload.clone().unwrap_or_default());
+                }
+            }
+            Item::Module(m) => collect_record_shapes_items(&m.items, shapes),
+            Item::Type(td) => {
+                if let TypeDefKind::Record(fields) = &td.kind {
+                    shapes
+                        .entry(td.name.clone())
+                        .or_insert_with(|| fields.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn expand_items(items: &mut [Item], shapes: &HashMap<String, Vec<Field>>) {
     for item in items.iter_mut() {
         match item {
-            Item::Flow(flow) => expand_flow(flow),
-            Item::Module(m) => expand_items(&mut m.items),
+            Item::Flow(flow) => expand_flow_with_shapes(flow, shapes),
+            Item::Module(m) => expand_items(&mut m.items, shapes),
             _ => {}
         }
     }
@@ -30,6 +68,19 @@ fn expand_items(items: &mut [Item]) {
 /// Expand a single flow: ensure Fault exists, inject missing (state, event) → Fault,
 /// and inject system verbs `reset` / `recover` (v0.29.13) when not user-defined.
 pub fn expand_flow(flow: &mut FlowDef) {
+    // Standalone path (unit tests): only this flow's shapes are known.
+    let mut shapes = HashMap::new();
+    for state in &flow.states {
+        if state.name != "Fault" {
+            shapes
+                .entry(state.name.clone())
+                .or_insert_with(|| state.payload.clone().unwrap_or_default());
+        }
+    }
+    expand_flow_with_shapes(flow, &shapes);
+}
+
+fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
     // Always ensure Fault exists so recovery verbs have a source state.
     ensure_fault_state(flow);
 
@@ -58,7 +109,7 @@ pub fn expand_flow(flow: &mut FlowDef) {
             if defined.contains(&(state.clone(), event.clone())) {
                 continue;
             }
-            let body = fault_return_body(flow, state, event);
+            let body = fault_return_body(flow, state, event, shapes);
             fallbacks.push(TransitionDef {
                 name: event.clone(),
                 from_state: state.clone(),
@@ -73,7 +124,7 @@ pub fn expand_flow(flow: &mut FlowDef) {
     flow.transitions.extend(fallbacks);
 
     // v0.29.13: inject reset / recover from Fault → root state.
-    inject_system_verbs(flow);
+    inject_system_verbs(flow, shapes);
 }
 
 /// Root (initial) state of a flow: first non-Fault declared state.
@@ -86,7 +137,12 @@ fn root_state_name(flow: &FlowDef) -> Option<String> {
 
 /// Build `return Root { fields... }` using defaults, overlaying `self.<persistent>`
 /// when `keep_persistent` is true (recover path).
-fn rebuild_root_body(flow: &FlowDef, root: &str, keep_persistent: bool) -> Block {
+fn rebuild_root_body(
+    flow: &FlowDef,
+    root: &str,
+    keep_persistent: bool,
+    shapes: &HashMap<String, Vec<Field>>,
+) -> Block {
     let fields = flow
         .states
         .iter()
@@ -100,7 +156,7 @@ fn rebuild_root_body(flow: &FlowDef, root: &str, keep_persistent: bool) -> Block
                         // Pull surviving value off the Fault payload (shadowed there).
                         Expr::Field(Box::new(Expr::Ident("self".to_string())), f.name.clone())
                     } else {
-                        default_type_value(&f.ty)
+                        default_type_value(&f.ty, shapes)
                     };
                     RecordFieldExpr {
                         name: f.name.clone(),
@@ -117,7 +173,21 @@ fn rebuild_root_body(flow: &FlowDef, root: &str, keep_persistent: bool) -> Block
     }))]
 }
 
-fn default_type_value(ty: &Type) -> Expr {
+/// Default expression for a type used by injected reset/recover/Fault bodies.
+///
+/// v0.29.17: when `ty` names a known record/state shape (including nested
+/// subflow state payloads), emit a zeroed record literal instead of unit.
+fn default_type_value(ty: &Type, shapes: &HashMap<String, Vec<Field>>) -> Expr {
+    default_type_value_depth(ty, shapes, 0)
+}
+
+const MAX_DEFAULT_NESTING: usize = 8;
+
+fn default_type_value_depth(
+    ty: &Type,
+    shapes: &HashMap<String, Vec<Field>>,
+    depth: usize,
+) -> Expr {
     match ty {
         Type::Name(n, _) if n == "string" || n == "String" => {
             Expr::Literal(Lit::String(String::new()))
@@ -127,15 +197,36 @@ fn default_type_value(ty: &Type) -> Expr {
             Expr::Literal(Lit::Float(0.0))
         }
         Type::Name(n, _) if n == "bool" || n == "Bool" => Expr::Literal(Lit::Bool(false)),
-        Type::Name(n, _) if n == "SystemTrace" => {
-            system_trace_expr("", "", "")
+        Type::Name(n, _) if n == "SystemTrace" => system_trace_expr("", "", ""),
+        Type::Name(n, _) if shapes.contains_key(n) => {
+            if depth >= MAX_DEFAULT_NESTING {
+                // Cycle / pathological depth — fall back to unit rather than stack overflow.
+                return Expr::Literal(Lit::Unit);
+            }
+            // Nested state / record payload: zero every field recursively.
+            let fields = shapes.get(n).cloned().unwrap_or_default();
+            Expr::Record {
+                ty: Some(n.clone()),
+                fields: fields
+                    .into_iter()
+                    .map(|f| RecordFieldExpr {
+                        name: f.name,
+                        value: default_type_value_depth(&f.ty, shapes, depth + 1),
+                    })
+                    .collect(),
+            }
+        }
+        Type::Name(n, args) if n == "List" || n == "list" => {
+            // Empty list default (args ignored for the empty literal).
+            let _ = args;
+            Expr::List(vec![])
         }
         _ => Expr::Literal(Lit::Unit),
     }
 }
 
 /// Inject `reset` and `recover` transitions from Fault → root when absent.
-fn inject_system_verbs(flow: &mut FlowDef) {
+fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
     let Some(root) = root_state_name(flow) else {
         return;
     };
@@ -150,7 +241,7 @@ fn inject_system_verbs(flow: &mut FlowDef) {
 
     if !has_reset {
         // reset: rebuild root from type defaults (SystemTrace destroyed by not copying).
-        let body = rebuild_root_body(flow, &root, false);
+        let body = rebuild_root_body(flow, &root, false, shapes);
         flow.transitions.push(TransitionDef {
             name: "reset".to_string(),
             from_state: "Fault".to_string(),
@@ -165,7 +256,7 @@ fn inject_system_verbs(flow: &mut FlowDef) {
         // recover: rebuild root, pulling persistent fields from Fault shadow copy.
         // When no persistent fields exist, recover == reset (still provided for API).
         let keep = !flow.persistent_fields.is_empty();
-        let body = rebuild_root_body(flow, &root, keep);
+        let body = rebuild_root_body(flow, &root, keep, shapes);
         flow.transitions.push(TransitionDef {
             name: "recover".to_string(),
             from_state: "Fault".to_string(),
@@ -279,7 +370,12 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
 
 /// Build `return Fault { ... }` matching the Fault state's payload shape.
 /// Persistent fields are shadowed from `self.<name>` so recover can restore them.
-fn fault_return_body(flow: &FlowDef, from_state: &str, event: &str) -> Block {
+fn fault_return_body(
+    flow: &FlowDef,
+    from_state: &str,
+    event: &str,
+    shapes: &HashMap<String, Vec<Field>>,
+) -> Block {
     let snapshot = format!("undefined transition {}({})", event, from_state);
     // Fields available on the from-state payload (for persistent shadowing).
     let from_fields: HashSet<String> = flow
@@ -305,7 +401,7 @@ fn fault_return_body(flow: &FlowDef, from_state: &str, event: &str) -> Block {
                         // Shadow copy from abandoned state.
                         Expr::Field(Box::new(Expr::Ident("self".to_string())), f.name.clone())
                     } else {
-                        default_field_value(&f.name, &f.ty, from_state, event, &snapshot)
+                        default_field_value(&f.name, &f.ty, from_state, event, &snapshot, shapes)
                     };
                     RecordFieldExpr {
                         name: f.name.clone(),
@@ -328,6 +424,7 @@ fn default_field_value(
     from_state: &str,
     event: &str,
     snapshot: &str,
+    shapes: &HashMap<String, Vec<Field>>,
 ) -> Expr {
     // Prefer SystemTrace semantics for well-known field names.
     match field {
@@ -353,19 +450,8 @@ fn default_field_value(
         }
         _ => {}
     }
-    match ty {
-        Type::Name(n, _) if n == "SystemTrace" => system_trace_expr(from_state, event, snapshot),
-        Type::Name(n, _) if n == "string" || n == "String" => {
-            Expr::Literal(Lit::String(String::new()))
-        }
-        Type::Name(n, _) if n == "i32" || n == "i64" || n == "Int" => Expr::Literal(Lit::Int(0)),
-        Type::Name(n, _) if n == "f32" || n == "f64" || n == "Float" => {
-            Expr::Literal(Lit::Float(0.0))
-        }
-        Type::Name(n, _) if n == "bool" || n == "Bool" => Expr::Literal(Lit::Bool(false)),
-        // Best-effort: empty unit for unknown shapes (type checker will report if bad).
-        _ => Expr::Literal(Lit::Unit),
-    }
+    // Shared path: scalars + nested record/state shapes (v0.29.17).
+    default_type_value(ty, shapes)
 }
 
 /// Build a runtime Fault value with full SystemTrace (used by panic→Fault path).
