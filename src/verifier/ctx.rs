@@ -235,6 +235,30 @@ impl SolverSession {
 
     pub fn set_params(&self, params: &z3::Params) { self.solver.set_params(params); }
 
+    /// Push, assert constraint, check, pop.
+    ///
+    /// Wraps the common push→assert→check→pop pattern used by call-site
+    /// precondition checking (both Mimi-internal calls and extern FFI calls).
+    ///
+    /// Returns the SatResult and, if Sat, the model for counterexample
+    /// extraction. The solver scope is cleaned up by pop() even on crash
+    /// (pop is a no-op when the solver was replaced during check()).
+    pub fn check_scope<T: std::borrow::Borrow<z3::ast::Bool>>(
+        &mut self,
+        constraint: T,
+    ) -> (SatResult, Option<z3::Model>) {
+        self.push();
+        self.assert(constraint);
+        let result = self.check();
+        let model = if matches!(result, SatResult::Sat) {
+            self.get_model()
+        } else {
+            None
+        };
+        self.pop();
+        (result, model)
+    }
+
     pub fn dump_smt2(&self) -> Option<String> {
         let s = self.solver.to_string();
         if s.is_empty() { None } else { Some(s) }
