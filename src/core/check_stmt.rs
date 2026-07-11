@@ -667,6 +667,20 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.check_pattern(pat, &final_ty, scopes);
+                // v0.29.49: track multi-target transition results.
+                // If the init expression is a Flow::transition() call and
+                // the transition has >1 to_states, the variable must be
+                // exhaustively matched (E0420 on direct field access).
+                if let Pattern::Variable(name) = pat {
+                    if let Some(init_expr) = init {
+                        if let Some(targets) = self.check_multi_target_transition(init_expr) {
+                            if targets.len() > 1 {
+                                self.multi_target_vars
+                                    .insert(name.clone(), targets);
+                            }
+                        }
+                    }
+                }
                 // v0.29.19: seed session residual for SessionChan<S> bindings.
                 if let (Pattern::Variable(name), Type::Name(n, args)) = (pat, &final_ty) {
                     if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
@@ -1355,5 +1369,44 @@ impl<'a> Checker<'a> {
                 self.in_pinned_depth = self.in_pinned_depth.saturating_sub(1);
             }
         }
+    }
+
+    /// v0.29.49: Check if an expression is a Flow::transition() call and
+    /// return the list of target state types if the transition has >1 to_states.
+    /// Returns None if not a multi-target transition call.
+    fn check_multi_target_transition(&self, expr: &Expr) -> Option<Vec<Type>> {
+        // C::go(s) is parsed as Expr::Call(Expr::Field(Expr::Ident("C"), "go"), [s])
+        if let Expr::Call(callee, _) = expr {
+            if let Expr::Field(obj, method) = callee.as_ref() {
+                if let Expr::Ident(flow_name) = obj.as_ref() {
+                    // Look up all transitions for this flow+method
+                    let mut targets: Vec<String> = Vec::new();
+                    for item in &self.file.items {
+                        if let crate::ast::Item::Flow(f) = item {
+                            if f.name == *flow_name {
+                                for t in &f.transitions {
+                                    if t.name == *method {
+                                        for ts in &t.to_states {
+                                            if !targets.contains(ts) {
+                                                targets.push(ts.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if targets.len() > 1 {
+                        return Some(
+                            targets
+                                .iter()
+                                .map(|s| Type::Name(s.clone(), vec![]))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        None
     }
 }

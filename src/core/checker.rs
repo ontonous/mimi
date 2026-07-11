@@ -75,6 +75,11 @@ pub(crate) struct Checker<'a> {
     /// is not used for return validation — each return is checked against all
     /// allowed types.
     pub(crate) flow_return_targets: Vec<Type>,
+    /// v0.29.49: variables bound to multi-target transition results.
+    /// Maps variable name -> list of possible target state types.
+    /// Direct field access on these variables is rejected (E0420) —
+    /// the caller must use match to handle all possible states.
+    pub(crate) multi_target_vars: HashMap<String, Vec<Type>>,
     /// Declared session types: name → body (v0.29.19).
     pub(crate) session_types: HashMap<String, crate::ast::SessionType>,
     /// Residual protocol for variables typed as `SessionChan<S>` within the
@@ -127,6 +132,7 @@ impl<'a> Checker<'a> {
             const_types: HashMap::new(),
             current_ret: None,
             flow_return_targets: Vec::new(),
+            multi_target_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
             view_params: std::collections::HashSet::new(),
