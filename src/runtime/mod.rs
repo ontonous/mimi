@@ -6748,6 +6748,10 @@ unsafe impl Sync for MimiActorRepr {}
 
 /// Global atomic counter for unique actor IDs.
 static ACTOR_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// v0.29.24: process-wide max children (0 = unlimited).
+static ACTOR_SPAWN_MAX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// v0.29.24: number of actors successfully spawned (not yet dropped).
+static ACTOR_SPAWN_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Thread-local: the ID of the actor whose worker thread we are currently
 // executing on, or 0 if not on an actor worker thread.  Used for self-call
@@ -6787,6 +6791,15 @@ pub extern "C" fn mimi_actor_spawn(
 ) -> *mut std::ffi::c_void {
     if fields_ptr.is_null() || dispatch_fn.is_none() {
         return std::ptr::null_mut();
+    }
+
+    // v0.29.24: spawn quota (0 max = unlimited).
+    let max = ACTOR_SPAWN_MAX.load(std::sync::atomic::Ordering::Acquire);
+    if max > 0 {
+        let count = ACTOR_SPAWN_COUNT.load(std::sync::atomic::Ordering::Acquire);
+        if count >= max {
+            return std::ptr::null_mut(); // QuotaExceeded
+        }
     }
 
     let id = ACTOR_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -6894,8 +6907,10 @@ pub extern "C" fn mimi_actor_spawn(
         muted,
     });
 
+    ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     Box::into_raw(repr) as *mut std::ffi::c_void
 }
+
 
 /// Get the actor ID from a handle. Used by codegen for self-call detection.
 #[no_mangle]
@@ -7039,6 +7054,12 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
     if handle.is_null() {
         return;
     }
+    // v0.29.24: free a spawn slot.
+    let _ = ACTOR_SPAWN_COUNT.fetch_update(
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+        |v| Some(v.saturating_sub(1)),
+    );
     // SAFETY: `handle` was created by `mimi_actor_spawn` as a `Box<MimiActorRepr>`.
     // We take ownership back and drop it, which closes the mailbox sender,
     // causing the worker's `recv()` to return `Err` and exit.
@@ -7122,6 +7143,25 @@ pub extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
     } else {
         0
     }
+}
+
+/// v0.29.24: set process-wide max children (0 = unlimited).
+#[no_mangle]
+pub extern "C" fn mimi_actor_set_max_children(max: i64) {
+    let v = if max <= 0 { 0 } else { max as u64 };
+    ACTOR_SPAWN_MAX.store(v, std::sync::atomic::Ordering::Release);
+}
+
+/// v0.29.24: current live actor spawn count.
+#[no_mangle]
+pub extern "C" fn mimi_actor_spawn_count() -> i64 {
+    ACTOR_SPAWN_COUNT.load(std::sync::atomic::Ordering::Acquire) as i64
+}
+
+/// v0.29.24: configured max children (0 = unlimited).
+#[no_mangle]
+pub extern "C" fn mimi_actor_max_children() -> i64 {
+    ACTOR_SPAWN_MAX.load(std::sync::atomic::Ordering::Acquire) as i64
 }
 
 // =========================================================================

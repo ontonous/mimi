@@ -111,6 +111,11 @@ pub struct Interpreter<'a> {
     actor_index: HashMap<String, ActorDef>,
     /// Flow definitions: flow_name -> FlowDef
     flow_index: HashMap<String, FlowDef>,
+    /// v0.29.24: process-wide max children (None = unlimited).
+    /// Taken from first `@max_children(N)` flow annotation in the file.
+    max_children: Option<usize>,
+    /// v0.29.24: number of actors spawned by this interpreter process.
+    spawn_count: usize,
     /// v0.29.14: per-flow persistent-payload transaction state.
     /// Keyed by flow name. Snapshotted at turn entry; committed on success /
     /// used for dirty detection + WAL restore on Fault.
@@ -183,6 +188,14 @@ impl<'a> Interpreter<'a> {
         Self::build_func_index(&file.items, &mut func_index);
         Self::build_actor_index(&file.items, &mut actor_index);
         Self::build_flow_index(&file.items, &mut flow_index);
+        // v0.29.24: first `@max_children(N)` among flows sets process spawn quota.
+        let max_children = flow_index
+            .values()
+            .flat_map(|f| f.annotations.iter())
+            .find_map(|a| match a {
+                crate::ast::FlowAnnotation::MaxChildren(n) => Some(*n),
+                _ => None,
+            });
         Self {
             file,
             scope_env: ScopeEnv::new(),
@@ -213,6 +226,8 @@ impl<'a> Interpreter<'a> {
             func_index,
             actor_index,
             flow_index,
+            max_children,
+            spawn_count: 0,
             flow_tx: HashMap::new(),
             globals: HashMap::new(),
             cli_args: Vec::new(),

@@ -403,6 +403,52 @@ impl<'a> Interpreter<'a> {
             )),
         }
     }
+
+    // ----- Spawn quota (v0.29.24) -----
+
+    pub(crate) fn builtin_actor_set_max_children(
+        &mut self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new(
+                "actor_set_max_children expects 1 argument (max, 0 = unlimited)",
+            ));
+        }
+        let n = match &args[0] {
+            Value::Int(x) if *x <= 0 => None,
+            Value::Int(x) => Some(*x as usize),
+            _ => {
+                return Err(InterpError::new(
+                    "actor_set_max_children expects i64",
+                ))
+            }
+        };
+        self.set_max_children(n);
+        // Keep runtime counter in sync for dual-backend / mixed paths.
+        crate::runtime::mimi_actor_set_max_children(n.map(|x| x as i64).unwrap_or(0));
+        Ok(Value::Unit)
+    }
+
+    pub(crate) fn builtin_actor_spawn_count(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if !args.is_empty() {
+            return Err(InterpError::new("actor_spawn_count expects 0 arguments"));
+        }
+        Ok(Value::Int(self.spawn_count as i64))
+    }
+
+    pub(crate) fn builtin_actor_max_children(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if !args.is_empty() {
+            return Err(InterpError::new("actor_max_children expects 0 arguments"));
+        }
+        Ok(Value::Int(self.max_children.map(|n| n as i64).unwrap_or(0)))
+    }
 }
 
 /// Helper: extract the i64 payload of a Value::Int as a runtime handle id.

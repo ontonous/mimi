@@ -1,0 +1,25 @@
+// MCDD real_world: Spawn quota @max_children (v0.29.24)
+// Process-wide spawn limit from flow annotation; over-quota → QuotaExceeded.
+
+flow Controller {
+    @max_children(2)
+    state Ready
+    transition start(Ready) -> Ready {
+        do { return Ready { } }
+    }
+}
+
+actor Worker {
+    id: i32
+    func get() -> i32 {
+        self.id
+    }
+}
+
+func main() -> i32 {
+    println(actor_max_children())
+    let a = Worker.spawn()
+    let b = Worker.spawn()
+    println(actor_spawn_count())
+    0
+}

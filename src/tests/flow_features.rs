@@ -3103,3 +3103,101 @@ func main() -> i32 { 0 }
     let err = check_source(src);
     assert!(err.is_err(), "expected drop under view to fail");
 }
+
+// ── v0.29.24 Spawn quota (@max_children) ───────────────────────────────
+
+#[test]
+fn spawn_quota_parse_max_children() {
+    let src = r#"
+flow Parent {
+    @max_children(3)
+    state Idle
+}
+"#;
+    let file = parse(src);
+    match &file.items[0] {
+        Item::Flow(f) => {
+            assert!(
+                f.annotations.iter().any(|a| matches!(a, FlowAnnotation::MaxChildren(3))),
+                "got {:?}",
+                f.annotations
+            );
+        }
+        _ => panic!("expected Flow"),
+    }
+}
+
+#[test]
+fn spawn_quota_within_limit_dual_backend() {
+    let src = r#"
+flow Parent {
+    @max_children(2)
+    state Idle
+    transition go(Idle) -> Idle { do { return Idle { } } }
+}
+actor Worker {
+    n: i32
+    func get() -> i32 { self.n }
+}
+func main() -> i32 {
+    println(actor_max_children())
+    let a = Worker.spawn()
+    let b = Worker.spawn()
+    println(actor_spawn_count())
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "2\n2");
+}
+
+#[test]
+fn spawn_quota_exceeded_runtime_error() {
+    let src = r#"
+flow Parent {
+    @max_children(1)
+    state Idle
+    transition go(Idle) -> Idle { do { return Idle { } } }
+}
+actor Worker {
+    n: i32
+    func get() -> i32 { self.n }
+}
+func main() -> i32 {
+    let a = Worker.spawn()
+    let b = Worker.spawn()
+    0
+}
+"#;
+    let err = run_source_result(src);
+    assert!(err.is_err(), "expected QuotaExceeded");
+    let msg = err.unwrap_err();
+    assert!(
+        msg.contains("QuotaExceeded") || msg.contains("max_children"),
+        "got {}",
+        msg
+    );
+}
+
+#[test]
+fn spawn_quota_set_builtin_dual_backend() {
+    let src = r#"
+actor Worker {
+    n: i32
+    func get() -> i32 { self.n }
+}
+func main() -> i32 {
+    actor_set_max_children(1)
+    println(actor_max_children())
+    let a = Worker.spawn()
+    println(actor_spawn_count())
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "1\n1");
+}

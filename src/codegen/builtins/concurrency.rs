@@ -730,4 +730,52 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.context.i64_type().const_int(0, false),
         ))
     }
+
+    /// v0.29.24: actor_set_max_children(n) — 0 = unlimited.
+    pub(super) fn compile_actor_set_max_children(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.is_empty() {
+            return Err("actor_set_max_children expects 1 argument".into());
+        }
+        let func = self
+            .module
+            .get_function("mimi_actor_set_max_children")
+            .ok_or("mimi_actor_set_max_children not declared")?;
+        self.builder
+            .build_call(func, &[args[0]], "actor_set_max_children")
+            .map_err(|e| format!("actor_set_max_children error: {}", e))?;
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
+    }
+
+    pub(super) fn compile_actor_spawn_count(
+        &self,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let func = self
+            .module
+            .get_function("mimi_actor_spawn_count")
+            .ok_or("mimi_actor_spawn_count not declared")?;
+        let result = self
+            .builder
+            .build_call(func, &[], "actor_spawn_count")
+            .map_err(|e| format!("actor_spawn_count error: {}", e))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_actor_spawn_count returned void")?)
+    }
+
+    pub(super) fn compile_actor_max_children(
+        &self,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let func = self
+            .module
+            .get_function("mimi_actor_max_children")
+            .ok_or("mimi_actor_max_children not declared")?;
+        let result = self
+            .builder
+            .build_call(func, &[], "actor_max_children")
+            .map_err(|e| format!("actor_max_children error: {}", e))?;
+        Ok(call_try_basic_value(&result).ok_or("mimi_actor_max_children returned void")?)
+    }
 }

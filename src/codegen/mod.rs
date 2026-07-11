@@ -266,6 +266,8 @@ pub struct CodeGenerator<'ctx> {
     /// Flow definitions keyed by flow name — used to compile transitions
     /// as ordinary functions and dispatch `Flow::transition(...)` calls.
     flow_defs: HashMap<String, crate::ast::FlowDef>,
+    /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
+    max_children: Option<usize>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -365,6 +367,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             actor_defs: HashMap::new(),
             // v0.29.9 flow transitions
             flow_defs: HashMap::new(),
+            max_children: None,
         }
     }
 
