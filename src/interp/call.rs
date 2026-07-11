@@ -413,7 +413,8 @@ impl<'a> Interpreter<'a> {
             "channel_try_recv" => self.builtin_channel_try_recv(args),
             "channel_drop" => self.builtin_channel_drop(args),
             "session_send" | "session_close" => Ok(Value::Unit),
-            "session_recv" | "session_open" => Ok(Value::Int(0)),
+            "session_pair" => self.builtin_session_pair(args),
+
             "actor_mailbox_depth" => self.builtin_actor_mailbox_depth(args),
             "actor_is_muted" => self.builtin_actor_is_muted(args),
             "actor_set_mailbox_depth" => self.builtin_actor_set_mailbox_depth(args),

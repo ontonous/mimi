@@ -3,6 +3,7 @@ use super::*;
 pub(crate) mod alloc;
 pub(crate) mod cinterop;
 pub(crate) mod concurrency;
+mod session;
 pub(crate) mod convert;
 pub(crate) mod env;
 pub(crate) mod hof;

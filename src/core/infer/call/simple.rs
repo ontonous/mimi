@@ -729,13 +729,14 @@ impl<'a> Checker<'a> {
                 return self.check_session_close(args, scopes);
             }
             "session_open" => {
-                // session_open::<S>() / session_open() — returns SessionChan residual S.
-                // Track residual when assigned to a variable (via let + pattern).
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                // Without turbofish we cannot know S; return opaque SessionChan.
+                // session_open::<S>() returns SessionChan residual S.
+                for a in args { self.infer_expr(a, scopes); }
                 return Type::Name("SessionChan".into(), vec![]);
+            }
+            "session_pair" => {
+                // session_pair() -> List<i64> (two channel handles).
+                for a in args { self.infer_expr(a, scopes); }
+                return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
             "print" => {
                 for a in args {

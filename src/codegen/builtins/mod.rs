@@ -1395,7 +1395,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "mutex_unlock" | "mutex_drop"
         | "channel_new" | "channel_send" | "channel_recv"
         | "channel_try_recv" | "channel_drop"
-        | "session_send" | "session_recv" | "session_close" | "session_open"
+        | "session_send" | "session_recv" | "session_close" | "session_open" | "session_pair"
         | "actor_mailbox_depth" | "actor_is_muted" | "actor_set_mailbox_depth"
         | "actor_set_max_children" | "actor_spawn_count" | "actor_max_children"
         | "broadcast"
@@ -1660,7 +1660,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "session_send" | "session_close" => {
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
-            "session_recv" | "session_open" => {
+            "session_open" | "session_pair" => self.compile_session_open(args),
+            "session_recv" => {
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
             "actor_mailbox_depth" => self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth"),
@@ -1990,6 +1991,9 @@ fn register_actor_concurrency_rt<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     // v0.29.25 broadcast
+    module.add_function("mimi_session_pair", i64.fn_type(&[], false), Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_session_lo", i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false), Some(inkwell::module::Linkage::External));
+    module.add_function("mimi_session_hi", i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false), Some(inkwell::module::Linkage::External));
     module.add_function(
         "mimi_actor_set_method_names",
         void.fn_type(
