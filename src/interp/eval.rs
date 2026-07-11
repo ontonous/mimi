@@ -275,16 +275,36 @@ impl<'a> Interpreter<'a> {
                             kind
                         )));
                     }
-                    match kind {
-                        DelegateKind::View => drop(val),
-                        DelegateKind::Mutate => {
-                            // Mutate: write the (possibly modified) value back.
-                            writeback_delegate_result(expr, val, self)?;
+                    // v0.29.47: Actually dispatch to the actor's mailbox.
+                    // If the actor is muted/overloaded, return ChannelOverloaded
+                    // (white-paper §2.2: "Result::Err(ChannelOverloaded)").
+                    let method_name = match kind {
+                        DelegateKind::View => "__delegate_view",
+                        DelegateKind::Mutate => "__delegate_mutate",
+                        DelegateKind::Consume => "__delegate_consume",
+                    };
+                    match handle.try_enqueue(method_name.to_string(), vec![val.clone()]) {
+                        Ok(rx) => {
+                            let result = rx.recv().map_err(|_| {
+                                InterpError::new("delegate: actor worker terminated")
+                            })??;
+                            match kind {
+                                DelegateKind::View => drop(val),
+                                DelegateKind::Mutate | DelegateKind::Consume => {
+                                    writeback_delegate_result(expr, result, self)?;
+                                }
+                            }
                         }
-                        DelegateKind::Consume => {
-                            // Consume: actor returns a replacement.
-                            // For now, pass-through.
-                            writeback_delegate_result(expr, val, self)?;
+                        Err(e) => {
+                            // v0.29.47: ChannelOverloaded — mailbox full or TTL expired.
+                            let msg = format!("{}", e);
+                            if msg.contains("TTL") || msg.contains("muted") || msg.contains("backpressure") {
+                                return Err(InterpError::new(format!(
+                                    "ChannelOverloaded: delegate target mailbox full — {}",
+                                    msg
+                                )));
+                            }
+                            return Err(e);
                         }
                     }
                 } else if is_closure {
