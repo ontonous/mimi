@@ -310,10 +310,11 @@ impl<'a> Interpreter<'a> {
                 timeout,
                 ..
             } => {
-                // v0.29.27: evaluate timeout first. timeout <= 0 is a cooperative
-                // watchdog expiry → ContractViolation (absorbed as Fault in transitions).
-                // Positive timeout is recorded but wall-clock OS kill is deferred.
-                if let Some(to_expr) = timeout {
+                // v0.29.32: cooperative wall-clock timeout watchdog.
+                // timeout <= 0 → immediate ContractViolation (absorbed as Fault).
+                // timeout > 0 → record wall-clock start, execute body, then check
+                // elapsed. If elapsed > timeout → ContractViolation → Fault.
+                let _pinned_timeout_ms: Option<i64> = if let Some(to_expr) = timeout {
                     let tv = self.eval_expr(to_expr)?;
                     let ms = match tv {
                         Value::Int(n) => n,
@@ -329,7 +330,19 @@ impl<'a> Interpreter<'a> {
                             ms
                         )));
                     }
-                }
+                    Some(ms)
+                } else {
+                    None
+                };
+                // Record start timestamp for cooperative expiry check.
+                let _pinned_start_ms: i64 = if _pinned_timeout_ms.is_some() {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 let val = self.eval_expr(expr)?;
                 // Bind the pinned variable in a nested scope for the body
                 self.scope_env.push_scope();
@@ -338,6 +351,20 @@ impl<'a> Interpreter<'a> {
                 }
                 let body_res = self.eval_block(body);
                 self.scope_env.pop_scope();
+                // v0.29.32: cooperative wall-clock expiry check after body.
+                if let Some(to_ms) = _pinned_timeout_ms {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(_pinned_start_ms);
+                    let elapsed = now_ms - _pinned_start_ms;
+                    if elapsed > to_ms {
+                        return Err(InterpError::contract_violation(format!(
+                            "pinned timeout expired ({}ms > {}ms): FFI anchor watchdog",
+                            elapsed, to_ms
+                        )));
+                    }
+                }
                 if let Some(v) = body_res? {
                     return Ok(Some(v));
                 }

@@ -745,15 +745,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     var,
                     body,
                 } => {
-                    // v0.29.27: cooperative timeout watchdog.
-                    // timeout <= 0 → mimi_runtime_abort (OS kill deferred).
-                    // Positive timeout is accepted; wall-clock expiry deferred.
-                    if let Some(to_expr) = timeout {
+                    // v0.29.32: cooperative wall-clock timeout watchdog.
+                    // timeout <= 0 → mimi_runtime_abort (immediate).
+                    // timeout > 0 → record start ms, run body, check elapsed.
+                    let _pinned_to_i64: Option<inkwell::values::IntValue> = if let Some(to_expr) = timeout {
                         let to_val = self.compile_expr(to_expr, vars)?;
                         let to_iv = match to_val {
                             inkwell::values::BasicValueEnum::IntValue(iv) => iv,
                             other => {
-                                // coerce via i64 if possible
                                 return Err(CompileError::TypeMismatch(format!(
                                     "pinned timeout must be integer, got {:?}",
                                     other
@@ -797,18 +796,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "pin_to_msg",
                             )
                             .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
-                        let abort_fn = self.module.get_function("mimi_runtime_abort").unwrap_or_else(|| {
-                            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let ty = self.context.void_type().fn_type(
-                                &[inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr)],
-                                false,
-                            );
-                            self.module.add_function(
-                                "mimi_runtime_abort",
-                                ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
+                        let abort_fn = self.get_or_declare_abort_fn();
                         self.builder
                             .build_call(
                                 abort_fn,
@@ -822,7 +810,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_unreachable()
                             .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
                         self.builder.position_at_end(ok_bb);
-                    }
+                        Some(to_i64)
+                    } else {
+                        None
+                    };
+                    // v0.29.32: record wall-clock start before body.
+                    let _pinned_start = if _pinned_to_i64.is_some() {
+                        let wc_fn = self.get_or_declare_wall_clock_fn();
+                        let start = self.builder
+                            .build_call(wc_fn, &[], "pin_start_ms")
+                            .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
+                        Some(call_try_basic_value(&start).unwrap().into_int_value())
+                    } else {
+                        None
+                    };
                     // Evaluate pinned expression, bind optional |var|, run body.
                     // (Implicit Active→FFI_Pinned→Active: body is the pinned region.)
                     let val = self.compile_expr(expr, vars)?;
@@ -833,6 +834,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                         vars.insert(v.clone(), (alloca, ty));
                     }
                     self.compile_block(body, vars)?;
+                    // v0.29.32: cooperative wall-clock expiry check after body.
+                    if let (Some(to_i64), Some(start_ms)) = (_pinned_to_i64, _pinned_start) {
+                        let wc_fn = self.get_or_declare_wall_clock_fn();
+                        let now_call = self.builder
+                            .build_call(wc_fn, &[], "pin_now_ms")
+                            .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
+                        let now_ms = call_try_basic_value(&now_call).unwrap().into_int_value();
+                        let elapsed = self.builder
+                            .build_int_sub(now_ms, start_ms, "pin_elapsed")
+                            .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;
+                        let exceeded = self.builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::SGT,
+                                elapsed,
+                                to_i64,
+                                "pin_exceeded",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                        let function = self
+                            .builder
+                            .get_insert_block()
+                            .ok_or_else(|| CompileError::LlvmError("pinned: no block".into()))?
+                            .get_parent()
+                            .ok_or_else(|| CompileError::LlvmError("pinned: no fn".into()))?;
+                        let exp_bb = self.context.append_basic_block(function, "pin_exp_abort");
+                        let cont_bb = self.context.append_basic_block(function, "pin_cont");
+                        self.builder
+                            .build_conditional_branch(exceeded, exp_bb, cont_bb)
+                            .map_err(|e| CompileError::LlvmError(format!("cbr: {}", e)))?;
+                        self.builder.position_at_end(exp_bb);
+                        let msg = self
+                            .builder
+                            .build_global_string_ptr(
+                                "pinned timeout expired: FFI anchor watchdog (cooperative)",
+                                "pin_exp_msg",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                        let abort_fn = self.get_or_declare_abort_fn();
+                        self.builder
+                            .build_call(
+                                abort_fn,
+                                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                                    msg.as_pointer_value(),
+                                )],
+                                "pin_exp_abort",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("abort: {}", e)))?;
+                        self.builder
+                            .build_unreachable()
+                            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
+                        self.builder.position_at_end(cont_bb);
+                    }
                 }
                 // Defensive wildcard: compile_block handles all current Stmt variants
                 // explicitly; this arm guards against future variants causing a

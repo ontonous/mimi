@@ -4254,6 +4254,16 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     std::process::abort();
 }
 
+/// v0.29.32: Wall-clock timestamp in milliseconds since UNIX epoch.
+/// Used by the pinned timeout watchdog to check cooperative expiry.
+#[no_mangle]
+pub extern "C" fn mimi_wall_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Capability runtime (self-contained, thread-local)
 // ---------------------------------------------------------------------------

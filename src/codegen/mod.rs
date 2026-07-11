@@ -483,6 +483,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", name)))
     }
 
+    /// v0.29.32: Get or declare the `mimi_wall_clock_ms` runtime function.
+    /// Returns i64 (milliseconds since UNIX epoch).
+    pub(super) fn get_or_declare_wall_clock_fn(
+        &self,
+    ) -> inkwell::values::FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("mimi_wall_clock_ms") {
+            return f;
+        }
+        let ty = self
+            .context
+            .i64_type()
+            .fn_type(&[], false);
+        self.module.add_function(
+            "mimi_wall_clock_ms",
+            ty,
+            Some(inkwell::module::Linkage::External),
+        )
+    }
+
+    /// v0.29.32: Get or declare `mimi_runtime_abort` (returns !).
+    pub(super) fn get_or_declare_abort_fn(
+        &self,
+    ) -> inkwell::values::FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("mimi_runtime_abort") {
+            return f;
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let ty = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+        self.module.add_function(
+            "mimi_runtime_abort",
+            ty,
+            Some(inkwell::module::Linkage::External),
+        )
+    }
+
     /// Build a call instruction and return the resulting `CallSiteValue`.
     pub(super) fn build_call(
         &self,
