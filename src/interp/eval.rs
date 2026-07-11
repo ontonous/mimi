@@ -241,7 +241,9 @@ impl<'a> Interpreter<'a> {
                 self.bind(&f.name, closure)?;
             }
             Stmt::Do(body) => {
-                self.eval_block(body)?;
+                if let Some(v) = self.eval_block(body)? {
+                    return Ok(Some(v));
+                }
             }
             Stmt::Delegate { expr, .. } => {
                 self.eval_expr(expr)?;
@@ -338,5 +340,42 @@ impl<'a> Interpreter<'a> {
                 self.cast_value(val, target_type)
             }
         }
+    }
+
+    /// Execute a flow transition call: FlowName::transition(self_payload, params...)
+    /// The first argument is the from-state payload (bound to `self`),
+    /// remaining args are the transition's event parameters.
+    pub(in crate::interp) fn eval_flow_transition(
+        &mut self,
+        _flow: &FlowDef,
+        t: &TransitionDef,
+        vals: &[Value],
+    ) -> Result<Value, InterpError> {
+        let body = t.body.as_ref().ok_or_else(|| {
+            InterpError::new(format!("transition '{}' has no body", t.name))
+        })?;
+
+        self.push_scope();
+
+        // Bind self to the first argument (from-state payload)
+        let self_val = vals.first().cloned().unwrap_or(Value::Unit);
+        self.bind("self", self_val)?;
+
+        // Bind transition params from remaining args
+        for (i, param) in t.params.iter().enumerate() {
+            let arg = vals.get(i + 1).cloned().unwrap_or(Value::Unit);
+            if param.mut_ {
+                self.bind_mut(&param.name, arg)?;
+            } else {
+                self.bind(&param.name, arg)?;
+            }
+        }
+
+        // Execute the transition body
+        let result = self.eval_block(body);
+
+        self.pop_scope();
+
+        result.map(|v| v.unwrap_or(Value::Unit))
     }
 }

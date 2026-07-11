@@ -70,6 +70,11 @@ pub(crate) struct Checker<'a> {
     /// Current function return type, used when type-checking block expressions
     /// so that `return` statements inside them are validated correctly.
     pub(crate) current_ret: Option<Type>,
+    /// For multi-target flow transitions: list of target state types that a
+    /// `return` statement is allowed to produce. When non-empty, `current_ret`
+    /// is not used for return validation — each return is checked against all
+    /// allowed types.
+    pub(crate) flow_return_targets: Vec<Type>,
 }
 
 #[allow(dead_code)]
@@ -110,6 +115,7 @@ impl<'a> Checker<'a> {
             unification: UnificationTable::new(),
             const_types: HashMap::new(),
             current_ret: None,
+            flow_return_targets: Vec::new(),
         }
     }
 

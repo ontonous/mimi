@@ -21,6 +21,23 @@ impl<'a> Checker<'a> {
             if self.use_imports.contains(module_name) {
                 return self.check_call(method_name, args, scopes);
             }
+            // Handle flow transition call: FlowName::transition(args)
+            let flow_prefix = format!("flow::{}::{}", module_name, method_name);
+            if self.funcs.contains_key(&flow_prefix) {
+                // First argument is the from-state payload (self)
+                if let Some(first_arg) = args.first() {
+                    self.infer_expr(first_arg, scopes);
+                }
+                // Infer remaining arguments
+                for arg in args.iter().skip(1) {
+                    self.infer_expr(arg, scopes);
+                }
+                // Return the transition's return type (registered in collect_item_decls)
+                if let Some((_, ret_type)) = self.funcs.get(&flow_prefix) {
+                    return ret_type.clone();
+                }
+                return Type::Name("unit".into(), vec![]);
+            }
         }
 
         let obj_ty = self.infer_expr(obj, scopes);

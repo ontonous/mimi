@@ -568,3 +568,88 @@ flow BadFlow {
         "expected type error for invalid field type"
     );
 }
+
+#[test]
+fn flow_exec_simple_transition() {
+    let src = r#"
+flow Calc {
+    state Zero { v: i32 }
+    state Value { v: i32 }
+
+    transition add(Zero, amount: i32) -> Value {
+        do {
+            return Value { v: self.v + amount }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Zero { v: 10 }
+    let r = Calc::add(s, 5)
+    r.v
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(15)));
+}
+
+#[test]
+fn flow_exec_multi_target() {
+    let src = r#"
+flow Checker {
+    state Small { v: i32 }
+    state Large { v: i32 }
+
+    transition classify(Small, amount: i32) -> Small | Large {
+        do {
+            if self.v + amount > 50 {
+                return Large { v: self.v + amount }
+            } else {
+                return Small { v: self.v + amount }
+            }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s1 = Small { v: 10 }
+    let r1 = Checker::classify(s1, 5)
+    let s2 = Small { v: 10 }
+    let r2 = Checker::classify(s2, 100)
+    r1.v + r2.v
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(125))); // 15 + 110
+}
+
+#[test]
+fn flow_exec_chain() {
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Active { count: i32 }
+    state Done
+
+    transition inc(Zero, amount: i32) -> Active {
+        do {
+            return Active { count: self.count + amount }
+        }
+    }
+    transition finish(Active) -> Done {
+        do {
+            return Done { }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Zero { count: 0 }
+    let a = Counter::inc(s, 7)
+    let _d = Counter::finish(a)
+    42
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(42)));
+}

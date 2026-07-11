@@ -535,6 +535,16 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
+                // Handle Flow::transition() - flow transition call
+                // The first argument is the from-state payload (becomes self),
+                // remaining args are the transition's event parameters.
+                if let Expr::Ident(flow_name) = obj.as_ref() {
+                    if let Some(flow) = self.find_flow(flow_name) {
+                        if let Some(t) = flow.transitions.iter().find(|t| t.name == *method) {
+                            return self.eval_flow_transition(&flow, t, &vals);
+                        }
+                    }
+                }
                 // If the object is a variable in scope, dispatch as a method call on
                 // that value. This prevents module-import fallbacks from shadowing
                 // actor/record method calls (e.g. prelude `increment` shadowing
