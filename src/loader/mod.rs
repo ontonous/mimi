@@ -441,7 +441,8 @@ pub(crate) mod legacy {
             Ok(File {
                 imports: all_imports,
                 items: all_items,
-            })
+                    implicit_single: false,
+                })
         }
     }
 

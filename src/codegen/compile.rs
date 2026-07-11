@@ -66,7 +66,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.comptime_file = Some(std::rc::Rc::new(crate::ast::File {
             imports: file.imports.clone(),
             items: file.items.clone(),
-        }));
+                    implicit_single: false,
+                }));
 
         // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
         // interpreter and cache the results so `Expr::Comptime` blocks and

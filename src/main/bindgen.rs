@@ -184,6 +184,7 @@ fn collect_extern_and_types(
                     &ast::File {
                         imports: Vec::new(),
                         items: m.items.clone(),
+                        implicit_single: false,
                     },
                     extern_funcs,
                     type_defs,
@@ -214,6 +215,7 @@ fn collect_exported_and_types(
                     &ast::File {
                         imports: Vec::new(),
                         items: m.items.clone(),
+                        implicit_single: false,
                     },
                     exported_funcs,
                     type_defs,

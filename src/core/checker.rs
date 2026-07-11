@@ -134,6 +134,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check(&mut self) -> Result<(), Vec<Diagnostic>> {
         self.collect_decls();
+        self.emit_progressive_migration_hint();
         for item in &self.file.items {
             self.check_item(item);
         }
@@ -168,6 +169,43 @@ impl<'a> Checker<'a> {
     }
 
     /// C2: Allocate a fresh type variable for inference.
+    /// v0.29.22: when a file uses explicit `flow` and still has top-level `main`,
+    /// emit a migration diagnostic (script mode is disabled).
+    pub(crate) fn emit_progressive_migration_hint(&mut self) {
+        if self.file.implicit_single {
+            return; // still in script mode — no migration needed
+        }
+        let has_user_flow = self
+            .file
+            .items
+            .iter()
+            .any(|i| matches!(i, crate::ast::Item::Flow(_)));
+        if !has_user_flow {
+            return;
+        }
+        if !crate::progressive::has_top_level_main(self.file) {
+            return;
+        }
+        let locals = crate::progressive::main_local_names(self.file);
+        let local_hint = if locals.is_empty() {
+            String::new()
+        } else {
+            let shown: Vec<_> = locals.into_iter().take(5).collect();
+            format!(
+                " Local variable(s) in main ({}) previously belonged to the implicit Single payload — declare them in your first Flow state if they must persist across transitions.",
+                shown.join(", ")
+            )
+        };
+        self.emit_warning_code(
+            crate::diagnostic::codes::W011,
+            format!(
+                "detected explicit `flow` — progressive script mode (implicit Single) is disabled.{}",
+                local_hint
+            ),
+        );
+    }
+
+
     pub(crate) fn fresh_var(&mut self) -> Type {
         let id = self.unification.fresh_var();
         Type::TypeVar(id)

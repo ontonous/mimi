@@ -4,6 +4,11 @@ use crate::span::Span;
 pub struct File {
     pub imports: Vec<Import>,
     pub items: Vec<Item>,
+    /// v0.29.22: true when this file was compiled in progressive Typestate
+    /// "script mode" — no user `flow`/`state`/`transition`, so the compiler
+    /// injected an implicit `flow Main { state Single }`. Mailbox closed,
+    /// no external events; execution remains via top-level `main`.
+    pub implicit_single: bool,
 }
 
 #[derive(Debug, Clone)]
