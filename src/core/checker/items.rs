@@ -956,12 +956,22 @@ impl<'a> Checker<'a> {
                             let resolved = self.resolve_type(&p.ty);
                             scopes[0].insert(p.name.clone(), resolved);
                         }
-                        // Use a fresh type variable as the return type so that
-                        // `return TargetState { ... }` statements type-check without
-                        // requiring a specific return type match.
-                        let fresh_var = self.unification.fresh_var();
-                        let ret_type = Type::TypeVar(fresh_var);
                         let prev_ret = self.current_ret.take();
+                        let prev_flow_targets = std::mem::take(&mut self.flow_return_targets);
+                        let ret_type: Type =
+                            if t.to_states.len() == 1 {
+                                // Use unqualified state name since record literals produce bare names
+                                Type::Name(t.to_states[0].clone(), vec![])
+                            } else {
+                                // Multi-target: validate each return against allowed types
+                                let mut allowed = Vec::new();
+                                for ts in &t.to_states {
+                                    allowed.push(Type::Name(ts.clone(), vec![]));
+                                }
+                                self.flow_return_targets = allowed;
+                                // Use unit as ret to suppress per-return unification errors
+                                Type::Name("unit".into(), vec![])
+                            };
                         self.current_ret = Some(ret_type.clone());
                         self.var_scopes.push(std::collections::HashMap::new());
                         self.cap_vars.push(std::collections::HashMap::new());
@@ -970,6 +980,7 @@ impl<'a> Checker<'a> {
                         self.cap_vars.pop();
                         self.var_scopes.pop();
                         self.current_ret = prev_ret;
+                        self.flow_return_targets = prev_flow_targets;
                     }
                 }
                 // Check impl_protocols references exist

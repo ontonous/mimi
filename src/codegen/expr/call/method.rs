@@ -284,6 +284,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_expr(&call_expr, vars);
         }
 
+        // 6. Detect flow transition calls and give a clear error
+        let flow_prefix = format!("flow::{}", obj_type);
+        if self.type_defs.keys().any(|k| k.starts_with(&flow_prefix)) {
+            return Err(CompileError::Generic(format!(
+                "flow transition '{}.{}()' cannot be compiled yet; use 'mimi run' instead",
+                obj_type, method_name
+            )));
+        }
+
         Err(CompileError::Generic(format!(
             "method '{}' not compiled for type '{}' (missing crate?)",
             method_name, obj_type

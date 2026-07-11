@@ -92,6 +92,8 @@ pub struct Interpreter<'a> {
     func_index: HashMap<String, FuncDef>,
     /// O(1) actor lookup index: name -> ActorDef
     actor_index: HashMap<String, ActorDef>,
+    /// Flow definitions: flow_name -> FlowDef
+    flow_index: HashMap<String, FlowDef>,
     /// Global constants defined at top level
     globals: HashMap<String, Value>,
     /// CLI arguments forwarded to the program
@@ -153,11 +155,13 @@ impl<'a> Interpreter<'a> {
         }
         // Expand built-in derive macros
         Self::expand_derives(&type_defs, &mut trait_defs, &mut type_impls);
-        // Build O(1) function and actor lookup indices
+        // Build O(1) function, actor, and flow lookup indices
         let mut func_index = HashMap::new();
         let mut actor_index = HashMap::new();
+        let mut flow_index = HashMap::new();
         Self::build_func_index(&file.items, &mut func_index);
         Self::build_actor_index(&file.items, &mut actor_index);
+        Self::build_flow_index(&file.items, &mut flow_index);
         Self {
             file,
             scope_env: ScopeEnv::new(),
@@ -187,6 +191,7 @@ impl<'a> Interpreter<'a> {
             recursion_depth: 0,
             func_index,
             actor_index,
+            flow_index,
             globals: HashMap::new(),
             cli_args: Vec::new(),
             cstring_registry: std::cell::RefCell::new(Vec::new()),
@@ -282,6 +287,18 @@ impl<'a> Interpreter<'a> {
                     index.insert(a.name.clone(), a.clone());
                 }
                 Item::Module(m) => Self::build_actor_index(&m.items, index),
+                _ => {}
+            }
+        }
+    }
+
+    fn build_flow_index(items: &[Item], index: &mut HashMap<String, FlowDef>) {
+        for item in items {
+            match item {
+                Item::Flow(f) => {
+                    index.insert(f.name.clone(), f.clone());
+                }
+                Item::Module(m) => Self::build_flow_index(&m.items, index),
                 _ => {}
             }
         }
@@ -877,6 +894,10 @@ impl<'a> Interpreter<'a> {
     fn find_actor(&self, name: &str) -> Option<ActorDef> {
         // O(1) lookup via pre-built index
         self.actor_index.get(name).cloned()
+    }
+
+    pub(in crate::interp) fn find_flow(&self, name: &str) -> Option<FlowDef> {
+        self.flow_index.get(name).cloned()
     }
 
     fn push_scope(&mut self) {

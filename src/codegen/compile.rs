@@ -109,6 +109,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Store const for later reference
                     self.const_values.insert(name.clone(), value.clone());
                 }
+                Item::Flow(f) => {
+                    // Register flow state payload types so record construction
+                    // (e.g. `Zero { count: 0 }`) works in function codegen.
+                    // Transition calls themselves are not supported — they will
+                    // produce a compile error at the method dispatch site.
+                    let qualified = format!("flow::{}", f.name);
+                    for s in &f.states {
+                        let type_name = format!("{}::{}", qualified, s.name);
+                        let fields = s.payload.clone().unwrap_or_default();
+                        let td = TypeDef {
+                            name: type_name.clone(),
+                            pub_: false,
+                            kind: TypeDefKind::Record(fields),
+                            generics: vec![],
+                            derives: vec![],
+                            attributes: vec![],
+                        };
+                        self.register_type_def(&td)?;
+                        // Also register unqualified name (skip built-in names like "i32")
+                        if !Self::is_builtin_type_name(&s.name)
+                            && !self.type_defs.contains_key(&s.name)
+                        {
+                            let td = TypeDef {
+                                name: s.name.clone(),
+                                pub_: false,
+                                kind: TypeDefKind::Record(s.payload.clone().unwrap_or_default()),
+                                generics: vec![],
+                                derives: vec![],
+                                attributes: vec![],
+                            };
+                            self.register_type_def(&td)?;
+                        }
+                    }
+                }
                 _ => {}
             }
             Ok(())
@@ -178,6 +212,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(())
+    }
+
+    /// Check if a name is a built-in Mimi type (should not be registered as a flow state type).
+    fn is_builtin_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit" | "char" | "Int" | "Float"
+                | "Bool" | "String" | "List" | "Option" | "Result" | "Set" | "Map"
+        )
     }
 
     /// Register built-in Record types used by builtin functions (exec, file_stat, etc.)

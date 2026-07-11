@@ -697,19 +697,43 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Return(Some(e)) => {
-                // C3: use check_expr with return type as expected
-                let t = self.check_expr(ret, e, scopes);
-                // Resolve through unification table to handle any TypeVars from C3
-                let t = self.unification.resolve(&t);
-                // C2: use unification for return type checking
-                if self.unification.unify(ret, &t).is_err() {
-                    self.errors.push(
-                        Diagnostic::error_code(
-                            crate::diagnostic::codes::E0207,
-                            format!("return type mismatch: expected {}, found {}", fmt_type(ret), fmt_type(&t)),
-                            Span::single(self.current_line, self.current_col),
-                        ).with_help("check the function's declared return type and the type of the returned expression")
-                    );
+                if self.flow_return_targets.is_empty() {
+                    // C3: use check_expr with return type as expected
+                    let t = self.check_expr(ret, e, scopes);
+                    // Resolve through unification table to handle any TypeVars from C3
+                    let t = self.unification.resolve(&t);
+                    if self.unification.unify(ret, &t).is_err() {
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0207,
+                                format!("return type mismatch: expected {}, found {}", fmt_type(ret), fmt_type(&t)),
+                                Span::single(self.current_line, self.current_col),
+                            ).with_help("check the function's declared return type and the type of the returned expression")
+                        );
+                    }
+                } else {
+                    // Multi-target flow transition: check against any allowed type
+                    let t = self.check_expr(ret, e, scopes);
+                    let t = self.unification.resolve(&t);
+                    let mut ok = false;
+                    for target in &self.flow_return_targets {
+                        if self.unification.unify(target, &t).is_ok() {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    if !ok {
+                        let types_str: Vec<String> = self.flow_return_targets.iter()
+                            .map(|t| fmt_type(t)).collect();
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0207,
+                                format!("return type mismatch: expected one of [{}], found {}",
+                                    types_str.join(", "), fmt_type(&t)),
+                                Span::single(self.current_line, self.current_col),
+                            ).with_help("the returned value must be one of the declared target states")
+                        );
+                    }
                 }
             }
             Stmt::Break(_) => {
