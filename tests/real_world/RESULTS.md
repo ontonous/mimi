@@ -1,36 +1,81 @@
 # Mimi 真实代码可用性评估结果
 
-**评估时间**：2026-07-11  
-**Mimi 版本**：0.29.26-dev  
-**最后更新**：2026-07-11  
+**评估时间**：2026-07-12  
+**Mimi 版本**：0.29.41-dev  
+**最后更新**：2026-07-12  
 **评估命令**：`python3 tests/real_world/run_suite.py` + flow dual-backend smoke  
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
-## Flow 范式 MCDD（v0.29.9–0.29.25）
+## Flow 范式 MCDD — 阶段二+三 (v0.29.9–0.29.41)
 
 | 指标 | 通过/总数 | 比例 |
 |------|----------|------|
-| flow_*.mimi 解释器 | 15 / 15 | 100% |
-| flow_*.mimi build+exec | 15 / 15 | 100% |
-| flow_*.mimi L1 双后端 stdout | 15 / 15 | 100% |
+| flow_*.mimi 解释器 | 17 / 17 | 100% |
+| flow_*.mimi build+exec | 17 / 17 | 100% |
+| flow_*.mimi L1 双后端 stdout | 17 / 17 | 100% |
 
 | 测试文件 | 解释器 | Build | 执行 | L1 | 覆盖版本 |
 |---------|--------|-------|------|----|---------|
 | flow_counter.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.9 |
 | flow_matrix_fault.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.10 |
 | flow_fault_absorb.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.11 |
-| flow_system_trace.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.12 |
+| flow_system_trace.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.12→0.29.39 |
 | flow_reset_recover.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.13–14 |
-| flow_pinned.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.16 |
+| flow_pinned.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.16→0.29.32 |
 | flow_subflow.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.17 |
-| flow_protocol.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.18 |
-| flow_session.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.19 |
+| flow_protocol.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.18→0.29.36 |
+| flow_session.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.19→0.29.34 |
 | flow_peer_fault.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.20 |
 | flow_mailbox_bp.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.21 |
 | flow_progressive.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.22 |
-| flow_view_mutate.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.23 |
+| flow_view_mutate.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.23→0.29.33 |
 | flow_spawn_quota.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.24 |
-| flow_broadcast.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.25 |
+| flow_broadcast.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.25→0.29.35 |
+| flow_actor_lifecycle.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.37 |
+| flow_test_macros.mimi | ✅ | ✅ | ✅ | ✅ | 0.29.38 |
+
+## 白皮书 38 项能力覆盖表 (v0.29.41 冻结)
+
+| # | 白皮书能力 | 实现版本 | 状态 | MCDD 测试 |
+|---|-----------|---------|------|----------|
+| 1 | Flow 声明 (state/transition) | 0.29.9 | ✅ | flow_counter.mimi |
+| 2 | 转移矩阵自动补全 (+1 兜底) | 0.29.10 | ✅ | flow_matrix_fault.mimi |
+| 3 | Fault 吸收态 + 资源析构 | 0.29.11 | ✅ | flow_fault_absorb.mimi |
+| 4 | SystemTrace 溯源 | 0.29.12 | ✅ | flow_system_trace.mimi |
+| 5 | Reset / Recover 系统动词 | 0.29.13 | ✅ | flow_reset_recover.mimi |
+| 6 | Persistent Payload 事务一致性 | 0.29.14 | ✅ | flow_reset_recover.mimi |
+| 7 | delegate view/mutate/consume | 0.29.15 | ✅ | flow_reset_recover.mimi |
+| 8 | pinned { timeout } FFI 锚定 | 0.29.16→32 | ✅ | flow_pinned.mimi |
+| 9 | Subflow 同步嵌套 | 0.29.17 | ✅ | flow_subflow.mimi |
+| 10 | Protocol 接口抽象 | 0.29.18 | ✅ | flow_protocol.mimi |
+| 11 | Session Types 骨架 | 0.29.19 | ✅ | flow_session.mimi |
+| 12 | PeerFault 跨 Actor 传播 | 0.29.20 | ✅ | flow_peer_fault.mimi |
+| 13 | Mailbox 背压自动治理 | 0.29.21 | ✅ | flow_mailbox_bp.mimi |
+| 14 | 渐进式 Typestate | 0.29.22 | ✅ | flow_progressive.mimi |
+| 15 | view/mutate 局部借用 | 0.29.23 | ✅ | flow_view_mutate.mimi |
+| 16 | Spawn 配额控制 | 0.29.24 | ✅ | flow_spawn_quota.mimi |
+| 17 | Flow 多态广播 dispatch | 0.29.25 | ✅ | flow_broadcast.mimi |
+| 18 | Session 双端运行时 | 0.29.34 | ✅ | flow_session.mimi |
+| 19 | Protocol VTable + broadcast Result | 0.29.35 | ✅ | flow_broadcast.mimi |
+| 20 | Payload 协变 + 保守投影 | 0.29.36 | ✅ | flow_protocol.mimi |
+| 21 | SystemKill 级联终止 | 0.29.37 | ✅ | flow_actor_lifecycle.mimi |
+| 22 | spawn detached 守护进程 | 0.29.37 | ✅ | flow_actor_lifecycle.mimi |
+| 23 | assert_state! 测试宏 | 0.29.38 | ✅ | flow_test_macros.mimi |
+| 24 | inject_fault! 测试宏 | 0.29.38 | ✅ | flow_test_macros.mimi |
+| 25 | MemoryDump 内存快照 | 0.29.39 | ✅ | flow_system_trace.mimi |
+| 26 | PanicPayload 结构化栈 | 0.29.39 | ✅ | flow_system_trace.mimi |
+| 27 | pinned 协作式超时看门狗 | 0.29.32 | ✅ | flow_pinned.mimi |
+| 28 | view/mutate 深层 realloc 禁 | 0.29.33 | ✅ | flow_view_mutate.mimi |
+| 29 | Session Open 通道通信 | 0.29.34 | ✅ | flow_session.mimi |
+| 30 | broadcast PeerFault sentinel | 0.29.35 | ✅ | flow_broadcast.mimi |
+| 31 | E0418 保守投影拒绝 | 0.29.36 | ✅ | (L2 unit test) |
+| 32 | 线性类型推断 (multi-target) | 0.29.40 | ✅ | (L2 unit test) |
+| 33 | Session 编译期顺序检查 | 0.29.19 | ✅ | flow_session.mimi |
+| 34 | PeerFault 默认注入 | 0.29.20 | ✅ | flow_peer_fault.mimi |
+| 35 | @mailbox(depth=N) 自动应用 | 0.29.21 | ✅ | flow_mailbox_bp.mimi |
+| 36 | @max_children(N) 配额 | 0.29.24 | ✅ | flow_spawn_quota.mimi |
+| 37 | W011 渐进迁移诊断 | 0.29.22 | ✅ | flow_progressive.mimi |
+| 38 | Flow 收尾回归门禁 | 0.29.26 | ✅ | real_world_flow_dual_backend_suite |
 
 ## 历史评估（v0.28.30-era 基线）
 

@@ -1,15 +1,73 @@
 # Changelog
 
-## [Unreleased] — v0.29.26-dev
+## [Unreleased] — v0.29.41-dev (白皮书全 Feature 冻结)
 
-### Flow (v0.29.9–0.29.25 收尾)
-- **MCDD 全量回归**：`tests/real_world/flow_*.mimi` 15/15 双后端 stdout 等价。
-- **集成测试**：`real_world_flow_dual_backend_suite` + `real_world_cli` 对 `flow_*` 强制 L1 输出匹配。
-- **文档**：`tests/real_world/RESULTS.md` 增加 Flow 范式表；Cargo `0.29.26-dev`。
+### v0.29.41 — 白皮书全 Feature 冻结回归
+- **38 项白皮书能力全部覆盖**：RESULTS.md 更新为完整对照表。
+- **17 个 flow_*.mimi MCDD 测试**：100% L1 双后端 stdout 等价。
+- **218 个 flow lib 单元测试**：全绿。
+- **冻结声明**：v0.29 阶段三完成，白皮书 38 项能力全部 ✅。
 
-### Prior session (committed as 0.29.17–0.29.25)
-- Subflow / Protocol / Session skeleton / PeerFault / Mailbox BP / Progressive Typestate /
-  view-mutate / Spawn quota / polymorphic broadcast — see git log `18da18e..b3be883`.
+### v0.29.40 — 线性类型推断优化
+- **multi-target transition typecheck**：验证 `-> B | A` 多状态返回类型检查。
+- **subflow payload 消耗**：验证嵌套 subflow payload 在 transition return 中的类型推断。
+- Tests: `multi_target_transition_typecheck`, `transition_return_with_subflow_payload` (L1+L2).
+
+### v0.29.39 — MemoryDump + PanicPayload 结构化栈
+- **SystemTrace 增强**：新增 `memory_dump: MemoryDump` 和 `panic_payload: PanicPayload` 子记录。
+- **MemoryDump** `{ fields: string, count: i32 }` — 字段→值快照。
+- **PanicPayload** `{ error_type: string, file: string, line: i32, stack: string }` — 结构化栈。
+- Codegen + Checker 注册新类型。4 个现有测试更新 SystemTrace 构造。
+- MCDD `flow_system_trace.mimi` 扩展。L1 双后端。
+
+### v0.29.38 — assert_state! + inject_fault! 测试宏
+- **assert_state(flow_instance, state_name)**：验证 flow 状态记录名。interp 检查，codegen no-op。
+- **inject_fault(flow_instance)**：构造 Fault + SystemTrace。interp 实现，codegen stub。
+- Type inference: assert_state→unit, inject_fault→Fault。
+- MCDD `flow_test_macros.mimi`。3 个 L2 测试。
+
+### v0.29.37 — SystemKill + spawn detached
+- **ActorInstance** 新增 `parent_id` 和 `is_detached` 字段。
+- **system_kill_children()**：递归终止非 detached 子 Actor。
+- **Type.spawn_detached()** 语法：interp + codegen + type infer 全路径。
+- `CURRENT_ACTOR_ID` / `actor_handles()` 提升为 `pub(crate)`。
+- MCDD `flow_actor_lifecycle.mimi`。1 个 L1 测试。
+
+### v0.29.36 — Payload 协变 + 保守投影
+- **E0418** 诊断码：保守投影失败（subflow→扁平协议歧义）。
+- Protocol impl checker 新增保守投影检查：subflow 状态作为 protocol transition target → E0418。
+- Payload 协变规则文档化：view 协变，mutate 不变。
+- 2 个 L2 测试。
+
+### v0.29.35 — Protocol VTable + broadcast Result
+- **PeerFault sentinel -1**：broadcast 失败槽返回 -1（区别于 0 结果）。
+- Runtime `mimi_broadcast`：null/unknown-method/call-failed 均返回 -1。
+- Interp `builtin_broadcast`：PeerFault 标准化为 -1，非 i64 结果强制为 0。
+- MCDD `flow_broadcast.mimi` 扩展。1 个 L1 测试。
+
+### v0.29.34 — Session 双端运行时
+- **session_send/recv/close** interp 实际调用 `mimi_channel_send/recv/drop`（之前返回 Unit stub）。
+- **session_recv** 添加到 interp dispatch（之前完全缺失）。
+- Codegen `compile_session_send/recv/close` 添加（之前返回 const 0）。
+- `session_pair` interp 委托 `mimi_session_pair`（交叉连接通道）。
+- Type infer：session_recv 在 i64 handle 上返回 i32（runtime 模式）。
+- MCDD `flow_session.mimi` 实际 send/recv/close。L1 双后端：10\n11。
+
+### v0.29.33 — view/mutate 深层 realloc 禁
+- **E0417 启发式扩展**：`Expr::List` 和 `Expr::Record` 在 mutate 参数上被拒绝（深层 realloc）。
+- 之前仅捕获 literal 和 unrelated-ident RHS。
+- 3 个测试（L2 reject + L1 no-regression）。
+
+### v0.29.32 — pinned 协作式超时看门狗
+- **Interpreter**：记录 wall-clock start，body 后检查 elapsed > timeout → ContractViolation → Fault。
+- **Codegen**：调用 `mimi_wall_clock_ms()` before/after body，比较 elapsed。
+- **Runtime**：新增 `mimi_wall_clock_ms()` extern 返回 i64 ms since epoch。
+- Codegen helpers: `get_or_declare_wall_clock_fn` / `get_or_declare_abort_fn`。
+- block.rs + func.rs pinned arms 同步更新。
+- MCDD `flow_pinned.mimi` 扩展。2 个 L1 测试。
+
+### v0.29.26–0.29.31 — 阶段二收尾 (已发布)
+- 详见 git log `c4e6cb1..3e1a1d0`。
 
 ## [Unreleased] — v0.28.30-dev
 
