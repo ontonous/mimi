@@ -100,6 +100,7 @@ fn mimi_build_and_run(src_path: &std::path::Path) -> Result<String, String> {
         .map_err(|e| format!("failed to run compiled binary: {}", e))?;
     let run_stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     let run_stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+    let _ = fs::remove_file(&binary);
     if !run_output.status.success() {
         return Err(format!(
             "compiled binary exited with {}\nstdout:\n{}\nstderr:\n{}",
@@ -343,4 +344,61 @@ fn real_world_csv_module() {
     "#,
         "[[a, b], [c, d]]\nb\nc",
     );
+}
+
+// ===================== Flow paradigm MCDD (v0.29.9–0.29.25) =====================
+
+/// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
+///
+/// Requires `cc` for the codegen path. Compares normalized stdout so L1
+/// equivalence is enforced (not just exit code 0).
+#[test]
+fn real_world_flow_dual_backend_suite() {
+    if !can_link() {
+        eprintln!("SKIP real_world_flow_dual_backend_suite: cc not available");
+        return;
+    }
+    let root = project_root().join("tests").join("real_world");
+    let mut sources: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("read tests/real_world")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|ext| ext == "mimi")
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with("flow_"))
+        })
+        .collect();
+    sources.sort();
+    assert!(
+        !sources.is_empty(),
+        "expected at least one flow_*.mimi under tests/real_world"
+    );
+
+    let mut failures = Vec::new();
+    for src in &sources {
+        let name = src.file_name().unwrap().to_string_lossy().to_string();
+        eprintln!("flow dual-backend: {name}");
+        match (mimi_run(src), mimi_build_and_run(src)) {
+            (Ok(i), Ok(c)) => {
+                let i = i.trim_end();
+                let c = c.trim_end();
+                if i != c {
+                    failures.push(format!(
+                        "{name}: L1 mismatch\n  interp: {i:?}\n  codegen: {c:?}"
+                    ));
+                }
+            }
+            (Err(e), _) => failures.push(format!("{name}: interp failed: {e}")),
+            (_, Err(e)) => failures.push(format!("{name}: codegen failed: {e}")),
+        }
+    }
+    if !failures.is_empty() {
+        panic!(
+            "{} flow dual-backend failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 }

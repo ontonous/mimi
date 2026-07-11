@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] — v0.29.26-dev
+
+### Flow (v0.29.9–0.29.25 收尾)
+- **MCDD 全量回归**：`tests/real_world/flow_*.mimi` 15/15 双后端 stdout 等价。
+- **集成测试**：`real_world_flow_dual_backend_suite` + `real_world_cli` 对 `flow_*` 强制 L1 输出匹配。
+- **文档**：`tests/real_world/RESULTS.md` 增加 Flow 范式表；Cargo `0.29.26-dev`。
+
+### Prior session (committed as 0.29.17–0.29.25)
+- Subflow / Protocol / Session skeleton / PeerFault / Mailbox BP / Progressive Typestate /
+  view-mutate / Spawn quota / polymorphic broadcast — see git log `18da18e..b3be883`.
+
 ## [Unreleased] — v0.28.30-dev
 
 ### Docs
