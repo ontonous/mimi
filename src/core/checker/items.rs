@@ -83,6 +83,28 @@ impl<'a> Checker<'a> {
             };
             self.types.insert("StatResult".to_string(), td);
         }
+        // v0.29.20 PeerFault — link-disconnect event payload (peer actor faulted).
+        // { peer_id: string, reason: string }
+        if !self.types.contains_key("PeerFault") {
+            let td = TypeDef {
+                name: "PeerFault".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field {
+                        name: "peer_id".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "reason".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("PeerFault".to_string(), td);
+        }
         // v0.29.12 SystemTrace — structured Fault crash context
         // { last_state_name: string, unexpected_event: string, snapshot: string }
         if !self.types.contains_key("SystemTrace") {

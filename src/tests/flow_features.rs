@@ -2662,3 +2662,129 @@ func main() -> i32 { 0 }
 "#;
     assert!(check_source(src).is_ok(), "dual: {:?}", check_source(src));
 }
+
+// ── v0.29.20 PeerFault cross-Actor propagation ────────────────────────
+
+#[test]
+fn flow_peer_fault_injected_default_cascade() {
+    // Unhandled peer_fault(State) is injected → Fault with SystemTrace.
+    let src = r#"
+flow Node {
+    state Live { n: i32 }
+    transition work(Live) -> Live {
+        do { return Live { n: self.n + 1 } }
+    }
+}
+func main() -> i32 {
+    let s = Live { n: 1 }
+    let f = Node::peer_fault(s)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "Live\npeer_fault");
+}
+
+#[test]
+fn flow_peer_fault_user_self_loop_not_overridden() {
+    // Explicit peer_fault self-loop breaks the cascade (user-defined wins).
+    let src = r#"
+flow Node {
+    state Active { n: i32 }
+    transition peer_fault(Active) -> Active {
+        do { return Active { n: self.n + 10 } }
+    }
+}
+func main() -> i32 {
+    let s = Active { n: 5 }
+    let t = Node::peer_fault(s)
+    println(t.n)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "15");
+}
+
+#[test]
+fn flow_peer_fault_user_recovering_target() {
+    // User handles peer_fault → Recovering (not Fault).
+    let src = r#"
+flow Node {
+    state Active { n: i32 }
+    state Recovering { n: i32 }
+    transition peer_fault(Active) -> Recovering {
+        do { return Recovering { n: self.n } }
+    }
+}
+func main() -> i32 {
+    let s = Active { n: 3 }
+    let r = Node::peer_fault(s)
+    println(r.n)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "3");
+}
+
+#[test]
+fn flow_peer_fault_record_constructible() {
+    // PeerFault builtin record type is available.
+    let src = r#"
+func main() -> i32 {
+    let pf = PeerFault { peer_id: "peer-7", reason: "disconnect" }
+    println(pf.peer_id)
+    println(pf.reason)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "peer-7\ndisconnect");
+}
+
+#[test]
+fn flow_parse_peer_fault_injection() {
+    let src = r#"
+flow N {
+    state A
+    state B
+    transition go(A) -> B { do { return B { } } }
+}
+"#;
+    let file = parse(src);
+    let f = match &file.items[0] {
+        Item::Flow(f) => f,
+        _ => panic!("expected Flow"),
+    };
+    // peer_fault injected for A and B (not Fault)
+    let pf: Vec<_> = f
+        .transitions
+        .iter()
+        .filter(|t| t.name == "peer_fault")
+        .collect();
+    assert!(
+        pf.iter().any(|t| t.from_state == "A" && t.to_states == vec!["Fault".to_string()] && t.is_fallback),
+        "A.peer_fault → Fault missing: {:?}",
+        pf
+    );
+    assert!(
+        pf.iter().any(|t| t.from_state == "B" && t.is_fallback),
+        "B.peer_fault missing"
+    );
+    // Fault state itself should not get peer_fault injection (only non-Fault)
+    assert!(
+        !pf.iter().any(|t| t.from_state == "Fault"),
+        "Fault must not receive peer_fault injection"
+    );
+}

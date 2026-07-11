@@ -369,6 +369,11 @@ pub struct ActorInstance {
     /// short-circuits (O(1)) while this is true — messages are dropped without
     /// waking business logic.
     pub faulted: bool,
+    /// v0.29.20: peer actor ids linked for PeerFault propagation.
+    /// When this actor faults, each peer receives a `peer_fault` notification
+    /// (link-disconnect injection). Stored as actor ids (not handles) to avoid
+    /// reference cycles; peers are resolved via the global actor registry.
+    pub peer_links: Vec<usize>,
 }
 
 /// Message sent to an actor's mailbox for FIFO processing.
@@ -409,6 +414,16 @@ impl PartialEq for ActorHandle {
 
 static ACTOR_HANDLE_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// Live actor handles by id for PeerFault peer resolution (v0.29.20).
+/// Entries are inserted in `ActorHandle::new` and removed on short-circuit.
+static ACTOR_HANDLES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>>,
+> = std::sync::OnceLock::new();
+
+fn actor_handles() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
+    ACTOR_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 // Thread-local flag set when inside an actor's worker thread.
 // Used to detect self-calls and avoid mailbox deadlock.
@@ -497,12 +512,17 @@ impl ActorHandle {
             })
             .expect("failed to spawn actor worker");
 
-        ActorHandle {
+        let handle = ActorHandle {
             inner,
             mailbox: mailbox_tx,
             id,
             program,
+        };
+        // v0.29.20: register for PeerFault peer resolution.
+        if let Ok(mut map) = actor_handles().lock() {
+            map.insert(id, handle.clone());
         }
+        handle
     }
 
     /// Returns the current actor's thread-local ID (0 if not in an actor worker).
@@ -510,20 +530,89 @@ impl ActorHandle {
         CURRENT_ACTOR_ID.with(|a| a.get())
     }
 
+    /// v0.29.20: register a bidirectional peer link for PeerFault injection.
+    pub(crate) fn link_peer(&self, peer: &ActorHandle) {
+        if self.id == peer.id {
+            return;
+        }
+        if let Ok(mut actor) = self.inner.write() {
+            if !actor.peer_links.contains(&peer.id) {
+                actor.peer_links.push(peer.id);
+            }
+        }
+        if let Ok(mut actor) = peer.inner.write() {
+            if !actor.peer_links.contains(&self.id) {
+                actor.peer_links.push(self.id);
+            }
+        }
+    }
+
+    /// v0.29.20: notify all linked peers that this actor has faulted.
+    /// Peers receive a mailbox message `peer_fault` with a PeerFault payload
+    /// description; if they are Flow-backed actors the message is drained by
+    /// the short-circuit path when already faulted, otherwise the method is
+    /// invoked if defined (user handlers). For Flow-level peer_fault, callers
+    /// should use `propagate_peer_fault_to_value` on nested flow payloads.
+    pub(crate) fn notify_peer_faults(&self, reason: &str) {
+        let peers: Vec<usize> = self
+            .inner
+            .read()
+            .map(|a| a.peer_links.clone())
+            .unwrap_or_default();
+        if peers.is_empty() {
+            return;
+        }
+        let handles: Vec<ActorHandle> = {
+            let Ok(map) = actor_handles().lock() else {
+                return;
+            };
+            peers.iter().filter_map(|id| map.get(id).cloned()).collect()
+        };
+        for peer in handles {
+            if peer.is_faulted() {
+                continue;
+            }
+            // Best-effort: enqueue peer_fault notification via mailbox.
+            // If the peer has no peer_fault method the worker returns an error
+            // response which we ignore — link injection is fire-and-forget.
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let msg = ActorMailboxMsg {
+                method: "peer_fault".to_string(),
+                args: vec![
+                    Value::String(self.id.to_string()),
+                    Value::String(reason.to_string()),
+                ],
+                response: tx,
+            };
+            let _ = peer.mailbox.send(msg);
+        }
+    }
+
     /// v0.29.11 Fault absorption: short-circuit the actor mailbox (O(1)).
     ///
     /// Sets `faulted` so every send site returns immediately without enqueueing.
     /// Clears actor fields so nested payload resources are dropped. The worker
     /// loop also checks `faulted` and drains remaining messages without dispatch.
-    /// Idempotent.
+    /// Idempotent. v0.29.20: also notifies linked peers (PeerFault injection).
     pub(crate) fn short_circuit_mailbox(&self) {
+        let already = self
+            .inner
+            .read()
+            .map(|a| a.faulted)
+            .unwrap_or(true);
+        if already {
+            return;
+        }
+        // Notify peers BEFORE clearing fields / marking faulted so links remain.
+        self.notify_peer_faults("peer actor entered Fault");
         if let Ok(mut actor) = self.inner.write() {
-            if actor.faulted {
-                return;
-            }
             actor.faulted = true;
-            // Auto-destruct: drop all field values held by the actor payload.
             actor.fields.clear();
+            actor.peer_links.clear();
+        }
+        // Drop from global registry.
+        if let Ok(mut map) = actor_handles().lock() {
+            map.remove(&self.id);
         }
     }
 

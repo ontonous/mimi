@@ -29,6 +29,7 @@ impl<'a> Interpreter<'a> {
             fields,
             methods: actor_def.methods.clone(),
             faulted: false,
+            peer_links: Vec::new(),
         };
 
         // v0.28.28 fix for #1: share the spawning program's AST so the
