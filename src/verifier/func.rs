@@ -147,7 +147,7 @@ impl crate::verifier::Verifier {
                         self.solver.assert(&z3_not_ens);
                         match self.check_safe() {
                             SatResult::Unsat => {
-                                self.solver_pop(1);
+                                self.solver_pop();
                                 VerificationResult {
                                     func_name: format!("extern {}", func.name),
                                     status: VerifStatus::Verified,
@@ -159,7 +159,7 @@ impl crate::verifier::Verifier {
                                 }
                             }
                             SatResult::Sat | SatResult::Unknown => {
-                                self.solver_pop(1);
+                                self.solver_pop();
                                 VerificationResult {
                                 func_name: format!("extern {}", func.name),
                                 status: VerifStatus::Unknown, // P2.3 fix: Unknown (not Verified) since we found a counterexample
@@ -173,7 +173,7 @@ impl crate::verifier::Verifier {
                             }
                         }
                     } else {
-                        self.solver_pop(1);
+                        self.solver_pop();
                         VerificationResult {
                             func_name: format!("extern {}", func.name),
                             status: VerifStatus::Unknown,
@@ -574,7 +574,7 @@ impl crate::verifier::Verifier {
                     }
                     match self.check_safe() {
                         SatResult::Unsat => {
-                            self.solver_pop(1);
+                            self.solver_pop();
                             VerificationResult {
                                 func_name: func.name.clone(),
                                 status: VerifStatus::Verified,
@@ -588,7 +588,7 @@ impl crate::verifier::Verifier {
                             let model = self.solver.get_model();
                             let counterexample =
                                 self.extract_counterexample(&model, &vars, &ensures_exprs);
-                            self.solver_pop(1);
+                            self.solver_pop();
                             let diagnostic = self.build_failure_narrative(
                                 func,
                                 &counterexample,
@@ -607,7 +607,7 @@ impl crate::verifier::Verifier {
                             }
                         }
                         SatResult::Unknown => {
-                            self.solver_pop(1);
+                            self.solver_pop();
                             let elapsed = start.elapsed();
                             let msg = if elapsed.as_millis() >= self.timeout_ms as u128 {
                                 format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
@@ -1564,7 +1564,7 @@ impl crate::verifier::Verifier {
                                 self.solver_push();
                                 self.solver.assert(z3_req.not());
                                 if self.check_safe() == z3::SatResult::Sat {
-                                    self.solver_pop(1);
+                                    self.solver_pop();
                                     errors.push((
                                         caller_name.to_string(),
                                         format!("call to '{}' may violate precondition", name),
@@ -1572,7 +1572,7 @@ impl crate::verifier::Verifier {
                                     ));
                                     return;
                                 }
-                                self.solver_pop(1);
+                                self.solver_pop();
                             }
                         }
                     }
