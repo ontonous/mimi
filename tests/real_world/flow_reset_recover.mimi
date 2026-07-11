@@ -1,0 +1,37 @@
+// MCDD real_world: Reset / Recover system verbs (v0.29.13)
+// Fall into Fault via undefined transition, then recover preserves persistent
+// max_retries while reset would zero it.
+flow Service {
+    persistent state Config { max_retries: i32 }
+    state Active { max_retries: i32, req: i32 }
+
+    transition start(Config) -> Active {
+        do {
+            return Active { max_retries: self.max_retries, req: 0 }
+        }
+    }
+    transition bump(Active) -> Active {
+        do {
+            return Active { max_retries: self.max_retries, req: self.req + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let c = Config { max_retries: 3 }
+    let a = Service::start(c)
+    let a2 = Service::bump(a)
+    println(a2.req)
+    // Illegal event → Fault (shadows max_retries)
+    let f = Service::start(a2)
+    println(f.last_state)
+    // recover → root Config with max_retries preserved
+    let r = Service::recover(f)
+    println(r.max_retries)
+    // fall again and reset → defaults
+    let a3 = Service::start(r)
+    let f2 = Service::start(a3)
+    let z = Service::reset(f2)
+    println(z.max_retries)
+    0
+}

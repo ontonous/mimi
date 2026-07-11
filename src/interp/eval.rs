@@ -383,7 +383,7 @@ impl<'a> Interpreter<'a> {
     /// snapshot with message + call stack). Already-Fault sources re-raise.
     pub(in crate::interp) fn eval_flow_transition(
         &mut self,
-        _flow: &FlowDef,
+        flow: &FlowDef,
         t: &TransitionDef,
         vals: &[Value],
     ) -> Result<Value, InterpError> {
@@ -427,26 +427,142 @@ impl<'a> Interpreter<'a> {
                 }
                 let event = format!("panic:{}", e.code());
                 let snapshot = format_panic_snapshot(&e, &call_stack);
-                let fault =
+                let mut fault =
                     crate::flow_matrix::make_fault_value(&t.from_state, &event, &snapshot);
+                // Shadow persistent fields for recover.
                 if let Some(from_payload) = vals.first() {
-                    drop_fault_payload(from_payload);
+                    shadow_persistent_into_fault(&mut fault, from_payload, &flow.persistent_fields);
+                    drop_fault_payload_except(from_payload, &flow.persistent_fields);
                 }
                 return Ok(fault);
             }
         };
 
         // Fault absorption: drop abandoned from-state payload (+ mailbox short-circuit).
+        // v0.29.13: skip Drop on persistent fields (they live on as Fault shadows).
         let enters_fault = t.is_fallback
             || t.to_states.iter().any(|s| s == "Fault")
             || matches!(&out, Value::Record(Some(n), _) if n == "Fault");
         if enters_fault {
             if let Some(from_payload) = vals.first() {
-                drop_fault_payload(from_payload);
+                drop_fault_payload_except(from_payload, &flow.persistent_fields);
             }
         }
 
+        // v0.29.13: reset / recover clear actor faulted flags so the flow can
+        // accept messages again after leaving Fault.
+        if (t.name == "reset" || t.name == "recover") && t.from_state == "Fault" {
+            if let Some(from_payload) = vals.first() {
+                clear_faulted_actors(from_payload);
+            }
+            // Also clear on the newly built root if it carries actors.
+            clear_faulted_actors(&out);
+        }
+
         Ok(out)
+    }
+}
+
+/// Copy persistent fields from the abandoned state into the Fault record.
+fn shadow_persistent_into_fault(
+    fault: &mut Value,
+    from: &Value,
+    persistent: &[String],
+) {
+    if persistent.is_empty() {
+        return;
+    }
+    let (Value::Record(_, from_fields), Value::Record(_, fault_fields)) = (from, fault) else {
+        return;
+    };
+    for name in persistent {
+        if let Some(v) = from_fields.get(name) {
+            fault_fields.insert(name.clone(), v.clone());
+        }
+    }
+}
+
+/// Like `drop_fault_payload` but skips fields listed in `persistent`.
+fn drop_fault_payload_except(val: &Value, persistent: &[String]) {
+    match val {
+        Value::Actor(handle) => {
+            handle.short_circuit_mailbox();
+        }
+        Value::Record(_, fields) => {
+            for (name, f) in fields {
+                if persistent.iter().any(|p| p == name) {
+                    continue;
+                }
+                drop_fault_payload_except(f, persistent);
+            }
+        }
+        Value::List(items)
+        | Value::Tuple(items)
+        | Value::Set(items)
+        | Value::Array(items)
+        | Value::Variant(_, items) => {
+            for item in items {
+                drop_fault_payload_except(item, persistent);
+            }
+        }
+        Value::Newtype(_, inner) | Value::DynTrait { data: inner, .. } => {
+            drop_fault_payload_except(inner, persistent);
+        }
+        Value::Shared(arc) | Value::Ref(arc) | Value::RefMut(arc) => {
+            if let Ok(guard) = arc.read() {
+                drop_fault_payload_except(&guard, persistent);
+            }
+        }
+        Value::LocalShared(inner) => {
+            if let Ok(guard) = inner.0.lock() {
+                drop_fault_payload_except(&guard, persistent);
+            }
+        }
+        Value::Slice { source, .. } => {
+            for item in source {
+                drop_fault_payload_except(item, persistent);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clear `faulted` on nested actors so they accept messages after reset/recover.
+fn clear_faulted_actors(val: &Value) {
+    match val {
+        Value::Actor(handle) => {
+            if let Ok(mut actor) = handle.inner.write() {
+                actor.faulted = false;
+            }
+        }
+        Value::Record(_, fields) => {
+            for f in fields.values() {
+                clear_faulted_actors(f);
+            }
+        }
+        Value::List(items)
+        | Value::Tuple(items)
+        | Value::Set(items)
+        | Value::Array(items)
+        | Value::Variant(_, items) => {
+            for item in items {
+                clear_faulted_actors(item);
+            }
+        }
+        Value::Newtype(_, inner) | Value::DynTrait { data: inner, .. } => {
+            clear_faulted_actors(inner);
+        }
+        Value::Shared(arc) | Value::Ref(arc) | Value::RefMut(arc) => {
+            if let Ok(guard) = arc.read() {
+                clear_faulted_actors(&guard);
+            }
+        }
+        Value::LocalShared(inner) => {
+            if let Ok(guard) = inner.0.lock() {
+                clear_faulted_actors(&guard);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -476,48 +592,6 @@ fn is_runtime_panic(e: &InterpError) -> bool {
 }
 
 /// Recursively release resources held by a from-state payload when entering Fault.
-///
-/// - Nested `Actor` handles: short-circuit the mailbox (O(1)).
-/// - Nested records / lists / tuples / variants: walk and drop the same way.
-/// - Ordinary values fall through to Rust `Drop` when the last clone is released.
 fn drop_fault_payload(val: &Value) {
-    match val {
-        Value::Actor(handle) => {
-            handle.short_circuit_mailbox();
-        }
-        Value::Record(_, fields) => {
-            for f in fields.values() {
-                drop_fault_payload(f);
-            }
-        }
-        Value::List(items)
-        | Value::Tuple(items)
-        | Value::Set(items)
-        | Value::Array(items)
-        | Value::Variant(_, items) => {
-            for item in items {
-                drop_fault_payload(item);
-            }
-        }
-        Value::Newtype(_, inner) | Value::DynTrait { data: inner, .. } => {
-            drop_fault_payload(inner);
-        }
-        Value::Shared(arc) | Value::Ref(arc) | Value::RefMut(arc) => {
-            if let Ok(guard) = arc.read() {
-                drop_fault_payload(&guard);
-            }
-        }
-        Value::LocalShared(inner) => {
-            if let Ok(guard) = inner.0.lock() {
-                drop_fault_payload(&guard);
-            }
-        }
-        Value::Slice { source, .. } => {
-            for item in source {
-                drop_fault_payload(item);
-            }
-        }
-        // Scalars / strings / handles without nested structure: no extra work.
-        _ => {}
-    }
+    drop_fault_payload_except(val, &[]);
 }
