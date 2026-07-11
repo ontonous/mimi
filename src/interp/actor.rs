@@ -28,6 +28,7 @@ impl<'a> Interpreter<'a> {
             actor_name: actor_name.to_string(),
             fields,
             methods: actor_def.methods.clone(),
+            faulted: false,
         };
 
         // v0.28.28 fix for #1: share the spawning program's AST so the

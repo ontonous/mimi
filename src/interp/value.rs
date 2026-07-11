@@ -365,6 +365,10 @@ pub struct ActorInstance {
     pub actor_name: String,
     pub fields: HashMap<String, Value>,
     pub methods: Vec<FuncDef>,
+    /// v0.29.11: set when the owning Flow entered Fault. Mailbox dispatch
+    /// short-circuits (O(1)) while this is true — messages are dropped without
+    /// waking business logic.
+    pub faulted: bool,
 }
 
 /// Message sent to an actor's mailbox for FIFO processing.
@@ -433,6 +437,17 @@ impl ActorHandle {
             .spawn(move || {
                 CURRENT_ACTOR_ID.with(|a| a.set(id));
                 while let Ok(msg) = mailbox_rx.recv() {
+                    // v0.29.11: Fault absorption — drain without dispatch.
+                    if worker_inner
+                        .read()
+                        .map(|a| a.faulted)
+                        .unwrap_or(true)
+                    {
+                        let _ = msg.response.send(Err(InterpError::new(
+                            "actor mailbox short-circuited (Fault)",
+                        )));
+                        continue;
+                    }
                     let result = {
                         // Read method definition
                         let (func, _actor_name) = {
@@ -493,6 +508,31 @@ impl ActorHandle {
     /// Returns the current actor's thread-local ID (0 if not in an actor worker).
     pub(crate) fn current_worker_id() -> usize {
         CURRENT_ACTOR_ID.with(|a| a.get())
+    }
+
+    /// v0.29.11 Fault absorption: short-circuit the actor mailbox (O(1)).
+    ///
+    /// Sets `faulted` so every send site returns immediately without enqueueing.
+    /// Clears actor fields so nested payload resources are dropped. The worker
+    /// loop also checks `faulted` and drains remaining messages without dispatch.
+    /// Idempotent.
+    pub(crate) fn short_circuit_mailbox(&self) {
+        if let Ok(mut actor) = self.inner.write() {
+            if actor.faulted {
+                return;
+            }
+            actor.faulted = true;
+            // Auto-destruct: drop all field values held by the actor payload.
+            actor.fields.clear();
+        }
+    }
+
+    /// True when this actor has entered Fault absorption (mailbox short-circuited).
+    pub(crate) fn is_faulted(&self) -> bool {
+        self.inner
+            .read()
+            .map(|a| a.faulted)
+            .unwrap_or(true)
     }
 }
 

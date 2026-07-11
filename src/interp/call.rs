@@ -545,6 +545,12 @@ impl<'a> Interpreter<'a> {
                 match method {
                     "spawn" => Err("spawn() should be called on Actor type, not instance".into()),
                     _ => {
+                        // v0.29.11: O(1) mailbox short-circuit after Fault.
+                        if actor_arc.is_faulted() {
+                            return Err(InterpError::new(
+                                "actor mailbox short-circuited (Fault)",
+                            ));
+                        }
                         // Check if we're inside this actor's own worker thread
                         // If so, execute directly to avoid mailbox deadlock.
                         // Cross-actor calls from a worker always go through mailbox.

@@ -371,6 +371,12 @@ impl<'a> Interpreter<'a> {
     /// Execute a flow transition call: FlowName::transition(self_payload, params...)
     /// The first argument is the from-state payload (bound to `self`),
     /// remaining args are the transition's event parameters.
+    ///
+    /// v0.29.11: when the transition is a transfer-matrix fallback (`is_fallback`)
+    /// or the result is a Fault record, the from-state payload is dropped after the
+    /// body runs (auto-destruct of the abandoned state's resources). Actors nested
+    /// in that payload have their mailboxes short-circuited so subsequent messages
+    /// are discarded without waking the worker.
     pub(in crate::interp) fn eval_flow_transition(
         &mut self,
         _flow: &FlowDef,
@@ -402,6 +408,65 @@ impl<'a> Interpreter<'a> {
 
         self.pop_scope();
 
-        result.map(|v| v.unwrap_or(Value::Unit))
+        let out = result.map(|v| v.unwrap_or(Value::Unit))?;
+
+        // Fault absorption: drop abandoned from-state payload (+ mailbox short-circuit).
+        let enters_fault = t.is_fallback
+            || t.to_states.iter().any(|s| s == "Fault")
+            || matches!(&out, Value::Record(Some(n), _) if n == "Fault");
+        if enters_fault {
+            if let Some(from_payload) = vals.first() {
+                drop_fault_payload(from_payload);
+            }
+        }
+
+        Ok(out)
+    }
+}
+
+/// Recursively release resources held by a from-state payload when entering Fault.
+///
+/// - Nested `Actor` handles: short-circuit the mailbox (O(1)).
+/// - Nested records / lists / tuples / variants: walk and drop the same way.
+/// - Ordinary values fall through to Rust `Drop` when the last clone is released.
+fn drop_fault_payload(val: &Value) {
+    match val {
+        Value::Actor(handle) => {
+            handle.short_circuit_mailbox();
+        }
+        Value::Record(_, fields) => {
+            for f in fields.values() {
+                drop_fault_payload(f);
+            }
+        }
+        Value::List(items)
+        | Value::Tuple(items)
+        | Value::Set(items)
+        | Value::Array(items)
+        | Value::Variant(_, items) => {
+            for item in items {
+                drop_fault_payload(item);
+            }
+        }
+        Value::Newtype(_, inner) | Value::DynTrait { data: inner, .. } => {
+            drop_fault_payload(inner);
+        }
+        Value::Shared(arc) | Value::Ref(arc) | Value::RefMut(arc) => {
+            if let Ok(guard) = arc.read() {
+                drop_fault_payload(&guard);
+            }
+        }
+        Value::LocalShared(inner) => {
+            if let Ok(guard) = inner.0.lock() {
+                drop_fault_payload(&guard);
+            }
+        }
+        Value::Slice { source, .. } => {
+            for item in source {
+                drop_fault_payload(item);
+            }
+        }
+        // Scalars / strings / handles without nested structure: no extra work.
+        _ => {}
     }
 }
