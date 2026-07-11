@@ -184,10 +184,11 @@ pub struct Verifier {
     // path so the substitution survives function boundaries.
     #[allow(dead_code)]
     pub(crate) let_subst: HashMap<String, Expr>,
-    /// E1: Tracks the number of push() calls without corresponding pop().
-    /// When check_safe() replaces the solver (Unknown/crash), the fresh solver
-    /// starts at depth 0 — callers must not pop(1) in that case.
-    pub(crate) push_depth: u32,
+    /// Flow: tracks whether check_safe replaced the solver (crash recovery).
+    /// When true, solver_pop is a no-op — the fresh solver starts at depth 0
+    /// and all pending pops from the old solver (which was replaced) become
+    /// unnecessary. Cleared on the next successful check_safe or reset.
+    pub(crate) solver_replaced: bool,
 }
 
 impl Verifier {
@@ -206,21 +207,28 @@ impl Verifier {
             timeout_ms,
             func_defs: HashMap::new(),
             let_subst: HashMap::new(),
-            push_depth: 0,
+            solver_replaced: false,
         })
     }
 
     /// Check satisfiability with timeout and crash protection.
     /// Returns Unknown on timeout/crash instead of panicking.
-    /// If Z3 panics/crashes (e.g. segfault in libz3), recreates the solver
-    /// because Z3's C API does not guarantee a usable solver state after a
-    /// crash. The old solver is dropped and a fresh one is created.
+    /// On crash: recreates the solver (Z3's C API does not guarantee a usable
+    /// state after crash), sets solver_replaced = true so pending pops are
+    /// skipped (fresh solver starts at depth 0).
+    /// On Sat/Unsat: clears solver_replaced.
     pub(crate) fn check_safe(&mut self) -> SatResult {
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())).ok();
         match result {
-            Some(SatResult::Sat) => SatResult::Sat,
-            Some(SatResult::Unsat) => SatResult::Unsat,
+            Some(SatResult::Sat) => {
+                self.solver_replaced = false;
+                SatResult::Sat
+            }
+            Some(SatResult::Unsat) => {
+                self.solver_replaced = false;
+                SatResult::Unsat
+            }
             _ => {
                 // 2.1/2.2: Z3 crashed or timed out — solver may be corrupt.
                 // Replace with a fresh solver. Params (incl. timeout) are
@@ -233,7 +241,7 @@ impl Verifier {
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
                 let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.push_depth = 0;
+                self.solver_replaced = true;
                 SatResult::Unknown
             }
         }
@@ -247,17 +255,17 @@ impl Verifier {
         self.solver.set_params(&params);
     }
 
-    /// E1: Push a new solver scope, tracking depth for safe pop after Unknown.
+    /// Push a new solver scope. Tracks depth implicitly via the solver's
+    /// internal stack — solver_replaced flag ensures safe pop after crash.
     pub(crate) fn solver_push(&mut self) {
         self.solver.push();
-        self.push_depth += 1;
     }
 
-    /// E1: Pop solver scope, but only if push_depth > 0 (safe after solver replacement).
-    pub(crate) fn solver_pop(&mut self, levels: u32) {
-        if self.push_depth >= levels {
-            self.push_depth -= levels;
-            self.solver.pop(levels);
+    /// Pop solver scope. NO-OP if solver was replaced by check_safe (the
+    /// fresh solver starts at depth 0; pending old-solver pops are moot).
+    pub(crate) fn solver_pop(&mut self) {
+        if !self.solver_replaced {
+            let _ = self.solver.pop(1);
         }
     }
 

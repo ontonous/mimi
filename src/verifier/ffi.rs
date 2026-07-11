@@ -41,7 +41,7 @@ impl super::Verifier {
                         results.push(result);
                     }
                 }
-                self.solver_pop(1);
+                self.solver_pop();
             }
         }
         results
@@ -240,7 +240,7 @@ impl super::Verifier {
 
         match self.check_safe() {
             SatResult::Unsat => {
-                self.solver_pop(1);
+                self.solver_pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Verified,
@@ -251,7 +251,7 @@ impl super::Verifier {
                 }
             }
             SatResult::Sat => {
-                self.solver_pop(1);
+                self.solver_pop();
                 let diag = Diagnostic::error(
                     format!(
                         "call to extern '{}' may violate precondition: {:?}",
@@ -273,7 +273,7 @@ impl super::Verifier {
                 }
             }
             SatResult::Unknown => {
-                self.solver_pop(1);
+                self.solver_pop();
                 VerificationResult {
                     func_name,
                     status: VerifStatus::Unknown,
