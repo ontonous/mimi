@@ -789,6 +789,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_conditional_branch(expired, fail_bb, ok_bb)
                             .map_err(|e| CompileError::LlvmError(format!("cbr: {}", e)))?;
                         self.builder.position_at_end(fail_bb);
+                        // v0.29.43: delayed Fault — set pending flag BEFORE abort.
+                        let state_str = self
+                            .builder
+                            .build_global_string_ptr("FFI_Pinned", "pin_state")
+                            .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                        let fault_fn = self.get_or_declare_pinned_fault_fn();
+                        self.builder
+                            .build_call(
+                                fault_fn,
+                                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                                    state_str.as_pointer_value(),
+                                )],
+                                "pin_fault",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("pinned_fault: {}", e)))?;
+                        // Still abort in codegen — the interp path has full
+                        // delayed-Fault value construction. Codegen sets the flag
+                        // so runtime can detect the fault context if needed.
                         let msg = self
                             .builder
                             .build_global_string_ptr(
@@ -864,6 +882,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_conditional_branch(exceeded, exp_bb, cont_bb)
                             .map_err(|e| CompileError::LlvmError(format!("cbr: {}", e)))?;
                         self.builder.position_at_end(exp_bb);
+                        // v0.29.43: delayed Fault — set pending flag BEFORE abort.
+                        let state_str = self
+                            .builder
+                            .build_global_string_ptr("FFI_Pinned", "pin_exp_state")
+                            .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                        let fault_fn = self.get_or_declare_pinned_fault_fn();
+                        self.builder
+                            .build_call(
+                                fault_fn,
+                                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                                    state_str.as_pointer_value(),
+                                )],
+                                "pin_exp_fault",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("pinned_fault: {}", e)))?;
                         let msg = self
                             .builder
                             .build_global_string_ptr(

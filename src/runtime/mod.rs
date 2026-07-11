@@ -4264,6 +4264,79 @@ pub extern "C" fn mimi_wall_clock_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// v0.29.43: Thread-local flag for delayed Fault from pinned blocks.
+/// When set, the codegen pinned timeout path does NOT abort the process;
+/// instead it sets this flag and returns, allowing the C call stack to
+/// unwind safely. The caller then checks the flag and produces a Fault value.
+thread_local! {
+    static PINNED_FAULT_PENDING: std::cell::RefCell<Option<PinnedFaultInfo>> = std::cell::RefCell::new(None);
+}
+
+#[derive(Clone)]
+struct PinnedFaultInfo {
+    state_name: String,
+    event: String,
+    snapshot: String,
+}
+
+/// v0.29.43: Set a pending delayed Fault from a pinned block.
+/// Called by codegen when pinned timeout expires or FFI crash detected.
+/// The process is NOT aborted — the flag is set and the function returns,
+/// honoring the white-paper's "delay until C call safely returns" requirement.
+#[no_mangle]
+pub extern "C" fn mimi_pinned_fault(state_name: *const std::ffi::c_char) -> i64 {
+    let state = if state_name.is_null() {
+        "FFI_Pinned".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(state_name) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    PINNED_FAULT_PENDING.with(|cell| {
+        *cell.borrow_mut() = Some(PinnedFaultInfo {
+            state_name: state.clone(),
+            event: format!("pinned_timeout:{}", state),
+            snapshot: "pinned timeout expired: FFI anchor watchdog".to_string(),
+        });
+    });
+    1 // non-zero = fault pending
+}
+
+/// v0.29.43: Check and consume the pending pinned Fault.
+/// Returns 1 if a Fault was pending (and clears it), 0 if not.
+#[no_mangle]
+pub extern "C" fn mimi_pinned_fault_take() -> i64 {
+    PINNED_FAULT_PENDING.with(|cell| {
+        if cell.borrow().is_some() {
+            *cell.borrow_mut() = None;
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// v0.29.43: Get the pending Fault's state name as a C string pointer.
+/// Returns null if no pending Fault. The returned pointer is valid until
+/// the next call to `mimi_pinned_fault_take`.
+#[no_mangle]
+pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
+    thread_local! {
+        static FAULT_STATE_CSTR: std::cell::RefCell<Option<std::ffi::CString>> = std::cell::RefCell::new(None);
+    }
+    FAULT_STATE_CSTR.with(|cstr_cell| {
+        let mut cstr = cstr_cell.borrow_mut();
+        PINNED_FAULT_PENDING.with(|cell| {
+            if let Some(ref info) = *cell.borrow() {
+                *cstr = Some(std::ffi::CString::new(info.state_name.as_str()).unwrap_or_else(|_| {
+                    std::ffi::CString::new("FFI_Pinned").unwrap()
+                }));
+            }
+        });
+        cstr.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Capability runtime (self-contained, thread-local)
 // ---------------------------------------------------------------------------

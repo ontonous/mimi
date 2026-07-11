@@ -122,6 +122,11 @@ pub struct Interpreter<'a> {
     /// Keyed by flow name. Snapshotted at turn entry; committed on success /
     /// used for dirty detection + WAL restore on Fault.
     pub(in crate::interp) flow_tx: HashMap<String, FlowPersistentTx>,
+    /// v0.29.43: current flow state name for delayed Fault context.
+    /// Set when entering `eval_flow_transition`; used by `pinned` blocks
+    /// to route timeout/crash through `make_fault_value` with correct
+    /// `last_state` information.
+    pub(in crate::interp) current_flow_state: Option<String>,
     /// Global constants defined at top level
     globals: HashMap<String, Value>,
     /// CLI arguments forwarded to the program
@@ -232,6 +237,7 @@ impl<'a> Interpreter<'a> {
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
             flow_tx: HashMap::new(),
+            current_flow_state: None,
             globals: HashMap::new(),
             cli_args: Vec::new(),
             cstring_registry: std::cell::RefCell::new(Vec::new()),
