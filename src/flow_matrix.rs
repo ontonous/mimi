@@ -85,10 +85,12 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
     ensure_fault_state(flow);
 
     // Event name → params (first definition wins; overloads should share params).
-    // Exclude system verbs from the N×M matrix — they only apply from Fault.
+    // Exclude system verbs from the N×M matrix:
+    // - reset/recover only apply from Fault
+    // - peer_fault is injected per-state (v0.29.20) rather than N×M-expanded
     let mut events: HashMap<String, Vec<Param>> = HashMap::new();
     for t in &flow.transitions {
-        if t.name == "reset" || t.name == "recover" {
+        if t.name == "reset" || t.name == "recover" || t.name == "peer_fault" {
             continue;
         }
         events.entry(t.name.clone()).or_insert_with(|| t.params.clone());
@@ -125,6 +127,9 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
 
     // v0.29.13: inject reset / recover from Fault → root state.
     inject_system_verbs(flow, shapes);
+    // v0.29.20: inject peer_fault(State) → Fault for every non-Fault state
+    // that does not already define peer_fault (user self-loop breaks the chain).
+    inject_peer_fault_verbs(flow, shapes);
 }
 
 /// Root (initial) state of a flow: first non-Fault declared state.
@@ -223,6 +228,46 @@ fn default_type_value_depth(
         }
         _ => Expr::Literal(Lit::Unit),
     }
+}
+
+/// Inject `peer_fault` → Fault for every non-Fault state missing a user handler.
+///
+/// v0.29.20 PeerFault cascade default: unhandled peer disconnect becomes Fault.
+/// User-written `transition peer_fault(State) -> State` (self-loop) or any
+/// other target is never overridden — that is the explicit break-chain form.
+fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
+    let states: Vec<String> = flow
+        .states
+        .iter()
+        .filter(|s| s.name != "Fault")
+        .map(|s| s.name.clone())
+        .collect();
+    // Collect (from_state) that already have a user/injected peer_fault.
+    let defined: HashSet<String> = flow
+        .transitions
+        .iter()
+        .filter(|t| t.name == "peer_fault")
+        .map(|t| t.from_state.clone())
+        .collect();
+
+    let mut injected = Vec::new();
+    for state in states {
+        if defined.contains(&state) {
+            continue;
+        }
+        // Default cascade: peer_fault(State) → Fault with SystemTrace payload.
+        let body = fault_return_body(flow, &state, "peer_fault", shapes);
+        injected.push(TransitionDef {
+            name: "peer_fault".to_string(),
+            from_state: state,
+            params: vec![],
+            to_states: vec!["Fault".to_string()],
+            body: Some(body),
+            pos: (0, 0),
+            is_fallback: true,
+        });
+    }
+    flow.transitions.extend(injected);
 }
 
 /// Inject `reset` and `recover` transitions from Fault → root when absent.
@@ -486,6 +531,17 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
         Value::Record(Some("SystemTrace".to_string()), trace),
     );
     Value::Record(Some("Fault".to_string()), fields)
+}
+
+
+/// Build a PeerFault record value (v0.29.20).
+pub fn make_peer_fault_value(peer_id: &str, reason: &str) -> crate::interp::Value {
+    use crate::interp::Value;
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("peer_id".to_string(), Value::String(peer_id.to_string()));
+    fields.insert("reason".to_string(), Value::String(reason.to_string()));
+    Value::Record(Some("PeerFault".to_string()), fields)
 }
 
 #[cfg(test)]

@@ -395,6 +395,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.type_llvm.insert("StatResult".to_string(), llvm_ty);
             self.type_defs.insert("StatResult".to_string(), stat_ty);
         }
+        // v0.29.20 PeerFault { peer_id, reason }
+        if !self.type_defs.contains_key("PeerFault") {
+            let pf_ty = crate::ast::TypeDef {
+                name: "PeerFault".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field {
+                        name: "peer_id".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "reason".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context.struct_type(&[string_ty, string_ty], false),
+            );
+            self.type_llvm.insert("PeerFault".to_string(), llvm_ty);
+            self.type_defs.insert("PeerFault".to_string(), pf_ty);
+        }
         // v0.29.12 SystemTrace { last_state_name, unexpected_event, snapshot }
         if !self.type_defs.contains_key("SystemTrace") {
             let st_ty = crate::ast::TypeDef {

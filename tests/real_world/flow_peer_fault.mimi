@@ -1,0 +1,40 @@
+// MCDD real_world: PeerFault cascade + self-loop break-chain (v0.29.20)
+// Unhandled peer_fault → Fault; user self-loop / Recovering target preserved.
+
+flow Cascade {
+    state Live { n: i32 }
+    transition tick(Live) -> Live {
+        do { return Live { n: self.n + 1 } }
+    }
+}
+
+flow Resilient {
+    state Active { n: i32 }
+    state Recovering { n: i32 }
+    transition peer_fault(Active) -> Recovering {
+        do { return Recovering { n: self.n } }
+    }
+    transition resume(Recovering) -> Active {
+        do { return Active { n: self.n } }
+    }
+}
+
+func main() -> i32 {
+    // Default cascade
+    let s0 = Live { n: 1 }
+    let f = Cascade::peer_fault(s0)
+    println(f.last_state)
+    println(f.unexpected_event)
+
+    // Explicit recovery path
+    let a = Active { n: 9 }
+    let r = Resilient::peer_fault(a)
+    println(r.n)
+    let a2 = Resilient::resume(r)
+    println(a2.n)
+
+    // PeerFault record
+    let pf = PeerFault { peer_id: "actor-1", reason: "link down" }
+    println(pf.peer_id)
+    0
+}
