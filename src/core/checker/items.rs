@@ -983,7 +983,9 @@ impl<'a> Checker<'a> {
                         self.flow_return_targets = prev_flow_targets;
                     }
                 }
-                // Check impl_protocols references exist
+                // Check impl_protocols references exist and validate conformance
+                let flow_state_names: Vec<&str> =
+                    f.states.iter().map(|s| s.name.as_str()).collect();
                 for proto_name in &f.impl_protocols {
                     let proto_key = format!("proto::{}", proto_name);
                     if !self.types.iter().any(|(k, _)| k.starts_with(&proto_key)) {
@@ -994,6 +996,71 @@ impl<'a> Checker<'a> {
                                 proto_name, f.name
                             ),
                         );
+                        continue;
+                    }
+                    // Look up the protocol definition
+                    let proto = self.file.items.iter().find_map(|item| {
+                        if let Item::Protocol(p) = item {
+                            if p.name == *proto_name {
+                                return Some(p);
+                            }
+                        }
+                        None
+                    });
+                    let Some(proto) = proto else { continue };
+                    // 1. Verify flow defines all protocol states
+                    for ps in &proto.states {
+                        if !flow_state_names.contains(&ps.name.as_str()) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0404,
+                                format!(
+                                    "flow '{}' implements protocol '{}' but is missing required state '{}'",
+                                    f.name, proto_name, ps.name
+                                ),
+                            );
+                            continue;
+                        }
+                        // Check payload compatibility: protocol state has payload_type,
+                        // flow state must have a matching field
+                        if let Some(ref proto_payload_ty) = ps.payload_type {
+                            let flow_state = f.states.iter()
+                                .find(|s| s.name == ps.name)
+                                .unwrap();
+                            let has_field = flow_state.payload.as_ref()
+                                .map(|fields| fields.iter().any(|field| {
+                                    let field_ty = self.resolve_type(&field.ty);
+                                    let expected_ty = self.resolve_type(proto_payload_ty);
+                                    self.unification.unify(&field_ty, &expected_ty).is_ok()
+                                }))
+                                .unwrap_or(false);
+                            if !has_field {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0209,
+                                    format!(
+                                        "flow '{}' state '{}' must have a field matching protocol payload type {}",
+                                        f.name, ps.name,
+                                        crate::core::fmt_type(&self.resolve_type(proto_payload_ty))
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    // 2. Verify flow defines all protocol transitions
+                    for pt in &proto.transitions {
+                        let has_transition = f.transitions.iter().any(|t| {
+                            t.name == pt.name
+                                && t.from_state == pt.from_state
+                                && t.to_states.contains(&pt.to_state)
+                        });
+                        if !has_transition {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0404,
+                                format!(
+                                    "flow '{}' implements protocol '{}' but is missing required transition '{}({}) -> {}'",
+                                    f.name, proto_name, pt.name, pt.from_state, pt.to_state
+                                ),
+                            );
+                        }
                     }
                 }
             }

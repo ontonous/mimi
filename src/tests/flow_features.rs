@@ -623,6 +623,140 @@ func main() -> i32 {
     assert_eq!(result, Ok(interp::Value::Int(125))); // 15 + 110
 }
 
+// ===================== Protocol checking tests =====================
+
+#[test]
+fn protocol_check_duplicate_state() {
+    let src = r#"
+protocol BadProto {
+    state Ready
+    state Ready
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for duplicate state in protocol");
+}
+
+#[test]
+fn protocol_check_duplicate_transition() {
+    let src = r#"
+protocol BadProto {
+    state Ready
+    state Active
+    transition go(Ready) -> Active
+    transition go(Ready) -> Active
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for duplicate transition in protocol");
+}
+
+#[test]
+fn protocol_check_undefined_state_in_transition() {
+    let src = r#"
+protocol BadProto {
+    state Ready
+    transition go(NonExistent) -> Ready
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for undefined from-state in protocol transition");
+}
+
+#[test]
+fn protocol_check_undefined_target_state() {
+    let src = r#"
+protocol BadProto {
+    state Ready
+    transition go(Ready) -> NonExistent
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for undefined target state in protocol transition");
+}
+
+#[test]
+fn protocol_check_invalid_payload_type() {
+    let src = r#"
+protocol BadProto {
+    state Ready { data: NonExistentType }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for invalid payload type in protocol state");
+}
+
+#[test]
+fn flow_check_missing_protocol_state() {
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+}
+
+flow BadFlow {
+    impl Sensor
+    state Idle
+    transition start(Idle) -> Idle {
+        do { return Idle { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for missing protocol state in flow");
+}
+
+#[test]
+fn flow_check_missing_protocol_transition() {
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+    transition stop(Active) -> Idle
+}
+
+flow BadFlow {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active {
+        do { return Active { data: 0 } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error for missing protocol transition in flow");
+}
+
+#[test]
+fn flow_check_valid_protocol_impl() {
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+    transition stop(Active) -> Idle
+}
+
+flow GoodFlow {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+
+    transition start(Idle) -> Active {
+        do { return Active { data: 0 } }
+    }
+    transition stop(Active) -> Idle {
+        do { return Idle { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "valid protocol implementation should pass: {:?}", result.err());
+}
+
 #[test]
 fn flow_exec_chain() {
     let src = r#"
