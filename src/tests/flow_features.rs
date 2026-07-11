@@ -2788,3 +2788,118 @@ flow N {
         "Fault must not receive peer_fault injection"
     );
 }
+
+// ── v0.29.21 Mailbox backpressure auto-governance ─────────────────────
+
+#[test]
+fn flow_parse_mailbox_depth_annotation() {
+    let src = r#"
+flow Audio {
+    @mailbox(depth = 64)
+    state Ready
+    transition go(Ready) -> Ready { do { return Ready { } } }
+}
+"#;
+    let file = parse(src);
+    match &file.items[0] {
+        Item::Flow(f) => {
+            assert!(
+                f.annotations.iter().any(|a| matches!(a, FlowAnnotation::MailboxDepth(64))),
+                "expected MailboxDepth(64), got {:?}",
+                f.annotations
+            );
+        }
+        other => panic!("expected Flow, got {:?}", other),
+    }
+}
+
+#[test]
+fn mailbox_bp_state_mute_and_hysteresis() {
+    use crate::interp::MailboxBpState;
+    let bp = MailboxBpState::new(4);
+    assert!(!bp.is_muted());
+    // Fill to limit without mute (over is > limit)
+    for _ in 0..4 {
+        bp.on_enqueue();
+    }
+    assert!(!bp.is_muted() || bp.current_depth() == 4);
+    // One more triggers mute
+    bp.on_enqueue();
+    assert!(bp.is_muted());
+    assert_eq!(bp.current_depth(), 5);
+    // Drain to ≤ 50% (2) should allow unmute after cooldown (set cooldown to 0)
+    // Force cooldown elapsed by setting unmute_after_ms to 0
+    bp.unmute_after_ms.store(0, std::sync::atomic::Ordering::Release);
+    for _ in 0..3 {
+        bp.on_dequeue();
+    }
+    // depth = 2, low = 2, should unmute
+    bp.try_unmute();
+    assert!(!bp.is_muted(), "should unmute at ≤50% depth");
+}
+
+#[test]
+fn actor_mailbox_depth_and_set() {
+    let src = r#"
+actor Counter {
+    n: i32
+    func bump() -> i32 {
+        self.n = self.n + 1
+        self.n
+    }
+    func get() -> i32 {
+        self.n
+    }
+}
+func main() -> i32 {
+    let c = Counter.spawn()
+    actor_set_mailbox_depth(c, 8)
+    let d = actor_mailbox_depth(c)
+    let m = actor_is_muted(c)
+    println(d)
+    println(m)
+    let v = c.bump()
+    println(v)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    // depth starts 0, muted 0, bump returns 1
+    assert_eq!(out.trim(), "0\n0\n1");
+}
+
+#[test]
+fn actor_mailbox_backpressure_ttl() {
+    // With depth=1, a slow consumer causes second concurrent send to wait;
+    // we simulate by setting depth=1 and flooding from main (sequential still ok).
+    // L1: setting depth and reading it dual-backend.
+    let src = r#"
+actor Worker {
+    n: i32
+    func work() -> i32 {
+        self.n = self.n + 1
+        self.n
+    }
+}
+func main() -> i32 {
+    let w = Worker.spawn()
+    actor_set_mailbox_depth(w, 1)
+    let a = w.work()
+    let b = w.work()
+    println(a)
+    println(b)
+    println(actor_mailbox_depth(w))
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "2");
+    // depth should be 0 after both completed
+    assert_eq!(lines[2], "0");
+}

@@ -381,6 +381,140 @@ pub struct ActorMailboxMsg {
     pub method: String,
     pub args: Vec<Value>,
     pub response: std::sync::mpsc::Sender<Result<Value, InterpError>>,
+    /// v0.29.21: absolute deadline (Instant) for TTL deadlock break.
+    /// `None` means no deadline (default path).
+    pub deadline: Option<std::time::Instant>,
+}
+
+/// Default mailbox high-water depth when no `@mailbox(depth=N)` is configured.
+pub const DEFAULT_MAILBOX_DEPTH: usize = 2048;
+/// Default mute cooldown ticks before an overloaded actor can unmute.
+pub const DEFAULT_MUTE_COOLDOWN_TICKS: u64 = 3;
+/// Default message TTL for backpressure wait (milliseconds).
+pub const DEFAULT_MAILBOX_TTL_MS: u64 = 50;
+
+/// Shared mailbox backpressure state (v0.29.21).
+///
+/// Tracked separately from `ActorInstance` so send sites can update depth
+/// without taking the instance write lock for every message.
+#[derive(Debug)]
+pub struct MailboxBpState {
+    /// High-water depth from `@mailbox(depth=N)` (or default).
+    pub depth_limit: std::sync::atomic::AtomicUsize,
+    /// Approximate number of in-flight messages (enqueued, not yet completed).
+    pub depth: std::sync::atomic::AtomicUsize,
+    /// True while this actor is muted (full-actor mute strategy).
+    pub muted: std::sync::atomic::AtomicBool,
+    /// Monotonic mute generation — bumped on each mute transition.
+    pub mute_gen: std::sync::atomic::AtomicU64,
+    /// Earliest Instant (as millis since UNIX_EPOCH) when unmute is allowed.
+    /// Stored as millis for atomic updates; 0 means not muted / no cooldown.
+    pub unmute_after_ms: std::sync::atomic::AtomicU64,
+    /// TTL for blocking send while muted (milliseconds).
+    pub ttl_ms: u64,
+    /// Cooldown duration in milliseconds (N ticks × tick_ms).
+    pub cooldown_ms: u64,
+}
+
+impl MailboxBpState {
+    pub fn new(depth_limit: usize) -> Self {
+        Self {
+            depth_limit: std::sync::atomic::AtomicUsize::new(depth_limit.max(1)),
+            depth: std::sync::atomic::AtomicUsize::new(0),
+            muted: std::sync::atomic::AtomicBool::new(false),
+            mute_gen: std::sync::atomic::AtomicU64::new(0),
+            unmute_after_ms: std::sync::atomic::AtomicU64::new(0),
+            ttl_ms: DEFAULT_MAILBOX_TTL_MS,
+            cooldown_ms: DEFAULT_MUTE_COOLDOWN_TICKS * 10, // 10ms/tick default
+        }
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Current approximate depth.
+    pub fn current_depth(&self) -> usize {
+        self.depth.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// True if muted and still inside the cooldown window.
+    pub fn is_muted(&self) -> bool {
+        if !self.muted.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let until = self
+            .unmute_after_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        let now = Self::now_ms();
+        if until == 0 || now >= until {
+            // Cooldown elapsed — may still be over HWM; leave muted flag for
+            // try_unmute to clear when depth drops.
+            return true;
+        }
+        true
+    }
+
+    /// Enter mute with cooldown debounce.
+    pub fn enter_mute(&self) {
+        let until = Self::now_ms().saturating_add(self.cooldown_ms);
+        self.unmute_after_ms
+            .store(until, std::sync::atomic::Ordering::Release);
+        self.muted
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.mute_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Leave mute if depth is under the high-water mark and cooldown elapsed.
+    pub fn try_unmute(&self) {
+        if !self.muted.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let until = self
+            .unmute_after_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        let now = Self::now_ms();
+        if until != 0 && now < until {
+            return; // still in cooldown
+        }
+        let d = self.depth.load(std::sync::atomic::Ordering::Acquire);
+        // Unmute when depth falls to ≤ 50% of limit (hysteresis).
+        let low = self.depth_limit.load(std::sync::atomic::Ordering::Acquire) / 2;
+        if d <= low {
+            self.muted
+                .store(false, std::sync::atomic::Ordering::Release);
+            self.unmute_after_ms
+                .store(0, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Increment depth; enter mute if over high-water mark. Returns new depth.
+    pub fn on_enqueue(&self) -> usize {
+        let d = self
+            .depth
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        if d > self.depth_limit.load(std::sync::atomic::Ordering::Acquire) {
+            self.enter_mute();
+        }
+        d
+    }
+
+    /// Decrement depth (message completed or rejected); try unmute.
+    pub fn on_dequeue(&self) {
+        let _ = self
+            .depth
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |v| Some(v.saturating_sub(1)),
+            );
+        self.try_unmute();
+    }
 }
 
 /// Handle to a running actor with per-actor mailbox + dedicated worker thread.
@@ -394,6 +528,8 @@ pub struct ActorHandle {
     /// actor methods. The worker dereferences this `Arc<File>` (cheap, no
     /// full AST clone per dispatch) to construct a per-call `Interpreter`.
     pub program: std::sync::Arc<crate::ast::File>,
+    /// v0.29.21: mailbox backpressure state (depth / mute / cooldown / TTL).
+    pub bp: std::sync::Arc<MailboxBpState>,
 }
 
 // SAFETY: ActorHandle is Send because all fields are Send: Arc<RwLock<ActorInstance>>
@@ -440,18 +576,40 @@ impl ActorHandle {
     /// methods cannot call any user code (see mimichat gap #1, fixed in
     /// v0.28.28).
     pub(crate) fn new(instance: ActorInstance, program: std::sync::Arc<crate::ast::File>) -> Self {
+        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH)
+    }
+
+    /// Create actor with explicit mailbox high-water depth (v0.29.21).
+    pub(crate) fn new_with_depth(
+        instance: ActorInstance,
+        program: std::sync::Arc<crate::ast::File>,
+        depth_limit: usize,
+    ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
         let inner = std::sync::Arc::new(std::sync::RwLock::new(instance));
+        let bp = std::sync::Arc::new(MailboxBpState::new(depth_limit));
 
         let worker_inner = inner.clone();
         let mailbox_tx_clone = mailbox_tx.clone();
         let worker_program = program.clone();
+        let worker_bp = bp.clone();
         std::thread::Builder::new()
             .name(format!("actor-{}", id))
             .spawn(move || {
                 CURRENT_ACTOR_ID.with(|a| a.set(id));
                 while let Ok(msg) = mailbox_rx.recv() {
+                    // v0.29.21: depth accounting — message left the queue.
+                    worker_bp.on_dequeue();
+                    // v0.29.21: TTL expiry — drop timed-out messages.
+                    if let Some(deadline) = msg.deadline {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = msg.response.send(Err(InterpError::new(
+                                "SendErrorNotWriteable: mailbox message TTL expired",
+                            )));
+                            continue;
+                        }
+                    }
                     // v0.29.11: Fault absorption — drain without dispatch.
                     if worker_inner
                         .read()
@@ -463,6 +621,8 @@ impl ActorHandle {
                         )));
                         continue;
                     }
+                    // v0.29.21: full-actor mute — drain without dispatch while muted.
+                    // (Producers are blocked at send; residual in-flight msgs complete.)
                     let result = {
                         // Read method definition
                         let (func, _actor_name) = {
@@ -484,6 +644,7 @@ impl ActorHandle {
                             mailbox: mailbox_tx_clone.clone(),
                             id,
                             program: worker_program.clone(),
+                            bp: worker_bp.clone(),
                         });
                         interp.push_scope();
                         interp
@@ -517,6 +678,7 @@ impl ActorHandle {
             mailbox: mailbox_tx,
             id,
             program,
+            bp,
         };
         // v0.29.20: register for PeerFault peer resolution.
         if let Ok(mut map) = actor_handles().lock() {
@@ -583,8 +745,13 @@ impl ActorHandle {
                     Value::String(reason.to_string()),
                 ],
                 response: tx,
+                deadline: None,
             };
-            let _ = peer.mailbox.send(msg);
+            // Best-effort peer notify — still account depth so worker on_dequeue balances.
+            peer.bp.on_enqueue();
+            if peer.mailbox.send(msg).is_err() {
+                peer.bp.on_dequeue();
+            }
         }
     }
 
@@ -622,6 +789,83 @@ impl ActorHandle {
             .read()
             .map(|a| a.faulted)
             .unwrap_or(true)
+    }
+
+    /// v0.29.21: enqueue a mailbox message with backpressure governance.
+    ///
+    /// - If faulted → immediate error.
+    /// - If muted / over HWM → wait up to TTL; on timeout return
+    ///   `SendErrorNotWriteable` (deadlock break).
+    /// - On success, depth is incremented and the message is sent.
+    pub(crate) fn try_enqueue(
+        &self,
+        method: String,
+        args: Vec<Value>,
+    ) -> Result<std::sync::mpsc::Receiver<Result<Value, InterpError>>, InterpError> {
+        if self.is_faulted() {
+            return Err(InterpError::new(
+                "actor mailbox short-circuited (Fault)",
+            ));
+        }
+        let start = std::time::Instant::now();
+        let ttl = std::time::Duration::from_millis(self.bp.ttl_ms);
+        let deadline = start + ttl;
+
+        // Wait while muted / over depth, with TTL.
+        loop {
+            self.bp.try_unmute();
+            let depth = self.bp.current_depth();
+            let muted = self.bp.is_muted();
+            let over = depth >= self.bp.depth_limit.load(std::sync::atomic::Ordering::Acquire);
+            if !muted && !over {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(InterpError::new(
+                    "SendErrorNotWriteable: mailbox backpressure TTL expired",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let msg = ActorMailboxMsg {
+            method,
+            args,
+            response: tx,
+            deadline: Some(deadline),
+        };
+        // Reserve depth slot before send so concurrent producers see HWM.
+        self.bp.on_enqueue();
+        if self.mailbox.send(msg).is_err() {
+            self.bp.on_dequeue(); // roll back reservation
+            return Err(InterpError::lock_error(
+                "actor mailbox send failed".to_string(),
+            ));
+        }
+        Ok(rx)
+    }
+
+    /// Current mailbox depth (approx).
+    pub(crate) fn mailbox_depth(&self) -> usize {
+        self.bp.current_depth()
+    }
+
+    /// True if this actor is currently muted under backpressure.
+    pub(crate) fn is_muted(&self) -> bool {
+        self.bp.is_muted()
+    }
+
+    /// Configured high-water depth limit.
+    pub(crate) fn mailbox_depth_limit(&self) -> usize {
+        self.bp.depth_limit.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Reconfigure high-water depth (v0.29.21).
+    pub(crate) fn set_mailbox_depth_limit(&self, depth: usize) {
+        self.bp
+            .depth_limit
+            .store(depth.max(1), std::sync::atomic::Ordering::Release);
     }
 }
 

@@ -414,6 +414,9 @@ impl<'a> Interpreter<'a> {
             "channel_drop" => self.builtin_channel_drop(args),
             "session_send" | "session_close" => Ok(Value::Unit),
             "session_recv" | "session_open" => Ok(Value::Int(0)),
+            "actor_mailbox_depth" => self.builtin_actor_mailbox_depth(args),
+            "actor_is_muted" => self.builtin_actor_is_muted(args),
+            "actor_set_mailbox_depth" => self.builtin_actor_set_mailbox_depth(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),
@@ -579,16 +582,11 @@ impl<'a> Interpreter<'a> {
                                 this.call_func(func, args)
                             })
                         } else {
-                            // Mailbox dispatch: send message, wait for response
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            let msg = crate::interp::value::ActorMailboxMsg {
-                                method: method.to_string(),
-                                args: args.to_vec(),
-                                response: tx,
-                            };
-                            actor_arc.mailbox.send(msg).map_err(|_| {
-                                InterpError::lock_error("actor mailbox send failed".to_string())
-                            })?;
+                            // Mailbox dispatch with backpressure (v0.29.21).
+                            let rx = actor_arc.try_enqueue(
+                                method.to_string(),
+                                args.to_vec(),
+                            )?;
                             match rx.recv() {
                                 Ok(result) => result,
                                 Err(_) => Err(InterpError::lock_error(

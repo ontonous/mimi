@@ -1178,17 +1178,8 @@ impl<'a> Interpreter<'a> {
                             "actor mailbox short-circuited (Fault)",
                         ));
                     }
-                    // Send through mailbox, return Future<T> for awaiting later
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let msg = crate::interp::value::ActorMailboxMsg {
-                        method: method_name,
-                        args: args_vals,
-                        response: tx,
-                    };
-                    handle
-                        .mailbox
-                        .send(msg)
-                        .map_err(|_| InterpError::new("actor mailbox send failed"))?;
+                    // Send through mailbox with backpressure (v0.29.21).
+                    let rx = handle.try_enqueue(method_name, args_vals)?;
                     return Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
                         crate::interp::value::PollFuture::Pending(rx),
                     ))));
