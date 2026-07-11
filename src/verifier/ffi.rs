@@ -2,6 +2,7 @@ use super::*;
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
+use crate::verifier::expr;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use z3::ast::String as Z3String;
@@ -186,7 +187,7 @@ impl super::Verifier {
     fn assert_func_requires(&mut self, func: &FuncDef, vars: &mut Z3VarMap) {
         for stmt in &func.body {
             if let Stmt::Requires(expr, _) = stmt {
-                if let Some(z3_bool) = self.expr_to_z3_bool(expr, vars) {
+                if let Some(z3_bool) = expr::expr_to_z3_bool(expr, vars) {
                     self.solver.assert(&z3_bool);
                 }
             }
@@ -220,7 +221,7 @@ impl super::Verifier {
 
         let substituted = substitute_args(requires, &extern_func.params, args);
 
-        let z3_requires = match self.expr_to_z3_bool(&substituted, vars) {
+        let z3_requires = match expr::expr_to_z3_bool(&substituted, vars) {
             Some(z) => z,
             None => {
                 return VerificationResult {
