@@ -730,6 +730,149 @@ flow BadFlow {
     assert!(result.is_err(), "expected error for missing protocol transition in flow");
 }
 
+// ===================== Flow negative tests (edge cases) =====================
+
+#[test]
+fn flow_check_wrong_return_target() {
+    let src = r#"
+flow BadFlow {
+    state Ready
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Ready { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: returning wrong target state");
+}
+
+#[test]
+fn flow_check_missing_field_in_return() {
+    let src = r#"
+flow BadFlow {
+    state Ready { v: i32 }
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Active { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: missing required field in return");
+}
+
+#[test]
+fn flow_check_extra_field_in_return() {
+    let src = r#"
+flow BadFlow {
+    state Ready { v: i32 }
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Active { v: 0, x: 1 } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: extra field in return");
+}
+
+#[test]
+fn flow_check_wrong_field_type_in_return() {
+    let src = r#"
+flow BadFlow {
+    state Ready { v: i32 }
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Active { v: "hello" } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: wrong field type in return");
+}
+
+#[test]
+fn flow_check_self_in_no_payload_state() {
+    let src = r#"
+flow BadFlow {
+    state Ready
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Active { v: self.v } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: self has no payload");
+}
+
+#[test]
+fn flow_check_undefined_param_type() {
+    let src = r#"
+flow BadFlow {
+    state Ready
+    state Active { v: i32 }
+    transition go(Ready, x: NonExistentType) -> Active {
+        do { return Active { v: 0 } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "expected error: undefined param type");
+}
+
+#[test]
+fn flow_check_return_self_wrong_state() {
+    let src = r#"
+flow BadFlow {
+    state Ready { v: i32 }
+    state Active { v: i32 }
+    transition go(Ready) -> Active {
+        do { return Active { v: self.v } }
+    }
+}
+"#;
+    // go(Ready) -> Active, self.v is accessible (Ready has payload), return Active is valid
+    let result = check_source(src);
+    assert!(result.is_ok(), "returning Active with self.v should be valid");
+}
+
+#[test]
+fn flow_check_multi_return_type_mismatch() {
+    let src = r#"
+flow BadFlow {
+    state Ready { v: i32 }
+    state Active { v: i32 }
+    state Done
+    transition go(Ready) -> Active | Done {
+        do {
+            let x = self.v
+            return Active { v: x }
+        }
+    }
+}
+"#;
+    // Only returns Active, not Done — but this is fine since it returns one of the valid targets
+    let result = check_source(src);
+    assert!(result.is_ok(), "returning one valid target is acceptable in multi-target");
+}
+
+#[test]
+fn flow_check_no_payload_state_return_no_braces() {
+    let src = r#"
+flow GoodFlow {
+    state Ready
+    state Done
+    transition finish(Ready) -> Done {
+        do { return Done { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "returning no-payload state with braces should be valid");
+}
+
 #[test]
 fn flow_check_valid_protocol_impl() {
     let src = r#"
