@@ -693,6 +693,20 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i64".into(), vec![]);
             }
+            // v0.29.38: assert_state(flow_instance, state_name) -> unit
+            "assert_state" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("unit".into(), vec![]);
+            }
+            // v0.29.38: inject_fault(flow_instance) -> Fault record
+            "inject_fault" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("Fault".into(), vec![]);
+            }
             "atomic_i32_load"
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"
