@@ -248,9 +248,15 @@ impl<'a> Interpreter<'a> {
             Stmt::Delegate { expr, .. } => {
                 self.eval_expr(expr)?;
             }
-            Stmt::Pinned { expr, body, .. } => {
-                self.eval_expr(expr)?;
+            Stmt::Pinned { expr, var, body, .. } => {
+                let val = self.eval_expr(expr)?;
+                // Bind the pinned variable in a nested scope for the body
+                self.scope_env.push_scope();
+                if let Some(var_name) = var {
+                    self.scope_env.bind(var_name, val)?;
+                }
                 self.eval_block(body)?;
+                self.scope_env.pop_scope();
             }
         }
         Ok(None)
