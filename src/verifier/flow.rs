@@ -93,6 +93,7 @@ impl VerifierState {
             ) => match queue.pop() {
                 Some(StepKind::Func(func)) => {
                     if !func.body.is_empty() {
+                        session.reset();
                         let result = ctx.verify_func(&mut session, &func);
                         acc.results.push(result);
                     }
@@ -105,6 +106,7 @@ impl VerifierState {
                 }
                 Some(StepKind::Extern(func)) => {
                     if func.requires.is_some() || func.ensures.is_some() {
+                        session.reset();
                         let result = ctx.verify_extern_func(&mut session, &func);
                         acc.results.push(result);
                     }

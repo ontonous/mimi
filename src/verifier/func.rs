@@ -44,8 +44,7 @@ impl VerifierCtx {
         // affected by reset() — they persist across calls. The solver is clean
         // for each extern verification, preventing cross-contamination from
         // prior verify_func calls.
-        session.reset();
-
+        
         let requires_expr = func.requires.as_ref();
         let ensures_expr = func.ensures.as_ref();
 
@@ -193,8 +192,7 @@ impl VerifierCtx {
         // shared identity → opaque Int variable,
         // field accesses → fresh Z3 variables (handled by Expr::Field encoding).
         // This allows verifying scalar-field contracts on shared params.
-        session.reset();
-
+        
         let mut requires_exprs: Vec<Expr> = Vec::new();
         let mut ensures_exprs: Vec<Expr> = Vec::new();
         let mut invariant_exprs: Vec<Expr> = Vec::new();
