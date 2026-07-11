@@ -438,6 +438,8 @@ impl<'a> Interpreter<'a> {
             "shadow_tag" => self.builtin_shadow_tag(args),
             "shadow_check" => self.builtin_shadow_check(args),
             "shadow_free" => self.builtin_shadow_free(args),
+            // v0.29.48: test sandbox
+            "test_sandbox" => self.builtin_test_sandbox(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),

@@ -4433,3 +4433,24 @@ func main() -> i32 {
     // (actor doesn't have __delegate_view method) — the key is no crash.
     assert!(r.is_ok() || r.is_err(), "delegate should not crash");
 }
+
+// ── v0.29.48: Integration Test Sandbox ────────────────────────────────
+
+#[test]
+fn test_sandbox_multi_actor() {
+    // L1 interp: test_sandbox spawns actors and runs transitions.
+    let src = r#"
+actor Counter {
+    n: i32
+    func bump() -> i32 { self.n = self.n + 1; self.n }
+}
+func main() -> i32 {
+    let cfg = Record { actors: ["Counter"], calls: [], faults: [] }
+    let results = test_sandbox(cfg)
+    println(results.len())
+    0
+}
+"#;
+    let r = run_source_result(src);
+    assert!(r.is_ok(), "test_sandbox should not crash: {:?}", r);
+}
