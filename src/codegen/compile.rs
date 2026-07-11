@@ -431,7 +431,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.type_llvm.insert("PeerFault".to_string(), llvm_ty);
             self.type_defs.insert("PeerFault".to_string(), pf_ty);
         }
-        // v0.29.12 SystemTrace { last_state_name, unexpected_event, snapshot }
+        // v0.29.12 SystemTrace { last_state_name, unexpected_event, snapshot, memory_dump, panic_payload }
+        // v0.29.39: added memory_dump + panic_payload structured sub-records
         if !self.type_defs.contains_key("SystemTrace") {
             let st_ty = crate::ast::TypeDef {
                 name: "SystemTrace".to_string(),
@@ -449,17 +450,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                         name: "snapshot".to_string(),
                         ty: crate::ast::Type::Name("string".to_string(), vec![]),
                     },
+                    crate::ast::Field {
+                        name: "memory_dump".to_string(),
+                        ty: crate::ast::Type::Name("MemoryDump".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "panic_payload".to_string(),
+                        ty: crate::ast::Type::Name("PanicPayload".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            // SystemTrace LLVM struct: { string, string, string, MemoryDump, PanicPayload }
+            let memory_dump_ty = self.type_llvm.get("MemoryDump").copied()
+                .unwrap_or(BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, i32_ty], false)));
+            let panic_payload_ty = self.type_llvm.get("PanicPayload").copied()
+                .unwrap_or(BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false)));
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context
+                    .struct_type(&[string_ty, string_ty, string_ty, memory_dump_ty, panic_payload_ty], false),
+            );
+            self.type_llvm.insert("SystemTrace".to_string(), llvm_ty);
+            self.type_defs.insert("SystemTrace".to_string(), st_ty);
+        }
+        // v0.29.39: PanicPayload { error_type: string, file: string, line: i32, stack: string }
+        if !self.type_defs.contains_key("PanicPayload") {
+            let pp_ty = crate::ast::TypeDef {
+                name: "PanicPayload".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field { name: "error_type".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
+                    crate::ast::Field { name: "file".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
+                    crate::ast::Field { name: "line".to_string(), ty: crate::ast::Type::Name("i32".to_string(), vec![]) },
+                    crate::ast::Field { name: "stack".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
                 ]),
                 generics: vec![],
                 derives: vec![],
                 attributes: vec![],
             };
             let llvm_ty = BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[string_ty, string_ty, string_ty], false),
+                self.context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
             );
-            self.type_llvm.insert("SystemTrace".to_string(), llvm_ty);
-            self.type_defs.insert("SystemTrace".to_string(), st_ty);
+            self.type_llvm.insert("PanicPayload".to_string(), llvm_ty);
+            self.type_defs.insert("PanicPayload".to_string(), pp_ty);
+        }
+        // v0.29.39: MemoryDump { fields: string, count: i32 }
+        if !self.type_defs.contains_key("MemoryDump") {
+            let md_ty = crate::ast::TypeDef {
+                name: "MemoryDump".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field { name: "fields".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
+                    crate::ast::Field { name: "count".to_string(), ty: crate::ast::Type::Name("i32".to_string(), vec![]) },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context.struct_type(&[string_ty, i32_ty], false),
+            );
+            self.type_llvm.insert("MemoryDump".to_string(), llvm_ty);
+            self.type_defs.insert("MemoryDump".to_string(), md_ty);
         }
         Ok(())
     }
