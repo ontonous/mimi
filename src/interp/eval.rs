@@ -240,6 +240,16 @@ impl<'a> Interpreter<'a> {
                 };
                 self.bind(&f.name, closure)?;
             }
+            Stmt::Do(body) => {
+                self.eval_block(body)?;
+            }
+            Stmt::Delegate { expr, .. } => {
+                self.eval_expr(expr)?;
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                self.eval_expr(expr)?;
+                self.eval_block(body)?;
+            }
         }
         Ok(None)
     }

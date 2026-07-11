@@ -347,5 +347,4 @@ impl LspServer {
         *self = updated;
         response
     }
-
-    }
+}

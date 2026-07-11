@@ -122,16 +122,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ],
                         true,
                     );
-                    let sprintf_fn = self
-                        .module
-                        .get_function("sprintf")
-                        .unwrap_or_else(|| {
-                            self.module.add_function(
-                                "sprintf",
-                                sprintf_ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
+                    let sprintf_fn = self.module.get_function("sprintf").unwrap_or_else(|| {
+                        self.module.add_function(
+                            "sprintf",
+                            sprintf_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
                     self.builder
                         .build_call(
                             sprintf_fn,

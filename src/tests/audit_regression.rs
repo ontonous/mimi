@@ -19,7 +19,11 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "non-exhaustive match should be rejected: {:?}", result);
+    assert!(
+        result.is_err(),
+        "non-exhaustive match should be rejected: {:?}",
+        result
+    );
     // Also test that exhaustive match passes
     let ok_src = r#"
 func main() -> i32 {
@@ -30,7 +34,10 @@ func main() -> i32 {
     }
 }
 "#;
-    assert!(check_source(ok_src).is_ok(), "exhaustive match should be accepted");
+    assert!(
+        check_source(ok_src).is_ok(),
+        "exhaustive match should be accepted"
+    );
 }
 
 // ── CG-C3: Err(string) 构造保留长度 ──
@@ -53,7 +60,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 0, "Err(string) should preserve length");
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        0,
+        "Err(string) should preserve length"
+    );
 }
 
 // ── CG-C5: ensures 合约一致性 ──
@@ -70,7 +81,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_ok(), "ensures contract should verify: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "ensures contract should verify: {:?}",
+        result.err()
+    );
 }
 
 // ── IN-C2: CString 不应泄漏 ──
@@ -84,7 +99,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 0, "str_to_c_str should not leak");
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        0,
+        "str_to_c_str should not leak"
+    );
 }
 
 // ── IN-C5: Levenshtein 距离支持多字节 ──
@@ -105,7 +124,11 @@ fn in_c5_levenshtein_multibyte() {
         }
         for i in 1..=a_len {
             for j in 1..=b_len {
-                let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+                let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 matrix[i][j] = std::cmp::min(
                     std::cmp::min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1),
                     matrix[i - 1][j - 1] + cost,
@@ -117,9 +140,16 @@ fn in_c5_levenshtein_multibyte() {
     // "café" is 5 bytes but 4 chars — allocation by char count prevents OOB reads.
     let bytes = "café".len();
     let chars = "café".chars().count();
-    assert!(bytes > chars, "multi-byte string must have more bytes than chars");
+    assert!(
+        bytes > chars,
+        "multi-byte string must have more bytes than chars"
+    );
     assert_eq!(edit_distance("café", "cafe"), 1, "edit_distance(é, e) = 1");
-    assert_eq!(edit_distance("你好", "你好吗"), 1, "CJK edit_distance works");
+    assert_eq!(
+        edit_distance("你好", "你好吗"),
+        1,
+        "CJK edit_distance works"
+    );
 }
 
 // ── IN-C6: HTTP 响应不截断 ──
@@ -153,7 +183,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 6, "turbofish pipe should work");
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        6,
+        "turbofish pipe should work"
+    );
 }
 
 // ── PA-C4: let 绑定后换行 ──
@@ -167,7 +201,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 42, "let with newline after =");
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        42,
+        "let with newline after ="
+    );
 }
 
 // ── LE-C1: 转义序列正确解析 ──
@@ -185,7 +223,12 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 0, "escape sequences should be parsed: got {}", result.as_int().unwrap_or(-1));
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        0,
+        "escape sequences should be parsed: got {}",
+        result.as_int().unwrap_or(-1)
+    );
 }
 
 // ── LE-H4: 科学计数法 ──
@@ -203,7 +246,12 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 0, "scientific notation should parse: got {}", result.as_int().unwrap_or(-1));
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        0,
+        "scientific notation should parse: got {}",
+        result.as_int().unwrap_or(-1)
+    );
 }
 
 // ── CL-C1: LSP header 分隔符处理 ──
@@ -293,7 +341,11 @@ func main() -> i32 {
 }
 "#;
     let result = run_source(src);
-    assert_eq!(result.as_int().unwrap_or(-1), 42, "generalize dead code doesn't affect execution");
+    assert_eq!(
+        result.as_int().unwrap_or(-1),
+        42,
+        "generalize dead code doesn't affect execution"
+    );
 }
 
 // ── IN-C8: fork 隔离可用 ──
@@ -306,5 +358,9 @@ func main() -> i32 {
 }
 "#;
     let result = run_source_result(src);
-    assert!(result.is_ok(), "fork isolation test should not crash: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "fork isolation test should not crash: {:?}",
+        result.err()
+    );
 }

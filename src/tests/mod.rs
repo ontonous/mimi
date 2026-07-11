@@ -80,6 +80,9 @@ pub(crate) mod stdlib_v02813_list_growth;
 pub(crate) mod transitive_deps;
 pub(crate) mod type_system_verification;
 
+// === Flow/State/Transition test modules ===
+pub(crate) mod flow_features;
+
 // === JSON test modules ===
 pub(crate) mod json_tests;
 pub(crate) mod pipe_loop_tests;

@@ -86,13 +86,20 @@ impl<'a> Interpreter<'a> {
                             // Named constructor pattern: match by field name
                             for (field_name, p) in pats.iter() {
                                 // Skip positional placeholder names (_0, _1, ...)
-                                if field_name.starts_with('_') && field_name[1..].parse::<usize>().is_ok() {
+                                if field_name.starts_with('_')
+                                    && field_name[1..].parse::<usize>().is_ok()
+                                {
                                     // Positional pattern — use index directly
                                     let idx: usize = field_name[1..].parse().unwrap_or(0);
                                     if idx >= vals.len() {
                                         return false;
                                     }
-                                    if !self.match_pattern_inner(p, &vals[idx], allow_constructor, bindings) {
+                                    if !self.match_pattern_inner(
+                                        p,
+                                        &vals[idx],
+                                        allow_constructor,
+                                        bindings,
+                                    ) {
                                         return false;
                                     }
                                 } else if let Some(&idx) = positions.get(field_name) {
@@ -100,7 +107,12 @@ impl<'a> Interpreter<'a> {
                                     if idx >= vals.len() {
                                         return false;
                                     }
-                                    if !self.match_pattern_inner(p, &vals[idx], allow_constructor, bindings) {
+                                    if !self.match_pattern_inner(
+                                        p,
+                                        &vals[idx],
+                                        allow_constructor,
+                                        bindings,
+                                    ) {
                                         return false;
                                     }
                                 } else {

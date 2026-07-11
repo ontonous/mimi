@@ -591,6 +591,90 @@ impl<'a> Checker<'a> {
                 };
                 self.const_types.insert(name.clone(), const_ty);
             }
+            Item::Flow(f) => {
+                // Register states and transitions for type checking
+                let qualified = format!("flow::{}", f.name);
+                for state in &f.states {
+                    let state_key = format!("{}::{}", qualified, state.name);
+                    let payload_types = state
+                        .payload
+                        .as_ref()
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .map(|f| self.resolve_type(&f.ty))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.funcs.insert(
+                        state_key,
+                        (payload_types, Type::Name("unit".into(), vec![])),
+                    );
+                    // Register state payload as a Record type (both qualified and unqualified)
+                    let type_name = format!("{}::{}", qualified, state.name);
+                    if !self.types.contains_key(&type_name) {
+                        let fields = state.payload.clone().unwrap_or_default();
+                        let td = TypeDef {
+                            name: type_name.clone(),
+                            pub_: false,
+                            kind: TypeDefKind::Record(fields),
+                            generics: vec![],
+                            derives: vec![],
+                            attributes: vec![],
+                        };
+                        self.types.insert(type_name, td);
+                        // Also register with unqualified name for use in transition bodies
+                        if !self.types.contains_key(&state.name)
+                            && !Self::is_builtin_type(&state.name)
+                        {
+                            let fields2 = state.payload.clone().unwrap_or_default();
+                            let td2 = TypeDef {
+                                name: state.name.clone(),
+                                pub_: false,
+                                kind: TypeDefKind::Record(fields2),
+                                generics: vec![],
+                                derives: vec![],
+                                attributes: vec![],
+                            };
+                            self.types.insert(state.name.clone(), td2);
+                        }
+                    }
+                }
+                // Register transition functions
+                for t in &f.transitions {
+                    let t_key = format!("{}::{}", qualified, t.name);
+                    let params: Vec<Type> =
+                        t.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+                    let ret = Type::Name("unit".into(), vec![]);
+                    self.funcs.insert(t_key, (params, ret));
+                }
+            }
+            Item::Protocol(p) => {
+                let qualified = format!("proto::{}", p.name);
+                for state in &p.states {
+                    let state_key = format!("{}::{}", qualified, state.name);
+                    self.funcs
+                        .insert(state_key, (Vec::new(), Type::Name("unit".into(), vec![])));
+                    // Register protocol state payload types
+                    if let Some(ref payload_ty) = state.payload_type {
+                        let type_name = format!("{}::{}", qualified, state.name);
+                        if !self.types.contains_key(&type_name) {
+                            let td = TypeDef {
+                                name: type_name.clone(),
+                                pub_: false,
+                                kind: TypeDefKind::Record(vec![Field {
+                                    name: "value".to_string(),
+                                    ty: payload_ty.clone(),
+                                }]),
+                                generics: vec![],
+                                derives: vec![],
+                                attributes: vec![],
+                            };
+                            self.types.insert(type_name, td);
+                        }
+                    }
+                }
+            }
         }
     }
     pub(crate) fn check_item(&mut self, item: &Item) {
@@ -788,6 +872,167 @@ impl<'a> Checker<'a> {
                 // Register const type so that later items can reference it.
                 // infer_item already does this; check_item must too.
                 self.const_types.insert(name.clone(), const_ty);
+            }
+            Item::Flow(f) => {
+                let qualified = format!("flow::{}", f.name);
+                self.set_pos(
+                    f.transitions.first().map(|t| t.pos).unwrap_or((1, 1)).0,
+                    f.transitions.first().map(|t| t.pos).unwrap_or((1, 1)).1,
+                );
+                // Check state name uniqueness
+                let mut seen_states: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for s in &f.states {
+                    if !seen_states.insert(s.name.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!("duplicate state '{}' in flow '{}'", s.name, f.name),
+                        );
+                    }
+                    // Validate payload types are well-formed
+                    if let Some(fields) = &s.payload {
+                        for field in fields {
+                            let resolved = self.resolve_type(&field.ty);
+                            self.check_type_well_formed(
+                                &resolved,
+                                &format!(
+                                    "state '{}' payload field '{}' in flow '{}'",
+                                    s.name, field.name, f.name
+                                ),
+                            );
+                        }
+                    }
+                }
+                // Check transition name uniqueness
+                let mut seen_transitions: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for t in &f.transitions {
+                    if !seen_transitions.insert(t.name.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!("duplicate transition '{}' in flow '{}'", t.name, f.name),
+                        );
+                    }
+                }
+                // Validate that all referenced states exist
+                let state_names: Vec<&str> = f.states.iter().map(|s| s.name.as_str()).collect();
+                for t in &f.transitions {
+                    if !state_names.contains(&t.from_state.as_str()) && t.from_state != "Fault" {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0404,
+                            format!("state '{}' referenced in transition '{}' is not defined in flow '{}'",
+                                    t.from_state, t.name, f.name),
+                        );
+                    }
+                    for to_state in &t.to_states {
+                        if to_state != "Fault" && !state_names.contains(&to_state.as_str()) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0404,
+                                format!("target state '{}' in transition '{}' is not defined in flow '{}'",
+                                        to_state, t.name, f.name),
+                            );
+                        }
+                    }
+                    // Type-check transition body with self in scope
+                    if let Some(body) = &t.body {
+                        let from_payload = f
+                            .states
+                            .iter()
+                            .find(|s| s.name == t.from_state)
+                            .and_then(|s| s.payload.as_ref());
+                        let mut scopes: Vec<std::collections::HashMap<String, Type>> =
+                            vec![std::collections::HashMap::new()];
+                        // Add self with from-state's payload as a Record type
+                        if from_payload.is_some() {
+                            let type_name = format!("{}::{}", qualified, t.from_state);
+                            let self_ty = Type::Name(type_name, vec![]);
+                            scopes[0].insert("self".to_string(), self_ty);
+                        } else {
+                            // No payload: self is unit
+                            scopes[0].insert("self".to_string(), Type::Name("unit".into(), vec![]));
+                        }
+                        // Add transition params to scope
+                        for p in &t.params {
+                            let resolved = self.resolve_type(&p.ty);
+                            scopes[0].insert(p.name.clone(), resolved);
+                        }
+                        // Use a fresh type variable as the return type so that
+                        // `return TargetState { ... }` statements type-check without
+                        // requiring a specific return type match.
+                        let fresh_var = self.unification.fresh_var();
+                        let ret_type = Type::TypeVar(fresh_var);
+                        let prev_ret = self.current_ret.take();
+                        self.current_ret = Some(ret_type.clone());
+                        self.var_scopes.push(std::collections::HashMap::new());
+                        self.cap_vars.push(std::collections::HashMap::new());
+                        // Type-check the body as a block
+                        self.check_block(body, &ret_type, &mut scopes);
+                        self.cap_vars.pop();
+                        self.var_scopes.pop();
+                        self.current_ret = prev_ret;
+                    }
+                }
+                // Check impl_protocols references exist
+                for proto_name in &f.impl_protocols {
+                    let proto_key = format!("proto::{}", proto_name);
+                    if !self.types.iter().any(|(k, _)| k.starts_with(&proto_key)) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0406,
+                            format!(
+                                "protocol '{}' referenced in flow '{}' is not defined",
+                                proto_name, f.name
+                            ),
+                        );
+                    }
+                }
+            }
+            Item::Protocol(p) => {
+                // Check state name uniqueness
+                let mut seen_states: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for s in &p.states {
+                    if !seen_states.insert(s.name.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!("duplicate state '{}' in protocol '{}'", s.name, p.name),
+                        );
+                    }
+                    // Validate payload types are well-formed
+                    if let Some(ref payload_ty) = s.payload_type {
+                        let resolved = self.resolve_type(payload_ty);
+                        self.check_type_well_formed(
+                            &resolved,
+                            &format!("state '{}' payload type in protocol '{}'", s.name, p.name),
+                        );
+                    }
+                }
+                // Check transition name uniqueness and state references
+                let proto_state_names: Vec<&str> =
+                    p.states.iter().map(|s| s.name.as_str()).collect();
+                let mut seen_transitions: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for t in &p.transitions {
+                    if !seen_transitions.insert(t.name.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!("duplicate transition '{}' in protocol '{}'", t.name, p.name),
+                        );
+                    }
+                    if !proto_state_names.contains(&t.from_state.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0404,
+                            format!("state '{}' referenced in protocol transition '{}' is not defined in protocol '{}'",
+                                    t.from_state, t.name, p.name),
+                        );
+                    }
+                    if !proto_state_names.contains(&t.to_state.as_str()) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0404,
+                            format!("target state '{}' in protocol transition '{}' is not defined in protocol '{}'",
+                                    t.to_state, t.name, p.name),
+                        );
+                    }
+                }
             }
         }
     }

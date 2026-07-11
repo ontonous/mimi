@@ -151,6 +151,8 @@ fn item_name(item: &Item) -> Option<&str> {
         Item::Impl(i) => Some(i.type_name.as_str()),
         Item::ExternBlock(_) => None,
         Item::Const { name, .. } => Some(name),
+        Item::Flow(f) => Some(&f.name),
+        Item::Protocol(p) => Some(&p.name),
     }
 }
 
@@ -453,6 +455,8 @@ pub(crate) mod legacy {
             Item::Impl(i) => Some(i.type_name.as_str()),
             Item::ExternBlock(_) => None,
             Item::Const { name, .. } => Some(name),
+            Item::Flow(f) => Some(&f.name),
+            Item::Protocol(p) => Some(&p.name),
         }
     }
 }

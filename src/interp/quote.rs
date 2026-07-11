@@ -112,7 +112,10 @@ impl<'a> Interpreter<'a> {
             | Stmt::Invariant(_, _)
             | Stmt::Math(_)
             | Stmt::Ellipsis
-            | Stmt::MmsBlock { .. } => Ok(None),
+            | Stmt::MmsBlock { .. }
+            | Stmt::Do(_)
+            | Stmt::Delegate { .. }
+            | Stmt::Pinned { .. } => Ok(None),
         }
     }
 
