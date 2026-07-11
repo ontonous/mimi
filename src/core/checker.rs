@@ -80,6 +80,10 @@ pub(crate) struct Checker<'a> {
     /// Residual protocol for variables typed as `SessionChan<S>` within the
     /// current function body (order checking for session_send/recv/close).
     pub(crate) session_residuals: HashMap<String, crate::ast::SessionType>,
+    /// v0.29.23: names of `view`-borrowed params in the current function.
+    pub(crate) view_params: std::collections::HashSet<String>,
+    /// v0.29.23: names of `mutate`-borrowed params in the current function.
+    pub(crate) mutate_params: std::collections::HashSet<String>,
 }
 
 #[allow(dead_code)]
@@ -123,6 +127,8 @@ impl<'a> Checker<'a> {
             flow_return_targets: Vec::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
+            view_params: std::collections::HashSet::new(),
+            mutate_params: std::collections::HashSet::new(),
         }
     }
 
@@ -171,7 +177,32 @@ impl<'a> Checker<'a> {
     /// C2: Allocate a fresh type variable for inference.
     /// v0.29.22: when a file uses explicit `flow` and still has top-level `main`,
     /// emit a migration diagnostic (script mode is disabled).
-    pub(crate) fn emit_progressive_migration_hint(&mut self) {
+    
+    /// v0.29.23: true when any view/mutate param is active in this function.
+    pub(crate) fn lexical_borrow_active(&self) -> bool {
+        !self.view_params.is_empty() || !self.mutate_params.is_empty()
+    }
+
+    /// v0.29.23: reject flow transitions while a lexical view/mutate borrow is live.
+    pub(crate) fn reject_transition_under_borrow(&mut self, what: &str) {
+        if self.lexical_borrow_active() {
+            let names: Vec<_> = self
+                .view_params
+                .iter()
+                .chain(self.mutate_params.iter())
+                .cloned()
+                .collect();
+            self.emit_code(
+                crate::diagnostic::codes::E0415,
+                format!(
+                    "cannot {} while view/mutate borrow of [{}] is active (lexical borrow ends at function return)",
+                    what,
+                    names.join(", ")
+                ),
+            );
+        }
+    }
+pub(crate) fn emit_progressive_migration_hint(&mut self) {
         if self.file.implicit_single {
             return; // still in script mode — no migration needed
         }

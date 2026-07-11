@@ -13,6 +13,20 @@ impl<'a> Checker<'a> {
         self.unification.reset();
         // v0.29.19: session residual tracking is per-function.
         self.session_residuals.clear();
+        // v0.29.23: view/mutate param borrow sets.
+        self.view_params.clear();
+        self.mutate_params.clear();
+        for p in &func.params {
+            match p.borrow {
+                Some(crate::ast::ParamBorrow::View) => {
+                    self.view_params.insert(p.name.clone());
+                }
+                Some(crate::ast::ParamBorrow::Mutate) => {
+                    self.mutate_params.insert(p.name.clone());
+                }
+                None => {}
+            }
+        }
         let ret = func
             .ret
             .as_ref()
