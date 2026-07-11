@@ -445,6 +445,7 @@ mod tests {
             }],
             impl_protocols: vec![],
             persistent_fields: vec![],
+            transactional_fields: vec![],
         }
     }
 

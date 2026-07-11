@@ -735,6 +735,7 @@ impl Parser {
         let mut transitions = Vec::new();
         let mut impl_protocols = Vec::new();
         let mut persistent_fields = Vec::new();
+        let mut transactional_fields = Vec::new();
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             self.skip_newlines();
@@ -750,11 +751,24 @@ impl Parser {
                 continue;
             }
             // Check for `persistent` modifier or `@` annotation
+            // `@transactional` may appear without `()` before `persistent state`.
+            let mut state_all_transactional = false;
             if self.at(&TokenKind::At) {
+                // Peek: @transactional without paren → field/state attribute
+                let saved = self.pos;
                 self.advance();
                 let ann_name = self.expect_ident()?;
-                self.expect(TokenKind::LParen, "`(`")?;
-                match ann_name.as_str() {
+                if ann_name == "transactional" && !self.at(&TokenKind::LParen) {
+                    state_all_transactional = true;
+                    self.skip_newlines();
+                    // fall through to persistent/state parsing
+                } else {
+                    // Restore and parse as flow annotation @name(...)
+                    self.pos = saved;
+                    self.advance();
+                    let ann_name = self.expect_ident()?;
+                    self.expect(TokenKind::LParen, "`(`")?;
+                    match ann_name.as_str() {
                     "mailbox" => {
                         if matches!(self.peek_kind(), TokenKind::Ident(_))
                             && self.pos + 1 < self.tokens.len()
@@ -784,9 +798,10 @@ impl Parser {
                         }
                     }
                     _ => {}
+                    }
+                    self.expect(TokenKind::RParen, "`)`")?;
+                    continue;
                 }
-                self.expect(TokenKind::RParen, "`)`")?;
-                continue;
             }
             // Check for `persistent` modifier
             let is_persistent = self.at(&TokenKind::Persistent);
@@ -799,7 +814,15 @@ impl Parser {
                     if is_persistent {
                         if let Some(ref payload) = state.payload {
                             for field in payload {
-                                persistent_fields.push(field.name.clone());
+                                if !persistent_fields.contains(&field.name) {
+                                    persistent_fields.push(field.name.clone());
+                                }
+                                // @transactional before persistent state → all fields WAL-backed
+                                if state_all_transactional
+                                    && !transactional_fields.contains(&field.name)
+                                {
+                                    transactional_fields.push(field.name.clone());
+                                }
                             }
                         }
                     }
@@ -809,6 +832,13 @@ impl Parser {
                     if is_persistent {
                         return Err(ParseError::new(
                             "`persistent` cannot be applied to a transition",
+                            self.peek().line,
+                            self.peek().col,
+                        ));
+                    }
+                    if state_all_transactional {
+                        return Err(ParseError::new(
+                            "`@transactional` cannot be applied to a transition",
                             self.peek().line,
                             self.peek().col,
                         ));
@@ -839,6 +869,7 @@ impl Parser {
             transitions,
             impl_protocols,
             persistent_fields,
+            transactional_fields,
         })
     }
 

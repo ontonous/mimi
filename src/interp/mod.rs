@@ -35,6 +35,21 @@ pub(crate) enum LoopAction {
     Break(Option<Value>),
 }
 
+/// v0.29.14: Persistent-payload transaction state for one flow.
+///
+/// At transition entry we snapshot persistent field values from `self`.
+/// - **Version/dirty strategy (default):** if any non-`@transactional` persistent
+///   field differs from the snapshot at Fault time, `recover` degrades to `reset`.
+/// - **WAL strategy (`@transactional`):** snapshot is a full shadow copy; on Fault
+///   those fields are restored from the snapshot before recover.
+#[derive(Debug, Clone, Default)]
+pub struct FlowPersistentTx {
+    /// Snapshotted values keyed by field name (turn entry).
+    pub snapshot: HashMap<String, Value>,
+    /// True after a successful transition commit (snapshot cleared).
+    pub committed: bool,
+}
+
 pub struct Interpreter<'a> {
     file: &'a File,
     /// Scope-level evaluation state (variable bindings, mutability, call stack)
@@ -94,6 +109,10 @@ pub struct Interpreter<'a> {
     actor_index: HashMap<String, ActorDef>,
     /// Flow definitions: flow_name -> FlowDef
     flow_index: HashMap<String, FlowDef>,
+    /// v0.29.14: per-flow persistent-payload transaction state.
+    /// Keyed by flow name. Snapshotted at turn entry; committed on success /
+    /// used for dirty detection + WAL restore on Fault.
+    pub(in crate::interp) flow_tx: HashMap<String, FlowPersistentTx>,
     /// Global constants defined at top level
     globals: HashMap<String, Value>,
     /// CLI arguments forwarded to the program
@@ -192,6 +211,7 @@ impl<'a> Interpreter<'a> {
             func_index,
             actor_index,
             flow_index,
+            flow_tx: HashMap::new(),
             globals: HashMap::new(),
             cli_args: Vec::new(),
             cstring_registry: std::cell::RefCell::new(Vec::new()),

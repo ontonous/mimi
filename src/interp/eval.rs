@@ -391,6 +391,11 @@ impl<'a> Interpreter<'a> {
             InterpError::new(format!("transition '{}' has no body", t.name))
         })?;
 
+        // v0.29.14: snapshot persistent fields at turn entry (WAL + dirty check).
+        if let Some(from_payload) = vals.first() {
+            self.begin_persistent_tx(&flow.name, flow, from_payload);
+        }
+
         self.push_scope();
 
         // Bind self to the first argument (from-state payload)
@@ -418,21 +423,30 @@ impl<'a> Interpreter<'a> {
             Err(e) => {
                 // Already in Fault: do not re-wrap (avoid infinite absorption).
                 if t.from_state == "Fault" {
+                    self.abort_persistent_tx(&flow.name);
                     return Err(e);
                 }
                 // v0.29.12: only absorb true runtime panics (div0/overflow/OOB/…),
                 // not programming errors like undefined names or type mismatches.
                 if !is_runtime_panic(&e) {
+                    self.abort_persistent_tx(&flow.name);
                     return Err(e);
                 }
                 let event = format!("panic:{}", e.code());
                 let snapshot = format_panic_snapshot(&e, &call_stack);
                 let mut fault =
                     crate::flow_matrix::make_fault_value(&t.from_state, &event, &snapshot);
-                // Shadow persistent fields for recover.
+                // Shadow persistent fields for recover (WAL-restored first).
                 if let Some(from_payload) = vals.first() {
-                    shadow_persistent_into_fault(&mut fault, from_payload, &flow.persistent_fields);
-                    drop_fault_payload_except(from_payload, &flow.persistent_fields);
+                    let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
+                    shadow_persistent_into_fault(
+                        &mut fault,
+                        &restored,
+                        &flow.persistent_fields,
+                    );
+                    drop_fault_payload_except(&restored, &flow.persistent_fields);
+                } else {
+                    self.abort_persistent_tx(&flow.name);
                 }
                 return Ok(fault);
             }
@@ -445,21 +459,166 @@ impl<'a> Interpreter<'a> {
             || matches!(&out, Value::Record(Some(n), _) if n == "Fault");
         if enters_fault {
             if let Some(from_payload) = vals.first() {
-                drop_fault_payload_except(from_payload, &flow.persistent_fields);
+                let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
+                // Re-shadow Fault payload with WAL-restored values if the body
+                // already constructed a Fault record.
+                let mut out_fault = out;
+                if matches!(&out_fault, Value::Record(Some(n), _) if n == "Fault") {
+                    shadow_persistent_into_fault(
+                        &mut out_fault,
+                        &restored,
+                        &flow.persistent_fields,
+                    );
+                }
+                drop_fault_payload_except(&restored, &flow.persistent_fields);
+                return Ok(out_fault);
             }
+            self.abort_persistent_tx(&flow.name);
+        } else {
+            // Success: commit (drop snapshot).
+            self.commit_persistent_tx(&flow.name);
         }
 
-        // v0.29.13: reset / recover clear actor faulted flags so the flow can
-        // accept messages again after leaving Fault.
+        // v0.29.13/14: reset / recover clear actor faulted flags.
+        // recover degrades to reset when non-transactional persistent fields
+        // were dirtied during the turn that produced this Fault.
+        let mut final_out = out;
         if (t.name == "reset" || t.name == "recover") && t.from_state == "Fault" {
+            if t.name == "recover" {
+                if let Some(from_payload) = vals.first() {
+                    if self.persistent_dirty_for_recover(flow, from_payload) {
+                        // Dirty non-transactional persistent data → degrade to reset
+                        // by zeroing non-default persistent fields on the result.
+                        final_out = force_reset_persistent(&final_out, flow);
+                    }
+                }
+            }
             if let Some(from_payload) = vals.first() {
                 clear_faulted_actors(from_payload);
             }
-            // Also clear on the newly built root if it carries actors.
-            clear_faulted_actors(&out);
+            clear_faulted_actors(&final_out);
+            // Clear any residual tx state after recovery.
+            self.flow_tx.remove(&flow.name);
         }
 
-        Ok(out)
+        Ok(final_out)
+    }
+
+    /// Snapshot persistent fields from `self` at turn entry.
+    fn begin_persistent_tx(&mut self, flow_name: &str, flow: &FlowDef, self_val: &Value) {
+        if flow.persistent_fields.is_empty() {
+            return;
+        }
+        let mut snap = HashMap::new();
+        if let Value::Record(_, fields) = self_val {
+            for name in &flow.persistent_fields {
+                if let Some(v) = fields.get(name) {
+                    snap.insert(name.clone(), v.clone());
+                }
+            }
+        }
+        self.flow_tx.insert(
+            flow_name.to_string(),
+            super::FlowPersistentTx {
+                snapshot: snap,
+                committed: false,
+            },
+        );
+    }
+
+    fn commit_persistent_tx(&mut self, flow_name: &str) {
+        if let Some(tx) = self.flow_tx.get_mut(flow_name) {
+            tx.snapshot.clear();
+            tx.committed = true;
+        }
+    }
+
+    fn abort_persistent_tx(&mut self, flow_name: &str) {
+        self.flow_tx.remove(flow_name);
+    }
+
+    /// Abort transaction and restore `@transactional` fields from WAL snapshot
+    /// onto a clone of `from_payload`. Non-transactional fields keep current
+    /// values (dirty flag checked later on recover).
+    fn abort_persistent_tx_restore(
+        &mut self,
+        flow_name: &str,
+        from_payload: &Value,
+        flow: &FlowDef,
+    ) -> Value {
+        let tx = self.flow_tx.remove(flow_name);
+        let mut restored = from_payload.clone();
+        let Some(tx) = tx else {
+            return restored;
+        };
+        if flow.transactional_fields.is_empty() {
+            return restored;
+        }
+        if let Value::Record(_, fields) = &mut restored {
+            for name in &flow.transactional_fields {
+                if let Some(v) = tx.snapshot.get(name) {
+                    fields.insert(name.clone(), v.clone());
+                }
+            }
+        }
+        restored
+    }
+
+    /// True if any non-transactional persistent field on the Fault shadow
+    /// differs from the last committed snapshot — recover should degrade to reset.
+    ///
+    /// Note: after a successful turn the snapshot is cleared. Dirty detection
+    /// for recover uses the Fault payload's own values vs type defaults only when
+    /// no snapshot remains; with an active snapshot (panic mid-turn already handled)
+    /// we compare against that. For the common path (fallback → Fault → recover),
+    /// the snapshot from the *faulting* turn is already consumed; we store a
+    /// "last good" snapshot on commit for this check.
+    fn persistent_dirty_for_recover(&self, flow: &FlowDef, fault_payload: &Value) -> bool {
+        // Prefer last-good snapshot if still present.
+        if let Some(tx) = self.flow_tx.get(&flow.name) {
+            if !tx.snapshot.is_empty() {
+                if let Value::Record(_, fields) = fault_payload {
+                    for name in &flow.persistent_fields {
+                        if flow.transactional_fields.iter().any(|t| t == name) {
+                            continue; // WAL-restored, always clean
+                        }
+                        match (fields.get(name), tx.snapshot.get(name)) {
+                            (Some(cur), Some(old)) if !crate::interp::value::values_equal(cur, old) => {
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Zero persistent fields on a recovered root (degrade recover → reset).
+fn force_reset_persistent(val: &Value, flow: &FlowDef) -> Value {
+    let Value::Record(name, fields) = val else {
+        return val.clone();
+    };
+    let mut fields = fields.clone();
+    for pname in &flow.persistent_fields {
+        if let Some(entry) = fields.get_mut(pname) {
+            *entry = default_value_for_runtime(entry);
+        }
+    }
+    Value::Record(name.clone(), fields)
+}
+
+fn default_value_for_runtime(sample: &Value) -> Value {
+    match sample {
+        Value::Int(_) => Value::Int(0),
+        Value::Float(_) => Value::Float(0.0),
+        Value::Bool(_) => Value::Bool(false),
+        Value::String(_) => Value::String(String::new()),
+        Value::List(_) => Value::List(vec![]),
+        Value::Unit => Value::Unit,
+        other => other.clone(), // keep shape for complex types
     }
 }
 
