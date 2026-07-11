@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, Z3VarMap};
+use crate::verifier::expr;
 use crate::verifier::helpers::{
     block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr,
 };
@@ -95,7 +96,7 @@ impl crate::verifier::Verifier {
             (requires_expr.is_some() as usize) + (ensures_expr.is_some() as usize);
 
         if let Some(req) = requires_expr {
-            if let Some(z3_bool) = self.expr_to_z3_bool(req, &mut vars) {
+            if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
                 self.solver.assert(&z3_bool);
             }
         }
@@ -142,7 +143,7 @@ impl crate::verifier::Verifier {
             SatResult::Sat => {
                 if let Some(ens) = ensures_expr {
                     self.solver_push();
-                    if let Some(z3_not_ens) = self.expr_to_z3_bool(ens, &mut vars).map(|b| b.not())
+                    if let Some(z3_not_ens) = expr::expr_to_z3_bool(ens, &mut vars).map(|b| b.not())
                     {
                         self.solver.assert(&z3_not_ens);
                         match self.check_safe() {
@@ -397,7 +398,7 @@ impl crate::verifier::Verifier {
         let body_return = body_return.map(|expr| Self::expand_lets_in_expr(&expr, &let_subst));
 
         for req in &requires_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(req, &mut vars) {
+            if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
                 self.solver.assert(z3_bool);
             } else {
                 parse_errors.push(format!("could not encode requires: {}", format_expr(req)));
@@ -405,7 +406,7 @@ impl crate::verifier::Verifier {
         }
 
         for math in &math_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(math, &mut vars) {
+            if let Some(z3_bool) = expr::expr_to_z3_bool(math, &mut vars) {
                 self.solver.assert(z3_bool);
             } else {
                 parse_errors.push(format!(
@@ -416,7 +417,7 @@ impl crate::verifier::Verifier {
         }
 
         for inv in &invariant_exprs {
-            if let Some(z3_bool) = self.expr_to_z3_bool(inv, &mut vars) {
+            if let Some(z3_bool) = expr::expr_to_z3_bool(inv, &mut vars) {
                 self.solver.assert(z3_bool);
             } else {
                 parse_errors.push(format!("could not encode invariant: {}", format_expr(inv)));
@@ -443,7 +444,7 @@ impl crate::verifier::Verifier {
 
         if let Some(ref return_expr) = body_return {
             if returns_real {
-                if let Some(body_z3) = self.expr_to_z3_real(return_expr, &mut vars) {
+                if let Some(body_z3) = expr::expr_to_z3_real(return_expr, &mut vars) {
                     if let Some(r) = vars.get_real("result") {
                         self.solver.assert(r.eq(&body_z3));
                     }
@@ -452,14 +453,14 @@ impl crate::verifier::Verifier {
                         "could not encode return expression — result may be unconstrained".into(),
                     );
                 }
-            } else if let Some(body_z3) = self.expr_to_z3_int(return_expr, &mut vars) {
+            } else if let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) {
                 if let Some(i) = vars.get_int("result") {
                     self.solver.assert(i.eq(&body_z3));
                 }
                 // Link result length to body return length for sort/reverse.
                 // This ensures len(result) == len(sort(xs)) == len(xs).
-                if let Some(body_len) = self.resolve_list_len(return_expr, &mut vars) {
-                    let len_key = self.call_var_key("len", &[Expr::Ident("result".to_string())]);
+                if let Some(body_len) = expr::resolve_list_len(return_expr, &mut vars) {
+                    let len_key = expr::call_var_key("len", &[Expr::Ident("result".to_string())]);
                     let result_len = vars.get_or_create_int(&len_key);
                     self.solver.assert(result_len.eq(&body_len));
                 }
@@ -565,7 +566,7 @@ impl crate::verifier::Verifier {
                 if !ensures_exprs.is_empty() {
                     self.solver_push();
                     for ens in &ensures_exprs {
-                        if let Some(z3_bool) = self.expr_to_z3_bool(ens, &mut vars) {
+                        if let Some(z3_bool) = expr::expr_to_z3_bool(ens, &mut vars) {
                             self.solver.assert(z3_bool.not());
                         } else {
                             parse_errors
@@ -1242,9 +1243,9 @@ impl crate::verifier::Verifier {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     if let Some(callee_func) = self.func_defs.get(name) {
-                        let call_key = self.call_var_key(name, call_args);
+                        let call_key = expr::call_var_key(name, call_args);
                         // Clone callee data to avoid borrow conflict with
-                        // self.expr_to_z3_bool (which needs &mut self).
+                        // expr::expr_to_z3_bool (which needs &mut Z3VarMap).
                         let callee_params = callee_func.params.clone();
                         let callee_ensures: Vec<Expr> = callee_func
                             .body
@@ -1267,7 +1268,7 @@ impl crate::verifier::Verifier {
                                 call_args,
                                 &call_key,
                             );
-                            if let Some(z3_bool) = self.expr_to_z3_bool(&substituted, vars) {
+                            if let Some(z3_bool) = expr::expr_to_z3_bool(&substituted, vars) {
                                 self.solver.assert(z3_bool);
                             }
                         }
@@ -1333,8 +1334,8 @@ impl crate::verifier::Verifier {
                 if let Expr::Ident(name) = callee.as_ref() {
                     if (name == "sort" || name == "reverse") && call_args.len() == 1 {
                         // len(sort(xs)) == len(xs)
-                        if let Some(input_len) = self.resolve_list_len(&call_args[0], vars) {
-                            let len_key = self.call_var_key("len", std::slice::from_ref(expr));
+                        if let Some(input_len) = expr::resolve_list_len(&call_args[0], vars) {
+                            let len_key = expr::call_var_key("len", std::slice::from_ref(expr));
                             let output_len = vars.get_or_create_int(&len_key);
                             self.solver.assert(output_len.eq(&input_len));
                         }
@@ -1560,7 +1561,7 @@ impl crate::verifier::Verifier {
                                 call_args,
                                 &format!("call_{}", name),
                             );
-                            if let Some(z3_req) = self.expr_to_z3_bool(&substituted, vars) {
+                            if let Some(z3_req) = expr::expr_to_z3_bool(&substituted, vars) {
                                 self.solver_push();
                                 self.solver.assert(z3_req.not());
                                 if self.check_safe() == z3::SatResult::Sat {
@@ -1792,7 +1793,7 @@ impl crate::verifier::Verifier {
         call_key: &str,
     ) -> Expr {
         // Simple recursive substitution. For `result`, replace with a fresh
-        // Ident that matches the Z3 variable naming from call_var_key.
+        // Ident that matches the Z3 variable naming from expr::call_var_key.
         // For param names, replace with the actual call argument expressions.
         match ensures {
             Expr::Ident(name) if name == "result" => Expr::Ident(call_key.to_string()),
