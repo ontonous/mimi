@@ -1,0 +1,17 @@
+// v0.29.45: Metadata Shadowing for @transactional
+// White-paper section 6.3: "事务性保护仅限于元数据层面（游标、指针、标识位）"
+// For large buffers, only metadata (length) is snapshotted, not full data.
+flow Buf {
+    persistent state Active { buffer: List<i32> }
+    @transactional state Active
+
+    transition safe(Active) -> Active {
+        do { return Active { buffer: self.buffer } }
+    }
+}
+func main() -> i32 {
+    let s = Active { buffer: [1, 2, 3] }
+    let r = Buf::safe(s)
+    println(r.buffer.len())
+    0
+}

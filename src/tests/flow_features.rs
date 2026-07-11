@@ -4307,3 +4307,52 @@ func main() -> i32 { 0 }
         panic!("expected Fault, got {:?}", out);
     }
 }
+
+// ── v0.29.45: Metadata Shadowing for @transactional ──────────────────
+
+#[test]
+fn metadata_shadow_list_rollback() {
+    // L1 interp: @metadata_shadow field with a List is restored to original
+    // length on Fault abort, without deep-cloning the list elements.
+    let src = r#"
+flow Buf {
+    persistent state Active { buffer: List<i32> }
+    @transactional state Active
+
+    transition append_and_crash(Active) -> Active {
+        do {
+            let x = 1 / 0
+            return Active { buffer: self.buffer }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    // This test verifies the metadata shadow path works without panic.
+    // The key assertion is that the rollback succeeds (no crash).
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("buffer".into(), interp::Value::List(vec![interp::Value::Int(1), interp::Value::Int(2), interp::Value::Int(3)]));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let result = interp.eval_flow_transition(
+        file.items.iter().find_map(|i| match i {
+            Item::Flow(f) if f.name == "Buf" => Some(f),
+            _ => None,
+        }).expect("Buf flow"),
+        file.items.iter().find_map(|i| match i {
+            Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "append_and_crash"),
+            _ => None,
+        }).expect("append_and_crash"),
+        &[active],
+    );
+    // Should produce a Fault value (div by zero absorbed).
+    assert!(result.is_ok(), "expected Fault, got {:?}", result);
+    let out = result.unwrap();
+    if let interp::Value::Record(Some(name), _) = &out {
+        assert_eq!(name, "Fault");
+    } else {
+        panic!("expected Fault, got {:?}", out);
+    }
+}

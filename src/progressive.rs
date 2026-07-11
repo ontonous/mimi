@@ -67,6 +67,7 @@ fn make_implicit_main_flow() -> FlowDef {
         impl_protocols: vec![],
         persistent_fields: vec![],
         transactional_fields: vec![],
+        metadata_shadow_fields: vec![],
     }
 }
 
@@ -159,6 +160,7 @@ mod tests {
             impl_protocols: vec![],
             persistent_fields: vec![],
             transactional_fields: vec![],
+            metadata_shadow_fields: vec![],
         }));
         file.items.push(Item::Func(FuncDef {
             name: "main".into(),

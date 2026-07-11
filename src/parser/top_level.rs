@@ -888,6 +888,7 @@ impl Parser {
             impl_protocols,
             persistent_fields,
             transactional_fields,
+            metadata_shadow_fields: vec![],
         })
     }
 
