@@ -112,8 +112,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Item::Flow(f) => {
                     // Register flow state payload types so record construction
                     // (e.g. `Zero { count: 0 }`) works in function codegen.
-                    // Transition calls themselves are not supported — they will
-                    // produce a compile error at the method dispatch site.
                     let qualified = format!("flow::{}", f.name);
                     for s in &f.states {
                         let type_name = format!("{}::{}", qualified, s.name);
@@ -142,6 +140,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_type_def(&td)?;
                         }
                     }
+                    // Cache the flow definition for transition compilation.
+                    self.flow_defs.insert(f.name.clone(), f.clone());
                 }
                 _ => {}
             }
@@ -176,12 +176,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.declare_func(f)?;
             }
         }
+        // Forward-declare flow transitions so user functions can call them.
+        {
+            let flow_defs: Vec<FlowDef> = self.flow_defs.values().cloned().collect();
+            for flow in &flow_defs {
+                for t in &flow.transitions {
+                    let func = Self::transition_to_func(flow, t);
+                    self.func_defs.insert(func.name.clone(), func.clone());
+                    self.declare_func(&func)?;
+                }
+            }
+        }
 
         // Third pass: compile impl methods (needed before vtable construction)
         self.compile_impl_methods()?;
         // Fourth pass: compile vtables (needed before user function compilation)
         self.compile_vtables()?;
-        // Fifth pass: compile user functions and actors.
+        // Fifth pass: compile user functions, actors, and flow transitions.
         // v0.28.21 — `comptime func` items are folded at codegen-start by
         // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
         // (the caller resolves them via the cached `comptime_values` map,
@@ -197,6 +208,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Item::Actor(actor) => {
                     self.compile_actor(actor)?;
+                }
+                Item::Flow(f) => {
+                    self.compile_flow(f)?;
                 }
                 _ => {}
             }
@@ -221,6 +235,86 @@ impl<'ctx> CodeGenerator<'ctx> {
             "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit" | "char" | "Int" | "Float"
                 | "Bool" | "String" | "List" | "Option" | "Result" | "Set" | "Map"
         )
+    }
+
+    /// Mangle a flow transition into an ordinary function name.
+    /// Format: `{FlowName}__{transition}__from_{FromState}`
+    pub(super) fn transition_fn_name(flow: &str, transition: &str, from: &str) -> String {
+        format!("{}__{}__from_{}", flow, transition, from)
+    }
+
+    /// Convert a flow transition into a synthetic FuncDef for codegen.
+    ///
+    /// Parameters: `self` (from-state payload) + event params.
+    /// Return type: first declared to-state (multi-target uses first as nominal).
+    /// Body: the transition body with outer `do { }` unwrapped (if present).
+    pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
+        let mut params = Vec::new();
+        params.push(Param {
+            name: "self".to_string(),
+            ty: Type::Name(t.from_state.clone(), vec![]),
+            mut_: false,
+            default_value: None,
+        });
+        params.extend(t.params.iter().cloned());
+
+        let ret_name = t
+            .to_states
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unit".to_string());
+
+        // Unwrap a single outer `do { ... }` so compile_block sees normal stmts.
+        let body: Block = match &t.body {
+            Some(block) => {
+                if block.len() == 1 {
+                    if let Stmt::Do(inner) = &block[0] {
+                        inner.clone()
+                    } else {
+                        block.clone()
+                    }
+                } else {
+                    // Multiple top-level stmts: unwrap each Do, keep rest.
+                    let mut out = Vec::new();
+                    for stmt in block {
+                        match stmt {
+                            Stmt::Do(inner) => out.extend(inner.iter().cloned()),
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    out
+                }
+            }
+            None => Vec::new(),
+        };
+
+        FuncDef {
+            name: Self::transition_fn_name(&flow.name, &t.name, &t.from_state),
+            pub_: false,
+            params,
+            ret: Some(Type::Name(ret_name, vec![])),
+            body,
+            where_clause: vec![],
+            generics: vec![],
+            effects: vec![],
+            is_comptime: false,
+            is_async: false,
+            extern_abi: None,
+            pos: t.pos,
+        }
+    }
+
+    /// Compile all transitions of a flow as ordinary LLVM functions.
+    pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
+        for t in &flow.transitions {
+            if t.body.is_none() {
+                continue; // abstract / protocol-style transition — no body
+            }
+            let func = Self::transition_to_func(flow, t);
+            self.compile_func(&func)
+                .map_err(|e| e.at(Span::from(t.pos)))?;
+        }
+        Ok(())
     }
 
     /// Register built-in Record types used by builtin functions (exec, file_stat, etc.)

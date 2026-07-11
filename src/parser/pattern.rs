@@ -146,10 +146,16 @@ impl Parser {
                     Ok(Pattern::Array(pats))
                 }
             }
-            // Keywords that can be used as identifiers in pattern context.
-            // Only `old` is allowed as a soft keyword — all other keywords
-            // are reserved and cannot be used as binding names.
-            TokenKind::Old => {
+            // Soft keywords allowed as binding names in pattern context.
+            // Special syntax (delegate view/mutate/consume, do { }, etc.)
+            // is handled by statement parsers before patterns are reached.
+            TokenKind::Old
+            | TokenKind::View
+            | TokenKind::Mutate
+            | TokenKind::Consume
+            | TokenKind::Do
+            | TokenKind::Persistent
+            | TokenKind::Subflow => {
                 let name = tok.kind.source_text().to_string();
                 self.advance();
                 Ok(Pattern::Variable(name))

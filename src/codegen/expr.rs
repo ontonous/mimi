@@ -308,7 +308,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name.clone()
             }
             Expr::Record { ty: Some(name), .. } => name.clone(),
-            Expr::Call(callee, _) => {
+            Expr::Call(callee, args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
                     // Try to strip _new suffix used by our codegen constructors
                     if let Some(stripped) = name.strip_suffix("_new") {
@@ -324,6 +324,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let obj_type = self.infer_object_type(obj, vars);
                     if obj_type == "string" {
                         self.infer_string_method_return_type(method)
+                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                        // Flow::transition(from, ...) → to-state of the matching overload.
+                        // Prefer from_state match so fallbacks (→ Fault) win over earlier defs.
+                        if let Some(flow) = self.flow_defs.get(flow_name) {
+                            let from_type = args
+                                .first()
+                                .map(|a| self.infer_object_type(a, vars))
+                                .unwrap_or_default();
+                            let t = flow
+                                .transitions
+                                .iter()
+                                .find(|t| t.name == *method && t.from_state == from_type)
+                                .or_else(|| flow.transitions.iter().find(|t| t.name == *method));
+                            if let Some(t) = t {
+                                return t.to_states.first().cloned().unwrap_or_default();
+                            }
+                        }
+                        String::new()
                     } else {
                         String::new()
                     }

@@ -942,6 +942,7 @@ impl Parser {
             to_states,
             body,
             pos,
+            is_fallback: false,
         })
     }
 

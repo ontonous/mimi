@@ -294,7 +294,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if !elem_type.is_empty() {
                                 self.var_type_names.insert(name.clone(), elem_type);
                             }
-                        } else if let Expr::Call(callee, _) = init {
+                        } else if let Expr::Call(callee, call_args) = init {
                             if let Expr::Field(obj, method_name) = callee.as_ref() {
                                 if method_name == "spawn" {
                                     let obj_type = self.infer_object_type(obj, vars);
@@ -321,13 +321,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else if method_name == "upgrade" {
                                     self.track_weak_upgrade_type(name, obj);
                                 } else {
-                                    // Generic string method call: infer return type
+                                    // Generic method call: infer return type
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type == "string" {
                                         let ret_type =
                                             self.infer_string_method_return_type(method_name);
                                         if !ret_type.is_empty() {
                                             self.var_type_names.insert(name.clone(), ret_type);
+                                        }
+                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                        // Flow::transition(from, ...) → matching overload's to-state
+                                        if let Some(flow) = self.flow_defs.get(flow_name) {
+                                            let from_type = call_args
+                                                .first()
+                                                .map(|a| self.infer_object_type(a, vars))
+                                                .unwrap_or_default();
+                                            let t = flow
+                                                .transitions
+                                                .iter()
+                                                .find(|t| {
+                                                    t.name == *method_name
+                                                        && t.from_state == from_type
+                                                })
+                                                .or_else(|| {
+                                                    flow.transitions
+                                                        .iter()
+                                                        .find(|t| t.name == *method_name)
+                                                });
+                                            if let Some(t) = t {
+                                                if let Some(to) = t.to_states.first() {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), to.clone());
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -690,20 +716,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } => {
                     self.compile_for_stmt(var, iterable, body, vars)?;
                 }
-                Stmt::Do(..) => {
-                    return Err(CompileError::Generic(
-                        "do blocks inside flow transitions cannot be compiled yet; use 'mimi run' instead".to_string(),
-                    ));
+                Stmt::Do(body) => {
+                    // do { ... } is a plain block after transition unwrapping;
+                    // also accept nested do for defensive completeness.
+                    self.compile_block(body, vars)?;
                 }
-                Stmt::Delegate { .. } => {
-                    return Err(CompileError::Generic(
-                        "delegate statements cannot be compiled yet; use 'mimi run' instead".to_string(),
-                    ));
+                Stmt::Delegate { kind, expr, target } => {
+                    // Minimal codegen: evaluate expr (side effects) and validate
+                    // the target exists. Full Move/Return semantics land later.
+                    let _ = self.compile_expr(expr, vars)?;
+                    if !vars.contains_key(target) {
+                        return Err(CompileError::Generic(format!(
+                            "delegate target '{}' not found in scope",
+                            target
+                        )));
+                    }
+                    let _ = kind; // View/Mutate/Consume distinguished at type-check time
                 }
-                Stmt::Pinned { .. } => {
-                    return Err(CompileError::Generic(
-                        "pinned blocks cannot be compiled yet; use 'mimi run' instead".to_string(),
-                    ));
+                Stmt::Pinned {
+                    expr,
+                    timeout,
+                    var,
+                    body,
+                } => {
+                    // Minimal codegen: evaluate the pinned expression, bind
+                    // optional |var|, run body. Timeout is ignored for now.
+                    let val = self.compile_expr(expr, vars)?;
+                    if let Some(v) = var {
+                        let ty = val.get_type();
+                        let alloca = self.build_alloca(ty, v)?;
+                        self.build_store(alloca, val)?;
+                        vars.insert(v.clone(), (alloca, ty));
+                    }
+                    let _ = timeout;
+                    self.compile_block(body, vars)?;
                 }
                 // Defensive wildcard: compile_block handles all current Stmt variants
                 // explicitly; this arm guards against future variants causing a
