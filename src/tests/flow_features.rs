@@ -1262,6 +1262,98 @@ func main() -> i32 {
     assert!(err.contains("nonexistent"), "error should mention target name: {}", err);
 }
 
+// ===================== Pinned execution tests (v0.29.16) =====================
+
+#[test]
+fn flow_exec_pinned_basic() {
+    // v0.29.16: pinned block in do body — basic value scoping.
+    let src = r#"
+flow Buffer {
+    state Active { data: i32 }
+
+    transition use_pinned(Active) -> Active {
+        do {
+            pinned(self.data) |ptr| {
+                let _ = ptr
+            }
+            return Active { data: self.data + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { data: 100 }
+    let r = Buffer::use_pinned(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "101");
+}
+
+#[test]
+fn flow_exec_pinned_with_timeout() {
+    // v0.29.16: pinned with timeout expression.
+    let src = r#"
+flow Buffer {
+    state Active { data: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 5) |p| {
+                let _ = p
+            }
+            return Active { data: self.data + 10 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { data: 42 }
+    let r = Buffer::process(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "52");
+}
+
+#[test]
+fn flow_exec_pinned_no_var() {
+    // v0.29.16: pinned without pipe-var — just evaluates expr and runs body.
+    let src = r#"
+flow Buffer {
+    state Active { data: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 1) {
+                let _ = 42
+            }
+            return Active { data: self.data * 2 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { data: 5 }
+    let r = Buffer::process(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "10");
+}
+
 #[test]
 fn flow_exec_chain() {
     let src = r#"

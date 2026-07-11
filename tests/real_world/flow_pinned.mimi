@@ -1,0 +1,34 @@
+// MCDD real_world: Flow pinned — FFI anchor syntax (v0.29.16)
+// Exercises pinned block: value side-effect through ptr, timeout evaluation.
+flow Buffer {
+    state Active { data: i32 }
+
+    transition use_pinned(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 1) |ptr| {
+                // In real FFI, ptr would be passed to a C function.
+                // Here we just verify ptr binding + scope isolation.
+                let _ = ptr
+            }
+            return Active { data: self.data + 1 }
+        }
+    }
+
+    transition no_timeout(Active) -> Active {
+        do {
+            pinned(self.data) |p| {
+                let _ = p
+            }
+            return Active { data: self.data + 10 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Active { data: 100 }
+    let s1 = Buffer::use_pinned(s0)
+    println(s1.data)
+    let s2 = Buffer::no_timeout(s1)
+    println(s2.data)
+    0
+}
