@@ -347,6 +347,62 @@ impl<'a> Interpreter<'a> {
         crate::runtime::mimi_channel_drop(h);
         Ok(Value::Unit)
     }
+
+    // ----- Mailbox backpressure (v0.29.21) -----
+
+    pub(crate) fn builtin_actor_mailbox_depth(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("actor_mailbox_depth expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Actor(h) => Ok(Value::Int(h.mailbox_depth() as i64)),
+            _ => Err(InterpError::new("actor_mailbox_depth expects actor handle")),
+        }
+    }
+
+    pub(crate) fn builtin_actor_is_muted(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("actor_is_muted expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Actor(h) => Ok(Value::Int(if h.is_muted() { 1 } else { 0 })),
+            _ => Err(InterpError::new("actor_is_muted expects actor handle")),
+        }
+    }
+
+    pub(crate) fn builtin_actor_set_mailbox_depth(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "actor_set_mailbox_depth expects (actor, depth)",
+            ));
+        }
+        let depth = match &args[1] {
+            Value::Int(n) if *n > 0 => *n as usize,
+            _ => {
+                return Err(InterpError::new(
+                    "actor_set_mailbox_depth: depth must be positive i64",
+                ))
+            }
+        };
+        match &args[0] {
+            Value::Actor(h) => {
+                h.set_mailbox_depth_limit(depth);
+                Ok(Value::Unit)
+            }
+            _ => Err(InterpError::new(
+                "actor_set_mailbox_depth expects actor handle",
+            )),
+        }
+    }
 }
 
 /// Helper: extract the i64 payload of a Value::Int as a runtime handle id.
@@ -365,3 +421,4 @@ impl ValueAsI64 for Value {
         }
     }
 }
+

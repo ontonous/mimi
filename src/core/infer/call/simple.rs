@@ -661,7 +661,7 @@ impl<'a> Checker<'a> {
             // v0.28.20 — concurrency primitives; handle types are uniform i64.
             "atomic_i32_new" | "atomic_i32_drop" | "atomic_i64_new" | "atomic_i64_drop"
             | "atomic_bool_new" | "atomic_bool_drop" | "mutex_new" | "mutex_lock"
-            | "channel_new" => {
+            | "channel_new" | "actor_mailbox_depth" | "actor_is_muted" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }
@@ -697,7 +697,8 @@ impl<'a> Checker<'a> {
                 return Type::Name("i64".into(), vec![]);
             }
             "atomic_i32_store" | "atomic_i64_store" | "atomic_bool_store" | "mutex_set"
-            | "mutex_unlock" | "mutex_drop" | "channel_send" | "channel_drop" => {
+            | "mutex_unlock" | "mutex_drop" | "channel_send" | "channel_drop"
+            | "actor_set_mailbox_depth" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }

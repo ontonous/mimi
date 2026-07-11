@@ -6728,6 +6728,12 @@ struct MimiActorRepr {
     /// v0.29.11: Fault absorption — when set, mailbox is short-circuited (O(1)).
     /// Shared with the worker so both call and drain paths see the same flag.
     faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// v0.29.21: mailbox high-water depth limit.
+    mailbox_depth_limit: usize,
+    /// v0.29.21: approximate in-flight message count.
+    mailbox_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// v0.29.21: muted under backpressure.
+    muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 // SAFETY: `MimiActorRepr` is shared between the caller thread (which holds the
@@ -6805,6 +6811,12 @@ pub extern "C" fn mimi_actor_spawn(
     let worker_id = id;
     let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_faulted = faulted.clone();
+    let mailbox_depth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_depth = mailbox_depth.clone();
+    let muted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_muted = muted.clone();
+    let mailbox_depth_limit: usize = 2048;
+    let worker_limit = mailbox_depth_limit;
 
     let handle = std::thread::Builder::new()
         .name(format!("mimi-actor-{}", id))
@@ -6819,6 +6831,17 @@ pub extern "C" fn mimi_actor_spawn(
             let mut result_blob = vec![0u8; MIMI_ACTOR_BLOB_SIZE];
 
             while let Ok(msg) = rx.recv() {
+                // v0.29.21: depth accounting.
+                let _ = worker_depth.fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |v| Some(v.saturating_sub(1)),
+                );
+                // Hysteresis unmute at ≤ 50% depth.
+                let d = worker_depth.load(std::sync::atomic::Ordering::Acquire);
+                if d <= worker_limit / 2 {
+                    worker_muted.store(false, std::sync::atomic::Ordering::Release);
+                }
                 // v0.29.11: Fault absorption — drain without dispatch (O(1) short-circuit).
                 if worker_faulted.load(std::sync::atomic::Ordering::Acquire) {
                     // Zero-size result signals short-circuit to the caller.
@@ -6866,6 +6889,9 @@ pub extern "C" fn mimi_actor_spawn(
         mailbox_tx: tx,
         worker: Some(handle),
         faulted,
+        mailbox_depth_limit,
+        mailbox_depth,
+        muted,
     });
 
     Box::into_raw(repr) as *mut std::ffi::c_void
@@ -6928,6 +6954,25 @@ pub extern "C" fn mimi_actor_call(
         return 0;
     }
 
+    // v0.29.21: mailbox backpressure — wait while muted/over HWM, TTL break.
+    let ttl = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    loop {
+        let depth = repr
+            .mailbox_depth
+            .load(std::sync::atomic::Ordering::Acquire);
+        let muted = repr.muted.load(std::sync::atomic::Ordering::Acquire);
+        let over = depth >= repr.mailbox_depth_limit;
+        if !muted && !over {
+            break;
+        }
+        if start.elapsed() >= ttl {
+            // SendErrorNotWriteable — force-wake producer (return 0).
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
     // Pack args.
     let args: Vec<u8> = if args_ptr.is_null() || args_size <= 0 {
         Vec::new()
@@ -6947,8 +6992,22 @@ pub extern "C" fn mimi_actor_call(
         response: resp_tx,
     };
 
+    // v0.29.21: reserve depth slot; mute if over HWM.
+    let d = repr
+        .mailbox_depth
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+        + 1;
+    if d > repr.mailbox_depth_limit {
+        repr.muted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     // Send to mailbox. If the channel is closed (actor dropped), return 0.
     if repr.mailbox_tx.send(msg).is_err() {
+        let _ = repr.mailbox_depth.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |v| Some(v.saturating_sub(1)),
+        );
         return 0;
     }
 
@@ -7023,6 +7082,42 @@ pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
     // SAFETY: `handle` is a valid `Box<MimiActorRepr>` from spawn.
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
     if repr.faulted.load(std::sync::atomic::Ordering::Acquire) {
+        1
+    } else {
+        0
+    }
+}
+
+
+/// v0.29.21: set mailbox high-water depth limit for backpressure.
+#[no_mangle]
+pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
+    if handle.is_null() || depth <= 0 {
+        return;
+    }
+    // SAFETY: handle from mimi_actor_spawn; exclusive via opaque pointer.
+    let repr = unsafe { &mut *(handle as *mut MimiActorRepr) };
+    repr.mailbox_depth_limit = depth as usize;
+}
+
+/// v0.29.21: current approximate mailbox depth.
+#[no_mangle]
+pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64 {
+    if handle.is_null() {
+        return 0;
+    }
+    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    repr.mailbox_depth.load(std::sync::atomic::Ordering::Acquire) as i64
+}
+
+/// v0.29.21: 1 if actor is muted under backpressure, else 0.
+#[no_mangle]
+pub extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
+    if handle.is_null() {
+        return 0;
+    }
+    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    if repr.muted.load(std::sync::atomic::Ordering::Acquire) {
         1
     } else {
         0

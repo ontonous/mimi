@@ -690,4 +690,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("channel_try_recv error: {}", e))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_channel_try_recv returned void")?)
     }
+
+    /// v0.29.21: actor_mailbox_depth / actor_is_muted → runtime query.
+    pub(super) fn compile_actor_mailbox_query(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        runtime_name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.is_empty() {
+            return Err(format!("{} expects actor handle", runtime_name).into());
+        }
+        let func = self
+            .module
+            .get_function(runtime_name)
+            .ok_or_else(|| format!("{} not declared", runtime_name))?;
+        let result = self
+            .builder
+            .build_call(func, &[args[0]], "actor_bp_query")
+            .map_err(|e| format!("{} error: {}", runtime_name, e))?;
+        Ok(call_try_basic_value(&result).ok_or_else(|| format!("{} returned void", runtime_name))?)
+    }
+
+    /// v0.29.21: actor_set_mailbox_depth(handle, depth).
+    pub(super) fn compile_actor_set_mailbox_depth(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() < 2 {
+            return Err("actor_set_mailbox_depth expects (handle, depth)".into());
+        }
+        let func = self
+            .module
+            .get_function("mimi_actor_set_mailbox_depth")
+            .ok_or("mimi_actor_set_mailbox_depth not declared")?;
+        self.builder
+            .build_call(func, &[args[0], args[1]], "actor_set_mb_depth")
+            .map_err(|e| format!("actor_set_mailbox_depth error: {}", e))?;
+        Ok(BasicValueEnum::IntValue(
+            self.context.i64_type().const_int(0, false),
+        ))
+    }
 }

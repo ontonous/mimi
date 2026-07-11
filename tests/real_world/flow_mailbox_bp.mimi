@@ -1,0 +1,37 @@
+// MCDD real_world: Mailbox backpressure governance (v0.29.21)
+// @mailbox(depth=N) annotation parse + actor depth/mute query dual-backend.
+
+flow Engine {
+    @mailbox(depth = 128)
+    state Idle
+    state Running { ticks: i32 }
+    transition start(Idle) -> Running {
+        do { return Running { ticks: 0 } }
+    }
+    transition tick(Running) -> Running {
+        do { return Running { ticks: self.ticks + 1 } }
+    }
+}
+
+actor Counter {
+    n: i32
+    func bump() -> i32 {
+        self.n = self.n + 1
+        self.n
+    }
+}
+
+func main() -> i32 {
+    let s0 = Idle { }
+    let s1 = Engine::start(s0)
+    let s2 = Engine::tick(s1)
+    println(s2.ticks)
+
+    let c = Counter.spawn()
+    actor_set_mailbox_depth(c, 16)
+    println(actor_mailbox_depth(c))
+    println(actor_is_muted(c))
+    let v = c.bump()
+    println(v)
+    0
+}
