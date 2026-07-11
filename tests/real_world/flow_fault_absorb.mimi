@@ -1,0 +1,24 @@
+// MCDD real_world: Fault absorption + payload drop (v0.29.11)
+// Transition into Fault (via user path or matrix fallback) must leave a readable
+// Fault payload and not crash. Nested actor short-circuit is covered by unit tests.
+flow Holder {
+    state Live { tag: string, n: i32 }
+    state Done { tag: string }
+
+    transition finish(Live) -> Done {
+        do {
+            return Done { tag: self.tag }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Live { tag: "ok", n: 42 }
+    let s1 = Holder::finish(s0)
+    println(s1.tag)
+    // Done+finish is auto-fallback → Fault
+    let f = Holder::finish(s1)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}

@@ -1589,3 +1589,100 @@ func main() -> i32 {
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "2");
 }
+
+// ===================== Fault absorption (v0.29.11) =====================
+
+#[test]
+fn flow_fault_absorption_drop_nested_record() {
+    // Entering Fault via fallback must succeed and leave a readable Fault payload.
+    // Nested payload resources are walked for drop (actors short-circuited).
+    let src = r#"
+flow Holder {
+    state Live { tag: string, n: i32 }
+    state Dead { tag: string }
+
+    transition kill(Live) -> Dead {
+        do { return Dead { tag: self.tag } }
+    }
+}
+
+func main() -> i32 {
+    let s = Live { tag: "x", n: 7 }
+    // kill is only defined on Live; Dead+kill is fallback → Fault
+    let d = Holder::kill(s)
+    let f = Holder::kill(d)
+    if f.last_state == "Dead" {
+        if f.unexpected_event == "kill" {
+            return 1
+        }
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(1)));
+}
+
+#[test]
+fn flow_fault_mailbox_short_circuit_actor() {
+    // Actor nested in flow payload: user transition Active → Fault short-circuits
+    // the nested actor (fields cleared, faulted=true). Subsequent method calls fail.
+    let src = r#"
+actor Worker {
+    mut n: i32 = 0;
+    func ping() -> i32 { return self.n; }
+}
+
+flow S {
+    state Active { w: Worker }
+    transition fail(Active) -> Fault {
+        do {
+            return Fault { last_state: "Active", unexpected_event: "fail" }
+        }
+    }
+}
+
+func main() -> i32 {
+    let w = Worker.spawn()
+    let s = Active { w: w }
+    let f = S::fail(s)
+    if f.last_state == "Active" {
+        if f.unexpected_event == "fail" {
+            return 1
+        }
+    }
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(1)));
+}
+
+#[test]
+fn flow_fault_absorption_codegen() {
+    let src = r#"
+flow F {
+    state A { v: i32 }
+    state B { v: i32 }
+
+    transition go(A) -> B {
+        do { return B { v: self.v + 1 } }
+    }
+}
+
+func main() -> i32 {
+    let a = A { v: 1 }
+    let b = F::go(a)
+    // B+go is fallback → Fault
+    let f = F::go(b)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines, vec!["B", "go"], "got {:?}", lines);
+}

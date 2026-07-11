@@ -1865,6 +1865,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 /// - `mimi_actor_current_id() -> i64`
 /// - `mimi_actor_call(handle: i8*, method_id: i32, args_ptr: i8*, args_size: i64, result_ptr: i8*) -> i64`
 /// - `mimi_actor_drop(handle: i8*)`
+/// - `mimi_actor_fault(handle: i8*)` — v0.29.11 mailbox short-circuit
+/// - `mimi_actor_is_faulted(handle: i8*) -> i32`
 fn register_actor_concurrency_rt<'ctx>(
     module: &Module<'ctx>,
     _ctx: &'ctx Context,
@@ -1917,6 +1919,18 @@ fn register_actor_concurrency_rt<'ctx>(
     module.add_function(
         "mimi_actor_drop",
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_fault(handle: i8*) — v0.29.11 Fault absorption short-circuit
+    module.add_function(
+        "mimi_actor_fault",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_actor_is_faulted(handle: i8*) -> i32
+    module.add_function(
+        "mimi_actor_is_faulted",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
 }

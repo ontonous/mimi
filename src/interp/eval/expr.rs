@@ -1172,6 +1172,12 @@ impl<'a> Interpreter<'a> {
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Value::Actor(handle) = obj_val {
+                    // v0.29.11: O(1) short-circuit after Fault absorption.
+                    if handle.is_faulted() {
+                        return Err(InterpError::new(
+                            "actor mailbox short-circuited (Fault)",
+                        ));
+                    }
                     // Send through mailbox, return Future<T> for awaiting later
                     let (tx, rx) = std::sync::mpsc::channel();
                     let msg = crate::interp::value::ActorMailboxMsg {

@@ -342,6 +342,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .copied()
             .unwrap();
 
+        let is_fallback = t.is_fallback;
+        let enters_fault = is_fallback || t.to_states.iter().any(|s| s == "Fault");
         let fn_name = CodeGenerator::transition_fn_name(flow_name, &t.name, &t.from_state);
         let function = self.module.get_function(&fn_name).ok_or_else(|| {
             CompileError::Generic(format!(
@@ -369,8 +371,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let metadata_args = self.values_to_metadata(&compiled_args);
         let call = self.build_call(function, &metadata_args, "flow_transition")?;
-        Ok(call_try_basic_value(&call)
-            .unwrap_or(self.context.i64_type().const_int(0, false).into()))
+        let result = call_try_basic_value(&call)
+            .unwrap_or(self.context.i64_type().const_int(0, false).into());
+
+        // v0.29.11: Fault absorption — if this transition enters Fault and the
+        // from-state payload is a bare actor handle (i8*), short-circuit its mailbox.
+        // Nested actors inside record payloads are handled by the interpreter path;
+        // codegen covers the common actor-as-payload case without a full walk.
+        if enters_fault {
+            if let Some(first) = compiled_args.first() {
+                if let BasicValueEnum::PointerValue(pv) = *first {
+                    // Actor handles are opaque i8*; only call fault if the runtime
+                    // symbol is available (always registered with actor concurrency).
+                    if let Ok(fault_fn) = self.get_runtime_fn("mimi_actor_fault") {
+                        let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(pv)]);
+                        let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Build a `weak<T>.upgrade()` call, returning `Option<T*>` as `{ i1, i64 }`.
