@@ -1405,6 +1405,8 @@ pub fn is_builtin(name: &str) -> bool {
         | "inject_fault"
         // v0.29.44: shadow memory tagging
         | "shadow_alloc" | "shadow_tag" | "shadow_check" | "shadow_free"
+        // v0.29.48: test sandbox
+        | "test_sandbox"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1704,6 +1706,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             "shadow_free" => {
                 self.compile_shadow_simple(args, "mimi_shadow_free", 1)?;
                 Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+            }
+            // v0.29.48: test_sandbox — returns empty list in codegen (stub)
+            "test_sandbox" => {
+                Ok(self.context.i64_type().const_int(0, false).into())
             }
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {

@@ -732,6 +732,13 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unit".into(), vec![]);
             }
+            // v0.29.48: test_sandbox(config) -> List<string>
+            "test_sandbox" => {
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+            }
             "atomic_i32_load"
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"

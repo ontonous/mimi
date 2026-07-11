@@ -1,0 +1,12 @@
+// v0.29.48: Integration Test Sandbox
+// White-paper section 8: "测试框架支持批量激活多个 Flow 实例"
+actor Counter {
+    n: i32
+    func bump() -> i32 { self.n = self.n + 1; self.n }
+}
+func main() -> i32 {
+    let cfg = Record { actors: ["Counter"], calls: [], faults: [] }
+    let results = test_sandbox(cfg)
+    println(results.len())
+    0
+}
