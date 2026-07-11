@@ -1,0 +1,33 @@
+// MCDD real_world: view/mutate lexical borrow in flow turn (v0.29.23)
+// view = read-only param borrow; mutate = in-place exclusive borrow.
+// Lifetime ends at function return (no transition/drop while borrowed).
+
+func sum_view(data: view List<i32>) -> i32 {
+    len(data)
+}
+
+func bump(x: mutate i32) -> i32 {
+    x = x + 1
+    x
+}
+
+flow Process {
+    state Active { buffer: List<i32>, tag: i32 }
+    state Done { total: i32 }
+
+    transition process(Active) -> Done {
+        do {
+            let n = sum_view(self.buffer)
+            let t = bump(self.tag)
+            return Done { total: n + t }
+        }
+    }
+}
+
+func main() -> i32 {
+    let buf = [1, 2, 3, 4]
+    let s0 = Active { buffer: buf, tag: 10 }
+    let s1 = Process::process(s0)
+    println(s1.total)
+    0
+}

@@ -167,6 +167,19 @@ pub struct Param {
     pub ty: Type,
     pub mut_: bool,
     pub default_value: Option<Expr>,
+    /// v0.29.23: lexical borrow mode for pure-function params.
+    /// `None` = by-value (default); `View` = read-only borrow; `Mutate` = exclusive
+    /// in-place borrow. Lifetime = call expression (ends on return).
+    pub borrow: Option<ParamBorrow>,
+}
+
+/// Borrow mode for function parameters (v0.29.23 progressive Typestate borrow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamBorrow {
+    /// `view T` — read-only lexical borrow; no writes / no ownership transfer.
+    View,
+    /// `mutate T` — exclusive in-place borrow; no free / no reallocate / no move-out.
+    Mutate,
 }
 
 #[derive(Debug, Clone)]

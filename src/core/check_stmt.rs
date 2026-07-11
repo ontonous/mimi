@@ -974,6 +974,16 @@ impl<'a> Checker<'a> {
                 let mut value_ty = self.infer_expr(value, scopes);
                 match target {
                     Expr::Ident(name) => {
+                        // v0.29.23: view params are read-only.
+                        if self.view_params.contains(name) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0415,
+                                format!(
+                                    "cannot assign to `view` parameter '{}' (read-only lexical borrow)",
+                                    name
+                                ),
+                            );
+                        }
                         // Check mutability
                         let is_mut = self
                             .mut_vars
@@ -1191,6 +1201,18 @@ impl<'a> Checker<'a> {
             Stmt::Drop(expr) => {
                 // Evaluate the expression to ensure it's valid
                 self.infer_expr(expr, scopes);
+                // v0.29.23: cannot drop view/mutate borrowed params.
+                if let Expr::Ident(name) = expr {
+                    if self.view_params.contains(name) || self.mutate_params.contains(name) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0415,
+                            format!(
+                                "cannot drop `view`/`mutate` parameter '{}' during lexical borrow",
+                                name
+                            ),
+                        );
+                    }
+                }
                 // Mark the capability as consumed
                 if let Expr::Ident(name) = expr {
                     if let Some(cap_scope) = self.cap_vars.last_mut() {

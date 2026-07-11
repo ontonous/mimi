@@ -93,7 +93,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ty: self_ty,
                             mut_: false,
                             default_value: None,
-                        },
+                borrow: None,
+            },
                     );
                     // Set type_map to identity so compile_func can resolve type params
                     // in self (e.g., &List<T> → T resolves to T in type_map).

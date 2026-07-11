@@ -256,7 +256,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             ty: Type::Name(t.from_state.clone(), vec![]),
             mut_: false,
             default_value: None,
-        });
+                borrow: None,
+            });
         params.extend(t.params.iter().cloned());
 
         let ret_name = t

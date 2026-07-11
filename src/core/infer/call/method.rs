@@ -25,6 +25,11 @@ impl<'a> Checker<'a> {
             // Prefer overload key that includes from_state of the first arg.
             let short_key = format!("flow::{}::{}", module_name, method_name);
             if self.funcs.keys().any(|k| k == &short_key || k.starts_with(&format!("{}::", short_key))) {
+                // v0.29.23: no state transition while view/mutate borrow is live.
+                self.reject_transition_under_borrow(&format!(
+                    "call flow transition '{}::{}'",
+                    module_name, method_name
+                ));
                 let from_ty = if let Some(first_arg) = args.first() {
                     self.infer_expr(first_arg, scopes)
                 } else {

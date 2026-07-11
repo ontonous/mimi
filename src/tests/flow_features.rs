@@ -3001,3 +3001,105 @@ protocol P {
     assert!(!file.implicit_single);
     assert!(!file.items.iter().any(|i| matches!(i, Item::Flow(_))));
 }
+
+// ── v0.29.23 view/mutate local lexical borrow ─────────────────────────
+
+#[test]
+fn view_mutate_parse_param_borrow() {
+    let src = r#"
+func f(a: view i32, b: mutate i32) -> i32 { a }
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let f = file.items.iter().find_map(|i| match i {
+        Item::Func(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("func f");
+    assert_eq!(f.params[0].borrow, Some(ParamBorrow::View));
+    assert_eq!(f.params[1].borrow, Some(ParamBorrow::Mutate));
+    assert!(f.params[1].mut_, "mutate implies mut_");
+}
+
+#[test]
+fn view_mutate_exec_dual_backend() {
+    let src = r#"
+func compute_mean(data: view List<i32>) -> i32 {
+    len(data)
+}
+func id_view(x: view i32) -> i32 {
+    x
+}
+func add_mutate(x: mutate i32) -> i32 {
+    x = x + 1
+    x
+}
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    let m = compute_mean(xs)
+    println(m)
+    let b = id_view(5)
+    println(b)
+    let c = add_mutate(7)
+    println(c)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "3
+5
+8");
+}
+
+#[test]
+fn view_param_write_rejected() {
+    let src = r#"
+func bad(data: view i32) {
+    data = 1
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err());
+    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+    assert!(msgs.contains("view") || msgs.contains("E0415") || msgs.contains("read-only"), "{}", msgs);
+}
+
+#[test]
+fn view_param_transition_rejected() {
+    let src = r#"
+flow F {
+    state A { n: i32 }
+    transition go(A) -> A {
+        do { return A { n: self.n + 1 } }
+    }
+}
+func bad(data: view i32) -> i32 {
+    let s = A { n: data }
+    let s2 = F::go(s)
+    s2.n
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err());
+    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+    assert!(
+        msgs.contains("transition") || msgs.contains("borrow") || msgs.contains("E0415"),
+        "{}",
+        msgs
+    );
+}
+
+#[test]
+fn view_param_drop_rejected() {
+    let src = r#"
+func bad(data: view i32) {
+    drop(data)
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected drop under view to fail");
+}

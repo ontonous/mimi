@@ -652,6 +652,16 @@ impl Parser {
             }
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon, "`:`")?;
+            // v0.29.23: optional `view` / `mutate` borrow mode before the type.
+            let borrow = if self.at(&TokenKind::View) {
+                self.advance();
+                Some(ParamBorrow::View)
+            } else if self.at(&TokenKind::Mutate) {
+                self.advance();
+                Some(ParamBorrow::Mutate)
+            } else {
+                None
+            };
             let ty = self.parse_type()?;
             let default_value = if self.at(&TokenKind::Eq) {
                 self.advance();
@@ -659,11 +669,14 @@ impl Parser {
             } else {
                 None
             };
+            // mutate implies mut_ for assignment checking inside the callee.
+            let mut_ = mut_ || matches!(borrow, Some(ParamBorrow::Mutate));
             params.push(Param {
                 name,
                 ty,
                 mut_,
                 default_value,
+                borrow,
             });
             self.skip_newlines();
             if !self.at(&TokenKind::Comma) {
@@ -926,12 +939,23 @@ impl Parser {
                 }
                 let pname = self.expect_ident()?;
                 self.expect(TokenKind::Colon, "`:`")?;
+                let borrow = if self.at(&TokenKind::View) {
+                    self.advance();
+                    Some(ParamBorrow::View)
+                } else if self.at(&TokenKind::Mutate) {
+                    self.advance();
+                    Some(ParamBorrow::Mutate)
+                } else {
+                    None
+                };
                 let pty = self.parse_type()?;
+                let mut_ = mut_ || matches!(borrow, Some(ParamBorrow::Mutate));
                 params.push(Param {
                     name: pname,
                     ty: pty,
                     mut_,
                     default_value: None,
+                    borrow,
                 });
                 self.skip_newlines();
                 if !self.at(&TokenKind::Comma) {

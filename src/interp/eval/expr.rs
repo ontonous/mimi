@@ -779,7 +779,8 @@ impl<'a> Interpreter<'a> {
                                     ty: Type::Name("unknown".into(), vec![]),
                                     mut_: false,
                                     default_value: None,
-                                })
+                borrow: None,
+            })
                                 .collect(),
                             ret: None,
                             body: vec![Stmt::Return(Some(Expr::Call(

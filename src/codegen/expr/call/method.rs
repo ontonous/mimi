@@ -188,7 +188,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ty: self_ty,
                                         mut_: false,
                                         default_value: None,
-                                    },
+                borrow: None,
+            },
                                 );
                                 self.compile_generic_func(f, &type_map)?;
                             }
