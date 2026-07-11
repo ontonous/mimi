@@ -970,6 +970,115 @@ func main() -> i32 {
     assert_eq!(result, Ok(interp::Value::Int(11)));
 }
 
+// ===================== State machine validation tests =====================
+
+#[test]
+fn flow_warn_unreachable_state() {
+    let src = r#"
+flow BadFlow {
+    state Ready
+    state Lost
+    transition go(Ready) -> Ready {
+        do { return Ready { } }
+    }
+}
+"#;
+    let warnings = check_source_warnings(src);
+    assert!(
+        warnings.iter().any(|w| w.code.as_deref() == Some("W0400")),
+        "expected W0400 warning for unreachable state 'Lost'. warnings: {:?}",
+        warnings.iter().map(|w| &w.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn flow_no_warn_first_state_unreachable() {
+    // First state is initial — should not trigger W0400 even if not targeted
+    let src = r#"
+flow GoodFlow {
+    state Ready
+    state Active
+    transition go(Ready) -> Active {
+        do { return Active { } }
+    }
+}
+"#;
+    let warnings = check_source_warnings(src);
+    assert!(
+        !warnings.iter().any(|w| w.code.as_deref() == Some("W0400")),
+        "first state should not warn as unreachable. warnings: {:?}",
+        warnings.iter().map(|w| &w.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn flow_warn_terminal_state() {
+    let src = r#"
+flow GoodFlow {
+    state Ready
+    state Done
+    transition go(Ready) -> Done {
+        do { return Done { } }
+    }
+}
+"#;
+    let warnings = check_source_warnings(src);
+    assert!(
+        warnings.iter().any(|w| w.code.as_deref() == Some("W0401")),
+        "expected W0401 warning for terminal state 'Done'"
+    );
+}
+
+#[test]
+fn flow_no_warn_cycling_state() {
+    // A state that transitions to itself should not warn about terminal
+    let src = r#"
+flow GoodFlow {
+    state Ready
+    state Active
+    transition tick(Active) -> Active {
+        do { return Active { } }
+    }
+}
+"#;
+    let warnings = check_source_warnings(src);
+    // Ready has no incoming (first state — no W0400) but has no outgoing either
+    let terminal: Vec<&str> = warnings.iter()
+        .filter(|w| w.code.as_deref() == Some("W0401"))
+        .filter_map(|w| {
+            w.message.split('\'').nth(1)
+        })
+        .collect();
+    assert!(
+        !terminal.contains(&"Active"),
+        "Active has a self-loop and should not warn about terminal. terminal states: {:?}",
+        terminal
+    );
+    assert!(
+        terminal.contains(&"Ready"),
+        "Ready has no outgoing and should warn as terminal"
+    );
+}
+
+#[test]
+fn flow_warn_terminal_not_first() {
+    let src = r#"
+flow GoodFlow {
+    state Active
+    state Ready
+    transition go(Active) -> Ready {
+        do { return Ready { } }
+    }
+}
+"#;
+    let warnings = check_source_warnings(src);
+    // 'Ready' has no outgoing, 'Active' is first (no warn for unreachable)
+    assert!(
+        warnings.iter().any(|w| w.code.as_deref() == Some("W0401")),
+        "expected W0401 for terminal state 'Ready'"
+    );
+}
+
 #[test]
 fn flow_exec_chain() {
     let src = r#"
