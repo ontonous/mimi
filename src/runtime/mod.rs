@@ -4023,6 +4023,9 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
 // FFI-4: The UB trigger __mimi_extern_test_segfault is always compiled into the
 // staticlib. It ALWAYS performs the UB (no cfg gate). The test wrapper
 // test_segfault is gated #[cfg(test)] so only Mimi test code can trigger it.
+// The function itself must also be cfg-gated so it is never exported from
+// release/production staticlibs — any C caller could trigger a SIGSEGV.
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_segfault() {
     // Deliberate null pointer dereference — used by FFI safety tests to verify
@@ -4081,6 +4084,7 @@ pub extern "C" fn test_json_sum(json: *const std::ffi::c_char) -> i32 {
     __mimi_extern_test_json_sum(json)
 }
 
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn test_segfault() {
     __mimi_extern_test_segfault()

@@ -577,6 +577,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         };
                         let alloca = self.build_alloca(llvm_ty, name)?;
+                        // Zero-initialize the alloca so that `let x;` without an
+                        // initializer does not leave LLVM undef (UB on first read).
+                        // StructType uses const_zero (recursive zero-init of all fields).
+                        // ArrayType uses get_undef (LLVM does not guarantee zero-init
+                        // of array elements, but no struct-like holes exist).
                         match llvm_ty {
                             BasicTypeEnum::IntType(ty) => {
                                 self.build_store(alloca, ty.const_int(0, false))?;
@@ -586,6 +591,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             BasicTypeEnum::PointerType(ty) => {
                                 self.build_store(alloca, ty.const_null())?;
+                            }
+                            BasicTypeEnum::StructType(ty) => {
+                                self.build_store(alloca, ty.const_zero())?;
+                            }
+                            BasicTypeEnum::ArrayType(ty) => {
+                                self.build_store(alloca, ty.get_undef())?;
                             }
                             _ => {}
                         }
