@@ -1,0 +1,20 @@
+// v0.29.44: Software Shadow Memory Tagging
+// White-paper section 4.2: "软件层面的影子内存（Shadow Memory）"
+// Tag memory regions passed to FFI, check tags on access.
+
+func main() -> i32 {
+    // Allocate tagged memory
+    let ptr = shadow_alloc(128, 1, "audio_buffer")
+    let ok = shadow_check(ptr, 1)
+    println(ok)
+
+    // Retag and check
+    let rc = shadow_tag(ptr, 2)
+    let ok2 = shadow_check(ptr, 2)
+    let bad = shadow_check(ptr, 1)
+    println(ok2)
+    println(bad)
+
+    shadow_free(ptr)
+    0
+}

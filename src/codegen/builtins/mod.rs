@@ -1403,6 +1403,8 @@ pub fn is_builtin(name: &str) -> bool {
         | "spawn_detached"
         | "assert_state"
         | "inject_fault"
+        // v0.29.44: shadow memory tagging
+        | "shadow_alloc" | "shadow_tag" | "shadow_check" | "shadow_free"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1687,6 +1689,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             // v0.29.38: inject_fault — test utility, returns Fault record (0 in codegen)
             "inject_fault" => {
                 Ok(self.context.i64_type().const_int(0, false).into())
+            }
+            // v0.29.44: shadow memory tagging builtins
+            "shadow_alloc" => {
+                // Delegates to mimi_shadow_alloc(size, tag, label) -> ptr
+                self.compile_shadow_alloc(args)
+            }
+            "shadow_tag" => {
+                self.compile_shadow_simple(args, "mimi_shadow_tag", 2)
+            }
+            "shadow_check" => {
+                self.compile_shadow_simple(args, "mimi_shadow_check", 2)
+            }
+            "shadow_free" => {
+                self.compile_shadow_simple(args, "mimi_shadow_free", 1)?;
+                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
             }
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {

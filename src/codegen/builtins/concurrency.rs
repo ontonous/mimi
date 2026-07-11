@@ -7,6 +7,7 @@
 use super::super::call_try_basic_value;
 use super::CodeGenerator;
 use crate::error::MimiResult;
+use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -1047,4 +1048,78 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let di8 = self.builder.build_bit_cast(data, self.context.ptr_type(inkwell::AddressSpace::default()), "spi8").map_err(|e| format!("cast: {}", e))?.into_pointer_value();
         Ok(BasicValueEnum::PointerValue(self.alloc_list_result(i64_ty.const_int(2, false), di8)?))
-    }}
+    }
+
+    // ── v0.29.44: Shadow memory tagging codegen ───────────────────────
+
+    /// shadow_alloc(size: i64, tag: i64, label: string) -> i64 (pointer)
+    pub(super) fn compile_shadow_alloc(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err("shadow_alloc expects 3 arguments".into());
+        }
+        let size = args[0].into_int_value();
+        let tag = self.builder
+            .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
+            .map_err(|e| format!("trunc: {}", e))?;
+        let label_ptr = args[2].into_pointer_value();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let usize_ty = self.context.i64_type(); // size_t on 64-bit
+        let fn_ty = usize_ty.fn_type(
+            &[BasicMetadataTypeEnum::IntType(usize_ty), BasicMetadataTypeEnum::IntType(self.context.i8_type()), BasicMetadataTypeEnum::PointerType(i8_ptr)],
+            false,
+        );
+        let func = self.module.add_function("mimi_shadow_alloc", fn_ty, Some(inkwell::module::Linkage::External));
+        let call = self.builder
+            .build_call(func, &[size.into(), tag.into(), label_ptr.into()], "shadow_alloc")
+            .map_err(|e| format!("shadow_alloc: {}", e))?;
+        Ok(call_try_basic_value(&call).unwrap().into_int_value().into())
+    }
+
+    /// Generic shadow_tag/check/free — calls a runtime function with i64 args.
+    pub(super) fn compile_shadow_simple(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        fn_name: &str,
+        expected_arg_count: usize,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != expected_arg_count {
+            return Err(format!("{} expects {} arguments", fn_name, expected_arg_count).into());
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let ret_ty = self.context.i32_type();
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
+            param_types.push(BasicMetadataTypeEnum::PointerType(i8_ptr)); // ptr
+            param_types.push(BasicMetadataTypeEnum::IntType(self.context.i8_type())); // tag
+        } else if fn_name == "mimi_shadow_free" {
+            param_types.push(BasicMetadataTypeEnum::PointerType(i8_ptr)); // ptr
+        }
+        let fn_ty = ret_ty.fn_type(&param_types, false);
+        let func = self.module.add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External));
+        let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
+            let ptr_int = args[0].into_int_value();
+            let ptr = self.builder
+                .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")
+                .map_err(|e| format!("inttoptr: {}", e))?;
+            let tag = self.builder
+                .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
+                .map_err(|e| format!("trunc: {}", e))?;
+            call_args.push(ptr.into());
+            call_args.push(tag.into());
+        } else if fn_name == "mimi_shadow_free" {
+            let ptr_int = args[0].into_int_value();
+            let ptr = self.builder
+                .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")
+                .map_err(|e| format!("inttoptr: {}", e))?;
+            call_args.push(ptr.into());
+        }
+        let call = self.builder
+            .build_call(func, &call_args, fn_name)
+            .map_err(|e| format!("{}: {}", fn_name, e))?;
+        Ok(call_try_basic_value(&call).unwrap().into_int_value().into())
+    }
+}
