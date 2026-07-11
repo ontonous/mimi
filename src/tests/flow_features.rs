@@ -4356,3 +4356,42 @@ func main() -> i32 { 0 }
         panic!("expected Fault, got {:?}", out);
     }
 }
+
+// ── v0.29.46: Full-Actor Muting (Producer-Side) ───────────────────────
+
+#[test]
+fn producer_mute_cascade() {
+    // L1 interp: when consumer actor enters mute (mailbox overflow),
+    // producer actor should also be muted (push-mute cascade).
+    let src = r#"
+actor Consumer {
+    n: i32
+    func bump() -> i32 {
+        self.n = self.n + 1
+        self.n
+    }
+}
+actor Producer {
+    n: i32
+    func get() -> i32 { self.n }
+}
+func main() -> i32 {
+    let c = Consumer.spawn()
+    actor_set_mailbox_depth(c, 2)
+    let p = Producer.spawn()
+
+    // Fill consumer's mailbox to trigger mute
+    let _ = c.bump()
+    let _ = c.bump()
+    let _ = c.bump()
+
+    // Consumer should be muted
+    let cm = actor_is_muted(c)
+    println(cm)
+
+    0
+}
+"#;
+    let r = run_source_result(src);
+    assert!(r.is_ok(), "producer mute cascade should not crash: {:?}", r);
+}

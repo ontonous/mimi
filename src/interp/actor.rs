@@ -64,6 +64,7 @@ impl<'a> Interpreter<'a> {
                 if id == 0 { None } else { Some(id) }
             }),
             is_detached: false,
+            producers: Vec::new(),
         };
 
         // v0.28.28 fix for #1: share the spawning program's AST so the

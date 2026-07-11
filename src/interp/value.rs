@@ -381,6 +381,11 @@ pub struct ActorInstance {
     /// v0.29.37: detached actors survive parent SystemKill.
     /// Set by `spawn_detached` builtin.
     pub is_detached: bool,
+    /// v0.29.46: actor IDs that have sent messages to this actor.
+    /// When this actor enters mute (backpressure), all producers are
+    /// push-muted to cascade backpressure upstream (white-paper §6.7,
+    /// Pony-style full-actor muting).
+    pub producers: Vec<usize>,
 }
 
 /// Message sent to an actor's mailbox for FIFO processing.
@@ -852,6 +857,19 @@ impl ActorHandle {
         };
         // Reserve depth slot before send so concurrent producers see HWM.
         self.bp.on_enqueue();
+        // v0.29.46: register current actor as a producer of this target.
+        // When this target enters mute, producers will be push-muted.
+        let caller_id = CURRENT_ACTOR_ID.with(|id| id.get());
+        if caller_id != 0 && caller_id != self.id {
+            let mut inner = self.inner.write().unwrap();
+            if !inner.producers.contains(&caller_id) {
+                inner.producers.push(caller_id);
+            }
+        }
+        // v0.29.46: if this enqueue pushed us into mute, cascade to producers.
+        if self.bp.is_muted() {
+            self.cascade_mute_to_producers();
+        }
         if self.mailbox.send(msg).is_err() {
             self.bp.on_dequeue(); // roll back reservation
             return Err(InterpError::lock_error(
@@ -869,6 +887,29 @@ impl ActorHandle {
     /// True if this actor is currently muted under backpressure.
     pub(crate) fn is_muted(&self) -> bool {
         self.bp.is_muted()
+    }
+
+    /// v0.29.46: Push-mute all producers of this actor.
+    /// Called after this actor enters mute. Iterates the producer list
+    /// and mutes each producer's MailboxBpState (white-paper §6.7:
+    /// "生产者 Actor 整体被挂起").
+    pub(crate) fn cascade_mute_to_producers(&self) {
+        let producers: Vec<usize> = {
+            let inner = self.inner.read().unwrap();
+            inner.producers.clone()
+        };
+        if producers.is_empty() {
+            return;
+        }
+        let registry = actor_handles();
+        let Ok(map) = registry.lock() else {
+            return;
+        };
+        for pid in producers {
+            if let Some(handle) = map.get(&pid) {
+                handle.bp.enter_mute();
+            }
+        }
     }
 
     /// Configured high-water depth limit.
