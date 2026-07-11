@@ -1237,7 +1237,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         } else if let Expr::Call(callee, call_args) = init {
                             if let Expr::Field(obj, method_name) = callee.as_ref() {
-                                if method_name == "spawn" {
+                                if method_name == "spawn" || method_name == "spawn_detached" {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if !obj_type.is_empty() {
                                         self.var_type_names.insert(name.clone(), obj_type);

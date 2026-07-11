@@ -535,6 +535,14 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
+                // v0.29.37: Handle Type.spawn_detached() - detached actor constructor
+                if method == "spawn_detached" {
+                    if let Expr::Ident(type_name) = obj.as_ref() {
+                        if self.find_actor(type_name).is_some() {
+                            return self.spawn_detached_actor(type_name);
+                        }
+                    }
+                }
                 // Handle Flow::transition() - flow transition call
                 // The first argument is the from-state payload (becomes self),
                 // remaining args are the transition's event parameters.

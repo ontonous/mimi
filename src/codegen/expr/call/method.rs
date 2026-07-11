@@ -89,6 +89,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        // v0.29.37: Type.spawn_detached() — for codegen, use the same spawn path.
+        // The detached flag is a runtime concept; in codegen the actor handle
+        // is returned the same way as regular spawn.
+        if method_name == "spawn_detached" {
+            let spawn_name = format!("{}_spawn", obj_type);
+            if let Some(spawn_fn) = self.module.get_function(&spawn_name) {
+                let call = self.build_call(spawn_fn, &[], "actor_spawn_detached")?;
+                return Ok(call_try_basic_value(&call)
+                    .unwrap_or(self.context.i64_type().const_int(0, false).into()));
+            }
+        }
+
         // 1.7. Cap method dispatch: split() for capability types
         if self.cap_type_names.contains(&obj_type) && method_name == "split" {
             // For now, return a dummy i64 value.

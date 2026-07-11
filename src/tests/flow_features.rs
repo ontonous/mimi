@@ -3670,6 +3670,35 @@ func main() -> i32 {
 
 // ── v0.29.35 broadcast PeerFault sentinel ─────────────────────────────
 
+// ── v0.29.37 Actor lifecycle: SystemKill + spawn detached ─────────────
+
+#[test]
+fn spawn_detached_dual_backend() {
+    // L1: spawn_detached creates an actor that can be called normally.
+    let src = r#"
+actor W {
+    v: i32
+    func read() -> i32 { self.v }
+    func set(n: i32) { self.v = n }
+}
+func main() -> i32 {
+    let a = W.spawn()
+    a.set(10)
+    let d = W.spawn_detached()
+    d.set(99)
+    println(a.read())
+    println(d.read())
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines[0], "10");
+    assert_eq!(lines[1], "99");
+}
+
 // ── v0.29.36 Payload covariance + conservative projection ─────────────
 
 #[test]

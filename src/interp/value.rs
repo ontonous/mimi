@@ -374,6 +374,13 @@ pub struct ActorInstance {
     /// (link-disconnect injection). Stored as actor ids (not handles) to avoid
     /// reference cycles; peers are resolved via the global actor registry.
     pub peer_links: Vec<usize>,
+    /// v0.29.37: parent actor id (None for top-level actors).
+    /// Used for SystemKill cascade: when parent faults/drops, non-detached
+    /// children are killed.
+    pub parent_id: Option<usize>,
+    /// v0.29.37: detached actors survive parent SystemKill.
+    /// Set by `spawn_detached` builtin.
+    pub is_detached: bool,
 }
 
 /// Message sent to an actor's mailbox for FIFO processing.
@@ -553,18 +560,20 @@ static ACTOR_HANDLE_COUNTER: std::sync::atomic::AtomicUsize =
 
 /// Live actor handles by id for PeerFault peer resolution (v0.29.20).
 /// Entries are inserted in `ActorHandle::new` and removed on short-circuit.
+/// v0.29.37: pub(crate) for SystemKill cascade in actor.rs.
 static ACTOR_HANDLES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>>,
 > = std::sync::OnceLock::new();
 
-fn actor_handles() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
+pub(crate) fn actor_handles() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
     ACTOR_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 // Thread-local flag set when inside an actor's worker thread.
 // Used to detect self-calls and avoid mailbox deadlock.
+// v0.29.37: pub(crate) for SystemKill parent tracking in actor.rs.
 thread_local! {
-    static CURRENT_ACTOR_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CURRENT_ACTOR_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ActorHandle {

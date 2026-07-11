@@ -214,6 +214,11 @@ impl<'a> Interpreter<'a> {
             return self.spawn_actor(actor_name);
         }
 
+        // v0.29.37: Handle Actor.spawn_detached() calls
+        if let Some(actor_name) = name.strip_suffix(".spawn_detached") {
+            return self.spawn_detached_actor(actor_name);
+        }
+
         // Handle extern function calls via their FFI contract (wrapper layer).
         if let Some(extern_func) = self.extern_funcs.get(name).cloned() {
             let contract = self
@@ -425,6 +430,7 @@ impl<'a> Interpreter<'a> {
             "actor_spawn_count" => self.builtin_actor_spawn_count(args),
             "actor_max_children" => self.builtin_actor_max_children(args),
             "broadcast" => self.builtin_broadcast(args),
+            "spawn_detached" => self.builtin_spawn_detached(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),
