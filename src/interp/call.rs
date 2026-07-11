@@ -414,6 +414,7 @@ impl<'a> Interpreter<'a> {
             "channel_drop" => self.builtin_channel_drop(args),
             "session_send" | "session_close" => Ok(Value::Unit),
             "session_pair" => self.builtin_session_pair(args),
+            "protocol_methods" => self.builtin_protocol_methods(args),
 
             "actor_mailbox_depth" => self.builtin_actor_mailbox_depth(args),
             "actor_is_muted" => self.builtin_actor_is_muted(args),

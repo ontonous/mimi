@@ -734,10 +734,14 @@ impl<'a> Checker<'a> {
                 return Type::Name("SessionChan".into(), vec![]);
             }
             "session_pair" => {
-                // session_pair() -> List<i64> (two channel handles).
                 for a in args { self.infer_expr(a, scopes); }
                 return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
+            "protocol_methods" => {
+                for a in args { self.infer_expr(a, scopes); }
+                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
+            }
+
             "print" => {
                 for a in args {
                     self.infer_expr(a, scopes);

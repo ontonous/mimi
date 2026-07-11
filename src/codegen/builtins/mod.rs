@@ -1396,6 +1396,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "channel_new" | "channel_send" | "channel_recv"
         | "channel_try_recv" | "channel_drop"
         | "session_send" | "session_recv" | "session_close" | "session_open" | "session_pair"
+        | "protocol_methods"
         | "actor_mailbox_depth" | "actor_is_muted" | "actor_set_mailbox_depth"
         | "actor_set_max_children" | "actor_spawn_count" | "actor_max_children"
         | "broadcast"
@@ -1661,6 +1662,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
             "session_open" | "session_pair" => self.compile_session_open(args),
+            "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()),
+            "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()), // stub: return 0
             "session_recv" => {
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
