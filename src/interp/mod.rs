@@ -52,8 +52,10 @@ pub struct FlowPersistentTx {
 
 pub struct Interpreter<'a> {
     file: &'a File,
-    /// Scope-level evaluation state (variable bindings, mutability, call stack)
-    pub scope_env: ScopeEnv,
+    /// Scope-level evaluation state (variable bindings, mutability, call stack).
+    /// `pub(in crate::interp)` so delegate writeback can bypass the mutability
+    /// check for flow state `self` (implicitly mutable in do blocks).
+    pub(in crate::interp) scope_env: ScopeEnv,
     constructors: HashMap<String, usize>,
     /// Set of constructor names that are newtypes (for wrapping result in Value::Newtype)
     newtype_constructors: HashMap<String, bool>,
