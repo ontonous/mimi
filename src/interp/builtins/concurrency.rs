@@ -449,6 +449,84 @@ impl<'a> Interpreter<'a> {
         }
         Ok(Value::Int(self.max_children.map(|n| n as i64).unwrap_or(0)))
     }
+
+    /// v0.29.25: broadcast(targets, method_name) -> List of results.
+    ///
+    /// `targets` is a List of Actor handles (type-erased protocol set).
+    /// For each target, invoke `method` with no extra args via mailbox.
+    /// On success: Ok-like value (the method return).
+    /// On fault/error: PeerFault-shaped record { peer_id, reason }.
+    /// No 2PC — caller decides how to handle mixed results.
+    pub(crate) fn builtin_broadcast(
+        &mut self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new(
+                "broadcast expects 2 arguments (targets: List, method: string)",
+            ));
+        }
+        let targets = match &args[0] {
+            Value::List(items) => items.clone(),
+            _ => {
+                return Err(InterpError::new(
+                    "broadcast: first argument must be a List of actors",
+                ))
+            }
+        };
+        let method = match &args[1] {
+            Value::String(s) => s.clone(),
+            _ => {
+                return Err(InterpError::new(
+                    "broadcast: second argument must be a method name string",
+                ))
+            }
+        };
+
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            match target {
+                Value::Actor(handle) => {
+                    if handle.is_faulted() {
+                        results.push(peer_fault_result(
+                            &handle.id.to_string(),
+                            "actor mailbox short-circuited (Fault)",
+                        ));
+                        continue;
+                    }
+                    // Dispatch via existing method-call path (mailbox / self).
+                    match self.call_method(
+                        &Value::Actor(handle.clone()),
+                        &method,
+                        vec![],
+                    ) {
+                        Ok(v) => results.push(v),
+                        Err(e) => {
+                            results.push(peer_fault_result(
+                                &handle.id.to_string(),
+                                &e.message().to_string(),
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    results.push(peer_fault_result(
+                        "?",
+                        &format!("broadcast target is not an actor: {:?}", other),
+                    ));
+                }
+            }
+        }
+        Ok(Value::List(results))
+    }
+}
+
+fn peer_fault_result(peer_id: &str, reason: &str) -> Value {
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("peer_id".to_string(), Value::String(peer_id.to_string()));
+    fields.insert("reason".to_string(), Value::String(reason.to_string()));
+    Value::Record(Some("PeerFault".to_string()), fields)
 }
 
 /// Helper: extract the i64 payload of a Value::Int as a runtime handle id.

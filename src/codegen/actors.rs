@@ -496,6 +496,59 @@ impl<'ctx> CodeGenerator<'ctx> {
         )?;
 
         let handle_val = call_try_basic_value(&handle).unwrap_or(i8_ptr.const_null().into());
+
+        // v0.29.25: register method names so broadcast can resolve by name.
+        if !actor.methods.is_empty() {
+            if let Ok(set_names) = self.get_runtime_fn("mimi_actor_set_method_names") {
+                let n = actor.methods.len();
+                let arr_ty = i8_ptr.array_type(n as u32);
+                let names_arr = self
+                    .builder
+                    .build_alloca(arr_ty, "method_names_arr")
+                    .map_err(|e| CompileError::LlvmError(format!("alloca: {}", e)))?;
+                for (i, m) in actor.methods.iter().enumerate() {
+                    let name_gv = self
+                        .builder
+                        .build_global_string_ptr(
+                            &m.name,
+                            &format!(".mn_{}_{}", actor.name, m.name),
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                    let gep = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                arr_ty,
+                                names_arr,
+                                &[
+                                    self.context.i64_type().const_int(0, false),
+                                    self.context.i64_type().const_int(i as u64, false),
+                                ],
+                                "name_slot",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?
+                    };
+                    self.builder
+                        .build_store(gep, name_gv.as_pointer_value())
+                        .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+                }
+                let names_ptr = self
+                    .builder
+                    .build_bit_cast(names_arr, i8_ptr, "names_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?
+                    .into_pointer_value();
+                let count = self.context.i64_type().const_int(n as u64, false);
+                let hptr = match handle_val {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    _ => i8_ptr.const_null(),
+                };
+                let _ = self.build_call(
+                    set_names,
+                    &[hptr.into(), names_ptr.into(), count.into()],
+                    "set_method_names",
+                )?;
+            }
+        }
+
         self.build_return(Some(&handle_val))?;
 
         Ok(())

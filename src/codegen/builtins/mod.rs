@@ -1398,6 +1398,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "session_send" | "session_recv" | "session_close" | "session_open"
         | "actor_mailbox_depth" | "actor_is_muted" | "actor_set_mailbox_depth"
         | "actor_set_max_children" | "actor_spawn_count" | "actor_max_children"
+        | "broadcast"
         | "option_value_or"
         | "to_json" | "from_json"
         | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
@@ -1668,6 +1669,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_set_max_children" => self.compile_actor_set_max_children(args),
             "actor_spawn_count" => self.compile_actor_spawn_count(),
             "actor_max_children" => self.compile_actor_max_children(),
+            "broadcast" => self.compile_broadcast(args),
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {
                 self.compile_atomic_drop_helper("mimi_channel_drop", args)?;
@@ -1985,6 +1987,54 @@ fn register_actor_concurrency_rt<'ctx>(
     module.add_function(
         "mimi_actor_max_children",
         i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // v0.29.25 broadcast
+    module.add_function(
+        "mimi_actor_set_method_names",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_actor_method_id",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_broadcast",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_broadcast_free",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
 }

@@ -420,6 +420,7 @@ impl<'a> Interpreter<'a> {
             "actor_set_max_children" => self.builtin_actor_set_max_children(args),
             "actor_spawn_count" => self.builtin_actor_spawn_count(args),
             "actor_max_children" => self.builtin_actor_max_children(args),
+            "broadcast" => self.builtin_broadcast(args),
             "to_int" => self.builtin_to_int(args),
             "to_float" => self.builtin_to_float(args),
             "from_int" => self.builtin_from_int(args),

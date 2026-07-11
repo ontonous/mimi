@@ -6734,6 +6734,8 @@ struct MimiActorRepr {
     mailbox_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// v0.29.21: muted under backpressure.
     muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// v0.29.25: method_id → method name for polymorphic broadcast name resolution.
+    method_names: std::sync::Mutex<Vec<String>>,
 }
 
 // SAFETY: `MimiActorRepr` is shared between the caller thread (which holds the
@@ -6905,6 +6907,7 @@ pub extern "C" fn mimi_actor_spawn(
         mailbox_depth_limit,
         mailbox_depth,
         muted,
+        method_names: std::sync::Mutex::new(Vec::new()),
     });
 
     ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -7162,6 +7165,120 @@ pub extern "C" fn mimi_actor_spawn_count() -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_actor_max_children() -> i64 {
     ACTOR_SPAWN_MAX.load(std::sync::atomic::Ordering::Acquire) as i64
+}
+
+/// v0.29.25: register method names for an actor handle (for broadcast by name).
+/// `names` is an array of `count` C strings (method name in definition order).
+#[no_mangle]
+pub extern "C" fn mimi_actor_set_method_names(
+    handle: *mut std::ffi::c_void,
+    names: *const *const std::os::raw::c_char,
+    count: i64,
+) {
+    if handle.is_null() || names.is_null() || count <= 0 {
+        return;
+    }
+    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    let slice = unsafe { std::slice::from_raw_parts(names, count as usize) };
+    let mut v = Vec::with_capacity(count as usize);
+    for &p in slice {
+        if p.is_null() {
+            v.push(String::new());
+        } else {
+            let s = unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned();
+            v.push(s);
+        }
+    }
+    if let Ok(mut g) = repr.method_names.lock() {
+        *g = v;
+    }
+}
+
+/// Resolve method name to method_id for a handle; returns -1 if not found.
+#[no_mangle]
+pub extern "C" fn mimi_actor_method_id(
+    handle: *mut std::ffi::c_void,
+    name: *const std::os::raw::c_char,
+) -> i32 {
+    if handle.is_null() || name.is_null() {
+        return -1;
+    }
+    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    let needle = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    if let Ok(g) = repr.method_names.lock() {
+        for (i, n) in g.iter().enumerate() {
+            if n == needle.as_ref() {
+                return i as i32;
+            }
+        }
+    }
+    -1
+}
+
+/// v0.29.25: broadcast method_name to an array of actor handles.
+///
+/// For each non-null handle, resolve method name → id and call mimi_actor_call
+/// with empty args. Results: heap-allocated i64 array of length `count`
+/// (0 on fault/error). Caller owns the returned pointer.
+#[no_mangle]
+pub extern "C" fn mimi_broadcast(
+    handles: *const *mut std::ffi::c_void,
+    count: i64,
+    method_name: *const std::os::raw::c_char,
+    out_len: *mut i64,
+) -> *mut i64 {
+    if handles.is_null() || count <= 0 || method_name.is_null() {
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        return std::ptr::null_mut();
+    }
+    let n = count as usize;
+    let slice = unsafe { std::slice::from_raw_parts(handles, n) };
+    let mut results: Vec<i64> = Vec::with_capacity(n);
+    for &h in slice {
+        if h.is_null() {
+            results.push(0);
+            continue;
+        }
+        let mid = mimi_actor_method_id(h, method_name);
+        if mid < 0 {
+            results.push(0);
+            continue;
+        }
+        let mut result_buf = [0u8; MIMI_ACTOR_BLOB_SIZE];
+        let sz = mimi_actor_call(
+            h,
+            mid,
+            std::ptr::null(),
+            0,
+            result_buf.as_mut_ptr() as *mut std::ffi::c_void,
+        );
+        if sz >= 8 {
+            let v = i64::from_le_bytes(result_buf[0..8].try_into().unwrap_or([0; 8]));
+            results.push(v);
+        } else {
+            results.push(0);
+        }
+    }
+    if !out_len.is_null() {
+        unsafe { *out_len = results.len() as i64 };
+    }
+    let boxed = results.into_boxed_slice();
+    Box::into_raw(boxed) as *mut i64
+}
+
+/// Free a buffer returned by mimi_broadcast.
+#[no_mangle]
+pub extern "C" fn mimi_broadcast_free(ptr: *mut i64, len: i64) {
+    if ptr.is_null() || len <= 0 {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len as usize));
+    }
 }
 
 // =========================================================================

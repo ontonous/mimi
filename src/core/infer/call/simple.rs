@@ -668,6 +668,19 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i64".into(), vec![]);
             }
+            "broadcast" => {
+                // broadcast(list, method_name) -> List (Vec of Result / values)
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "broadcast expects 2 arguments (targets, method_name)".to_string(),
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
+            }
             "atomic_i32_load"
             | "atomic_i32_compare_exchange"
             | "atomic_i32_fetch_add"
