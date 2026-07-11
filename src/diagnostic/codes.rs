@@ -114,6 +114,7 @@ pub const E0412: &str = "E0412"; // protocol must be flat (no nested protocol-st
 pub const E0413: &str = "E0413"; // unknown session type name
 pub const E0414: &str = "E0414"; // session protocol order violation (send/recv/close)
 pub const E0415: &str = "E0415"; // view/mutate borrow violation
+pub const E0416: &str = "E0416"; // transition under pinned (FFI anchor)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -321,6 +322,7 @@ pub fn describe(code: &str) -> &'static str {
         E0413 => "unknown session type name",
         E0414 => "session protocol order violation",
 E0415 => "view/mutate borrow violation",
+E0416 => "transition under pinned FFI anchor",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

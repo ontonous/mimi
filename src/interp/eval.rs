@@ -303,15 +303,44 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            Stmt::Pinned { expr, var, body, .. } => {
+            Stmt::Pinned {
+                expr,
+                var,
+                body,
+                timeout,
+                ..
+            } => {
+                // v0.29.27: evaluate timeout first. timeout <= 0 is a cooperative
+                // watchdog expiry → ContractViolation (absorbed as Fault in transitions).
+                // Positive timeout is recorded but wall-clock OS kill is deferred.
+                if let Some(to_expr) = timeout {
+                    let tv = self.eval_expr(to_expr)?;
+                    let ms = match tv {
+                        Value::Int(n) => n,
+                        _ => {
+                            return Err(InterpError::new(
+                                "pinned timeout must be an integer (milliseconds)",
+                            ));
+                        }
+                    };
+                    if ms <= 0 {
+                        return Err(InterpError::contract_violation(format!(
+                            "pinned timeout expired (timeout={}ms): FFI anchor watchdog",
+                            ms
+                        )));
+                    }
+                }
                 let val = self.eval_expr(expr)?;
                 // Bind the pinned variable in a nested scope for the body
                 self.scope_env.push_scope();
                 if let Some(var_name) = var {
                     self.scope_env.bind(var_name, val)?;
                 }
-                self.eval_block(body)?;
+                let body_res = self.eval_block(body);
                 self.scope_env.pop_scope();
+                if let Some(v) = body_res? {
+                    return Ok(Some(v));
+                }
             }
         }
         Ok(None)
@@ -416,7 +445,7 @@ impl<'a> Interpreter<'a> {
     /// v0.29.12: runtime Panic inside a transition body is absorbed into Fault
     /// with a full SystemTrace (last_state / unexpected_event=`panic:<code>` /
     /// snapshot with message + call stack). Already-Fault sources re-raise.
-    pub(in crate::interp) fn eval_flow_transition(
+    pub(crate) fn eval_flow_transition(
         &mut self,
         flow: &FlowDef,
         t: &TransitionDef,

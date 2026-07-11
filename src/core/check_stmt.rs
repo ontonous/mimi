@@ -1308,19 +1308,23 @@ impl<'a> Checker<'a> {
                 // Validate timeout is an integer if present
                 if let Some(timeout_expr) = timeout {
                     let t_ty = self.infer_expr(timeout_expr, scopes);
-                    if !same_type(&t_ty, &Type::Name("i32".into(), vec![])) {
+                    if !same_type(&t_ty, &Type::Name("i32".into(), vec![]))
+                        && !same_type(&t_ty, &Type::Name("i64".into(), vec![]))
+                    {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             "pinned timeout must be an integer".to_string(),
                         );
                     }
                 }
-                // Bind the variable in scope for the body
+                // v0.29.27: enter FFI_Pinned region for the body (no transitions).
+                self.in_pinned_depth += 1;
                 let mut inner_scopes = scopes.clone();
                 if let Some(var_name) = var {
                     inner_scopes[0].insert(var_name.clone(), val_ty);
                 }
                 self.check_block(body, ret, &mut inner_scopes);
+                self.in_pinned_depth = self.in_pinned_depth.saturating_sub(1);
             }
         }
     }

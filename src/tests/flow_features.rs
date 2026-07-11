@@ -3287,3 +3287,164 @@ func main() -> i32 {
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "1");
 }
+
+// ── v0.29.27 pinned true semantics ────────────────────────────────────
+
+#[test]
+fn pinned_reject_transition_under_pin() {
+    // L2: Flow::transition inside pinned body → E0416
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition step(Active) -> Active {
+        do { return Active { data: self.data + 1 } }
+    }
+    transition bad(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 5) |p| {
+                let _ = p
+                let _ = Buf::step(Active { data: 0 })
+            }
+            return Active { data: self.data }
+        }
+    }
+}
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "expected E0416, got ok");
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("E0416") || msg.contains("pinned") || msg.contains("cannot"),
+        "got {}",
+        msg
+    );
+}
+
+#[test]
+fn pinned_timeout_zero_absorbed_to_fault() {
+    // L1 interp: timeout=0 → ContractViolation → Fault (panic:E0808)
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition expire(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 0) |p| { let _ = p }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 7 }
+    let f = Buf::expire(s)
+    0
+}
+"#;
+    let r = run_source_result(src);
+    assert!(r.is_ok(), "timeout should absorb to Fault, got {:?}", r);
+}
+
+#[test]
+fn pinned_timeout_zero_fault_trace_fields() {
+    // Call transition directly via interpreter API to inspect Fault Value.
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition expire(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 0) |p| { let _ = p }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    // Build Active { data: 7 }
+    use std::collections::HashMap;
+    let mut fields = HashMap::new();
+    fields.insert("data".into(), interp::Value::Int(7));
+    let active = interp::Value::Record(Some("Active".into()), fields);
+    let out = interp
+        .eval_flow_transition(
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            }).expect("Buf flow"),
+            file.items.iter().find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
+                _ => None,
+            }).expect("expire"),
+            &[active],
+        )
+        .expect("expire should absorb to Fault Value");
+    match out {
+        interp::Value::Record(Some(name), f) => {
+            assert_eq!(name, "Fault");
+            let last = f.get("last_state").map(|v| format!("{}", v));
+            let ev = f.get("unexpected_event").map(|v| format!("{}", v));
+            assert_eq!(last.as_deref(), Some("Active"), "last_state={:?}", last);
+            let evs = ev.unwrap_or_default();
+            assert!(
+                evs.contains("panic:") || evs.contains("E0808") || evs.contains("pinned"),
+                "unexpected_event={}",
+                evs
+            );
+        }
+        other => panic!("expected Fault record, got {:?}", other),
+    }
+}
+
+#[test]
+fn pinned_positive_timeout_dual_backend() {
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition use_pin(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 1000) |p| {
+                let _ = p
+            }
+            return Active { data: self.data + 1 }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 40 }
+    let r = Buf::use_pin(s)
+    println(r.data)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "41");
+}
+
+#[test]
+fn pinned_timeout_zero_codegen_aborts() {
+    // Codegen cooperative watchdog: timeout=0 aborts process (non-zero exit).
+    let src = r#"
+flow Buf {
+    state Active { data: i32 }
+    transition expire(Active) -> Active {
+        do {
+            pinned(self.data, timeout = 0) |p| { let _ = p }
+            return Active { data: self.data }
+        }
+    }
+}
+func main() -> i32 {
+    let s = Active { data: 1 }
+    let _ = Buf::expire(s)
+    0
+}
+"#;
+    let result = compile_and_run(src);
+    assert!(
+        result.is_err(),
+        "codegen should abort on timeout=0, got {:?}",
+        result
+    );
+}
