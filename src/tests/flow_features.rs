@@ -1130,24 +1130,29 @@ flow MyFlow {
 func main() -> i32 {
     let s = Active { val: 10 }
     let r = MyFlow::process(s)
+    println(r.val)
     0
 }
 "#;
-    let result = run_source_result(src);
-    assert_eq!(result, Ok(interp::Value::Int(0)));
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "10");
 }
 
 #[test]
 fn flow_exec_delegate_consume() {
+    // v0.29.15: delegate consume returns the target's replacement value.
+    // Plain value target → identity write-back.
     let src = r#"
 flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
         do {
-            let sub = 42
+            let sub = 99
             delegate consume(self.val) to sub;
-            return Active { val: 99 }
+            return Active { val: self.val + 1 }
         }
     }
 }
@@ -1155,23 +1160,27 @@ flow MyFlow {
 func main() -> i32 {
     let s = Active { val: 10 }
     let r = MyFlow::process(s)
+    println(r.val)
     0
 }
 "#;
-    let result = run_source_result(src);
-    assert_eq!(result, Ok(interp::Value::Int(0)));
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "11");
 }
 
 #[test]
-fn flow_exec_delegate_mutate() {
+fn flow_exec_delegate_view_no_mutate() {
+    // Delegate view must not mutate the source field.
     let src = r#"
 flow MyFlow {
     state Active { val: i32 }
 
     transition process(Active) -> Active {
         do {
-            let sub = 42
-            delegate mutate(self.val) to sub;
+            let sub = 99
+            delegate view(self.val) to sub;
             return Active { val: self.val }
         }
     }
@@ -1180,11 +1189,47 @@ flow MyFlow {
 func main() -> i32 {
     let s = Active { val: 10 }
     let r = MyFlow::process(s)
+    println(r.val)
     0
 }
 "#;
-    let result = run_source_result(src);
-    assert_eq!(result, Ok(interp::Value::Int(0)));
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    // view is read-only: val stays 10
+    assert_eq!(out.trim(), "10");
+}
+
+#[test]
+fn flow_exec_delegate_mutate() {
+    // v0.29.15: delegate mutate writes back to self.field.
+    // The target `sub` is a plain i32 literal (no op); writeback is identity.
+    // The `return Active { val: self.val }` sees the mutated value in scope.
+    let src = r#"
+flow MyFlow {
+    state Active { val: i32 }
+
+    transition process(Active) -> Active {
+        do {
+            let sub = 99
+            delegate mutate(self.val) to sub;
+            return Active { val: self.val + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = MyFlow::process(s)
+    println(r.val)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    // mutate writes `self.val` back (identity write-back), then +1
+    assert_eq!(out.trim(), "11");
 }
 
 #[test]

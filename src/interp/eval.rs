@@ -246,25 +246,60 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Stmt::Delegate { kind, expr, target } => {
+                // v0.29.15: three-tier delegate permissions.
+                // `delegate <kind>(<field>) to <target>`:
+                //   view:   inspect value (target must be alive, no mutation back)
+                //   mutate: target mutates value in-place → write-back to source
+                //   consume: target takes ownership → target returns replacement
                 let val = self.eval_expr(expr)?;
-                // Look up the target subflow in scope (validates it exists)
-                let _target_val = self.scope_env.lookup(target).ok_or_else(|| {
+                let target_val = self.scope_env.lookup(target).ok_or_else(|| {
                     InterpError::new(format!("delegate target '{}' not found in scope", target))
                 })?;
-                match kind {
-                    DelegateKind::Consume => {
-                        // Consume: ownership transferred to subflow — explicitly drop
-                        // In a full implementation this would route to the subflow's
-                        // transition. For now, consuming means the resource moves.
-                        drop(val);
+
+                // For actor targets: validate liveness, then dispatch.
+                let is_actor = matches!(&target_val, Value::Actor(_));
+                let is_closure = matches!(&target_val, Value::Closure { .. });
+
+                if is_actor {
+                    let handle = match &target_val {
+                        Value::Actor(h) => h,
+                        _ => {
+                            return Err(InterpError::new(
+                                "delegate target is not an actor",
+                            ));
+                        }
+                    };
+                    if handle.is_faulted() {
+                        return Err(InterpError::new(format!(
+                            "delegate {:?}: target actor is faulted",
+                            kind
+                        )));
                     }
-                    DelegateKind::View | DelegateKind::Mutate => {
-                        // View/Mutate: resource stays in the parent flow.
-                        // Evaluate the expression (side effects if any) but keep
-                        // the value alive by storing in a temp that lives for the
-                        // scope. In practice, self.field access just reads — the
-                        // value remains bound in the flow state.
-                        let _kept = val;
+                    match kind {
+                        DelegateKind::View => drop(val),
+                        DelegateKind::Mutate => {
+                            // Mutate: write the (possibly modified) value back.
+                            writeback_delegate_result(expr, val, self)?;
+                        }
+                        DelegateKind::Consume => {
+                            // Consume: actor returns a replacement.
+                            // For now, pass-through.
+                            writeback_delegate_result(expr, val, self)?;
+                        }
+                    }
+                } else if is_closure {
+                    // Closure target: call with val as __arg, use result as replacement.
+                    let result = self.call_closure_target(&target_val, val, kind)?;
+                    if matches!(kind, DelegateKind::Mutate | DelegateKind::Consume) {
+                        writeback_delegate_result(expr, result, self)?;
+                    }
+                } else {
+                    // Plain value target: validate view otherwise identity.
+                    match kind {
+                        DelegateKind::View => drop(val),
+                        DelegateKind::Mutate | DelegateKind::Consume => {
+                            writeback_delegate_result(expr, val, self)?;
+                        }
                     }
                 }
             }
@@ -753,4 +788,57 @@ fn is_runtime_panic(e: &InterpError) -> bool {
 /// Recursively release resources held by a from-state payload when entering Fault.
 fn drop_fault_payload(val: &Value) {
     drop_fault_payload_except(val, &[]);
+}
+
+// ── v0.29.15: delegate helper functions ────────────────────────────────────
+
+/// Write-back a delegate result to the source field.
+fn writeback_delegate_result(
+    expr: &Expr,
+    result: Value,
+    interp: &mut Interpreter<'_>,
+) -> Result<(), InterpError> {
+    if let Expr::Field(container, field_name) = expr {
+        let mut owner = interp.eval_expr(container)?;
+        if let Value::Record(_, fields) = &mut owner {
+            fields.insert(field_name.clone(), result);
+        }
+        if let Expr::Ident(name) = container.as_ref() {
+            // Use scope_env's direct mutable update (bypasses mutability check
+            // for flow state self which is implicitly mutable in do blocks).
+            for scope in interp.scope_env.env.iter_mut().rev() {
+                if scope.contains_key(name) {
+                    scope.insert(name.clone(), owner);
+                    return Ok(());
+                }
+            }
+            interp.scope_env.assign(name, owner)?;
+        }
+    }
+    Ok(())
+}
+
+impl<'a> Interpreter<'a> {
+    /// Call a closure target with `__arg` bound to val, return its result.
+    fn call_closure_target(
+        &mut self,
+        target: &Value,
+        val: Value,
+        _kind: &DelegateKind,
+    ) -> Result<Value, InterpError> {
+        if let Value::Closure { params: _, ret: _, body, captured } = target {
+            self.push_scope();
+            // Bind captured vars
+            for (name, cap_val) in captured {
+                self.bind(name, cap_val.clone())?;
+            }
+            // Bind the delegate arg
+            self.bind("__arg", val)?;
+            let result = self.eval_block(body);
+            self.pop_scope();
+            result.map(|v| v.unwrap_or(Value::Unit))
+        } else {
+            Ok(val)
+        }
+    }
 }
