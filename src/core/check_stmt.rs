@@ -993,6 +993,10 @@ impl<'a> Checker<'a> {
                             let is_wholesale_replace = match value {
                                 // Plain literal assignment → realloc
                                 Expr::Literal(_) => true,
+                                // List literal → realloc (allocates new backing store)
+                                Expr::List(_) => true,
+                                // Record/struct construction → realloc
+                                Expr::Record { .. } => true,
                                 // Assignment to an ident that isn't self → replacement
                                 Expr::Ident(rhs) if rhs != name => true,
                                 // Otherwise (math/binop/field/call) → likely read-modify-write, allow
