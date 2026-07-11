@@ -106,7 +106,9 @@ impl<'a> Checker<'a> {
             self.types.insert("PeerFault".to_string(), td);
         }
         // v0.29.12 SystemTrace — structured Fault crash context
-        // { last_state_name: string, unexpected_event: string, snapshot: string }
+        // v0.29.39: added memory_dump + panic_payload structured fields
+        // { last_state_name: string, unexpected_event: string, snapshot: string,
+        //   memory_dump: MemoryDump, panic_payload: PanicPayload }
         if !self.types.contains_key("SystemTrace") {
             let td = TypeDef {
                 name: "SystemTrace".to_string(),
@@ -124,12 +126,72 @@ impl<'a> Checker<'a> {
                         name: "snapshot".to_string(),
                         ty: Type::Name("string".to_string(), vec![]),
                     },
+                    Field {
+                        name: "memory_dump".to_string(),
+                        ty: Type::Name("MemoryDump".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "panic_payload".to_string(),
+                        ty: Type::Name("PanicPayload".to_string(), vec![]),
+                    },
                 ]),
                 generics: vec![],
                 derives: vec![],
                 attributes: vec![],
             };
             self.types.insert("SystemTrace".to_string(), td);
+        }
+        // v0.29.39: PanicPayload — structured panic info
+        // { error_type: string, file: string, line: i32, stack: string }
+        if !self.types.contains_key("PanicPayload") {
+            let td = TypeDef {
+                name: "PanicPayload".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field {
+                        name: "error_type".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "file".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "line".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "stack".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("PanicPayload".to_string(), td);
+        }
+        // v0.29.39: MemoryDump — field→value snapshot (string summary)
+        // { fields: string, count: i32 }
+        if !self.types.contains_key("MemoryDump") {
+            let td = TypeDef {
+                name: "MemoryDump".to_string(),
+                pub_: false,
+                kind: TypeDefKind::Record(vec![
+                    Field {
+                        name: "fields".to_string(),
+                        ty: Type::Name("string".to_string(), vec![]),
+                    },
+                    Field {
+                        name: "count".to_string(),
+                        ty: Type::Name("i32".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            self.types.insert("MemoryDump".to_string(), td);
         }
     }
 

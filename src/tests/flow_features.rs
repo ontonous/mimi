@@ -1793,7 +1793,9 @@ flow S {
                 trace: SystemTrace {
                     last_state_name: "Active",
                     unexpected_event: "fail",
-                    snapshot: "user fail"
+                    snapshot: "user fail",
+                    memory_dump: MemoryDump { fields: "", count: 0 },
+                    panic_payload: PanicPayload { error_type: "fail", file: "", line: 0, stack: "user fail" }
                 }
             }
         }
@@ -2006,7 +2008,9 @@ flow F {
                 trace: SystemTrace {
                     last_state_name: "A",
                     unexpected_event: "go",
-                    snapshot: "manual"
+                    snapshot: "manual",
+                    memory_dump: MemoryDump { fields: "", count: 0 },
+                    panic_payload: PanicPayload { error_type: "go", file: "", line: 0, stack: "manual" }
                 }
             }
         }
@@ -2021,7 +2025,9 @@ flow F {
                 trace: SystemTrace {
                     last_state_name: "Fault",
                     unexpected_event: "boom",
-                    snapshot: "unreachable"
+                    snapshot: "unreachable",
+                    memory_dump: MemoryDump { fields: "", count: 0 },
+                    panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "unreachable" }
                 }
             }
         }
@@ -2286,7 +2292,9 @@ flow Parent {
                 trace: SystemTrace {
                     last_state_name: "Working",
                     unexpected_event: "boom",
-                    snapshot: "user"
+                    snapshot: "user",
+                    memory_dump: MemoryDump { fields: "", count: 0 },
+                    panic_payload: PanicPayload { error_type: "boom", file: "", line: 0, stack: "user" }
                 }
             }
         }

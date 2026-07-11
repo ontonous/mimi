@@ -1,5 +1,6 @@
-// MCDD real_world: SystemTrace on Fault (v0.29.12)
+// MCDD real_world: SystemTrace on Fault (v0.29.39)
 // Auto-fallback fills flat fields + structured `trace: SystemTrace`.
+// v0.29.39: SystemTrace now includes memory_dump + panic_payload.
 flow Counter {
     state Zero { count: i32 }
     state Positive { count: i32 }
@@ -22,5 +23,13 @@ func main() -> i32 {
     println(f.trace.last_state_name)
     println(f.trace.unexpected_event)
     println(f.snapshot)
+
+    // v0.29.39: structured PanicPayload
+    println(f.trace.panic_payload.error_type)
+    println(f.trace.panic_payload.line)
+
+    // v0.29.39: MemoryDump
+    println(f.trace.memory_dump.count)
+
     0
 }

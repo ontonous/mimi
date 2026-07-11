@@ -392,7 +392,8 @@ fn attach_persistent_shadows(flow: &mut FlowDef) {
     }
 }
 
-/// Build a `SystemTrace { last_state_name, unexpected_event, snapshot }` record.
+/// Build a `SystemTrace { last_state_name, unexpected_event, snapshot, memory_dump, panic_payload }` record.
+/// v0.29.39: added memory_dump + panic_payload structured sub-records.
 pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr {
     Expr::Record {
         ty: Some("SystemTrace".to_string()),
@@ -408,6 +409,48 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
             RecordFieldExpr {
                 name: "snapshot".to_string(),
                 value: Expr::Literal(Lit::String(snapshot.to_string())),
+            },
+            // v0.29.39: MemoryDump
+            RecordFieldExpr {
+                name: "memory_dump".to_string(),
+                value: Expr::Record {
+                    ty: Some("MemoryDump".to_string()),
+                    fields: vec![
+                        RecordFieldExpr {
+                            name: "fields".to_string(),
+                            value: Expr::Literal(Lit::String(String::new())),
+                        },
+                        RecordFieldExpr {
+                            name: "count".to_string(),
+                            value: Expr::Literal(Lit::Int(0)),
+                        },
+                    ],
+                },
+            },
+            // v0.29.39: PanicPayload
+            RecordFieldExpr {
+                name: "panic_payload".to_string(),
+                value: Expr::Record {
+                    ty: Some("PanicPayload".to_string()),
+                    fields: vec![
+                        RecordFieldExpr {
+                            name: "error_type".to_string(),
+                            value: Expr::Literal(Lit::String(event.to_string())),
+                        },
+                        RecordFieldExpr {
+                            name: "file".to_string(),
+                            value: Expr::Literal(Lit::String(String::new())),
+                        },
+                        RecordFieldExpr {
+                            name: "line".to_string(),
+                            value: Expr::Literal(Lit::Int(0)),
+                        },
+                        RecordFieldExpr {
+                            name: "stack".to_string(),
+                            value: Expr::Literal(Lit::String(snapshot.to_string())),
+                        },
+                    ],
+                },
             },
         ],
     }
@@ -493,6 +536,50 @@ fn default_field_value(
             // User-defined Fault { trace: string } — encode a compact reason.
             return Expr::Literal(Lit::String(snapshot.to_string()));
         }
+        // v0.29.39: MemoryDump field in SystemTrace
+        "memory_dump" => {
+            if matches!(ty, Type::Name(n, _) if n == "MemoryDump") {
+                return Expr::Record {
+                    ty: Some("MemoryDump".to_string()),
+                    fields: vec![
+                        RecordFieldExpr {
+                            name: "fields".to_string(),
+                            value: Expr::Literal(Lit::String(String::new())),
+                        },
+                        RecordFieldExpr {
+                            name: "count".to_string(),
+                            value: Expr::Literal(Lit::Int(0)),
+                        },
+                    ],
+                };
+            }
+        }
+        // v0.29.39: PanicPayload field in SystemTrace
+        "panic_payload" => {
+            if matches!(ty, Type::Name(n, _) if n == "PanicPayload") {
+                return Expr::Record {
+                    ty: Some("PanicPayload".to_string()),
+                    fields: vec![
+                        RecordFieldExpr {
+                            name: "error_type".to_string(),
+                            value: Expr::Literal(Lit::String(event.to_string())),
+                        },
+                        RecordFieldExpr {
+                            name: "file".to_string(),
+                            value: Expr::Literal(Lit::String(String::new())),
+                        },
+                        RecordFieldExpr {
+                            name: "line".to_string(),
+                            value: Expr::Literal(Lit::Int(0)),
+                        },
+                        RecordFieldExpr {
+                            name: "stack".to_string(),
+                            value: Expr::Literal(Lit::String(snapshot.to_string())),
+                        },
+                    ],
+                };
+            }
+        }
         _ => {}
     }
     // Shared path: scalars + nested record/state shapes (v0.29.17).
@@ -500,10 +587,23 @@ fn default_field_value(
 }
 
 /// Build a runtime Fault value with full SystemTrace (used by panic→Fault path).
+/// v0.29.39: SystemTrace now includes memory_dump + panic_payload.
 /// Persistent field shadows are filled by the caller via `shadow_persistent_into_fault`.
 pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate::interp::Value {
     use crate::interp::Value;
     use std::collections::HashMap;
+
+    // v0.29.39: PanicPayload sub-record
+    let mut panic_payload = HashMap::new();
+    panic_payload.insert("error_type".to_string(), Value::String(event.to_string()));
+    panic_payload.insert("file".to_string(), Value::String(String::new()));
+    panic_payload.insert("line".to_string(), Value::Int(0));
+    panic_payload.insert("stack".to_string(), Value::String(snapshot.to_string()));
+
+    // v0.29.39: MemoryDump sub-record (field summary)
+    let mut memory_dump = HashMap::new();
+    memory_dump.insert("fields".to_string(), Value::String(String::new()));
+    memory_dump.insert("count".to_string(), Value::Int(0));
 
     let mut trace = HashMap::new();
     trace.insert(
@@ -515,6 +615,14 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
         Value::String(event.to_string()),
     );
     trace.insert("snapshot".to_string(), Value::String(snapshot.to_string()));
+    trace.insert(
+        "memory_dump".to_string(),
+        Value::Record(Some("MemoryDump".to_string()), memory_dump),
+    );
+    trace.insert(
+        "panic_payload".to_string(),
+        Value::Record(Some("PanicPayload".to_string()), panic_payload),
+    );
 
     let mut fields = HashMap::new();
     fields.insert(
