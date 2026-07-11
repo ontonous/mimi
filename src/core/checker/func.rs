@@ -11,6 +11,8 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
         // C2: reset unification table for each function
         self.unification.reset();
+        // v0.29.19: session residual tracking is per-function.
+        self.session_residuals.clear();
         let ret = func
             .ret
             .as_ref()
@@ -28,6 +30,18 @@ impl<'a> Checker<'a> {
             if matches!(&ty, Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
                     s.insert(p.name.clone(), false);
+                }
+            }
+            // SessionChan<S> params: seed residual from declared session body.
+            if let Type::Name(n, args) = &ty {
+                if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                    if let Type::Name(sname, _) = &args[0] {
+                        if let Some(body) = self.session_types.get(sname).cloned() {
+                            let resolved = crate::session::resolve(&body, &self.session_types)
+                                .unwrap_or(body);
+                            self.session_residuals.insert(p.name.clone(), resolved);
+                        }
+                    }
                 }
             }
             scopes[0].insert(p.name.clone(), ty);

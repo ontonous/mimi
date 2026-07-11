@@ -202,6 +202,21 @@ impl<'a> Checker<'a> {
         }
         match ty {
             Type::Name(name, args) => {
+                // SessionChan<S>: S must name a declared session (v0.29.19).
+                if name == "SessionChan" || name == "session_chan" {
+                    if let Some(Type::Name(s, _)) = args.first() {
+                        if !self.session_types.contains_key(s) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0413,
+                                format!(
+                                    "unknown session type '{}' in SessionChan (in {})",
+                                    s, context
+                                ),
+                            );
+                        }
+                    }
+                    return;
+                }
                 if !Self::is_builtin_type(name)
                     && !self.types.contains_key(name)
                     && !self.generic_scope.contains(name)

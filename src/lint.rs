@@ -957,6 +957,9 @@ fn collect_names_in_item(item: &Item, names: &mut std::collections::HashSet<Stri
         Item::Protocol(p) => {
             names.insert(p.name.clone());
         }
+        Item::Session(s) => {
+            names.insert(s.name.clone());
+        }
     }
 }
 

@@ -30,6 +30,8 @@ pub enum Item {
     },
     Flow(FlowDef),
     Protocol(ProtocolDef),
+    /// Session type declaration: `session Name = !T . ?U . end`
+    Session(SessionDef),
 }
 
 #[derive(Debug, Clone)]
@@ -641,6 +643,35 @@ pub struct ProtocolDef {
     pub generics: Vec<GenericParam>,
     pub states: Vec<ProtocolStateDef>,
     pub transitions: Vec<ProtocolTransitionDef>,
+}
+
+/// Top-level session type alias: `session Name = SessionTypeExpr`.
+#[derive(Debug, Clone)]
+pub struct SessionDef {
+    pub name: String,
+    pub pub_: bool,
+    pub body: SessionType,
+}
+
+/// Linear session type expression (v0.29.19 skeleton).
+///
+/// Syntax (prefix actions, `.` sequencing, `end` termination):
+/// ```text
+/// session S = !i32 . ?string . end
+/// session T = dual(S)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionType {
+    /// Send a value of type `T`, then continue as `cont`: `!T . cont`
+    Send(Type, Box<SessionType>),
+    /// Receive a value of type `T`, then continue as `cont`: `?T . cont`
+    Recv(Type, Box<SessionType>),
+    /// Dual of another session: `dual(S)` or `dual(session-expr)`
+    Dual(Box<SessionType>),
+    /// Named session reference (after `session Name = ...` declaration)
+    Name(String),
+    /// Protocol termination: `end`
+    End,
 }
 
 #[derive(Debug, Clone)]

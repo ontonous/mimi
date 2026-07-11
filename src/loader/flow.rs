@@ -371,6 +371,7 @@ fn item_name(item: &Item) -> Option<&str> {
         Item::Const { name, .. } => Some(name),
         Item::Flow(f) => Some(&f.name),
         Item::Protocol(p) => Some(&p.name),
+        Item::Session(s) => Some(&s.name),
     }
 }
 

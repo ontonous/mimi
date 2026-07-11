@@ -150,6 +150,9 @@ impl Parser {
             TokenKind::Do => "do".to_string(),
             TokenKind::Persistent => "persistent".to_string(),
             TokenKind::Subflow => "subflow".to_string(),
+            TokenKind::Session => "session".to_string(),
+            TokenKind::Dual => "dual".to_string(),
+            TokenKind::End => "end".to_string(),
             _ => {
                 return Err(ParseError::new(
                     format!("expected identifier, found {}", tok.kind),

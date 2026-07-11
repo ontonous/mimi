@@ -155,7 +155,10 @@ impl Parser {
             | TokenKind::Consume
             | TokenKind::Do
             | TokenKind::Persistent
-            | TokenKind::Subflow => {
+            | TokenKind::Subflow
+            | TokenKind::Session
+            | TokenKind::Dual
+            | TokenKind::End => {
                 let name = tok.kind.source_text().to_string();
                 self.advance();
                 Ok(Pattern::Variable(name))

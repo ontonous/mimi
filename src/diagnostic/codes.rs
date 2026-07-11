@@ -111,6 +111,8 @@ pub const E0409: &str = "E0409"; // type alias cycle
 pub const E0410: &str = "E0410"; // cannot infer record type without explicit type name
 pub const E0411: &str = "E0411"; // weak requires a shared value
 pub const E0412: &str = "E0412"; // protocol must be flat (no nested protocol-state payloads)
+pub const E0413: &str = "E0413"; // unknown session type name
+pub const E0414: &str = "E0414"; // session protocol order violation (send/recv/close)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -314,6 +316,8 @@ pub fn describe(code: &str) -> &'static str {
         E0410 => "cannot infer record type without explicit type name",
         E0411 => "weak requires a shared value",
         E0412 => "protocol must be flat (no nested protocol-state payloads)",
+        E0413 => "unknown session type name",
+        E0414 => "session protocol order violation",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

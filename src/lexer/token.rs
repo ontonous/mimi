@@ -87,6 +87,12 @@ pub enum TokenKind {
     Consume,
     Do,
     Subflow,
+    /// Session type declaration: `session Name = !T . ?U . end`
+    Session,
+    /// Session dual: `dual(S)` — dual of a session type
+    Dual,
+    /// Session end marker: `end` (session protocol termination)
+    End,
     With,
     And,
     Or,
@@ -234,6 +240,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Consume => "consume",
             TokenKind::Do => "do",
             TokenKind::Subflow => "subflow",
+            TokenKind::Session => "session",
+            TokenKind::Dual => "dual",
+            TokenKind::End => "end",
 
             TokenKind::Failure => "failure",
             TokenKind::Requires => "requires",
@@ -384,6 +393,9 @@ impl TokenKind {
             TokenKind::Consume => "consume",
             TokenKind::Do => "do",
             TokenKind::Subflow => "subflow",
+            TokenKind::Session => "session",
+            TokenKind::Dual => "dual",
+            TokenKind::End => "end",
 
             TokenKind::Failure => "failure",
             TokenKind::Requires => "requires",

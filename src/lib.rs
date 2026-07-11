@@ -51,6 +51,7 @@ pub mod macros;
 pub mod ast;
 pub mod codegen;
 pub mod flow_matrix;
+pub mod session;
 
 pub mod diagnostic;
 pub mod error;

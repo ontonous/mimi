@@ -734,6 +734,29 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Item::Session(s) => {
+                // Register session type for order checking / dual resolution.
+                if self.session_types.contains_key(&s.name) {
+                    // duplicate handled in check_item
+                } else {
+                    self.session_types.insert(s.name.clone(), s.body.clone());
+                }
+                // Also expose SessionChan marker type so SessionChan<S> is well-formed.
+                if !self.types.contains_key("SessionChan") {
+                    let td = TypeDef {
+                        name: "SessionChan".to_string(),
+                        pub_: false,
+                        kind: TypeDefKind::Record(vec![]),
+                        generics: vec![GenericParam {
+                            name: "S".to_string(),
+                            bounds: vec![],
+                        }],
+                        derives: vec![],
+                        attributes: vec![],
+                    };
+                    self.types.insert("SessionChan".to_string(), td);
+                }
+            }
         }
     }
     pub(crate) fn check_item(&mut self, item: &Item) {
@@ -1265,6 +1288,51 @@ impl<'a> Checker<'a> {
                                     t.to_state, t.name, p.name),
                         );
                     }
+                }
+            }
+            Item::Session(s) => {
+                // Duplicate session names
+                let count = self
+                    .file
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i, Item::Session(o) if o.name == s.name))
+                    .count();
+                if count > 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0402,
+                        format!("duplicate session type '{}'", s.name),
+                    );
+                }
+                // Resolve body; unknown names are errors.
+                self.check_session_type_wf(&s.body, &s.name);
+            }
+        }
+    }
+
+    /// Well-formedness for a session type expression (v0.29.19).
+    fn check_session_type_wf(&mut self, st: &crate::ast::SessionType, context: &str) {
+        use crate::ast::SessionType;
+        match st {
+            SessionType::Send(t, cont) | SessionType::Recv(t, cont) => {
+                let resolved = self.resolve_type(t);
+                self.check_type_well_formed(
+                    &resolved,
+                    &format!("payload type in session '{}'", context),
+                );
+                self.check_session_type_wf(cont, context);
+            }
+            SessionType::Dual(inner) => self.check_session_type_wf(inner, context),
+            SessionType::End => {}
+            SessionType::Name(n) => {
+                if !self.session_types.contains_key(n) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0413,
+                        format!(
+                            "unknown session type '{}' referenced in session '{}'",
+                            n, context
+                        ),
+                    );
                 }
             }
         }

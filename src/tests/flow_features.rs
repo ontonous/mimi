@@ -354,7 +354,7 @@ flow ResilientService {
 fn flow_lexer_keywords() {
     use crate::lexer::TokenKind;
     // Verify all new flow-related keywords are tokenized correctly
-    let src = "flow state transition protocol delegate pinned fault reset recover persistent view mutate consume do subflow";
+    let src = "flow state transition protocol delegate pinned fault reset recover persistent view mutate consume do subflow session dual end";
     let tokens = crate::lexer::Lexer::new(src)
         .tokenize()
         .expect("lexer failed");
@@ -371,6 +371,9 @@ fn flow_lexer_keywords() {
         ("consume", TokenKind::Consume),
         ("do", TokenKind::Do),
         ("subflow", TokenKind::Subflow),
+        ("session", TokenKind::Session),
+        ("dual", TokenKind::Dual),
+        ("end", TokenKind::End),
     ];
     let expected_soft: Vec<&str> = vec!["fault", "reset", "recover"];
     let kinds: Vec<&TokenKind> = tokens
@@ -2548,4 +2551,114 @@ func main() -> i32 {
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
+}
+
+// ── v0.29.19 Session Types compiler skeleton ──────────────────────────
+
+#[test]
+fn session_parse_basic() {
+    let src = r#"
+session S = !i32 . ?string . end
+session T = dual(S)
+"#;
+    let file = parse(src);
+    assert_eq!(file.items.len(), 2);
+    match &file.items[0] {
+        Item::Session(s) => {
+            assert_eq!(s.name, "S");
+            match &s.body {
+                SessionType::Send(t, cont) => {
+                    assert!(matches!(t, Type::Name(n, _) if n == "i32"));
+                    match cont.as_ref() {
+                        SessionType::Recv(t2, cont2) => {
+                            assert!(matches!(t2, Type::Name(n, _) if n == "string"));
+                            assert_eq!(cont2.as_ref(), &SessionType::End);
+                        }
+                        other => panic!("expected Recv, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Send, got {:?}", other),
+            }
+        }
+        other => panic!("expected Session, got {:?}", other),
+    }
+    match &file.items[1] {
+        Item::Session(s) => {
+            assert_eq!(s.name, "T");
+            assert!(matches!(s.body, SessionType::Dual(_)));
+        }
+        other => panic!("expected Session, got {:?}", other),
+    }
+}
+
+#[test]
+fn session_check_order_ok() {
+    // Correct send → recv → close order typechecks.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func client(ch: SessionChan<S>) -> i32 {
+    session_send(ch, 1)
+    let x = session_recv(ch)
+    session_close(ch)
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_ok(), "good order: {:?}", check_source(src));
+}
+
+#[test]
+fn session_check_order_recv_before_send_rejected() {
+    let src = r#"
+session S = !i32 . ?i32 . end
+func bad(ch: SessionChan<S>) -> i32 {
+    let x = session_recv(ch)
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "recv-before-send must fail");
+    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+    assert!(
+        msgs.contains("order") || msgs.contains("E0414") || msgs.contains("ExpectedRecv") || msgs.contains("recv"),
+        "expected order violation, got: {}",
+        msgs
+    );
+}
+
+#[test]
+fn session_check_close_before_end_rejected() {
+    let src = r#"
+session S = !i32 . end
+func bad(ch: SessionChan<S>) {
+    session_close(ch)
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_err(), "close before end must fail");
+}
+
+#[test]
+fn session_check_unknown_session_name() {
+    let src = r#"
+func f(ch: SessionChan<NoSuch>) -> i32 { 0 }
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_err(), "unknown session name must fail");
+}
+
+#[test]
+fn session_check_dual_ok() {
+    let src = r#"
+session S = !i32 . end
+session T = dual(S)
+func server(ch: SessionChan<T>) -> i32 {
+    let x = session_recv(ch)
+    session_close(ch)
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_ok(), "dual: {:?}", check_source(src));
 }

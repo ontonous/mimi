@@ -703,6 +703,25 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unit".into(), vec![]);
             }
+            // v0.29.19 — session endpoint ops with compile-time order checking.
+            "session_send" => {
+                return self.check_session_send(args, scopes);
+            }
+            "session_recv" => {
+                return self.check_session_recv(args, scopes);
+            }
+            "session_close" => {
+                return self.check_session_close(args, scopes);
+            }
+            "session_open" => {
+                // session_open::<S>() / session_open() — returns SessionChan residual S.
+                // Track residual when assigned to a variable (via let + pattern).
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
+                // Without turbofish we cannot know S; return opaque SessionChan.
+                return Type::Name("SessionChan".into(), vec![]);
+            }
             "print" => {
                 for a in args {
                     self.infer_expr(a, scopes);
@@ -1878,4 +1897,162 @@ impl<'a> Checker<'a> {
         }
         ret
     }
+
+    // ── v0.29.19 Session Types order checking ─────────────────────────
+
+    fn session_chan_name(ty: &Type) -> Option<String> {
+        crate::session::session_from_chan_type(ty)
+    }
+
+    fn residual_for_var(&self, name: &str) -> Option<crate::ast::SessionType> {
+        self.session_residuals.get(name).cloned()
+    }
+
+    fn set_residual(&mut self, name: &str, residual: crate::ast::SessionType) {
+        self.session_residuals.insert(name.to_string(), residual);
+    }
+
+    /// Resolve residual for a channel expression. Only Ident endpoints are tracked.
+    fn residual_of_expr(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Option<(Option<String>, crate::ast::SessionType)> {
+        let ty = self.infer_expr(expr, scopes);
+        if let Expr::Ident(v) = expr {
+            if let Some(r) = self.residual_for_var(v) {
+                return Some((Some(v.clone()), r));
+            }
+            // Initialize residual from SessionChan<S> annotation if present.
+            if let Some(sname) = Self::session_chan_name(&ty) {
+                if let Some(body) = self.session_types.get(&sname).cloned() {
+                    let resolved = crate::session::resolve(&body, &self.session_types)
+                        .unwrap_or(body);
+                    self.set_residual(v, resolved.clone());
+                    return Some((Some(v.clone()), resolved));
+                }
+            }
+        }
+        // Untracked endpoint: no order check (best-effort skeleton).
+        None
+    }
+
+    pub(in crate::core) fn check_session_send(
+        &mut self,
+        args: &[Expr],
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        if args.len() != 2 {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                "session_send expects 2 arguments (endpoint, value)".to_string(),
+            );
+            return Type::Name("unit".into(), vec![]);
+        }
+        if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            match crate::session::apply_action(&residual, crate::session::SessionAction::Send) {
+                Ok((next, expected_ty)) => {
+                    if let Some(et) = expected_ty {
+                        let actual = self.infer_expr(&args[1], scopes);
+                        let et_r = self.resolve_type(&et);
+                        if self.unification.unify(&et_r, &actual).is_err()
+                            && !crate::core::helpers::same_type(&et_r, &actual)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0414,
+                                format!(
+                                    "session_send: expected value of type {}, found {}",
+                                    crate::core::fmt_type(&et_r),
+                                    crate::core::fmt_type(&actual)
+                                ),
+                            );
+                        }
+                    } else {
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    if let Some(v) = var {
+                        self.set_residual(&v, next);
+                    }
+                }
+                Err(e) => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0414,
+                        format!("session protocol order violation on send: {:?}", e),
+                    );
+                    self.infer_expr(&args[1], scopes);
+                }
+            }
+        } else {
+            for a in args {
+                self.infer_expr(a, scopes);
+            }
+        }
+        Type::Name("unit".into(), vec![])
+    }
+
+    pub(in crate::core) fn check_session_recv(
+        &mut self,
+        args: &[Expr],
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        if args.len() != 1 {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                "session_recv expects 1 argument (endpoint)".to_string(),
+            );
+            return Type::Name("unknown".into(), vec![]);
+        }
+        if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            match crate::session::apply_action(&residual, crate::session::SessionAction::Recv) {
+                Ok((next, payload_ty)) => {
+                    if let Some(v) = var {
+                        self.set_residual(&v, next);
+                    }
+                    return payload_ty.unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
+                }
+                Err(e) => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0414,
+                        format!("session protocol order violation on recv: {:?}", e),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+            }
+        }
+        self.infer_expr(&args[0], scopes);
+        Type::Name("unknown".into(), vec![])
+    }
+
+    pub(in crate::core) fn check_session_close(
+        &mut self,
+        args: &[Expr],
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        if args.len() != 1 {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                "session_close expects 1 argument (endpoint)".to_string(),
+            );
+            return Type::Name("unit".into(), vec![]);
+        }
+        if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            match crate::session::apply_action(&residual, crate::session::SessionAction::Close) {
+                Ok((next, _)) => {
+                    if let Some(v) = var {
+                        self.set_residual(&v, next);
+                    }
+                }
+                Err(e) => {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0414,
+                        format!("session protocol order violation on close: {:?}", e),
+                    );
+                }
+            }
+        } else {
+            self.infer_expr(&args[0], scopes);
+        }
+        Type::Name("unit".into(), vec![])
+    }
+
 }
