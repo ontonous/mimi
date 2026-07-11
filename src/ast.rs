@@ -601,6 +601,10 @@ pub struct FlowDef {
     pub impl_protocols: Vec<String>,
     /// Fields declared as `persistent` — survive Fault and recover
     pub persistent_fields: Vec<String>,
+    /// Subset of `persistent_fields` marked `@transactional` — full WAL
+    /// shadow-copy on turn entry; restored on Fault (v0.29.14).
+    /// Remaining persistent fields use dirty/version check (recover→reset).
+    pub transactional_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
