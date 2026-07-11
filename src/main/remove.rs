@@ -4,6 +4,11 @@ use mimi::manifest;
 /// `mimi remove <name>` — drop a dependency from mimi.toml, mimi.lock,
 /// and `.mimi/deps/<name>`.
 pub(crate) fn remove(name: &str) -> Result<(), String> {
+    // Reject names with path separators — prevent traversal attacks
+    // where `name = "../../src"` would resolve to `<project>/src`.
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(format!("invalid dependency name '{}': must not contain path separators", name));
+    }
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
     let (dir, mut manifest) = match manifest::Manifest::find(&cwd)? {
         Some((d, m)) => (d, m),
