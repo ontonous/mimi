@@ -74,8 +74,19 @@ pub fn expand_flow(flow: &mut FlowDef) {
     flow.transitions.extend(fallbacks);
 }
 
-/// Ensure a `Fault` state exists. Auto-injected Fault carries a minimal
-/// SystemTrace-shaped payload so callers can read last_state / unexpected_event.
+/// Ensure a `Fault` state exists.
+///
+/// v0.29.12 SystemTrace shape:
+/// ```text
+/// state Fault {
+///   last_state: string,       // alias: last_state_name
+///   unexpected_event: string, // event name or "panic:<type>"
+///   snapshot: string,         // compact reason / stack summary
+///   trace: SystemTrace,       // structured { last_state_name, unexpected_event, snapshot }
+/// }
+/// ```
+/// Flat fields keep existing MCDD / dual-backend tests working; `trace` is the
+/// structured view for user `match self.trace` recovery paths.
 fn ensure_fault_state(flow: &mut FlowDef) {
     if flow.states.iter().any(|s| s.name == "Fault") {
         return;
@@ -91,12 +102,42 @@ fn ensure_fault_state(flow: &mut FlowDef) {
                 name: "unexpected_event".to_string(),
                 ty: Type::Name("string".to_string(), vec![]),
             },
+            Field {
+                name: "snapshot".to_string(),
+                ty: Type::Name("string".to_string(), vec![]),
+            },
+            Field {
+                name: "trace".to_string(),
+                ty: Type::Name("SystemTrace".to_string(), vec![]),
+            },
         ]),
     });
 }
 
+/// Build a `SystemTrace { last_state_name, unexpected_event, snapshot }` record.
+pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr {
+    Expr::Record {
+        ty: Some("SystemTrace".to_string()),
+        fields: vec![
+            RecordFieldExpr {
+                name: "last_state_name".to_string(),
+                value: Expr::Literal(Lit::String(from_state.to_string())),
+            },
+            RecordFieldExpr {
+                name: "unexpected_event".to_string(),
+                value: Expr::Literal(Lit::String(event.to_string())),
+            },
+            RecordFieldExpr {
+                name: "snapshot".to_string(),
+                value: Expr::Literal(Lit::String(snapshot.to_string())),
+            },
+        ],
+    }
+}
+
 /// Build `return Fault { ... }` matching the Fault state's payload shape.
 fn fault_return_body(flow: &FlowDef, from_state: &str, event: &str) -> Block {
+    let snapshot = format!("undefined transition {}({})", event, from_state);
     let fields = flow
         .states
         .iter()
@@ -107,7 +148,7 @@ fn fault_return_body(flow: &FlowDef, from_state: &str, event: &str) -> Block {
                 .iter()
                 .map(|f| RecordFieldExpr {
                     name: f.name.clone(),
-                    value: default_field_value(&f.name, &f.ty, from_state, event),
+                    value: default_field_value(&f.name, &f.ty, from_state, event, &snapshot),
                 })
                 .collect::<Vec<_>>()
         })
@@ -119,7 +160,13 @@ fn fault_return_body(flow: &FlowDef, from_state: &str, event: &str) -> Block {
     }))]
 }
 
-fn default_field_value(field: &str, ty: &Type, from_state: &str, event: &str) -> Expr {
+fn default_field_value(
+    field: &str,
+    ty: &Type,
+    from_state: &str,
+    event: &str,
+    snapshot: &str,
+) -> Expr {
     // Prefer SystemTrace semantics for well-known field names.
     match field {
         "last_state" | "last_state_name" => {
@@ -128,16 +175,24 @@ fn default_field_value(field: &str, ty: &Type, from_state: &str, event: &str) ->
         "unexpected_event" => {
             return Expr::Literal(Lit::String(event.to_string()));
         }
+        "snapshot" => {
+            return Expr::Literal(Lit::String(snapshot.to_string()));
+        }
         "trace" => {
+            // Structured SystemTrace record (v0.29.12).
+            if matches!(ty, Type::Name(n, _) if n == "SystemTrace" || n == "string" || n == "String")
+            {
+                if matches!(ty, Type::Name(n, _) if n == "SystemTrace") {
+                    return system_trace_expr(from_state, event, snapshot);
+                }
+            }
             // User-defined Fault { trace: string } — encode a compact reason.
-            return Expr::Literal(Lit::String(format!(
-                "undefined transition {}({})",
-                event, from_state
-            )));
+            return Expr::Literal(Lit::String(snapshot.to_string()));
         }
         _ => {}
     }
     match ty {
+        Type::Name(n, _) if n == "SystemTrace" => system_trace_expr(from_state, event, snapshot),
         Type::Name(n, _) if n == "string" || n == "String" => {
             Expr::Literal(Lit::String(String::new()))
         }
@@ -149,6 +204,39 @@ fn default_field_value(field: &str, ty: &Type, from_state: &str, event: &str) ->
         // Best-effort: empty unit for unknown shapes (type checker will report if bad).
         _ => Expr::Literal(Lit::Unit),
     }
+}
+
+/// Build a runtime Fault value with full SystemTrace (used by panic→Fault path).
+pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate::interp::Value {
+    use crate::interp::Value;
+    use std::collections::HashMap;
+
+    let mut trace = HashMap::new();
+    trace.insert(
+        "last_state_name".to_string(),
+        Value::String(from_state.to_string()),
+    );
+    trace.insert(
+        "unexpected_event".to_string(),
+        Value::String(event.to_string()),
+    );
+    trace.insert("snapshot".to_string(), Value::String(snapshot.to_string()));
+
+    let mut fields = HashMap::new();
+    fields.insert(
+        "last_state".to_string(),
+        Value::String(from_state.to_string()),
+    );
+    fields.insert(
+        "unexpected_event".to_string(),
+        Value::String(event.to_string()),
+    );
+    fields.insert("snapshot".to_string(), Value::String(snapshot.to_string()));
+    fields.insert(
+        "trace".to_string(),
+        Value::Record(Some("SystemTrace".to_string()), trace),
+    );
+    Value::Record(Some("Fault".to_string()), fields)
 }
 
 #[cfg(test)]

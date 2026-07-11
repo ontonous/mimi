@@ -1,0 +1,26 @@
+// MCDD real_world: SystemTrace on Fault (v0.29.12)
+// Auto-fallback fills flat fields + structured `trace: SystemTrace`.
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    println(s1.count)
+    // Positive+inc → Fault with SystemTrace
+    let f = Counter::inc(s1)
+    println(f.last_state)
+    println(f.unexpected_event)
+    println(f.trace.last_state_name)
+    println(f.trace.unexpected_event)
+    println(f.snapshot)
+    0
+}

@@ -395,6 +395,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.type_llvm.insert("StatResult".to_string(), llvm_ty);
             self.type_defs.insert("StatResult".to_string(), stat_ty);
         }
+        // v0.29.12 SystemTrace { last_state_name, unexpected_event, snapshot }
+        if !self.type_defs.contains_key("SystemTrace") {
+            let st_ty = crate::ast::TypeDef {
+                name: "SystemTrace".to_string(),
+                pub_: false,
+                kind: crate::ast::TypeDefKind::Record(vec![
+                    crate::ast::Field {
+                        name: "last_state_name".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "unexpected_event".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "snapshot".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                ]),
+                generics: vec![],
+                derives: vec![],
+                attributes: vec![],
+            };
+            let llvm_ty = BasicTypeEnum::StructType(
+                self.context
+                    .struct_type(&[string_ty, string_ty, string_ty], false),
+            );
+            self.type_llvm.insert("SystemTrace".to_string(), llvm_ty);
+            self.type_defs.insert("SystemTrace".to_string(), st_ty);
+        }
         Ok(())
     }
 
