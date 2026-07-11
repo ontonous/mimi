@@ -1,5 +1,6 @@
-// MCDD real_world: Flow polymorphic broadcast (v0.29.25)
+// MCDD real_world: Flow polymorphic broadcast (v0.29.35)
 // Type-erased list of actor handles + method-name dispatch.
+// v0.29.35: PeerFault slots use sentinel -1 (distinguishable from 0 result).
 // No 2PC — returns List of per-target results.
 
 actor Sensor {
@@ -22,5 +23,10 @@ func main() -> i32 {
     println(len(results))
     println(results[0])
     println(results[1])
+
+    // v0.29.35: unknown method → PeerFault sentinel -1
+    let bad = broadcast(targets, "nonexistent")
+    println(bad[0])
+    println(bad[1])
     0
 }
