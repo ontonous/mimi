@@ -147,7 +147,14 @@ impl<'a> Checker<'a> {
             | Stmt::Desc(..)
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
-            | Stmt::Ellipsis => {}
+            | Stmt::Ellipsis
+            | Stmt::Delegate { .. }
+            | Stmt::Pinned { .. } => {}
+            Stmt::Do(body) => {
+                for s in body {
+                    self.check_stmt_parasteps_safe(s, scopes);
+                }
+            }
         }
     }
 
@@ -248,6 +255,20 @@ impl<'a> Checker<'a> {
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis => {}
+            Stmt::Do(body) => {
+                for s in body {
+                    self.collect_shared_writes_in_stmt(s, scopes, writes);
+                }
+            }
+            Stmt::Delegate { expr, .. } => {
+                self.collect_shared_writes_in_expr(expr, scopes, writes);
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                self.collect_shared_writes_in_expr(expr, scopes, writes);
+                for s in body {
+                    self.collect_shared_writes_in_stmt(s, scopes, writes);
+                }
+            }
         }
     }
 
@@ -1217,6 +1238,16 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 self.funcs.insert(func.name.clone(), (params, ret));
                 self.check_item(&Item::Func(func.clone()));
+            }
+            Stmt::Do(body) => {
+                self.check_block(body, ret, scopes);
+            }
+            Stmt::Delegate { expr, .. } => {
+                self.infer_expr(expr, scopes);
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                self.infer_expr(expr, scopes);
+                self.check_block(body, ret, scopes);
             }
         }
     }

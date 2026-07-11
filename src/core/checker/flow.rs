@@ -321,11 +321,25 @@ mod tests {
 
         // Phase 2: item 0 (consumes 1 step)
         let state = state.transition(FlowEvent::Step).unwrap();
-        assert!(matches!(state, CheckerState::Checking { index: 1, total: 2, .. }));
+        assert!(matches!(
+            state,
+            CheckerState::Checking {
+                index: 1,
+                total: 2,
+                ..
+            }
+        ));
 
         // Phase 2: item 1 (consumes 1 step)
         let state = state.transition(FlowEvent::Step).unwrap();
-        assert!(matches!(state, CheckerState::Checking { index: 2, total: 2, .. }));
+        assert!(matches!(
+            state,
+            CheckerState::Checking {
+                index: 2,
+                total: 2,
+                ..
+            }
+        ));
 
         // One more step to transition to Done
         let state = state.transition(FlowEvent::Step).unwrap();

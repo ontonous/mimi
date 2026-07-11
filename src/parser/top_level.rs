@@ -125,6 +125,12 @@ impl Parser {
             TokenKind::Cap => Ok(Item::Cap(self.parse_cap_def()?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl_def()?)),
+            TokenKind::Flow => {
+                let mut f = self.parse_flow_def()?;
+                f.pub_ = pub_;
+                Ok(Item::Flow(f))
+            }
+            TokenKind::Protocol => Ok(Item::Protocol(self.parse_protocol_def()?)),
             TokenKind::Unsafe => {
                 // unsafe extern "C" { ... } — bypass passport-type checking
                 self.advance(); // consume `unsafe`
@@ -677,6 +683,337 @@ impl Parser {
             self.expect(TokenKind::LBrace, &format!("`{{` for {}", context))?;
         }
         Ok(())
+    }
+
+    fn parse_flow_def(&mut self) -> Result<FlowDef, ParseError> {
+        self.expect_keyword(TokenKind::Flow)?;
+        let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
+        // Parse optional annotations: @mailbox(depth = 2048) etc.
+        let mut annotations = Vec::new();
+        while self.at(&TokenKind::At) {
+            self.advance();
+            let ann_name = self.expect_ident()?;
+            self.expect(TokenKind::LParen, "`(`")?;
+            match ann_name.as_str() {
+                "mailbox" => {
+                    if matches!(self.peek_kind(), TokenKind::Ident(_))
+                        && self.pos + 1 < self.tokens.len()
+                        && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                    {
+                        self.expect_ident()?; // skip "depth"
+                        self.expect(TokenKind::Eq, "`=`")?;
+                    }
+                    if let TokenKind::Int(s) = &self.peek().kind {
+                        let depth = s.parse::<usize>().unwrap_or(2048);
+                        self.advance();
+                        annotations.push(FlowAnnotation::MailboxDepth(depth));
+                    }
+                }
+                "max_children" => {
+                    if matches!(self.peek_kind(), TokenKind::Ident(_))
+                        && self.pos + 1 < self.tokens.len()
+                        && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                    {
+                        self.expect_ident()?; // skip "children"
+                        self.expect(TokenKind::Eq, "`=`")?;
+                    }
+                    if let TokenKind::Int(s) = &self.peek().kind {
+                        let n = s.parse::<usize>().unwrap_or(10);
+                        self.advance();
+                        annotations.push(FlowAnnotation::MaxChildren(n));
+                    }
+                }
+                _ => {}
+            }
+            self.expect(TokenKind::RParen, "`)`")?;
+            self.skip_newlines();
+        }
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut states = Vec::new();
+        let mut transitions = Vec::new();
+        let mut impl_protocols = Vec::new();
+        let mut persistent_fields = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&TokenKind::RBrace) {
+                break;
+            }
+            // Check for `impl ProtocolName`
+            if self.at(&TokenKind::Impl) {
+                self.advance();
+                let proto = self.expect_ident()?;
+                self.match_semi();
+                impl_protocols.push(proto);
+                continue;
+            }
+            // Check for `persistent` modifier or `@` annotation
+            if self.at(&TokenKind::At) {
+                self.advance();
+                let ann_name = self.expect_ident()?;
+                self.expect(TokenKind::LParen, "`(`")?;
+                match ann_name.as_str() {
+                    "mailbox" => {
+                        if matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && self.pos + 1 < self.tokens.len()
+                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        {
+                            self.expect_ident()?;
+                            self.expect(TokenKind::Eq, "`=`")?;
+                        }
+                        if let TokenKind::Int(s) = &self.peek().kind {
+                            let depth = s.parse::<usize>().unwrap_or(2048);
+                            self.advance();
+                            annotations.push(FlowAnnotation::MailboxDepth(depth));
+                        }
+                    }
+                    "max_children" => {
+                        if matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && self.pos + 1 < self.tokens.len()
+                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        {
+                            self.expect_ident()?;
+                            self.expect(TokenKind::Eq, "`=`")?;
+                        }
+                        if let TokenKind::Int(s) = &self.peek().kind {
+                            let n = s.parse::<usize>().unwrap_or(10);
+                            self.advance();
+                            annotations.push(FlowAnnotation::MaxChildren(n));
+                        }
+                    }
+                    _ => {}
+                }
+                self.expect(TokenKind::RParen, "`)`")?;
+                continue;
+            }
+            // Check for `persistent` modifier
+            let is_persistent = self.at(&TokenKind::Persistent);
+            if is_persistent {
+                self.advance();
+            }
+            match self.peek_kind() {
+                TokenKind::State => {
+                    let state = self.parse_state_def()?;
+                    if is_persistent {
+                        if let Some(ref payload) = state.payload {
+                            for field in payload {
+                                persistent_fields.push(field.name.clone());
+                            }
+                        }
+                    }
+                    states.push(state);
+                }
+                TokenKind::Transition => {
+                    if is_persistent {
+                        return Err(ParseError::new(
+                            "`persistent` cannot be applied to a transition",
+                            self.peek().line,
+                            self.peek().col,
+                        ));
+                    }
+                    transitions.push(self.parse_transition_def()?);
+                }
+                _ => {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!(
+                            "expected `state` or `transition` in flow body, found {}",
+                            tok.kind
+                        ),
+                        tok.line,
+                        tok.col,
+                    ));
+                }
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(FlowDef {
+            name,
+            pub_: false,
+            generics,
+            annotations,
+            states,
+            transitions,
+            impl_protocols,
+            persistent_fields,
+        })
+    }
+
+    fn parse_state_def(&mut self) -> Result<StateDef, ParseError> {
+        self.expect_keyword(TokenKind::State)?;
+        let name = self.expect_ident()?;
+        let payload = if self.at(&TokenKind::LBrace) {
+            self.advance();
+            let mut fields = Vec::new();
+            while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                let fname = self.expect_ident()?;
+                self.expect(TokenKind::Colon, "`:`")?;
+                let fty = self.parse_type()?;
+                fields.push(Field {
+                    name: fname,
+                    ty: fty,
+                });
+                if self.at(&TokenKind::Comma) {
+                    self.advance();
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RBrace, "`}`")?;
+            Some(fields)
+        } else {
+            None
+        };
+        self.match_semi();
+        Ok(StateDef { name, payload })
+    }
+
+    fn parse_transition_def(&mut self) -> Result<TransitionDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
+        self.expect_keyword(TokenKind::Transition)?;
+        let name = self.expect_ident()?;
+        // Parse: (FromState) or (FromState, event_param, ...)
+        self.expect(TokenKind::LParen, "`(`")?;
+        let from_state = self.expect_ident()?;
+        let mut params = Vec::new();
+        self.skip_newlines();
+        // Check for event params (after from_state)
+        if self.at(&TokenKind::Comma) {
+            self.advance();
+            self.skip_newlines();
+            loop {
+                let mut_ = self.at(&TokenKind::Mut);
+                if mut_ {
+                    self.advance();
+                }
+                let pname = self.expect_ident()?;
+                self.expect(TokenKind::Colon, "`:`")?;
+                let pty = self.parse_type()?;
+                params.push(Param {
+                    name: pname,
+                    ty: pty,
+                    mut_,
+                    default_value: None,
+                });
+                self.skip_newlines();
+                if !self.at(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+                self.skip_newlines();
+                if self.at(&TokenKind::RParen) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "`)`")?;
+        // Parse -> ToState or -> ToState1 | ToState2
+        self.skip_newlines();
+        self.expect(TokenKind::Arrow, "`->`")?;
+        let mut to_states = Vec::new();
+        loop {
+            let target = self.expect_ident()?;
+            to_states.push(target);
+            self.skip_newlines();
+            if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                break;
+            }
+        }
+        // Parse optional body: { do { ... } }
+        let body = if self.at(&TokenKind::LBrace) {
+            self.expect(TokenKind::LBrace, "`{`")?;
+            Some(self.parse_block()?)
+        } else if self.at(&TokenKind::Semi) {
+            self.advance();
+            None
+        } else {
+            self.match_semi();
+            None
+        };
+        Ok(TransitionDef {
+            name,
+            from_state,
+            params,
+            to_states,
+            body,
+            pos,
+        })
+    }
+
+    fn parse_protocol_def(&mut self) -> Result<ProtocolDef, ParseError> {
+        self.expect_keyword(TokenKind::Protocol)?;
+        let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut states = Vec::new();
+        let mut transitions = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            self.skip_newlines();
+            if self.at(&TokenKind::RBrace) {
+                break;
+            }
+            match self.peek_kind() {
+                TokenKind::State => {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    let payload_type = if self.at(&TokenKind::LBrace) {
+                        self.advance();
+                        // Parse single payload type: { data: f32 }
+                        let _fname = self.expect_ident()?;
+                        self.expect(TokenKind::Colon, "`:`")?;
+                        let fty = self.parse_type()?;
+                        self.expect(TokenKind::RBrace, "`}`")?;
+                        Some(fty)
+                    } else {
+                        None
+                    };
+                    self.match_semi();
+                    states.push(ProtocolStateDef { name, payload_type });
+                }
+                TokenKind::Transition => {
+                    self.advance();
+                    let tname = self.expect_ident()?;
+                    self.expect(TokenKind::LParen, "`(`")?;
+                    let from_state = self.expect_ident()?;
+                    self.expect(TokenKind::RParen, "`)`")?;
+                    self.skip_newlines();
+                    self.expect(TokenKind::Arrow, "`->`")?;
+                    let to_state = self.expect_ident()?;
+                    self.match_semi();
+                    transitions.push(ProtocolTransitionDef {
+                        name: tname,
+                        from_state,
+                        to_state,
+                    });
+                }
+                _ => {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!(
+                            "expected `state` or `transition` in protocol body, found {}",
+                            tok.kind
+                        ),
+                        tok.line,
+                        tok.col,
+                    ));
+                }
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(ProtocolDef {
+            name,
+            generics,
+            states,
+            transitions,
+        })
     }
 
     fn parse_item_block(&mut self) -> Result<Vec<Item>, ParseError> {

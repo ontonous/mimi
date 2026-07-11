@@ -241,9 +241,7 @@ fn resolve_import_path(from: &Path, import_path: &[String], acc: &Acc) -> Result
                     dep_root.join(&dep_relative).with_extension("mimi"),
                     dep_root.with_extension("mimi"),
                 ]) {
-                    if import_path.len() == 1
-                        || found != dep_root.with_extension("mimi")
-                    {
+                    if import_path.len() == 1 || found != dep_root.with_extension("mimi") {
                         return Ok(found);
                     }
                 }
@@ -371,6 +369,8 @@ fn item_name(item: &Item) -> Option<&str> {
         Item::Impl(i) => Some(i.type_name.as_str()),
         Item::ExternBlock(_) => None,
         Item::Const { name, .. } => Some(name),
+        Item::Flow(f) => Some(&f.name),
+        Item::Protocol(p) => Some(&p.name),
     }
 }
 

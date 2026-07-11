@@ -860,7 +860,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .then(|| self.builder.get_insert_block())
                     .flatten();
                 self.builder.position_at_end(merge_bb);
-                if then_val.get_type() == else_val.as_ref().map(|v| v.get_type()).unwrap_or(then_val.get_type()) {
+                if then_val.get_type()
+                    == else_val
+                        .as_ref()
+                        .map(|v| v.get_type())
+                        .unwrap_or(then_val.get_type())
+                {
                     let phi = self
                         .builder
                         .build_phi(then_val.get_type(), "if_result")

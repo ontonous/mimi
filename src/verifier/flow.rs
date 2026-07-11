@@ -77,33 +77,38 @@ impl VerifierState {
     /// Uses `self` by value — ownership moves in and out.
     pub fn transition(self, event: FlowEvent) -> Result<Self, String> {
         match (self, event) {
-            (VerifierState::Ready { mut verifier, mut queue, mut acc }, FlowEvent::Step) => {
-                match queue.pop() {
-                    Some(StepKind::Func(func)) => {
-                        if !func.body.is_empty() {
-                            let result = verifier.verify_func(&func);
-                            acc.results.push(result);
-                        }
-                        Ok(VerifierState::Ready {
-                            verifier,
-                            queue,
-                            acc,
-                        })
+            (
+                VerifierState::Ready {
+                    mut verifier,
+                    mut queue,
+                    mut acc,
+                },
+                FlowEvent::Step,
+            ) => match queue.pop() {
+                Some(StepKind::Func(func)) => {
+                    if !func.body.is_empty() {
+                        let result = verifier.verify_func(&func);
+                        acc.results.push(result);
                     }
-                    Some(StepKind::Extern(func)) => {
-                        if func.requires.is_some() || func.ensures.is_some() {
-                            let result = verifier.verify_extern_func(&func);
-                            acc.results.push(result);
-                        }
-                        Ok(VerifierState::Ready {
-                            verifier,
-                            queue,
-                            acc,
-                        })
-                    }
-                    None => Ok(VerifierState::Done(acc)),
+                    Ok(VerifierState::Ready {
+                        verifier,
+                        queue,
+                        acc,
+                    })
                 }
-            }
+                Some(StepKind::Extern(func)) => {
+                    if func.requires.is_some() || func.ensures.is_some() {
+                        let result = verifier.verify_extern_func(&func);
+                        acc.results.push(result);
+                    }
+                    Ok(VerifierState::Ready {
+                        verifier,
+                        queue,
+                        acc,
+                    })
+                }
+                None => Ok(VerifierState::Done(acc)),
+            },
             (done @ VerifierState::Done(_), _) => Ok(done),
         }
     }

@@ -460,11 +460,17 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn builtin_exec_safe(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.is_empty() {
-            return Err(InterpError::new("exec_safe expects at least 1 argument (program)"));
+            return Err(InterpError::new(
+                "exec_safe expects at least 1 argument (program)",
+            ));
         }
         let prog = match &args[0] {
             Value::String(s) => s.clone(),
-            _ => return Err(InterpError::new("exec_safe: first argument must be a string (program)")),
+            _ => {
+                return Err(InterpError::new(
+                    "exec_safe: first argument must be a string (program)",
+                ))
+            }
         };
         let mut cmd = std::process::Command::new(&prog);
         for arg in args.iter().skip(1) {

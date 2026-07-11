@@ -1107,10 +1107,7 @@ unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
 /// later detection by `mimi_any_to_string` (aligned heap pointer >= 1MB).
 /// The caller (codegen side) is responsible for freeing via `mimi_string_free`.
 #[no_mangle]
-pub extern "C" fn mimi_str_clone(
-    ptr: *const std::ffi::c_char,
-    len: i64,
-) -> ValueHandle {
+pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> ValueHandle {
     if ptr.is_null() || len <= 0 {
         return 0;
     }

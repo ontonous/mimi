@@ -238,7 +238,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or("strlen not declared")?;
                 let len = self
                     .builder
-                    .build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(ptr)], "strlen_s")
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(ptr)],
+                        "strlen_s",
+                    )
                     .map_err(|e| format!("strlen call error: {}", e))?
                     .try_as_basic_value_opt()
                     .ok_or("strlen returned void")?

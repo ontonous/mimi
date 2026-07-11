@@ -74,6 +74,18 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::Unit
+            | TokenKind::Flow
+            | TokenKind::State
+            | TokenKind::Transition
+            | TokenKind::Protocol
+            | TokenKind::Delegate
+            | TokenKind::Pinned
+            | TokenKind::Persistent
+            | TokenKind::View
+            | TokenKind::Mutate
+            | TokenKind::Consume
+            | TokenKind::Do
+            | TokenKind::Subflow
     )
 }
 
@@ -134,6 +146,18 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "rule" => TokenKind::Rule,
         "old" => TokenKind::Old,
         "mms" => TokenKind::Mms,
+        "flow" => TokenKind::Flow,
+        "state" => TokenKind::State,
+        "transition" => TokenKind::Transition,
+        "protocol" => TokenKind::Protocol,
+        "delegate" => TokenKind::Delegate,
+        "pinned" => TokenKind::Pinned,
+        "persistent" => TokenKind::Persistent,
+        "view" => TokenKind::View,
+        "mutate" => TokenKind::Mutate,
+        "consume" => TokenKind::Consume,
+        "do" => TokenKind::Do,
+        "subflow" => TokenKind::Subflow,
         "with" => TokenKind::With,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,

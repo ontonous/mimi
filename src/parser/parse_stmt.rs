@@ -100,6 +100,89 @@ impl Parser {
                 self.match_semi();
                 Ok(Stmt::Func(func))
             }
+            TokenKind::Do => {
+                self.advance();
+                self.skip_newlines();
+                self.expect(TokenKind::LBrace, "`{`")?;
+                let body = self.parse_block()?;
+                Ok(Stmt::Do(body))
+            }
+            TokenKind::Delegate => {
+                self.advance();
+                let kind = match self.peek_kind() {
+                    k if *k == TokenKind::View => {
+                        self.advance();
+                        DelegateKind::View
+                    }
+                    k if *k == TokenKind::Mutate => {
+                        self.advance();
+                        DelegateKind::Mutate
+                    }
+                    k if *k == TokenKind::Consume => {
+                        self.advance();
+                        DelegateKind::Consume
+                    }
+                    _ => {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "expected `view`, `mutate`, or `consume` after `delegate`",
+                            tok.line,
+                            tok.col,
+                        ));
+                    }
+                };
+                self.expect(TokenKind::LParen, "`(`")?;
+                let expr = self.parse_expr(0)?;
+                self.expect(TokenKind::RParen, "`)`")?;
+                // expect "to" keyword
+                if !matches!(self.peek_kind(), TokenKind::Ident(s) if s == "to") {
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!("expected `to`, found {}", tok.kind),
+                        tok.line,
+                        tok.col,
+                    ));
+                }
+                self.advance();
+                let target = self.expect_ident()?;
+                self.match_semi();
+                Ok(Stmt::Delegate { kind, expr, target })
+            }
+            TokenKind::Pinned => {
+                self.advance();
+                self.expect(TokenKind::LParen, "`(`")?;
+                let expr = self.parse_expr(0)?;
+                let timeout = if self.at(&TokenKind::Comma) {
+                    self.advance();
+                    // parse timeout = 5s
+                    self.expect_ident()?; // skip "timeout"
+                    self.expect(TokenKind::Eq, "`=`")?;
+                    let t = self.parse_expr(0)?;
+                    Some(t)
+                } else {
+                    None
+                };
+                self.expect(TokenKind::RParen, "`)`")?;
+                let var = if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+                    self.advance();
+                    let v = self.expect_ident()?;
+                    if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
+                        self.advance();
+                    }
+                    Some(v)
+                } else {
+                    None
+                };
+                self.skip_newlines();
+                self.expect(TokenKind::LBrace, "`{`")?;
+                let body = self.parse_block()?;
+                Ok(Stmt::Pinned {
+                    expr,
+                    timeout,
+                    var,
+                    body,
+                })
+            }
             TokenKind::Ident(s) if s == "on" => {
                 self.advance();
                 self.expect(TokenKind::Failure, "`failure`")?;

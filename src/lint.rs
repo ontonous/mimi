@@ -335,6 +335,12 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Rule(..)
         | Stmt::Continue
         | Stmt::Ellipsis => {}
+        Stmt::Do(body) => collect_refs_in_block(body, info),
+        Stmt::Delegate { expr, .. } => collect_refs_in_expr(expr, info),
+        Stmt::Pinned { expr, body, .. } => {
+            collect_refs_in_expr(expr, info);
+            collect_refs_in_block(body, info);
+        }
     }
 }
 
@@ -941,6 +947,15 @@ fn collect_names_in_item(item: &Item, names: &mut std::collections::HashSet<Stri
         }
         Item::Cap(c) => {
             names.insert(c.name.clone());
+        }
+        Item::Flow(f) => {
+            names.insert(f.name.clone());
+            for t in &f.transitions {
+                names.insert(t.name.clone());
+            }
+        }
+        Item::Protocol(p) => {
+            names.insert(p.name.clone());
         }
     }
 }

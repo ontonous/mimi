@@ -28,6 +28,8 @@ pub enum Item {
         value: Expr,
         pub_: bool,
     },
+    Flow(FlowDef),
+    Protocol(ProtocolDef),
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +309,21 @@ pub enum Stmt {
     },
     /// On failure compensation block
     OnFailure(Block),
+    /// Do block — marks the implementation body of a transition
+    Do(Block),
+    /// Delegate resource to subflow: delegate view/mutate/consume(self.field) to target
+    Delegate {
+        kind: DelegateKind,
+        expr: Expr,
+        target: String,
+    },
+    /// Pinned block — pin memory for FFI safety: pinned(expr, timeout = 5s) |ptr| { ... }
+    Pinned {
+        expr: Expr,
+        timeout: Option<Expr>,
+        var: Option<String>,
+        body: Block,
+    },
     /// Parallel steps block (parasteps)
     Parasteps(Block),
     /// mms {} super-comment block containing MimiSpec intent
@@ -568,6 +585,75 @@ pub enum Type {
     TypeVar(u32),
     /// Polymorphic type: forall T. Body
     ForAll(Vec<String>, Box<Type>),
+}
+
+// ── Flow/state/transition types ─────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct FlowDef {
+    pub name: String,
+    pub pub_: bool,
+    pub generics: Vec<GenericParam>,
+    pub annotations: Vec<FlowAnnotation>,
+    pub states: Vec<StateDef>,
+    pub transitions: Vec<TransitionDef>,
+    /// Protocol names this flow implements (e.g., `Sensor`)
+    pub impl_protocols: Vec<String>,
+    /// Fields declared as `persistent` — survive Fault and recover
+    pub persistent_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum FlowAnnotation {
+    MailboxDepth(usize),
+    MaxChildren(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct StateDef {
+    pub name: String,
+    pub payload: Option<Vec<Field>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransitionDef {
+    pub name: String,
+    pub from_state: String,
+    pub params: Vec<Param>,
+    /// Target states listed in the transition signature (e.g., `-> Active | OverloadWarning`)
+    pub to_states: Vec<String>,
+    /// Transition body — requires a `do { }` block
+    pub body: Option<Block>,
+    /// Source position (line, col) from the `transition` keyword
+    pub pos: (usize, usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolDef {
+    pub name: String,
+    pub generics: Vec<GenericParam>,
+    pub states: Vec<ProtocolStateDef>,
+    pub transitions: Vec<ProtocolTransitionDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolStateDef {
+    pub name: String,
+    pub payload_type: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolTransitionDef {
+    pub name: String,
+    pub from_state: String,
+    pub to_state: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegateKind {
+    View,
+    Mutate,
+    Consume,
 }
 
 /// Kind of allocator for alloc blocks
