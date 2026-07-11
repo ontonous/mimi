@@ -2903,3 +2903,101 @@ func main() -> i32 {
     // depth should be 0 after both completed
     assert_eq!(lines[2], "0");
 }
+
+// ── v0.29.22 Progressive Typestate ────────────────────────────────────
+
+#[test]
+fn progressive_script_injects_main_single() {
+    let src = r#"
+func main() -> i32 {
+    let x = 42
+    println(x)
+    0
+}
+"#;
+    let file = parse(src);
+    assert!(file.implicit_single, "script mode should be active");
+    assert!(
+        file.items.iter().any(|i| matches!(i, Item::Flow(f) if f.name == "Main")),
+        "Main flow should be injected"
+    );
+    let main_flow = file.items.iter().find_map(|i| match i {
+        Item::Flow(f) if f.name == "Main" => Some(f),
+        _ => None,
+    }).unwrap();
+    assert!(main_flow.states.iter().any(|s| s.name == "Single"));
+    // Fault injected by matrix expand
+    assert!(main_flow.states.iter().any(|s| s.name == "Fault"));
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "42");
+}
+
+#[test]
+fn progressive_explicit_flow_no_injection() {
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero {
+        do { return Zero { n: self.n + 1 } }
+    }
+}
+func main() -> i32 {
+    let s = Zero { n: 0 }
+    let s2 = Counter::inc(s)
+    println(s2.n)
+    0
+}
+"#;
+    let file = parse(src);
+    assert!(!file.implicit_single);
+    // Only user Counter flow (+ matrix Fault), not auto Main — unless user named Main
+    let flow_names: Vec<_> = file.items.iter().filter_map(|i| match i {
+        Item::Flow(f) => Some(f.name.as_str()),
+        _ => None,
+    }).collect();
+    assert!(flow_names.contains(&"Counter"));
+    assert!(!flow_names.contains(&"Main") || flow_names.iter().filter(|n| **n == "Main").count() == 0);
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
+fn progressive_migration_warning_on_flow_plus_main() {
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero {
+        do { return Zero { n: self.n + 1 } }
+    }
+}
+func main() -> i32 {
+    let x = 1
+    let s = Zero { n: 0 }
+    let s2 = Counter::inc(s)
+    println(s2.n)
+    0
+}
+"#;
+    let warns = check_source_warnings(src);
+    assert!(
+        warns.iter().any(|w| w.code.as_deref() == Some(crate::diagnostic::codes::W011)
+            || w.message.contains("progressive")
+            || w.message.contains("implicit Single")),
+        "expected W011 migration warning, got {:?}",
+        warns
+    );
+}
+
+#[test]
+fn progressive_protocol_only_no_injection() {
+    let src = r#"
+protocol P {
+    state A
+    transition go(A) -> A
+}
+"#;
+    let file = parse(src);
+    assert!(!file.implicit_single);
+    assert!(!file.items.iter().any(|i| matches!(i, Item::Flow(_))));
+}

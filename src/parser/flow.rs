@@ -68,6 +68,7 @@ macro_rules! state_done {
                 File {
                     imports: std::mem::take(&mut $acc.imports),
                     items: std::mem::take(&mut $acc.items),
+                    implicit_single: false,
                 },
                 $acc.errors,
             ),
@@ -110,7 +111,8 @@ macro_rules! run_flow {
                             File {
                                 imports: Vec::new(),
                                 items: Vec::new(),
-                            },
+                    implicit_single: false,
+                },
                             vec![e],
                         )
                     }
@@ -434,6 +436,8 @@ pub enum FlowOutput {
 /// After parsing, expands the flow transfer matrix (+1 Fault fallback).
 pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseError> {
     let mut file = run_flow!(flow_init!(false), mode, &tokens)?;
+    // v0.29.22: progressive Typestate — inject implicit Main/Single for scripts.
+    crate::progressive::apply_progressive_typestate(&mut file);
     crate::flow_matrix::expand_file(&mut file);
     Ok(file)
 }
@@ -443,6 +447,7 @@ pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseErro
 /// After parsing, expands the flow transfer matrix (+1 Fault fallback).
 pub fn flow_parse_with_recovery(tokens: Vec<Token>, mode: ParseMode) -> (File, Vec<ParseError>) {
     let (mut file, errors) = run_flow!(recovery flow_init!(true), mode, &tokens);
+    crate::progressive::apply_progressive_typestate(&mut file);
     crate::flow_matrix::expand_file(&mut file);
     (file, errors)
 }

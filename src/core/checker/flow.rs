@@ -59,6 +59,7 @@ impl<'a> CheckerState<'a> {
         match self {
             CheckerState::Collecting { mut checker } => {
                 checker.collect_decls();
+                checker.emit_progressive_migration_hint();
                 let total = checker.file.items.len();
                 Ok(CheckerState::Checking {
                     checker,
@@ -351,7 +352,8 @@ mod tests {
         let file = File {
             imports: Vec::new(),
             items: Vec::new(),
-        };
+                    implicit_single: false,
+                };
         let state = CheckerState::new(&file);
         let state = state.transition(FlowEvent::Step).unwrap();
         assert!(matches!(state, CheckerState::Checking { total: 0, .. }));

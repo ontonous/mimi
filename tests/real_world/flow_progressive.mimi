@@ -1,0 +1,9 @@
+// MCDD real_world: Progressive Typestate script mode (v0.29.22)
+// No flow/state/transition — compiler injects flow Main { state Single }.
+
+func main() -> i32 {
+    let a = 10
+    let b = 20
+    println(a + b)
+    0
+}

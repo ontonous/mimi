@@ -355,7 +355,8 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
     Ok(File {
         imports: all_imports,
         items: all_items,
-    })
+                    implicit_single: false,
+                })
 }
 
 fn item_name(item: &Item) -> Option<&str> {
@@ -559,11 +560,13 @@ mod tests {
         let file1 = File {
             imports: vec![],
             items: vec![item.clone()],
-        };
+                    implicit_single: false,
+                };
         let file2 = File {
             imports: vec![],
             items: vec![item],
-        };
+                    implicit_single: false,
+                };
         modules.insert(
             "a".to_string(),
             LoadedModule {
