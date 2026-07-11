@@ -1235,7 +1235,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if !elem_type.is_empty() {
                                 self.var_type_names.insert(name.clone(), elem_type);
                             }
-                        } else if let Expr::Call(callee, _) = init {
+                        } else if let Expr::Call(callee, call_args) = init {
                             if let Expr::Field(obj, method_name) = callee.as_ref() {
                                 if method_name == "spawn" {
                                     let obj_type = self.infer_object_type(obj, vars);
@@ -1262,13 +1262,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else if method_name == "upgrade" {
                                     self.track_weak_upgrade_type(name, obj);
                                 } else {
-                                    // Generic string method call: infer return type
+                                    // Generic method call: infer return type
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type == "string" {
                                         let ret_type =
                                             self.infer_string_method_return_type(method_name);
                                         if !ret_type.is_empty() {
                                             self.var_type_names.insert(name.clone(), ret_type);
+                                        }
+                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                        // Flow::transition(from, ...) → matching overload's to-state
+                                        if let Some(flow) = self.flow_defs.get(flow_name) {
+                                            let from_type = call_args
+                                                .first()
+                                                .map(|a| self.infer_object_type(a, vars))
+                                                .unwrap_or_default();
+                                            let t = flow
+                                                .transitions
+                                                .iter()
+                                                .find(|t| {
+                                                    t.name == *method_name
+                                                        && t.from_state == from_type
+                                                })
+                                                .or_else(|| {
+                                                    flow.transitions
+                                                        .iter()
+                                                        .find(|t| t.name == *method_name)
+                                                });
+                                            if let Some(t) = t {
+                                                if let Some(to) = t.to_states.first() {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), to.clone());
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1749,6 +1775,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Block(block) => {
                     self.compile_block(block, vars)?;
+                }
+                Stmt::Do(body) => {
+                    self.compile_block(body, vars)?;
+                }
+                Stmt::Delegate { kind, expr, target } => {
+                    let _ = self.compile_expr(expr, vars)?;
+                    if !vars.contains_key(target) {
+                        return Err(CompileError::Generic(format!(
+                            "delegate target '{}' not found in scope",
+                            target
+                        )));
+                    }
+                    let _ = kind;
+                }
+                Stmt::Pinned {
+                    expr,
+                    timeout,
+                    var,
+                    body,
+                } => {
+                    let val = self.compile_expr(expr, vars)?;
+                    if let Some(v) = var {
+                        let ty = val.get_type();
+                        let alloca = self.build_alloca(ty, v)?;
+                        self.build_store(alloca, val)?;
+                        vars.insert(v.clone(), (alloca, ty));
+                    }
+                    let _ = timeout;
+                    self.compile_block(body, vars)?;
                 }
                 _ => {}
             }

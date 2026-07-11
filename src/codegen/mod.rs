@@ -263,6 +263,9 @@ pub struct CodeGenerator<'ctx> {
     /// call-site recover the declared method return type for unpacking the
     /// packed i64 result blob back to the original LLVM type.
     actor_defs: HashMap<String, crate::ast::ActorDef>,
+    /// Flow definitions keyed by flow name — used to compile transitions
+    /// as ordinary functions and dispatch `Flow::transition(...)` calls.
+    flow_defs: HashMap<String, crate::ast::FlowDef>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -360,6 +363,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             actor_names: std::collections::HashSet::new(),
             actor_method_ids: HashMap::new(),
             actor_defs: HashMap::new(),
+            // v0.29.9 flow transitions
+            flow_defs: HashMap::new(),
         }
     }
 

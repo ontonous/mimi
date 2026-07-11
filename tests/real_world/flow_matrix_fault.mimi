@@ -1,0 +1,24 @@
+// MCDD real_world: Flow transfer-matrix auto-completion (+1 Fault) — v0.29.10
+// Only Zero+inc is user-defined. Calling inc on Positive hits the compiler-injected
+// fallback and lands in Fault with SystemTrace fields.
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    println(s1.count)
+    // Undefined (Positive, inc) → Fault
+    let f = Counter::inc(s1)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}

@@ -431,14 +431,20 @@ pub enum FlowOutput {
 
 /// Flow-based parser: strict mode (first error fails).
 /// Semantically equivalent to `Parser::parse_file()`.
+/// After parsing, expands the flow transfer matrix (+1 Fault fallback).
 pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseError> {
-    run_flow!(flow_init!(false), mode, &tokens)
+    let mut file = run_flow!(flow_init!(false), mode, &tokens)?;
+    crate::flow_matrix::expand_file(&mut file);
+    Ok(file)
 }
 
 /// Flow-based parser: recovery mode (collects all errors).
 /// Semantically equivalent to `Parser::parse_file_with_recovery()`.
+/// After parsing, expands the flow transfer matrix (+1 Fault fallback).
 pub fn flow_parse_with_recovery(tokens: Vec<Token>, mode: ParseMode) -> (File, Vec<ParseError>) {
-    run_flow!(recovery flow_init!(true), mode, &tokens)
+    let (mut file, errors) = run_flow!(recovery flow_init!(true), mode, &tokens);
+    crate::flow_matrix::expand_file(&mut file);
+    (file, errors)
 }
 
 // ---------------------------------------------------------------------------

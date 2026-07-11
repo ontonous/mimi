@@ -22,18 +22,25 @@ impl<'a> Checker<'a> {
                 return self.check_call(method_name, args, scopes);
             }
             // Handle flow transition call: FlowName::transition(args)
-            let flow_prefix = format!("flow::{}::{}", module_name, method_name);
-            if self.funcs.contains_key(&flow_prefix) {
-                // First argument is the from-state payload (self)
-                if let Some(first_arg) = args.first() {
-                    self.infer_expr(first_arg, scopes);
-                }
-                // Infer remaining arguments
+            // Prefer overload key that includes from_state of the first arg.
+            let short_key = format!("flow::{}::{}", module_name, method_name);
+            if self.funcs.keys().any(|k| k == &short_key || k.starts_with(&format!("{}::", short_key))) {
+                let from_ty = if let Some(first_arg) = args.first() {
+                    self.infer_expr(first_arg, scopes)
+                } else {
+                    Type::Name("unit".into(), vec![])
+                };
                 for arg in args.iter().skip(1) {
                     self.infer_expr(arg, scopes);
                 }
-                // Return the transition's return type (registered in collect_item_decls)
-                if let Some((_, ret_type)) = self.funcs.get(&flow_prefix) {
+                let overload_key = match &from_ty {
+                    Type::Name(n, _) => format!("{}::{}", short_key, n),
+                    _ => short_key.clone(),
+                };
+                if let Some((_, ret_type)) = self.funcs.get(&overload_key) {
+                    return ret_type.clone();
+                }
+                if let Some((_, ret_type)) = self.funcs.get(&short_key) {
                     return ret_type.clone();
                 }
                 return Type::Name("unit".into(), vec![]);

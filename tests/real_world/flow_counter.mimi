@@ -1,0 +1,42 @@
+// MCDD real_world: Flow counter — dual-backend equivalence (v0.29.9)
+// Exercises state payload construction, overloaded transitions, and field access.
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    state Done
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+    transition inc(Positive) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+    transition reset(Positive) -> Zero {
+        do {
+            return Zero { count: 0 }
+        }
+    }
+    transition finish(Positive) -> Done {
+        do {
+            return Done { }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let s2 = Counter::inc(s1)
+    let s3 = Counter::inc(s2)
+    println(s3.count)
+    let s4 = Counter::reset(s3)
+    println(s4.count)
+    let s5 = Counter::inc(s4)
+    let _d = Counter::finish(s5)
+    println(s5.count)
+    0
+}

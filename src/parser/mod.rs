@@ -158,7 +158,10 @@ impl Parser {
             }
             items.push(self.parse_item()?);
         }
-        Ok(File { imports, items })
+        let mut file = File { imports, items };
+        // Keep legacy path in lockstep with flow_parse for AST equivalence tests.
+        crate::flow_matrix::expand_file(&mut file);
+        Ok(file)
     }
 
     /// Parse a file with error recovery, collecting multiple errors.
@@ -241,7 +244,9 @@ impl Parser {
         }
 
         errors.extend(std::mem::take(&mut self.errors));
-        (File { imports, items }, errors)
+        let mut file = File { imports, items };
+        crate::flow_matrix::expand_file(&mut file);
+        (file, errors)
     }
 
     pub(crate) fn parse_block(&mut self) -> Result<Block, ParseError> {

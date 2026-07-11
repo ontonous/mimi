@@ -538,9 +538,24 @@ impl<'a> Interpreter<'a> {
                 // Handle Flow::transition() - flow transition call
                 // The first argument is the from-state payload (becomes self),
                 // remaining args are the transition's event parameters.
+                // Overloads are distinguished by from_state (first arg type name).
                 if let Expr::Ident(flow_name) = obj.as_ref() {
                     if let Some(flow) = self.find_flow(flow_name) {
-                        if let Some(t) = flow.transitions.iter().find(|t| t.name == *method) {
+                        let from_name = vals.first().and_then(|v| match v {
+                            Value::Record(Some(n), _) => Some(n.as_str()),
+                            _ => None,
+                        });
+                        let t = flow
+                            .transitions
+                            .iter()
+                            .find(|t| {
+                                t.name == *method
+                                    && from_name.map(|n| n == t.from_state).unwrap_or(false)
+                            })
+                            .or_else(|| {
+                                flow.transitions.iter().find(|t| t.name == *method)
+                            });
+                        if let Some(t) = t {
                             return self.eval_flow_transition(&flow, t, &vals);
                         }
                     }

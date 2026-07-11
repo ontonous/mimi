@@ -284,19 +284,93 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_expr(&call_expr, vars);
         }
 
-        // 6. Detect flow transition calls and give a clear error
-        let flow_prefix = format!("flow::{}", obj_type);
-        if self.type_defs.keys().any(|k| k.starts_with(&flow_prefix)) {
-            return Err(CompileError::Generic(format!(
-                "flow transition '{}.{}()' cannot be compiled yet; use 'mimi run' instead",
-                obj_type, method_name
-            )));
+        // 6. Flow transition call: FlowName::transition(from_state, ...event_args)
+        //    When `obj` is a flow type name (not an instance), dispatch to the
+        //    synthetic transition function. The first argument is the from-state
+        //    payload; remaining args are the event parameters.
+        if let Expr::Ident(flow_name) = obj {
+            if self.flow_defs.contains_key(flow_name) {
+                return self.compile_flow_transition_call(flow_name, method_name, args, vars);
+            }
+        }
+        // Also detect when obj_type is a bare flow name (via type tracking).
+        if self.flow_defs.contains_key(&obj_type) {
+            return self.compile_flow_transition_call(&obj_type, method_name, args, vars);
         }
 
         Err(CompileError::Generic(format!(
             "method '{}' not compiled for type '{}' (missing crate?)",
             method_name, obj_type
         )))
+    }
+
+    /// Compile `FlowName::transition(from_state, ...args)` as a direct call to
+    /// the synthetic LLVM function `{Flow}__{transition}__from_{FromState}`.
+    fn compile_flow_transition_call(
+        &mut self,
+        flow_name: &str,
+        transition_name: &str,
+        args: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let flow = self.flow_defs.get(flow_name).ok_or_else(|| {
+            CompileError::Generic(format!("unknown flow '{}'", flow_name))
+        })?;
+
+        // Find matching transition by name. Prefer the one whose from_state
+        // matches the first arg's inferred type when multiple share a name.
+        let from_type = args
+            .first()
+            .map(|a| self.infer_object_type(a, vars))
+            .unwrap_or_default();
+
+        let candidates: Vec<&TransitionDef> = flow
+            .transitions
+            .iter()
+            .filter(|t| t.name == transition_name)
+            .collect();
+        if candidates.is_empty() {
+            return Err(CompileError::Generic(format!(
+                "flow '{}' has no transition '{}'",
+                flow_name, transition_name
+            )));
+        }
+        let t = candidates
+            .iter()
+            .find(|t| t.from_state == from_type)
+            .or_else(|| candidates.first())
+            .copied()
+            .unwrap();
+
+        let fn_name = CodeGenerator::transition_fn_name(flow_name, &t.name, &t.from_state);
+        let function = self.module.get_function(&fn_name).ok_or_else(|| {
+            CompileError::Generic(format!(
+                "flow transition function '{}' not found (was the flow compiled?)",
+                fn_name
+            ))
+        })?;
+
+        // Compile args by value (self payload + event params).
+        // Record construction yields an alloca pointer; ordinary Ident loads
+        // yield StructValue. The synthetic transition function takes structs
+        // by value (same as declare_func/compile_func), so load any pointer
+        // args that correspond to struct parameters.
+        let mut compiled_args = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let mut val = self.compile_expr(arg, vars)?;
+            if let Some(param) = function.get_nth_param(i as u32) {
+                if let BasicTypeEnum::StructType(sty) = param.get_type() {
+                    if let BasicValueEnum::PointerValue(pv) = val {
+                        val = self.build_load(BasicTypeEnum::StructType(sty), pv, "flow_arg_load")?;
+                    }
+                }
+            }
+            compiled_args.push(val);
+        }
+        let metadata_args = self.values_to_metadata(&compiled_args);
+        let call = self.build_call(function, &metadata_args, "flow_transition")?;
+        Ok(call_try_basic_value(&call)
+            .unwrap_or(self.context.i64_type().const_int(0, false).into()))
     }
 
     /// Build a `weak<T>.upgrade()` call, returning `Option<T*>` as `{ i1, i64 }`.

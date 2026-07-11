@@ -626,6 +626,9 @@ pub struct TransitionDef {
     pub body: Option<Block>,
     /// Source position (line, col) from the `transition` keyword
     pub pos: (usize, usize),
+    /// True when this transition was injected by transfer-matrix auto-completion
+    /// (`(state, event) → Fault`). User-written transitions always have `false`.
+    pub is_fallback: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -138,9 +138,18 @@ impl Parser {
 
     pub(crate) fn expect_ident(&mut self) -> Result<String, ParseError> {
         let tok = self.peek();
+        // Soft keywords may appear as identifiers outside their special
+        // syntactic contexts (e.g. `func mutate(...)`, `let view = 1`).
+        // Hard keywords (if/while/func/...) still reject here.
         let name = match &tok.kind {
             TokenKind::Ident(name) => name.clone(),
             TokenKind::Old => "old".to_string(),
+            TokenKind::View => "view".to_string(),
+            TokenKind::Mutate => "mutate".to_string(),
+            TokenKind::Consume => "consume".to_string(),
+            TokenKind::Do => "do".to_string(),
+            TokenKind::Persistent => "persistent".to_string(),
+            TokenKind::Subflow => "subflow".to_string(),
             _ => {
                 return Err(ParseError::new(
                     format!("expected identifier, found {}", tok.kind),

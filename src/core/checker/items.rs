@@ -640,13 +640,30 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Register transition functions
+                // Register transition functions.
+                // Key includes from_state so overloads on different source
+                // states coexist: `flow::Counter::inc::Zero`.
+                // Signature: (from_state_payload, ...event_params) -> to_state
+                // Multi-target transitions use the first target as the nominal
+                // return type (call sites access common payload fields).
                 for t in &f.transitions {
-                    let t_key = format!("{}::{}", qualified, t.name);
-                    let params: Vec<Type> =
-                        t.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
-                    let ret = Type::Name("unit".into(), vec![]);
-                    self.funcs.insert(t_key, (params, ret));
+                    let t_key = format!("{}::{}::{}", qualified, t.name, t.from_state);
+                    let mut params: Vec<Type> = Vec::new();
+                    // First arg is the from-state payload (self)
+                    params.push(Type::Name(t.from_state.clone(), vec![]));
+                    for p in &t.params {
+                        params.push(self.resolve_type(&p.ty));
+                    }
+                    let ret = if let Some(first) = t.to_states.first() {
+                        Type::Name(first.clone(), vec![])
+                    } else {
+                        Type::Name("unit".into(), vec![])
+                    };
+                    self.funcs.insert(t_key, (params.clone(), ret.clone()));
+                    // Also keep a short key (last write wins) for name-only lookup
+                    // when from_state cannot be inferred at the call site.
+                    let short_key = format!("{}::{}", qualified, t.name);
+                    self.funcs.insert(short_key, (params, ret));
                 }
             }
             Item::Protocol(p) => {
@@ -903,14 +920,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Check transition name uniqueness
-                let mut seen_transitions: std::collections::HashSet<&str> =
+                // Check transition uniqueness by (name, from_state) — same event
+                // name may overload across different source states.
+                let mut seen_transitions: std::collections::HashSet<(&str, &str)> =
                     std::collections::HashSet::new();
                 for t in &f.transitions {
-                    if !seen_transitions.insert(t.name.as_str()) {
+                    if !seen_transitions.insert((t.name.as_str(), t.from_state.as_str())) {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
-                            format!("duplicate transition '{}' in flow '{}'", t.name, f.name),
+                            format!(
+                                "duplicate transition '{}({})' in flow '{}'",
+                                t.name, t.from_state, f.name
+                            ),
                         );
                     }
                 }
@@ -1067,14 +1088,17 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // State machine validation: reachability and completeness
-                let state_names: Vec<&str> = f.states.iter().map(|s| s.name.as_str()).collect();
-                // Collect which states are targeted by transitions
+                // State machine validation: reachability and completeness.
+                // Only count user-written transitions — auto-injected Fault
+                // fallbacks would otherwise make every state look fully wired.
                 let mut targeted_by: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
                 let mut has_outgoing: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
                 for t in &f.transitions {
+                    if t.is_fallback {
+                        continue;
+                    }
                     for to_state in &t.to_states {
                         if to_state != "Fault" {
                             targeted_by.insert(to_state.as_str());
@@ -1086,7 +1110,12 @@ impl<'a> Checker<'a> {
                 }
                 // Warn about states with no incoming transitions (unreachable from other
                 // states). The first declared state is implicitly the initial state.
+                // Fault is the system sink; it may only be reached via fallbacks and is
+                // never warned as unreachable.
                 for s in &f.states {
+                    if s.name == "Fault" {
+                        continue;
+                    }
                     if !targeted_by.contains(s.name.as_str()) {
                         // Skip the first state — it's the initial entry state
                         let is_first = f.states.first().map(|first| first.name == s.name).unwrap_or(false);
@@ -1105,8 +1134,12 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Warn about states with no outgoing transitions (terminal but not declared
-                // as terminal — may indicate incomplete flow definition)
+                // as terminal — may indicate incomplete flow definition).
+                // Fault is the absorbing sink (transfer-matrix auto-completion); skip it.
                 for s in &f.states {
+                    if s.name == "Fault" {
+                        continue;
+                    }
                     if !has_outgoing.contains(s.name.as_str()) {
                         self.warnings.push(
                             crate::diagnostic::Diagnostic::warning_code(

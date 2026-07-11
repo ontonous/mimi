@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::verifier::ctx::{SolverSession, VerificationResult, Verifier, VerifierCtx};
+use crate::verifier::ctx::{SolverSession, VerificationResult, VerifierCtx};
 use crate::verifier::helpers;
 
 /// Flow event driving the verifier state machine.

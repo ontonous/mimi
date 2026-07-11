@@ -1,6 +1,20 @@
 use crate::ast::*;
 use crate::tests::*;
 
+/// User-written (non-fallback) transitions after transfer-matrix expansion.
+fn user_transitions(f: &FlowDef) -> Vec<&TransitionDef> {
+    f.transitions.iter().filter(|t| !t.is_fallback).collect()
+}
+
+/// State names excluding the auto-injected Fault sink.
+fn user_states(f: &FlowDef) -> Vec<&str> {
+    f.states
+        .iter()
+        .filter(|s| s.name != "Fault")
+        .map(|s| s.name.as_str())
+        .collect()
+}
+
 #[test]
 fn flow_parse_debug() {
     // Test that a block body transition doesn't consume the flow body's `}`
@@ -10,17 +24,19 @@ fn flow_parse_debug() {
     //         LBrace, RBrace, RBrace, Eof
     // The { } is the transition body. The } after that is the flow body closer.
     // parse_block() should consume { } and leave the final } for the flow body.
+    // v0.29.10: transfer matrix injects Fault + fallbacks for missing (state,event).
     let file = parse(src);
     assert_eq!(file.items.len(), 1);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
-            assert_eq!(f.states.len(), 2);
-            assert_eq!(f.transitions.len(), 1);
-            assert!(
-                f.transitions[0].body.is_some(),
-                "transition body should be Some"
-            );
+            assert_eq!(user_states(f), vec!["A", "B"]);
+            assert!(f.states.iter().any(|s| s.name == "Fault"));
+            let user = user_transitions(f);
+            assert_eq!(user.len(), 1);
+            assert!(user[0].body.is_some(), "transition body should be Some");
+            // Fallbacks: B+go, Fault+go
+            assert!(f.transitions.iter().any(|t| t.is_fallback));
         }
         other => panic!("expected Item::Flow, got {:?}", other),
     }
@@ -28,13 +44,16 @@ fn flow_parse_debug() {
 
 #[test]
 fn flow_parse_states_only() {
+    // No transitions → only Fault state is injected (no event matrix cells).
     let src = "flow F { state Idle state Active }";
     let file = parse(src);
     assert_eq!(file.items.len(), 1);
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
-            assert_eq!(f.states.len(), 2);
+            assert_eq!(user_states(f), vec!["Idle", "Active"]);
+            assert!(f.states.iter().any(|s| s.name == "Fault"));
+            assert!(f.transitions.is_empty());
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -48,12 +67,13 @@ fn flow_parse_transition_semicolon() {
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
-            assert_eq!(f.states.len(), 2);
-            assert_eq!(f.transitions.len(), 1);
-            assert_eq!(f.transitions[0].name, "go");
-            assert_eq!(f.transitions[0].from_state, "A");
-            assert_eq!(f.transitions[0].to_states, vec!["B"]);
-            assert!(f.transitions[0].body.is_none());
+            assert_eq!(user_states(f), vec!["A", "B"]);
+            let user = user_transitions(f);
+            assert_eq!(user.len(), 1);
+            assert_eq!(user[0].name, "go");
+            assert_eq!(user[0].from_state, "A");
+            assert_eq!(user[0].to_states, vec!["B"]);
+            assert!(user[0].body.is_none());
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -67,8 +87,9 @@ fn flow_parse_empty_block() {
     match &file.items[0] {
         Item::Flow(f) => {
             assert_eq!(f.name, "F");
-            assert_eq!(f.transitions.len(), 1);
-            assert!(f.transitions[0].body.is_some());
+            let user = user_transitions(f);
+            assert_eq!(user.len(), 1);
+            assert!(user[0].body.is_some());
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -97,14 +118,18 @@ flow Processor {
     assert_eq!(file.items.len(), 1);
     match &file.items[0] {
         Item::Flow(f) => {
-            assert_eq!(f.states.len(), 3);
-            assert_eq!(f.transitions.len(), 1);
+            assert_eq!(user_states(f), vec!["Idle", "Active", "OverloadWarning"]);
+            assert!(f.states.iter().any(|s| s.name == "Fault"));
+            let user = user_transitions(f);
+            assert_eq!(user.len(), 1);
             assert_eq!(
-                f.transitions[0].to_states,
+                user[0].to_states,
                 vec!["Active", "OverloadWarning"]
             );
-            assert_eq!(f.transitions[0].params.len(), 1);
-            assert_eq!(f.transitions[0].params[0].name, "data");
+            assert_eq!(user[0].params.len(), 1);
+            assert_eq!(user[0].params[0].name, "data");
+            // Fallbacks for Active/OverloadWarning/Fault + process
+            assert_eq!(f.transitions.iter().filter(|t| t.is_fallback).count(), 3);
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -1217,102 +1242,108 @@ func main() -> i32 {
     assert_eq!(result, Ok(interp::Value::Int(42)));
 }
 
-// ===================== Codegen error tests =====================
+// ===================== Codegen dual-backend tests (v0.29.9) =====================
+//
+// compile_and_run treats non-zero process exit as failure, so main must
+// return 0 and print results via println for dual-backend comparison.
 
 #[test]
-fn flow_codegen_error_transition_call() {
-    // Verify that compiling a flow transition call produces a clear error
+fn flow_codegen_simple_transition() {
+    let src = r#"
+flow Calc {
+    state Zero { v: i32 }
+    state Value { v: i32 }
+
+    transition add(Zero, amount: i32) -> Value {
+        do {
+            return Value { v: self.v + amount }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Zero { v: 10 }
+    let r = Calc::add(s, 5)
+    println(r.v)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check failed: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "15");
+}
+
+#[test]
+fn flow_codegen_chain() {
     let src = r#"
 flow Counter {
     state Zero { count: i32 }
     state Active { count: i32 }
     state Done
 
-    transition inc(Zero) -> Active {
+    transition inc(Zero, amount: i32) -> Active {
         do {
-            return Active { count: 0 }
+            return Active { count: self.count + amount }
+        }
+    }
+    transition finish(Active) -> Done {
+        do {
+            return Done { }
         }
     }
 }
 
 func main() -> i32 {
     let s = Zero { count: 0 }
-    let _a = Counter::inc(s, 7)
-    42
-}
-"#;
-    let err = compile_only(src).unwrap_err();
-    assert!(
-        err.contains("cannot be compiled yet"),
-        "expected codegen error about flow transition calls, got: {}",
-        err
-    );
-}
-
-#[test]
-fn flow_codegen_error_delegate() {
-    // Flow transition calls error first, before reaching delegate body compilation.
-    // This verifies the defensive error path for delegate in codegen.
-    let src = r#"
-flow Parent {
-    state Active { val: i32 }
-
-    transition run(Active) -> Active {
-        do {
-            let sub = 42
-            delegate view(self.val) to sub;
-            return Active { val: self.val }
-        }
-    }
-}
-
-func main() -> i32 {
-    let s = Active { val: 10 }
-    let _r = Parent::run(s)
+    let a = Counter::inc(s, 7)
+    let _d = Counter::finish(a)
+    println(a.count)
     0
 }
 "#;
-    let err = compile_only(src).unwrap_err();
-    // The first error encountered is the transition call itself
-    assert!(
-        err.contains("cannot be compiled yet"),
-        "expected codegen error about flow transition, got: {}",
-        err
-    );
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "7");
 }
 
 #[test]
-fn flow_codegen_error_pinned() {
+fn flow_codegen_multi_target() {
     let src = r#"
-flow SafeFFI {
-    state Active { buffer: List<u8> }
+flow Checker {
+    state Small { v: i32 }
+    state Large { v: i32 }
 
-    transition process(Active) -> Active {
+    transition classify(Small, amount: i32) -> Small | Large {
         do {
-            pinned(self.buffer) |ptr| {
-                let _x = ptr
+            if self.v + amount > 50 {
+                return Large { v: self.v + amount }
+            } else {
+                return Small { v: self.v + amount }
             }
-            return Active { buffer: self.buffer }
         }
     }
 }
 
 func main() -> i32 {
-    let s = Active { buffer: [] }
-    let _r = SafeFFI::process(s)
+    let s1 = Small { v: 10 }
+    let r1 = Checker::classify(s1, 5)
+    let s2 = Small { v: 10 }
+    let r2 = Checker::classify(s2, 100)
+    println(r1.v + r2.v)
     0
 }
 "#;
-    let err = compile_only(src).unwrap_err();
-    assert!(
-        err.contains("cannot be compiled yet"),
-        "expected codegen error about flow transition, got: {}",
-        err
-    );
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "125");
 }
 
 #[test]
-fn flow_codegen_error_do_block() {
+fn flow_codegen_empty_payload_state() {
+    // Empty payload states (Done { }) and transition that returns them.
     let src = r#"
 flow F {
     state A
@@ -1328,13 +1359,233 @@ flow F {
 func main() -> i32 {
     let s = A { }
     let _r = F::go(s)
+    println(1)
     0
 }
 "#;
-    let err = compile_only(src).unwrap_err();
-    assert!(
-        err.contains("cannot be compiled yet"),
-        "expected codegen error about flow transition, got: {}",
-        err
-    );
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "1");
+}
+
+#[test]
+fn flow_codegen_delegate_no_op() {
+    // Delegate is currently a no-op in codegen (resource stays / is dropped).
+    let src = r#"
+flow Parent {
+    state Active { val: i32 }
+
+    transition run(Active) -> Active {
+        do {
+            let sub = 42
+            delegate view(self.val) to sub;
+            return Active { val: self.val + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s = Active { val: 10 }
+    let r = Parent::run(s)
+    println(r.val)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "11");
+}
+
+// ===================== Transfer matrix + Fault fallback (v0.29.10) =====================
+
+#[test]
+fn flow_matrix_injects_fault_and_fallback() {
+    // Only Zero+inc is user-defined. Positive+inc and Fault+inc are auto-filled.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+"#;
+    let file = parse(src);
+    match &file.items[0] {
+        Item::Flow(f) => {
+            assert!(f.states.iter().any(|s| s.name == "Fault"));
+            let user = user_transitions(f);
+            assert_eq!(user.len(), 1);
+            assert_eq!(user[0].from_state, "Zero");
+            let fb: Vec<_> = f.transitions.iter().filter(|t| t.is_fallback).collect();
+            assert_eq!(fb.len(), 2);
+            assert!(fb.iter().any(|t| t.from_state == "Positive" && t.name == "inc"));
+            assert!(fb.iter().any(|t| t.from_state == "Fault" && t.name == "inc"));
+            // Auto Fault payload has SystemTrace fields
+            let fault = f.states.iter().find(|s| s.name == "Fault").unwrap();
+            let fields: Vec<_> = fault
+                .payload
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect();
+            assert!(fields.contains(&"last_state"));
+            assert!(fields.contains(&"unexpected_event"));
+        }
+        _ => panic!("expected Flow"),
+    }
+}
+
+#[test]
+fn flow_matrix_preserves_user_fault_shape() {
+    let src = r#"
+flow Tolerant {
+    state Active { data: i32 }
+    state Fault { trace: string }
+
+    transition tick(Active) -> Active {
+        do {
+            return Active { data: self.data + 1 }
+        }
+    }
+}
+"#;
+    let file = parse(src);
+    match &file.items[0] {
+        Item::Flow(f) => {
+            let fault = f.states.iter().find(|s| s.name == "Fault").unwrap();
+            let fields = fault.payload.as_ref().unwrap();
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "trace");
+            // Active+tick defined; Fault+tick is fallback using user Fault shape
+            assert!(f
+                .transitions
+                .iter()
+                .any(|t| t.is_fallback && t.from_state == "Fault" && t.name == "tick"));
+        }
+        _ => panic!("expected Flow"),
+    }
+}
+
+#[test]
+fn flow_matrix_undefined_event_returns_fault_interp() {
+    // Calling inc on Positive (not user-defined) hits the auto fallback → Fault.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    // s1 is Positive; Positive+inc is a fallback → Fault
+    let f = Counter::inc(s1)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    // Capture stdout from interp via dual path: compile_and_run only for codegen;
+    // for interp we verify field values by returning a sentinel after side-effect println.
+    // Use a pure return for field checks:
+    let src2 = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let f = Counter::inc(s1)
+    if f.last_state == "Positive" {
+        if f.unexpected_event == "inc" {
+            return 1
+        }
+    }
+    0
+}
+"#;
+    assert_eq!(run_source_result(src2), Ok(interp::Value::Int(1)));
+}
+
+#[test]
+fn flow_codegen_undefined_event_returns_fault() {
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do {
+            return Positive { count: self.count + 1 }
+        }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let f = Counter::inc(s1)
+    println(f.last_state)
+    println(f.unexpected_event)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(lines, vec!["Positive", "inc"], "got {:?}", lines);
+}
+
+#[test]
+fn flow_matrix_does_not_override_user_defined_cell() {
+    // User defines Positive+inc → Positive; must not be replaced by Fault fallback.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition inc(Positive) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let s2 = Counter::inc(s1)
+    println(s2.count)
+    0
+}
+"#;
+    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(out.trim(), "2");
 }
