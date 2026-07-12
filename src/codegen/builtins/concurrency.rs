@@ -1071,7 +1071,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[BasicMetadataTypeEnum::IntType(usize_ty), BasicMetadataTypeEnum::IntType(self.context.i8_type()), BasicMetadataTypeEnum::PointerType(i8_ptr)],
             false,
         );
-        let func = self.module.add_function("mimi_shadow_alloc", fn_ty, Some(inkwell::module::Linkage::External));
+        let func = self.module.get_function("mimi_shadow_alloc").unwrap_or_else(|| {
+            self.module.add_function("mimi_shadow_alloc", fn_ty, Some(inkwell::module::Linkage::External))
+        });
         let call = self.builder
             .build_call(func, &[size.into(), tag.into(), label_ptr.into()], "shadow_alloc")
             .map_err(|e| format!("shadow_alloc: {}", e))?;
@@ -1098,7 +1100,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             param_types.push(BasicMetadataTypeEnum::PointerType(i8_ptr)); // ptr
         }
         let fn_ty = ret_ty.fn_type(&param_types, false);
-        let func = self.module.add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External));
+        let func = self.module.get_function(fn_name).unwrap_or_else(|| {
+            self.module.add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External))
+        });
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
         if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
             let ptr_int = args[0].into_int_value();

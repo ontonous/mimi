@@ -5,8 +5,8 @@ actor Counter {
     func bump() -> i32 { self.n = self.n + 1; self.n }
 }
 func main() -> i32 {
-    let cfg = Record { actors: ["Counter"], calls: [], faults: [] }
-    let results = test_sandbox(cfg)
-    println(results.len())
+    let c = Counter.spawn()
+    let v = c.bump()
+    println(v)
     0
 }
