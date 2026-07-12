@@ -219,7 +219,13 @@ impl<'a> Interpreter<'a> {
                 let mut is_float = false;
                 for v in l {
                     match v {
-                        Value::Int(n) => total_int += n,
+                        Value::Int(n) => {
+                            // audit (MEDIUM): use checked_add to prevent
+                            // silent i64 wrapping on overflow.
+                            total_int = total_int.checked_add(*n).ok_or_else(|| {
+                                InterpError::new("sum overflow: result exceeds i64 range")
+                            })?;
+                        }
                         Value::Float(n) => {
                             total_float += n;
                             is_float = true;

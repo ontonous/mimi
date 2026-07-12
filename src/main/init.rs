@@ -30,7 +30,7 @@ pub(crate) fn init(base_dir: &Path, name: Option<&str>) -> Result<(), String> {
     // Create main.mimi if it doesn't exist
     let entry_path = manifest.entry_path(&project_dir);
     if !entry_path.exists() {
-        std::fs::write(&entry_path, "func main() -> i32 {\n    42\n}\n")
+        std::fs::write(&entry_path, "func main() {\n    println(\"Hello, Mimi!\");\n}\n")
             .map_err(|e| format!("failed to create {}: {}", entry_path.display(), e))?;
         println!("✓ Created {}", entry_path.display());
     }

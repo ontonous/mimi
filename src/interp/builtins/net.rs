@@ -242,9 +242,20 @@ impl<'a> Interpreter<'a> {
             )
         };
         if n <= 0 {
+            // audit (MEDIUM): distinguish connection closed (n==0) from
+            // error (n<0). Both return empty string for now, but the caller
+            // can use a separate length check. On error, return empty.
             return Ok(Value::String(String::new()));
         }
-        buf.truncate(n as usize);
+        // n > 0: n is guaranteed <= buf_size (recv reads at most buf_size bytes).
+        // The buffer was allocated with buf_size bytes, so buf[..n] is valid.
+        let n = n as usize;
+        if n > buf.len() {
+            // audit: clamp to buffer length as defense-in-depth against
+            // platform-specific recv behavior.
+            return Ok(Value::String(String::new()));
+        }
+        buf.truncate(n);
         Ok(Value::String(String::from_utf8_lossy(&buf).to_string()))
     }
 

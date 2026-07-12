@@ -177,12 +177,23 @@ impl<'a> Checker<'a> {
         } else {
             Type::Name("unknown".into(), vec![])
         };
-        // Add var to scope
+        // Add var to scope, then remove it after inference to prevent
+        // audit (MEDIUM): comprehension variable leak into outer scope.
+        // The loop variable `var` must not be visible after the comprehension
+        // expression completes.
+        let old_var = scopes.last_mut().and_then(|s| s.remove(var));
         if let Some(s) = scopes.last_mut() {
             s.insert(var.to_owned(), elem_ty);
         }
         // Infer expression type
         let expr_ty = self.infer_expr(expr, scopes);
+        // Restore old binding (or remove if it didn't exist before)
+        if let Some(s) = scopes.last_mut() {
+            s.remove(var);
+            if let Some(old) = old_var {
+                s.insert(var.to_owned(), old);
+            }
+        }
         // Check guard if present
         if let Some(g) = guard {
             let guard_ty = self.infer_expr(g, scopes);
