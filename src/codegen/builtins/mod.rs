@@ -191,6 +191,20 @@ fn register_libc<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
 
+    // B3: snprintf for safe formatted output with buffer size limit.
+    module.add_function(
+        "snprintf",
+        i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            true,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+
     module.add_function(
         "exit",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
