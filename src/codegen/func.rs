@@ -40,73 +40,269 @@ use super::CodeGenerator;
 use super::VarEntry;
 
 /// CG-H10 (audit): collect all identifier names referenced via `old(name)`
-/// inside a postcondition expression, recursively walking through nested
-/// `Old(...)` wrappers and other Expr variants.
+/// inside a postcondition expression. Walks the full Expr tree recursively
+/// to find all `Old(inner)` nodes, then extracts the root identifier(s) from
+/// each `old(...)` expression.
+///
+/// This is a comprehensive walker that handles ALL Expr variants so that
+/// `old(x)` nested inside `if`, `match`, `cast`, `range`, etc. is not
+/// silently missed (which would cause the variable to not be snapshotted,
+/// defeating the postcondition check).
 fn collect_old_idents(expr: &crate::ast::Expr) -> Vec<String> {
     let mut out = Vec::new();
-    collect_old_idents_inner(expr, &mut out);
+    collect_old_idents_walker(expr, &mut out);
     out
 }
 
-fn collect_old_idents_inner(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+/// Walk all sub-expressions recursively. When we encounter `Old(inner)`,
+/// collect all identifier names from the inner expression — these are the
+/// variables that need to be snapshotted at function entry.
+fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
     use crate::ast::Expr;
     match expr {
         Expr::Old(inner) => {
-            // Recurse into inner to handle `old(old(x))` and nested Idents
-            // inside `old(...)`. We collect Idents at any depth under Old.
-            collect_old_ident_names(inner, out);
+            // Found an `old(...)` — collect all identifiers inside it.
+            collect_idents_in_old(inner, out);
         }
+        // Recurse into all sub-expressions for every other variant:
         Expr::Binary(_, l, r) => {
-            collect_old_idents_inner(l, out);
-            collect_old_idents_inner(r, out);
+            collect_old_idents_walker(l, out);
+            collect_old_idents_walker(r, out);
         }
-        Expr::Unary(_, e) | Expr::Field(e, _) | Expr::Index(e, _) => {
-            collect_old_idents_inner(e, out);
+        Expr::Unary(_, e) => collect_old_idents_walker(e, out),
+        Expr::Field(e, _) => collect_old_idents_walker(e, out),
+        Expr::Index(e, idx) => {
+            collect_old_idents_walker(e, out);
+            collect_old_idents_walker(idx, out);
         }
         Expr::Call(callee, args) => {
-            collect_old_idents_inner(callee, out);
+            collect_old_idents_walker(callee, out);
             for a in args {
-                collect_old_idents_inner(a, out);
+                collect_old_idents_walker(a, out);
             }
         }
         Expr::Tuple(es) | Expr::List(es) => {
             for e in es {
-                collect_old_idents_inner(e, out);
+                collect_old_idents_walker(e, out);
             }
         }
         Expr::Block(stmts) => {
             for s in stmts {
-                if let Stmt::Expr(e) = s {
-                    collect_old_idents_inner(e, out);
+                collect_old_idents_in_stmt(s, out);
+            }
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_old_idents_walker(cond, out);
+            for s in then_ { collect_old_idents_in_stmt(s, out); }
+            if let Some(e) = else_ {
+                for s in e { collect_old_idents_in_stmt(s, out); }
+            }
+        }
+        Expr::Match(scrut, arms) => {
+            collect_old_idents_walker(scrut, out);
+            for arm in arms {
+                collect_old_idents_walker(&arm.body, out);
+                if let Some(g) = &arm.guard {
+                    collect_old_idents_walker(g, out);
                 }
             }
         }
+        Expr::Cast(e, _) => collect_old_idents_walker(e, out),
+        Expr::Try(e) => collect_old_idents_walker(e, out),
+        Expr::Spawn(e) => collect_old_idents_walker(e, out),
+        Expr::Await(e) => collect_old_idents_walker(e, out),
+        Expr::TypeOf(e) => collect_old_idents_walker(e, out),
+        Expr::Range { start, end } => {
+            collect_old_idents_walker(start, out);
+            collect_old_idents_walker(end, out);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_old_idents_walker(target, out);
+            if let Some(s) = start { collect_old_idents_walker(s, out); }
+            if let Some(e) = end { collect_old_idents_walker(e, out); }
+        }
+        Expr::Comprehension { expr, var: _, iter, guard } => {
+            collect_old_idents_walker(expr, out);
+            collect_old_idents_walker(iter, out);
+            if let Some(g) = guard { collect_old_idents_walker(g, out); }
+        }
+        Expr::Record { ty: _, fields } => {
+            for f in fields {
+                collect_old_idents_walker(&f.value, out);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (k, v) in entries {
+                collect_old_idents_walker(k, out);
+                collect_old_idents_walker(v, out);
+            }
+        }
+        Expr::SetLiteral(es) => {
+            for e in es {
+                collect_old_idents_walker(e, out);
+            }
+        }
+        Expr::Turbofish(_, _, args) => {
+            for a in args {
+                collect_old_idents_walker(a, out);
+            }
+        }
+        Expr::TupleIndex(e, _) => collect_old_idents_walker(e, out),
+        Expr::OptionalChain(e, _) => collect_old_idents_walker(e, out),
+        Expr::NamedArg(_, e) => collect_old_idents_walker(e, out),
+        Expr::Arena(stmts) | Expr::Comptime(stmts) | Expr::Quote(stmts) => {
+            for s in stmts {
+                collect_old_idents_in_stmt(s, out);
+            }
+        }
+        Expr::QuoteInterpolate(e) => collect_old_idents_walker(e, out),
+        Expr::Lambda { params: _, ret: _, body } => {
+            for s in body {
+                collect_old_idents_in_stmt(s, out);
+            }
+        }
+        Expr::TypeInfo(_) | Expr::Literal(_) | Expr::Ident(_) => {}
+    }
+}
+
+/// Collect identifier names from within an `old(...)` expression. The root
+/// identifier is the variable being snapshotted. For `old(x.foo)`, we
+/// snapshot `x`. For `old(old(x))`, we recurse and snapshot `x`.
+fn collect_idents_in_old(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Ident(name) => out.push(name.clone()),
+        Expr::Field(inner, _) | Expr::Index(inner, _) | Expr::TupleIndex(inner, _) => {
+            collect_idents_in_old(inner, out);
+        }
+        Expr::OptionalChain(inner, _) => collect_idents_in_old(inner, out),
+        Expr::Binary(_, l, r) => {
+            collect_idents_in_old(l, out);
+            collect_idents_in_old(r, out);
+        }
+        Expr::Unary(_, e) => collect_idents_in_old(e, out),
+        Expr::Call(callee, args) => {
+            collect_idents_in_old(callee, out);
+            for a in args {
+                collect_idents_in_old(a, out);
+            }
+        }
+        Expr::Old(inner) => collect_idents_in_old(inner, out),
+        Expr::Cast(e, _) => collect_idents_in_old(e, out),
+        Expr::Tuple(es) | Expr::List(es) | Expr::SetLiteral(es) => {
+            for e in es {
+                collect_idents_in_old(e, out);
+            }
+        }
+        Expr::Record { ty: _, fields } => {
+            for f in fields {
+                collect_idents_in_old(&f.value, out);
+            }
+        }
+        // For complex expressions inside old(), collect all Idents recursively.
+        _ => {
+            // Fallback: walk the full expression and collect all Idents
+            collect_all_idents(expr, out);
+        }
+    }
+}
+
+/// Fallback: collect ALL identifiers from any expression tree.
+fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Ident(name) => out.push(name.clone()),
+        Expr::Binary(_, l, r) => {
+            collect_all_idents(l, out);
+            collect_all_idents(r, out);
+        }
+        Expr::Unary(_, e) => collect_all_idents(e, out),
+        Expr::Field(e, _) | Expr::Index(e, _) | Expr::TupleIndex(e, _) => collect_all_idents(e, out),
+        Expr::OptionalChain(e, _) => collect_all_idents(e, out),
+        Expr::Call(callee, args) => {
+            collect_all_idents(callee, out);
+            for a in args {
+                collect_all_idents(a, out);
+            }
+        }
+        Expr::Tuple(es) | Expr::List(es) | Expr::SetLiteral(es) => {
+            for e in es { collect_all_idents(e, out); }
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_all_idents(cond, out);
+            for s in then_ { collect_all_idents_in_stmt(s, out); }
+            if let Some(e) = else_ {
+                for s in e { collect_all_idents_in_stmt(s, out); }
+            }
+        }
+        Expr::Match(scrut, arms) => {
+            collect_all_idents(scrut, out);
+            for arm in arms {
+                collect_all_idents(&arm.body, out);
+                if let Some(g) = &arm.guard {
+                    collect_all_idents(g, out);
+                }
+            }
+        }
+        Expr::Cast(e, _) | Expr::Try(e) | Expr::Spawn(e) | Expr::Await(e)
+        | Expr::TypeOf(e) | Expr::Old(e) | Expr::QuoteInterpolate(e)
+        | Expr::NamedArg(_, e) => collect_all_idents(e, out),
+        Expr::Range { start, end } => {
+            collect_all_idents(start, out);
+            collect_all_idents(end, out);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_all_idents(target, out);
+            if let Some(s) = start { collect_all_idents(s, out); }
+            if let Some(e) = end { collect_all_idents(e, out); }
+        }
+        Expr::Record { ty: _, fields } => {
+            for f in fields { collect_all_idents(&f.value, out); }
+        }
+        Expr::MapLiteral { entries } => {
+            for (k, v) in entries {
+                collect_all_idents(k, out);
+                collect_all_idents(v, out);
+            }
+        }
+        Expr::Turbofish(_, _, args) => {
+            for a in args { collect_all_idents(a, out); }
+        }
+        Expr::Block(stmts) | Expr::Arena(stmts) | Expr::Comptime(stmts) | Expr::Quote(stmts)
+        | Expr::Lambda { params: _, ret: _, body: stmts } => {
+            for s in stmts { collect_all_idents_in_stmt(s, out); }
+        }
+        Expr::Comprehension { expr, var: _, iter, guard } => {
+            collect_all_idents(expr, out);
+            collect_all_idents(iter, out);
+            if let Some(g) = guard { collect_all_idents(g, out); }
+        }
+        Expr::TypeInfo(_) | Expr::Literal(_) => {}
+    }
+}
+
+/// Walk statements for old() collection — covers Let init, Expr, Return,
+/// If/While/For/Match bodies, etc.
+fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Expr(e) => collect_old_idents_walker(e, out),
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init { collect_old_idents_walker(e, out); }
+        }
+        Stmt::Return(Some(e)) => collect_old_idents_walker(e, out),
         _ => {}
     }
 }
 
-/// Collect identifier names nested under an `old(...)` expression. The
-/// "top-level" Ident is the variable being snapshotted; deeper Idents are
-/// field accesses (`old(x.foo)` → snapshot `x`).
-fn collect_old_ident_names(expr: &crate::ast::Expr, out: &mut Vec<String>) {
-    use crate::ast::Expr;
-    match expr {
-        Expr::Ident(name) => out.push(name.clone()),
-        Expr::Field(inner, _) | Expr::Index(inner, _) => {
-            collect_old_ident_names(inner, out);
+fn collect_all_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Expr(e) => collect_all_idents(e, out),
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init { collect_all_idents(e, out); }
         }
-        Expr::Binary(_, l, r) => {
-            collect_old_ident_names(l, out);
-            collect_old_ident_names(r, out);
-        }
-        Expr::Unary(_, e) => collect_old_ident_names(e, out),
-        Expr::Call(callee, args) => {
-            collect_old_ident_names(callee, out);
-            for a in args {
-                collect_old_ident_names(a, out);
-            }
-        }
-        Expr::Old(inner) => collect_old_ident_names(inner, out),
+        Stmt::Return(Some(e)) => collect_all_idents(e, out),
         _ => {}
     }
 }
@@ -1096,14 +1292,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let ret_ty_ast = func.ret.as_ref();
         // audit (MEDIUM): empty function bodies must not silently return a
         // default value of the wrong type (e.g. i64(0) for a struct-returning
-        // function). If the body is empty and the function has a non-unit
-        // return type, emit a compile error instead.
+        // function). For empty bodies with struct return, use `undef` —
+        // this is safe because empty-body functions are abstract declarations
+        // that are never called directly (LLVM `undef` is only UB if the
+        // caller actually uses the return value, and abstract functions are
+        // never called). For non-empty bodies, the default is overwritten by
+        // the last expression in the body.
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
             BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
             BasicTypeEnum::StructType(st) if func.body.is_empty() => {
-                // Empty body, struct return — unreachable (function is abstract).
-                // Use undef to avoid silent i64(0) mismatch.
+                // SAFETY: empty-body functions are abstract declarations
+                // (e.g. trait method signatures). They are never called, so
+                // returning `undef` does not cause UB at runtime.
                 return Ok(ControlFlow::Continue(st.get_undef().into()));
             }
             BasicTypeEnum::StructType(_) => {

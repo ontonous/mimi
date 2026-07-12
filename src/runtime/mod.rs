@@ -274,6 +274,16 @@ fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut
     if new_cap <= 0 {
         return std::ptr::null_mut();
     }
+    // audit (MEDIUM): guard against overflow when casting i64 to usize on
+    // 32-bit platforms. On 64-bit (primary target), i64→usize is lossless
+    // for non-negative values. On 32-bit, cap > u32::MAX would wrap to 0,
+    // producing a tiny allocation.
+    #[cfg(target_pointer_width = "32")]
+    {
+        if new_cap > (u32::MAX as i64) {
+            return std::ptr::null_mut();
+        }
+    }
     // H11 fix: use checked multiplication to prevent integer overflow that
     // could lead to undersized allocation and subsequent buffer overflow.
     let elem_size = std::mem::size_of::<*mut std::ffi::c_char>();

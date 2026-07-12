@@ -187,14 +187,8 @@ impl<'a> Checker<'a> {
         }
         // Infer expression type
         let expr_ty = self.infer_expr(expr, scopes);
-        // Restore old binding (or remove if it didn't exist before)
-        if let Some(s) = scopes.last_mut() {
-            s.remove(var);
-            if let Some(old) = old_var {
-                s.insert(var.to_owned(), old);
-            }
-        }
-        // Check guard if present
+        // Check guard if present — MUST be done while var is still in scope,
+        // because the guard references the loop variable.
         if let Some(g) = guard {
             let guard_ty = self.infer_expr(g, scopes);
             if !matches!(&guard_ty, Type::Name(n, _) if n == "bool") {
@@ -205,6 +199,13 @@ impl<'a> Checker<'a> {
                         fmt_type(&guard_ty)
                     ),
                 );
+            }
+        }
+        // NOW restore old binding (or remove if it didn't exist before)
+        if let Some(s) = scopes.last_mut() {
+            s.remove(var);
+            if let Some(old) = old_var {
+                s.insert(var.to_owned(), old);
             }
         }
         Type::Name("List".into(), vec![expr_ty])

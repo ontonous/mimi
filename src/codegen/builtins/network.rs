@@ -405,10 +405,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // substitute a static empty string so downstream strlen doesn't
         // dereference null (UB). The user-visible behavior matches the
         // interpreter: empty string on failure.
-        let empty_str = self
-            .builder
-            .build_global_string_ptr("", "http_empty_str")
-            .map_err(|e| format!("global str error: {}", e))?;
+        // Reuse the global if it already exists to avoid creating duplicate
+        // globals on repeated http_get calls.
+        let empty_str = if let Some(g) = self.module.get_global("http_empty_str") {
+            g.as_pointer_value()
+        } else {
+            self.builder
+                .build_global_string_ptr("", "http_empty_str")
+                .map_err(|e| format!("global str error: {}", e))?
+                .as_pointer_value()
+        };
         let is_null = self
             .builder
             .build_int_compare(
@@ -420,7 +426,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("icmp error: {}", e))?;
         let safe_ptr = self
             .builder
-            .build_select(is_null, empty_str.as_pointer_value(), result, "http_safe_ptr")
+            .build_select(is_null, empty_str, result, "http_safe_ptr")
             .map_err(|e| format!("select error: {}", e))?
             .into_pointer_value();
         let result = safe_ptr;
@@ -504,10 +510,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_http_post returned void")?
             .into_pointer_value();
         // audit (MEDIUM): null-safe substitution (same as http_get)
-        let empty_str = self
-            .builder
-            .build_global_string_ptr("", "http_post_empty_str")
-            .map_err(|e| format!("global str error: {}", e))?;
+        // Reuse the global if it already exists to avoid duplicates.
+        let empty_str = if let Some(g) = self.module.get_global("http_post_empty_str") {
+            g.as_pointer_value()
+        } else {
+            self.builder
+                .build_global_string_ptr("", "http_post_empty_str")
+                .map_err(|e| format!("global str error: {}", e))?
+                .as_pointer_value()
+        };
         let is_null = self
             .builder
             .build_int_compare(
@@ -519,7 +530,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("icmp error: {}", e))?;
         let safe_ptr = self
             .builder
-            .build_select(is_null, empty_str.as_pointer_value(), result, "http_post_safe_ptr")
+            .build_select(is_null, empty_str, result, "http_post_safe_ptr")
             .map_err(|e| format!("select error: {}", e))?
             .into_pointer_value();
         let result = safe_ptr;

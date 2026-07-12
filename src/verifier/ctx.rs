@@ -205,16 +205,18 @@ impl SolverSession {
             Ok(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
             Ok(SatResult::Unknown) => {
                 // Normal timeout — solver may be in an inconsistent state.
-                // Replace with a fresh solver. The new solver is explicitly
-                // reset so it starts at Z3 depth 0, matching the invariant
-                // that the next reset()/push() sequence expects.
+                // Replace with a fresh solver. The new solver starts at Z3
+                // depth 0, but callers (check_scope) have a pending push()
+                // that was on the OLD solver — the new solver never saw it.
+                // Setting `replaced = true` ensures the next pop() is a
+                // no-op, preventing Z3 UB (pop below depth 0).
                 let mut params = z3::Params::new();
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
                 new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.replaced = false; // fresh solver, no pending pops
+                self.replaced = true; // skip next pop() — push was on old solver
                 SatResult::Unknown
             }
             Err(panic_payload) => {
@@ -234,15 +236,14 @@ impl SolverSession {
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
-                // RT-H5 (audit): after replacing, explicitly reset the new
-                // solver so it starts at Z3 depth 0 — the same invariant a
-                // fresh-from-Solver::new() solver has. This ensures that
-                // subsequent callers that depend on reset() + push() do not
-                // observe stale depth or leftover assertions from a
-                // half-initialized solver.
+                // RT-H5 (audit): after replacing, the new solver starts at
+                // Z3 depth 0. But callers (check_scope) have a pending push()
+                // that was on the OLD solver — the new solver never saw it.
+                // Setting `replaced = true` ensures the next pop() is a
+                // no-op, preventing Z3 UB (pop below depth 0).
                 new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.replaced = false; // fresh solver has no pending pops
+                self.replaced = true; // skip next pop() — push was on old solver
                 SatResult::Unknown
             }
         }

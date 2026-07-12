@@ -1191,17 +1191,7 @@ impl<'a> Interpreter<'a> {
         match v {
             Value::Variant(ref name, ref vals) if name == "Some" && vals.len() == 1 => {
                 let inner_v = vals[0].clone();
-                let field_expr = Expr::Field(Box::new(Expr::Literal(crate::ast::Lit::Unit)), field.to_string());
-                // Build a temporary field access on inner_v by stuffing it
-                // into a synthetic Ident. The cleanest path is to use
-                // eval_field directly, which expects Expr.
-                let ident = Expr::Ident(format!("__chain_{}__", field));
-                let synthetic = Expr::Field(Box::new(Expr::Literal(crate::ast::Lit::Unit)), field.to_string());
-                // For simplicity, walk common record-shaped values:
-                // - Value::Record(name, fields) → look up field by name
-                // - Value::Variant(...) → recursive unwrap
-                // Otherwise error.
-                let _ = (ident, synthetic, field_expr);
+                // Walk common record-shaped values to extract the field.
                 self.eval_optional_field(&inner_v, field)
             }
             Value::Variant(ref name, ref vals) if name == "Ok" && vals.len() == 1 => {

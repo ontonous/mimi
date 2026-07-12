@@ -839,13 +839,25 @@ impl<'a> Checker<'a> {
             Stmt::WhileLet { pat, init, body } => {
                 // CG-H3 (audit): reject list/slice patterns at type-check time so the
                 // user gets a clear error instead of an opaque codegen failure later.
+                // The interpreter supports these patterns, but codegen does not.
                 if matches!(pat, Pattern::Array(_) | Pattern::Slice(_, _)) {
                     self.emit_code(
                         crate::diagnostic::codes::E0251,
-                        "while-let does not support list/slice patterns; \
+                        "while-let list/slice patterns are not supported in codegen; \
                          use a regular for loop, an index-based while loop, \
                          or destructure into individual variables".to_string(),
                     );
+                    // Still type-check the pattern and body to catch other errors,
+                    // but return early to avoid cascading diagnostics from the
+                    // unsupported pattern.
+                    let it = self.infer_expr(init, scopes);
+                    scopes.push(HashMap::new());
+                    self.check_pattern(pat, &it, scopes);
+                    self.loop_depth += 1;
+                    self.check_block(body, ret, scopes);
+                    self.loop_depth -= 1;
+                    scopes.pop();
+                    return;
                 }
                 let it = self.infer_expr(init, scopes);
                 scopes.push(HashMap::new());

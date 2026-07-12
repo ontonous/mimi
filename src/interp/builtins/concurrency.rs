@@ -323,31 +323,23 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("channel_recv expects 1 argument"));
         }
         let h = args[0].as_i64_for_handle()?;
-        // IN-H8 (audit): the interpreter must not block the entire interpreter
-        // thread on `rx.recv()`. Use `try_recv` with a brief spin budget so we
-        // surface progress to other ready interpreter tasks without hanging
-        // forever. After the budget is exhausted, return 0 with a warning so
-        // the user knows the channel was empty. The codegen path still uses
-        // the blocking `mimi_channel_recv` since compiled programs run their
-        // own threads.
-        const TRY_RECV_BUDGET: u32 = 1000;
-        for _ in 0..TRY_RECV_BUDGET {
-            // SAFETY: handle is a valid channel handle.
-            let v = crate::runtime::mimi_channel_try_recv(h);
-            if v != -1 {
-                return Ok(Value::Int(v));
-            }
-            // Cooperative yield: std::thread::yield_now() lets other OS threads
-            // run; combined with try_recv polling this approximates the
-            // semantic of `recv` without stalling the interpreter driver.
-            std::thread::yield_now();
-        }
-        eprintln!(
-            "[mimi interp] channel_recv: timed out after {} try_recv attempts; \
-             returning 0. Use channel_try_recv for non-blocking polling.",
-            TRY_RECV_BUDGET
-        );
-        Ok(Value::Int(0))
+        // IN-H8 (audit): the original spin-loop approach using try_recv had
+        // two problems:
+        // 1. The sentinel value -1 (used for "no message") conflicts with
+        //    legitimate channel data — if someone sends -1, it's silently
+        //    dropped and replaced with 0 on timeout.
+        // 2. The timeout fallback returns 0, which is indistinguishable from
+        //    a legitimate 0 value received from the channel.
+        //
+        // Fix: use the blocking `mimi_channel_recv` directly. This is
+        // semantically correct — recv blocks until a message arrives.
+        // The codegen path also uses the blocking version. In the
+        // interpreter, the recv() call will block the current OS thread
+        // until a message is available, which is acceptable for the
+        // interpreter's synchronous execution model.
+        // SAFETY: handle is a valid channel handle.
+        let v = crate::runtime::mimi_channel_recv(h);
+        Ok(Value::Int(v))
     }
 
     pub(crate) fn builtin_channel_try_recv(&self, args: Vec<Value>) -> Result<Value, InterpError> {

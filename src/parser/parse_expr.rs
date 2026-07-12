@@ -397,32 +397,41 @@ impl Parser {
                 ));
             }
         };
-        // ? after an identifier: check for `?.` (optional chain) vs plain `?` (try).
-        // PA-H3 (audit): handle `?.field` BEFORE plain `?` so the field access
-        // is consumed as part of the optional chain, not as a separate
-        // postfix operation on `Try(expr)`.
-        if self.at(&TokenKind::Question) {
-            let next_is_dot = self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].kind == TokenKind::Dot;
-            if next_is_dot {
-                self.advance(); // consume `?`
-                self.advance(); // consume `.`
-                let field = self.expect_ident()?;
-                expr = Expr::OptionalChain(Box::new(expr), field);
-            } else {
-                self.advance();
-                expr = expr.try_expr();
-            }
-        }
         Ok(expr)
     }
 
     /// Parse postfix operations (calls, field access, indexing) on a base expression
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
         loop {
-            // PA-H3 (audit): the optional-chain `?.field` and the try `?`
-            // operator are handled by parse_primary BEFORE this loop runs.
-            // parse_postfix handles the remaining postfix operations.
+            // PA-H3 (audit): handle `?.field` (optional chain) and `?` (try)
+            // INSIDE the postfix loop so they work after any expression and
+            // can be chained: `a?.b?.c`, `foo()?.bar`, `arr[0]?.name`.
+            if self.at(&TokenKind::Question) {
+                let next_is_dot = self.pos + 1 < self.tokens.len()
+                    && self.tokens[self.pos + 1].kind == TokenKind::Dot;
+                if next_is_dot {
+                    self.advance(); // consume `?`
+                    self.advance(); // consume `.`
+                    // Support both `?.field` and `?.0` (optional tuple index)
+                    if let TokenKind::Int(s) = &self.peek().kind {
+                        let idx = s.replace('_', "").parse::<usize>().map_err(|_| {
+                            ParseError::new("invalid tuple index", self.peek().line, self.peek().col)
+                        })?;
+                        self.advance();
+                        // OptionalChain doesn't have a tuple-index variant;
+                        // desugar to Field with numeric name for now.
+                        expr = Expr::OptionalChain(Box::new(expr), idx.to_string());
+                    } else {
+                        let field = self.expect_ident()?;
+                        expr = Expr::OptionalChain(Box::new(expr), field);
+                    }
+                    continue; // allow chaining: a?.b?.c
+                } else {
+                    self.advance();
+                    expr = expr.try_expr();
+                    continue;
+                }
+            }
             if self.at(&TokenKind::LParen) {
                 self.advance();
                 let args = self.parse_args()?;
@@ -447,10 +456,6 @@ impl Parser {
             } else {
                 break;
             }
-        }
-        if self.at(&TokenKind::Question) {
-            self.advance();
-            expr = expr.try_expr();
         }
         // Type cast: expr as Type
         if self.at(&TokenKind::As) {
@@ -700,13 +705,13 @@ impl Parser {
                 break;
             }
         }
-        // Type cast: expr as Type
-        if self.at(&TokenKind::As) {
-            self.advance();
-            let target_type = self.parse_type()?;
-            e = Expr::Cast(Box::new(e), target_type);
-        }
-        Ok(e)
+        // Delegate to parse_postfix for `?` / `?.field` / `as Type` handling.
+        // parse_ident_primary handles `.` `(` `[` `{` inline above, but the
+        // `?` and `?.` operators need to be handled after the ident-primary
+        // loop exits. parse_postfix will loop again but the tokens it looks
+        // for (`?`, `(`, `.`, `[`) will already be consumed if they appeared
+        // above, so it will quickly break on the first non-matching token.
+        self.parse_postfix(e)
     }
 
     /// Parse a `[expr]` / `[expr for var in iter]` / `[expr, ...]` primary expression.
