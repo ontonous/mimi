@@ -25,8 +25,8 @@ impl Parser {
             // Skip newlines before low-precedence boolean operators (multiline ||/&& chains)
             self.try_skip_newlines_for_boolean_op();
             let (op, prec, right_assoc) = match self.peek_kind() {
-                TokenKind::OrOr => (BinOp::Or, 1, false),
-                TokenKind::AndAnd => (BinOp::And, 2, false),
+                TokenKind::OrOr | TokenKind::Or => (BinOp::Or, 1, false),
+                TokenKind::AndAnd | TokenKind::And => (BinOp::And, 2, false),
                 TokenKind::EqEq => (BinOp::EqCmp, 3, false),
                 TokenKind::Ne => (BinOp::NeCmp, 3, false),
                 TokenKind::Lt => (BinOp::Lt, 4, false),
@@ -75,8 +75,8 @@ impl Parser {
             // Skip newlines before low-precedence boolean operators (multiline ||/&& chains)
             self.try_skip_newlines_for_boolean_op();
             let (op, prec, right_assoc) = match self.peek_kind() {
-                TokenKind::OrOr => (BinOp::Or, 1, false),
-                TokenKind::AndAnd => (BinOp::And, 2, false),
+                TokenKind::OrOr | TokenKind::Or => (BinOp::Or, 1, false),
+                TokenKind::AndAnd | TokenKind::And => (BinOp::And, 2, false),
                 TokenKind::EqEq => (BinOp::EqCmp, 3, false),
                 TokenKind::Ne => (BinOp::NeCmp, 3, false),
                 TokenKind::Lt => (BinOp::Lt, 4, false),
