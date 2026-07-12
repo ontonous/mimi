@@ -229,29 +229,23 @@ pub fn subst_type_params(
 }
 
 pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
-    // L10: `Any` is the dynamic/erased top type (escape hatch).
-    // TODO(#v0.31-type-engine): scope Any to explicit annotations only.
-    if matches!(a, Type::Name(n, _) if n == "Any") || matches!(b, Type::Name(n, _) if n == "Any") {
-        return true;
-    }
-    // Internal inference placeholder "_" (e.g. bare `None`, `Ok`, `Err`) is
-    // compatible with any concrete type so that contextual annotations can
-    // resolve it. It is never produced by user-facing type annotations.
-    if matches!(a, Type::Name(n, _) if n == "_") || matches!(b, Type::Name(n, _) if n == "_") {
-        return true;
-    }
-    // Only treat 'unknown' as matching if BOTH sides are unknown.
-    // Single-sided unknown would mask cascade errors — let the
-    // real type propagate so subsequent checks detect mismatches.
-    if matches!(a, Type::Name(n, _) if n == "unknown")
-        && matches!(b, Type::Name(n, _) if n == "unknown")
-    {
-        return true;
-    }
+    // A4: same_type is now a pure structural equality check.
+    // Escape hatches (Any, _, unknown, Infer) have been removed from same_type
+    // and are handled exclusively by UnificationTable::unify, which has the
+    // context to bind inference variables. This eliminates the class of bugs
+    // where same_type returns true for Any-vs-anything, bypassing type safety.
+    //
+    // Callers that need escape-hatch compatibility should use unify() instead.
+    // Type::Infer still matches itself structurally (both sides unknown).
+    //
     // Normalize Type::Name("Result", [T, E]) <-> Type::Result(T, E) and Type::Name("Option", [T]) <-> Type::Option(T)
     // Compare args directly without cloning to allocate new enum variants.
     match (a, b) {
         (Type::Name(na, aa), Type::Name(nb, ab)) => {
+            // A4: "unknown" is a cascade placeholder — only matches itself.
+            if na == "unknown" || nb == "unknown" {
+                return na == nb;
+            }
             na == nb
                 && aa.len() == ab.len()
                 && aa.iter().zip(ab.iter()).all(|(x, y)| same_type(x, y))
@@ -288,9 +282,14 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::LocalShared(a), Type::LocalShared(b)) => same_type(a, b),
         (Type::Weak(a), Type::Weak(b)) => same_type(a, b),
         (Type::WeakLocal(a), Type::WeakLocal(b)) => same_type(a, b),
-        // Newtypes with same name and same inner type are equal
-        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => n1 == n2 && same_type(a, b),
-        // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner≃n
+        // A4: Newtypes with same name and same inner type are equal.
+        // Different-name newtypes do NOT match (consistent with unify).
+        // Previous code fell through to inner-type comparison via the
+        // catch-all below, allowing Newtype("UserId", i32) == Newtype("OrderId", i32).
+        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => {
+            n1 == n2 && same_type(a, b)
+        }
+        // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner
         (Type::Newtype(n, inner), Type::Name(n2, _))
         | (Type::Name(n2, _), Type::Newtype(n, inner)) => {
             if n == n2 {
