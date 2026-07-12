@@ -236,7 +236,17 @@ fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
     if cap <= 0 {
         return std::ptr::null_mut();
     }
-    // C10/H17: use checked_mul to prevent integer overflow.
+    // audit (MEDIUM): guard against overflow when casting i64 to usize on
+    // 32-bit platforms. On 64-bit (primary target), i64→usize is lossless
+    // for non-negative values. On 32-bit, cap > u32::MAX would wrap to 0,
+    // producing a tiny allocation. Reject anything beyond u32::MAX on 32-bit
+    // by using `try_into` or a manual bounds check.
+    #[cfg(target_pointer_width = "32")]
+    {
+        if cap > (u32::MAX as i64) {
+            return std::ptr::null_mut();
+        }
+    }
     let elem_size = std::mem::size_of::<*mut std::ffi::c_char>();
     let data_size = match (cap as usize).checked_mul(elem_size) {
         Some(s) => s,
