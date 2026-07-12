@@ -10,11 +10,23 @@ impl<'a> Checker<'a> {
         body: &Block,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        let param_types: Vec<Type> = params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+        // CO-C1 / H16: unannotated (`_`) params become fresh TypeVars so that
+        // `let id = fn(x: _) { x }` can be generalized to ∀T. T → T.
+        let param_types: Vec<Type> = params
+            .iter()
+            .map(|p| {
+                let ty = self.resolve_type(&p.ty);
+                if matches!(ty, Type::Infer) {
+                    self.fresh_var()
+                } else {
+                    ty
+                }
+            })
+            .collect();
         scopes.push(HashMap::new());
-        for p in params {
+        for (p, ty) in params.iter().zip(param_types.iter()) {
             if let Some(s) = scopes.last_mut() {
-                s.insert(p.name.clone(), self.resolve_type(&p.ty));
+                s.insert(p.name.clone(), ty.clone());
             }
         }
         let mut body_type = Type::Name("unit".into(), vec![]);
@@ -36,7 +48,17 @@ impl<'a> Checker<'a> {
             }
         }
         scopes.pop();
-        let return_type = ret.cloned().unwrap_or(body_type);
+        let return_type = match ret {
+            Some(r) => {
+                let rty = self.resolve_type(r);
+                if matches!(rty, Type::Infer) {
+                    body_type
+                } else {
+                    rty
+                }
+            }
+            None => body_type,
+        };
         Type::Func(param_types, Box::new(return_type))
     }
 }

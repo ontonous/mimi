@@ -660,6 +660,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
+                // CO-C1 / H16: let-polymorphism — generalize free TypeVars for
+                // immutable, non-ref bindings so `let id = fn(x: _) { x }` is ∀T.T→T.
+                // mut bindings stay monomorphic (value restriction).
+                let final_ty = if !*mut_ && !*ref_ {
+                    let env: HashMap<String, Type> = scopes
+                        .iter()
+                        .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                        .collect();
+                    self.generalize(&final_ty, &env)
+                } else {
+                    final_ty
+                };
                 // Track mutability
                 if let Pattern::Variable(name) = pat {
                     if let Some(s) = self.mut_vars.last_mut() {

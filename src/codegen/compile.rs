@@ -256,7 +256,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Convert a flow transition into a synthetic FuncDef for codegen.
     ///
     /// Parameters: `self` (from-state payload) + event params.
-    /// Return type: first declared to-state (multi-target uses first as nominal).
+    /// Return type: first declared to-state as nominal LLVM layout (M6).
+    /// Multi-target `-> A | B` still uses the first target for the function
+    /// signature; callers must `match` exhaustively (E0420, v0.29.49). When
+    /// a return constructs a different to-state, layouts must be compatible
+    /// or the transition body only returns the first target's shape.
     /// Body: the transition body with outer `do { }` unwrapped (if present).
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let mut params = Vec::new();
@@ -269,6 +273,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         params.extend(t.params.iter().cloned());
 
+        // M6: multi-target uses first as nominal; see module docs above.
+        // H2: recover bodies already keep persistent shadows when
+        // `flow.persistent_fields` is non-empty (inject_system_verbs keep=true).
+        let _ = &flow.persistent_fields;
         let ret_name = t
             .to_states
             .first()

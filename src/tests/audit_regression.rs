@@ -332,19 +332,49 @@ func main() -> i32 {
     let _ = diagnostics;
 }
 
-// ── CO-C3: generalize 是死代码但不影响运行 ──
+// ── CO-C1 / H16: let-polymorphism via generalize + instantiate ──
 #[test]
-fn co_c3_generalize_dead_code() {
+fn co_c1_let_polymorphism_lambda() {
+    // Immutable let-bound identity is ∀T. T → T; usable at multiple types.
     let src = r#"
 func main() -> i32 {
-    42
+    let id = fn(x: _) { x }
+    let a: i32 = id(1)
+    let b: string = id("hi")
+    a
 }
 "#;
-    let result = run_source(src);
-    assert_eq!(
-        result.as_int().unwrap_or(-1),
-        42,
-        "generalize dead code doesn't affect execution"
+    check_source(src).expect("let-bound polymorphic lambda should typecheck");
+}
+
+#[test]
+fn co_c1_let_polymorphism_generic_func_value() {
+    let src = r#"
+func identity<T>(x: T) -> T { x }
+func main() -> i32 {
+    let f = identity
+    let a: i32 = f(1)
+    let b: string = f("hi")
+    a
+}
+"#;
+    check_source(src).expect("let-bound generic function value should re-instantiate");
+}
+
+#[test]
+fn co_c1_mut_let_stays_monomorphic() {
+    // mut bindings are not generalized (value restriction).
+    let src = r#"
+func main() -> i32 {
+    let mut id = fn(x: _) { x }
+    let a: i32 = id(1)
+    let b: string = id("hi")
+    a
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "mut let-bound lambda must stay monomorphic"
     );
 }
 

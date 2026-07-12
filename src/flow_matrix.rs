@@ -417,6 +417,10 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
     if !has_recover {
         // recover: rebuild root, pulling persistent fields from Fault shadow copy.
         // When no persistent fields exist, recover == reset (still provided for API).
+        // H2: codegen uses this body as-is (no separate dirty check). Interp may
+        // further degrade to reset when non-transactional persistent fields were
+        // dirtied mid-turn (`persistent_dirty_for_recover`); that path needs a
+        // live WAL snapshot which only the interpreter maintains.
         let keep = !flow.persistent_fields.is_empty();
         let body = rebuild_root_body(flow, &root, keep, shapes);
         flow.transitions.push(TransitionDef {

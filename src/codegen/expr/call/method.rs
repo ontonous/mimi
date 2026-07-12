@@ -387,24 +387,119 @@ impl<'ctx> CodeGenerator<'ctx> {
         let result = call_try_basic_value(&call)
             .unwrap_or(self.context.i64_type().const_int(0, false).into());
 
-        // v0.29.11: Fault absorption — if this transition enters Fault and the
-        // from-state payload is a bare actor handle (i8*), short-circuit its mailbox.
-        // Nested actors inside record payloads are handled by the interpreter path;
-        // codegen covers the common actor-as-payload case without a full walk.
+        // v0.29.11 / H1: Fault absorption — short-circuit mailboxes of any Actor
+        // handles in the from-state payload (bare handle or nested in records).
         if enters_fault {
             if let Some(first) = compiled_args.first() {
-                if let BasicValueEnum::PointerValue(pv) = *first {
-                    // Actor handles are opaque i8*; only call fault if the runtime
-                    // symbol is available (always registered with actor concurrency).
-                    if let Ok(fault_fn) = self.get_runtime_fn("mimi_actor_fault") {
-                        let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(pv)]);
-                        let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
-                    }
-                }
+                self.emit_fault_actors_in_payload(*first, &from_type)?;
             }
         }
 
+        // H2: recover dirty-check — see `inject_system_verbs` (keep=true body) and
+        // `persistent_dirty_for_recover` in the interpreter. Codegen recover is the
+        // injected transition that restores persistent shadows; mid-turn WAL dirty
+        // degrade-to-reset is interp-primary (codegen has no live tx snapshot).
+
         Ok(result)
+    }
+
+    /// H1: Recursively short-circuit Actor handles inside a from-state payload.
+    ///
+    /// - Bare `i8*` / `i64` actor handle → `mimi_actor_fault`
+    /// - Record/state struct → GEP each field; recurse on nested records;
+    ///   fault fields whose type name is a registered actor
+    /// Depth is capped at 8 (same as nested payload defaults).
+    fn emit_fault_actors_in_payload(
+        &mut self,
+        payload: BasicValueEnum<'ctx>,
+        type_name: &str,
+    ) -> Result<(), CompileError> {
+        self.emit_fault_actors_in_payload_depth(payload, type_name, 0)
+    }
+
+    fn emit_fault_actors_in_payload_depth(
+        &mut self,
+        payload: BasicValueEnum<'ctx>,
+        type_name: &str,
+        depth: usize,
+    ) -> Result<(), CompileError> {
+        if depth > 8 {
+            return Ok(());
+        }
+        let Ok(fault_fn) = self.get_runtime_fn("mimi_actor_fault") else {
+            return Ok(());
+        };
+
+        // Bare actor handle (pointer or i64-as-ptr).
+        if self.actor_names.contains(type_name) {
+            let handle_ptr = match payload {
+                BasicValueEnum::PointerValue(pv) => pv,
+                BasicValueEnum::IntValue(iv) => self
+                    .builder
+                    .build_int_to_ptr(
+                        iv,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "actor_h_as_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?,
+                _ => return Ok(()),
+            };
+            let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(handle_ptr)]);
+            let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
+            return Ok(());
+        }
+
+        // Nested record / flow state: walk fields.
+        let Some(td) = self.type_defs.get(type_name).cloned() else {
+            // Unknown type: try bare pointer short-circuit (legacy path).
+            if let BasicValueEnum::PointerValue(pv) = payload {
+                let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(pv)]);
+                let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
+            }
+            return Ok(());
+        };
+        let TypeDefKind::Record(fields) = td.kind else {
+            return Ok(());
+        };
+        if fields.is_empty() {
+            return Ok(());
+        }
+
+        // Materialize struct pointer for GEP.
+        let sty = match self.type_llvm.get(type_name).copied() {
+            Some(BasicTypeEnum::StructType(s)) => s,
+            _ => return Ok(()),
+        };
+        let base_ptr = match payload {
+            BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::StructValue(sv) => {
+                let alloca = self.build_alloca(BasicTypeEnum::StructType(sty), "fault_walk_tmp")?;
+                self.build_store(alloca, BasicValueEnum::StructValue(sv))?;
+                alloca
+            }
+            _ => return Ok(()),
+        };
+
+        for (idx, field) in fields.iter().enumerate() {
+            let field_ty_name = match &field.ty {
+                Type::Name(n, _) => n.as_str(),
+                _ => continue,
+            };
+            let gep = self
+                .gep()
+                .build_struct_gep(sty, base_ptr, idx as u32, &field.name)
+                .map_err(|e| CompileError::LlvmError(format!("fault walk gep: {}", e)))?;
+            let load_ty = self
+                .llvm_type_for(&field.ty)
+                .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+            let loaded = self.build_load(load_ty, gep, &field.name)?;
+            if self.actor_names.contains(field_ty_name)
+                || self.type_defs.contains_key(field_ty_name)
+            {
+                self.emit_fault_actors_in_payload_depth(loaded, field_ty_name, depth + 1)?;
+            }
+        }
+        Ok(())
     }
 
     /// Build a `weak<T>.upgrade()` call, returning `Option<T*>` as `{ i1, i64 }`.

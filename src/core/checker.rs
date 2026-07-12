@@ -304,12 +304,7 @@ pub(crate) fn emit_progressive_migration_hint(&mut self) {
     /// free vars were two separate O(N·D) tree walks; now done in one pass).
     /// Bug 10 fix: remap free TypeVar IDs to sequential indices 0,1,2... in the
     /// ForAll body so that `instantiate` (which substitutes TypeVar(i)→fresh) works correctly.
-    // TODO(#issue-TBD): wire this up at let-binding site — see audit CO-C1.
-    // The generalizer and free-var collector are implemented and correct in
-    // isolation, but no caller invokes them, so let-bound `let f = ...` is
-    // monomorphic in practice. This is the §21 red-line 3 escape: dead
-    // let-polymorphism support.
-    #[allow(dead_code)]
+    /// Called from `Stmt::Let` for immutable non-ref bindings (CO-C1 / H16).
     pub(crate) fn generalize(&mut self, ty: &Type, env: &HashMap<String, Type>) -> Type {
         let (resolved, free_vars) = self.resolve_and_collect_free_vars(ty);
         let env_vars = self.collect_env_type_vars(env);
@@ -401,11 +396,6 @@ pub(crate) fn emit_progressive_migration_hint(&mut self) {
     }
 
     /// Resolve a type and collect free TypeVars in a single traversal (Bug 6 fix).
-    // TODO(#issue-TBD): wire this up via `generalize` at let-binding site.
-    // See audit CO-C1 / §21 red-line 3.
-    // CO-C3: this function is dead code — generalize() is never called.
-    // The sort+dedup at line 295 ensures no phantom TypeVars in the free set.
-    #[allow(dead_code)]
     fn resolve_and_collect_free_vars(&mut self, ty: &Type) -> (Type, Vec<u32>) {
         let mut free_vars = Vec::new();
         let resolved = self.resolve_and_collect_inner(ty, &mut free_vars);

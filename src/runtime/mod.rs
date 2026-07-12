@@ -1619,6 +1619,10 @@ pub extern "C" fn mimi_args_init(argc: i32, argv: *mut *mut std::ffi::c_char) {
     // Original argv may be freed after init returns.
     if !argv.is_null() && argc > 0 {
         for i in 0..argc as isize {
+            // SAFETY (M10): `argv` is a C main-style pointer array of length
+            // `argc`. Loop bound guarantees `0 <= i < argc`, so `argv.offset(i)`
+            // is in-bounds. Each entry is a valid C string (or null handled by
+            // `cstr_to_string`).
             unsafe {
                 let s = cstr_to_string(*argv.offset(i));
                 let ptr = alloc_c_string(&s);
@@ -4283,10 +4287,25 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
 /// Used by the pinned timeout watchdog to check cooperative expiry.
 #[no_mangle]
 pub extern "C" fn mimi_wall_clock_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    // L3: clock failure must not return epoch 0 (would make pinned watchdog
+    // believe 50+ years elapsed). Prefer last good value; log on first failure.
+    thread_local! {
+        static LAST_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(1) };
+        static LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => {
+            let ms = d.as_millis() as i64;
+            LAST_MS.with(|c| c.set(ms.max(1)));
+            ms.max(1)
+        }
+        Err(_) => {
+            if !LOGGED.with(|c| c.replace(true)) {
+                eprintln!("mimi_wall_clock_ms: system clock before UNIX_EPOCH; using last good value");
+            }
+            LAST_MS.with(|c| c.get())
+        }
+    }
 }
 
 /// v0.29.43: Thread-local flag for delayed Fault from pinned blocks.
@@ -7553,7 +7572,12 @@ pub extern "C" fn mimi_broadcast(
             result_buf.as_mut_ptr() as *mut std::ffi::c_void,
         );
         if sz >= 8 {
-            let v = i64::from_le_bytes(result_buf[0..8].try_into().unwrap_or([0; 8]));
+            // L4: slice is exactly 8 bytes by construction; avoid silent zero.
+            let v = i64::from_le_bytes(
+                result_buf[0..8]
+                    .try_into()
+                    .expect("result_buf[0..8] is always 8 bytes"),
+            );
             results.push(v);
         } else {
             // v0.29.35: call failed → PeerFault sentinel
