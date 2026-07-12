@@ -2,6 +2,7 @@ use super::super::CallSiteValueExt;
 use super::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::types::BasicMetadataTypeEnum;
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_to_json(
@@ -18,10 +19,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("malloc")
             .ok_or_else(|| "malloc not declared".to_string())?;
-        let sprintf_fn = self
-            .module
-            .get_function("sprintf")
-            .ok_or_else(|| "sprintf not declared".to_string())?;
+        // B3: Use snprintf instead of sprintf for buffer safety.
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let ty = i8_ptr.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+        });
         let strcpy_fn = self
             .module
             .get_function("strcpy")
@@ -45,7 +55,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            _ => i64_ty.const_int(64, false),
+            _ => i64_ty.const_int(512, false), // B3: was 64, %f can produce 317+ chars
         };
         let buf = self
             .builder
@@ -67,15 +77,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| format!("fmt error: {}", e))?;
                 self.builder
                     .build_call(
-                        sprintf_fn,
+                        snprintf_fn,
                         &[
                             BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(alloc_size),
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                             BasicMetadataValueEnum::FloatValue(fv),
                         ],
-                        "json_sprintf",
+                        "json_snprintf",
                     )
-                    .map_err(|e| format!("sprintf error: {}", e))?;
+                    .map_err(|e| format!("snprintf error: {}", e))?;
                 Ok(buf.into())
             }
             BasicMetadataValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
@@ -140,22 +151,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(buf.into())
             }
             BasicMetadataValueEnum::IntValue(iv) => {
-                // Integer: sprintf("%ld", iv)
+                // Integer: snprintf(buf, size, "%ld", iv)
                 let fmt = self
                     .builder
                     .build_global_string_ptr("%ld", "json_int_fmt")
                     .map_err(|e| format!("fmt error: {}", e))?;
                 self.builder
                     .build_call(
-                        sprintf_fn,
+                        snprintf_fn,
                         &[
                             BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(alloc_size),
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                             BasicMetadataValueEnum::IntValue(iv),
                         ],
-                        "json_sprintf",
+                        "json_snprintf_int",
                     )
-                    .map_err(|e| format!("sprintf error: {}", e))?;
+                    .map_err(|e| format!("snprintf error: {}", e))?;
                 Ok(buf.into())
             }
             _ => {

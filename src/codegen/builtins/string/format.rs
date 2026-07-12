@@ -115,31 +115,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_global_string_ptr("%ld", "int_fmt")
                         .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let sprintf_ty = i8_ptr.fn_type(
+                    // B3: Use snprintf for buffer safety.
+                    let snprintf_ty = i8_ptr.fn_type(
                         &[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                         ],
                         true,
                     );
-                    let sprintf_fn = self.module.get_function("sprintf").unwrap_or_else(|| {
+                    let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
                         self.module.add_function(
-                            "sprintf",
-                            sprintf_ty,
+                            "snprintf",
+                            snprintf_ty,
                             Some(inkwell::module::Linkage::External),
                         )
                     });
                     self.builder
                         .build_call(
-                            sprintf_fn,
+                            snprintf_fn,
                             &[
                                 BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(alloc_size),
                                 BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
                                 BasicMetadataValueEnum::IntValue(iv),
                             ],
-                            "sprintf_int",
+                            "snprintf_int",
                         )
-                        .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                        .map_err(|e| CompileError::LlvmError(format!("snprintf error: {}", e)))?;
                     let str_ty = self.context.struct_type(
                         &[
                             BasicTypeEnum::PointerType(i8_ptr),
@@ -206,21 +209,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%.15g", "float_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-                let sprintf_fn = self
-                    .module
-                    .get_function("sprintf")
-                    .ok_or_else(|| "sprintf not declared".to_string())?;
+                // B3: Use snprintf for buffer safety.
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+                    let ty = i8_ptr.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        ],
+                        true,
+                    );
+                    self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+                });
                 self.builder
                     .build_call(
-                        sprintf_fn,
+                        snprintf_fn,
                         &[
                             BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(alloc_size),
                             BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
                             BasicMetadataValueEnum::FloatValue(fv),
                         ],
-                        "sprintf_call",
+                        "snprintf_float",
                     )
-                    .map_err(|e| CompileError::LlvmError(format!("sprintf error: {}", e)))?;
+                    .map_err(|e| CompileError::LlvmError(format!("snprintf error: {}", e)))?;
                 // Build {i8*, i64} struct from the buffer
                 let str_ty = self.context.struct_type(
                     &[

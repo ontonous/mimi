@@ -464,14 +464,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_global_string_ptr(&fmt, "record_json_fmt")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         let mut all_args = vec![BasicMetadataValueEnum::PointerValue(buf)];
+                        all_args.push(BasicMetadataValueEnum::IntValue(buf_size));
                         all_args.push(BasicMetadataValueEnum::PointerValue(
                             fmt_ptr.as_pointer_value(),
                         ));
                         all_args.extend(sprintf_args);
-                        let sprintf_fn = self.module.get_function("sprintf").ok_or_else(|| {
-                            CompileError::LlvmError("sprintf not declared".into())
-                        })?;
-                        self.build_call(sprintf_fn, &all_args, "record_json_sprintf")?;
+                        // B3: Use snprintf instead of sprintf for buffer safety.
+                        let snprintf_fn =
+                            self.module.get_function("snprintf").unwrap_or_else(|| {
+                                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                                let ty = i8_ptr.fn_type(
+                                    &[
+                                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                    ],
+                                    true,
+                                );
+                                self.module.add_function(
+                                    "snprintf",
+                                    ty,
+                                    Some(inkwell::module::Linkage::External),
+                                )
+                            });
+                        self.build_call(snprintf_fn, &all_args, "record_json_snprintf")?;
                         self.register_heap_alloc(buf);
                         return self.wrap_c_string(buf);
                     }
@@ -1175,7 +1191,6 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             // Get runtime functions
             let malloc_fn = self.get_runtime_fn("malloc")?;
-            let sprintf_fn = self.get_runtime_fn("sprintf")?;
 
             // Sort fields alphabetically
             let mut idx_map: Vec<(usize, &crate::ast::Field)> = fields.iter().enumerate().collect();
@@ -1291,12 +1306,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_global_string_ptr(&fmt, "elem_json_fmt")
                 .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
+            // B3: Use snprintf instead of sprintf for buffer safety.
+            let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ty = i8_ptr.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    ],
+                    true,
+                );
+                self.module.add_function(
+                    "snprintf",
+                    ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
             let mut all_args = vec![BasicMetadataValueEnum::PointerValue(buf)];
+            all_args.push(BasicMetadataValueEnum::IntValue(buf_size));
             all_args.push(BasicMetadataValueEnum::PointerValue(
                 fmt_ptr.as_pointer_value(),
             ));
             all_args.extend(sprintf_args);
-            self.build_call(sprintf_fn, &all_args, "elem_json_sprintf")?;
+            self.build_call(snprintf_fn, &all_args, "elem_json_snprintf")?;
             // Return the buffer pointer
             let ret_val: BasicValueEnum<'ctx> = buf.into();
             self.builder

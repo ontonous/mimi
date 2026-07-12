@@ -3,6 +3,7 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::types::BasicMetadataTypeEnum;
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -64,6 +65,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // For f-strings with interpolation: dynamically compute buffer size, then fill
+        // B3: Use snprintf instead of sprintf for buffer safety.
         let malloc_fn = self
             .module
             .get_function("malloc")
@@ -80,10 +82,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("strlen")
             .ok_or_else(|| "strlen not declared".to_string())?;
-        let sprintf_fn = self
-            .module
-            .get_function("sprintf")
-            .ok_or_else(|| "sprintf not declared".to_string())?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let ty = i8_ptr.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+        });
 
         // Phase 1: Compile each part and compute total buffer size at runtime
         enum CompiledPart<'ctx> {
@@ -141,13 +151,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     CompileError::LlvmError(format!("string error: {}", e))
                                 })?;
                             self.build_call(
-                                sprintf_fn,
+                                snprintf_fn,
                                 &[
                                     BasicMetadataValueEnum::PointerValue(temp_buf),
+                                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(32, false)),
                                     BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                                     BasicMetadataValueEnum::IntValue(ext_iv),
                                 ],
-                                &format!("fstr_sprintf_{}", i),
+                                &format!("fstr_snprintf_{}", i),
                             )?;
                             let len = self
                                 .build_call(
@@ -188,13 +199,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     CompileError::LlvmError(format!("string error: {}", e))
                                 })?;
                             self.build_call(
-                                sprintf_fn,
+                                snprintf_fn,
                                 &[
                                     BasicMetadataValueEnum::PointerValue(temp_buf),
+                                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(512, false)),
                                     BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                                     BasicMetadataValueEnum::FloatValue(fv),
                                 ],
-                                &format!("fstr_sprintf_{}", i),
+                                &format!("fstr_snprintf_{}", i),
                             )?;
                             let len = self
                                 .build_call(
