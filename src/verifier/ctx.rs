@@ -177,6 +177,11 @@ pub struct SolverSession {
     /// no-op — the fresh solver starts at Z3 depth 0; pending old-solver pops
     /// are moot. Cleared on the next successful check() or reset().
     pub(crate) replaced: bool,
+    /// B6: True after solver replacement — subsequent check() returns Unknown
+    /// because assertions from before the replacement are lost. The new solver
+    /// is empty, so any check result would be misleading (false Sat/Unsat).
+    /// Only cleared by reset() which starts a completely fresh verification.
+    pub(crate) poisoned: bool,
     pub(crate) timeout_ms: u64,
 }
 
@@ -187,7 +192,7 @@ impl SolverSession {
         let mut params = z3::Params::new();
         params.set_u32("timeout", timeout_ms as u32);
         solver.set_params(&params);
-        Ok(Self { solver, replaced: false, timeout_ms })
+        Ok(Self { solver, replaced: false, poisoned: false, timeout_ms })
     }
 
     /// Check satisfiability with timeout and crash protection.
@@ -196,6 +201,14 @@ impl SolverSession {
     /// and sets replaced = true so pending pop() calls are skipped.
     /// On Sat/Unsat: clears replaced flag.
     pub fn check(&mut self) -> SatResult {
+        // B6: If poisoned (solver was replaced after crash/timeout), all
+        // assertions from the original solver are lost. The fresh solver is
+        // empty, so checking it would produce misleading results (false Sat
+        // on an empty solver). Return Unknown to signal verification
+        // incompleteness.
+        if self.poisoned {
+            return SatResult::Unknown;
+        }
         // H14-fix: distinguish Z3 crash from timeout. A crash (panic) is now
         // logged to stderr so verification incompleteness is visible.
         let result =
@@ -217,6 +230,7 @@ impl SolverSession {
                 new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
                 self.replaced = true; // skip next pop() — push was on old solver
+                self.poisoned = true; // B6: assertions lost, future checks unreliable
                 SatResult::Unknown
             }
             Err(panic_payload) => {
@@ -244,6 +258,7 @@ impl SolverSession {
                 new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
                 self.replaced = true; // skip next pop() — push was on old solver
+                self.poisoned = true; // B6: assertions lost, future checks unreliable
                 SatResult::Unknown
             }
         }
@@ -252,7 +267,7 @@ impl SolverSession {
     /// RT-H5 (audit): reset clears all assertions and resets Z3 depth to 0.
     /// This is always safe to call regardless of `replaced` state — a fresh
     /// Solver::new() followed by reset() is idempotent with a reused solver.
-    pub fn reset(&mut self) { self.solver.reset(); self.replaced = false; }
+    pub fn reset(&mut self) { self.solver.reset(); self.replaced = false; self.poisoned = false; }
 
     pub fn push(&mut self) { self.solver.push(); }
 
