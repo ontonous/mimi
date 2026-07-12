@@ -82,9 +82,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // We need to decode that struct and bind each inner pattern to its
                 // respective field, instead of binding the entire payload to every
                 // inner pattern variable.
+                let variant_owner = self.find_variant_owner(name);
                 let variant_arg_tys: Option<Vec<crate::ast::Type>> =
-                    self.find_variant_owner(name).and_then(|(owner, _)| {
-                        self.type_defs.get(&owner).and_then(|td| {
+                    variant_owner.as_ref().and_then(|(owner, _)| {
+                        self.type_defs.get(owner).and_then(|td| {
                             if let TypeDefKind::Enum(variants) = &td.kind {
                                 variants.iter().find(|v| v.name == *name).and_then(|v| {
                                     match &v.payload {
@@ -112,11 +113,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         (decoded, ty)
                     }
                     BasicValueEnum::PointerValue(pv) => {
-                        // Load the struct through the pointer using the common {i32,i64} layout.
-                        let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
-                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-                        let struct_ty = self.context.struct_type(&[i32_ty, i64_ty], false);
-                        let loaded = self.build_load(struct_ty, pv, "enum_loaded")?;
+                        // Use the actual registered struct type from type_llvm if
+                        // available, instead of the synthetic {i32,i64} which is
+                        // a UB type mismatch when the real layout differs (e.g.
+                        // {i32, i32, i32} for 2-field payload or {i32, f64}).
+                        let real_ty = variant_owner.as_ref()
+                            .and_then(|(owner, _)| self.type_llvm.get(owner))
+                            .and_then(|bt| match bt {
+                                BasicTypeEnum::StructType(st) => Some(*st),
+                                _ => None,
+                            });
+                        let struct_ty = real_ty.unwrap_or_else(|| {
+                            let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
+                            let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                            self.context.struct_type(&[i32_ty, i64_ty], false)
+                        });
+                        let loaded = self.build_load(BasicTypeEnum::StructType(struct_ty), pv, "enum_loaded")?;
                         let sv = match loaded {
                             BasicValueEnum::StructValue(sv) => sv,
                             _ => {
