@@ -371,6 +371,37 @@ impl UnificationTable {
             ))),
         }
     }
+
+    /// A5: Strict unification — rejects escape hatches (Any, _, Infer).
+    ///
+    /// Use this at function call sites, field access sites, and other
+    /// positions where escape hatches should NOT silently unify. The
+    /// regular `unify` is for let-binding inference boundaries where
+    /// `_` and `Any` are legitimate.
+    ///
+    /// Returns Err if either type is an escape hatch, otherwise delegates
+    /// to `unify`.
+    pub fn unify_strict(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
+        let a_resolved = self.resolve(a);
+        let b_resolved = self.resolve(b);
+        let is_escape = |t: &Type| -> bool {
+            matches!(t, Type::Infer)
+                || matches!(t, Type::Name(n, _) if n == "Any" || n == "_")
+        };
+        if is_escape(&a_resolved) {
+            return Err(UnifyError::Mismatch(format!(
+                "strict unification rejects escape type {}",
+                crate::core::helpers::fmt_type(&a_resolved)
+            )));
+        }
+        if is_escape(&b_resolved) {
+            return Err(UnifyError::Mismatch(format!(
+                "strict unification rejects escape type {}",
+                crate::core::helpers::fmt_type(&b_resolved)
+            )));
+        }
+        self.unify(&a_resolved, &b_resolved)
+    }
 }
 
 impl Default for UnificationTable {
