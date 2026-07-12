@@ -470,17 +470,29 @@ impl<'a> LexerPos<'a> {
                 break;
             }
         }
+        // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
+        // HIGH fix: "1e" without following digits should not consume 'e'.
+        // Peek ahead to verify there are valid digits (possibly after sign)
+        // before consuming 'e'. If not, leave 'e' for the next token.
         if let Some(ch) = pos.peek() {
             if ch == 'e' || ch == 'E' {
-                s.push(ch);
-                pos = next!(pos);
-                if let Some(sign) = pos.peek() {
-                    if sign == '+' || sign == '-' {
-                        s.push(sign);
-                        pos = next!(pos);
+                // pos.chars points to characters AFTER the peeked 'e'/'E'.
+                let mut tmp = pos.chars.clone();
+                let first_after_e = tmp.next();
+                let first_digit = if first_after_e == Some('+') || first_after_e == Some('-') {
+                    tmp.next()
+                } else {
+                    first_after_e
+                };
+                if first_digit.map_or(false, |d| d.is_ascii_digit()) {
+                    s.push(ch);
+                    pos = next!(pos);
+                    if let Some(sign) = pos.peek() {
+                        if sign == '+' || sign == '-' {
+                            s.push(sign);
+                            pos = next!(pos);
+                        }
                     }
-                }
-                if pos.peek().map_or(false, |d| d.is_ascii_digit()) {
                     is_float = true;
                     while let Some(d) = pos.peek() {
                         if d.is_ascii_digit() || d == '_' {
@@ -683,6 +695,16 @@ impl<'a> LexerState<'a> {
                             });
                             return state_continue!(Dispatch {}, pos, mode, false, acc);
                         } else if spaces < current {
+                            // CRITICAL #7 fix: the previous code had `return` inside
+                            // the while loop body, causing only ONE dedent token to be
+                            // emitted per dispatch step. When source drops from
+                            // indent=12 to indent=0, only the first Dedent was emitted
+                            // and the remaining Dedents were deferred until subsequent
+                            // steps — which never came (EOF reached). This caused
+                            // unbalanced indent/dedent tokens.
+                            //
+                            // Fix: accumulate ALL dedent tokens in this step, then
+                            // return once after the while loop completes.
                             while *acc.indent_stack.last().expect("indent_stack seeded with 0")
                                 > spaces
                             {
@@ -692,7 +714,6 @@ impl<'a> LexerState<'a> {
                                     line: pos.line,
                                     col: spaces,
                                 });
-                                return state_continue!(Dispatch {}, pos, mode, false, acc);
                             }
                             if *acc.indent_stack.last().expect("indent_stack seeded with 0")
                                 != spaces

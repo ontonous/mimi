@@ -9,6 +9,13 @@ use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 /// For async fn: deferred (waiting to be evaluated by executor).
 /// For actor spawn: Pending with a channel receiver (polled on await).
 /// For immediately-ready: Ready with result.
+///
+/// CRITICAL #5 analysis: `Deferred` owns its `Box<File>` (heap-allocated,
+/// independent copy), NOT a reference to an external Interpreter's data.
+/// When the original Interpreter is dropped, the `Box<File>` in the global
+/// executor queue remains valid. `poll_deferred` creates a fresh Interpreter
+/// from `&*file`, which lives only within the poll call. No dangling
+/// references are possible.
 pub enum PollFuture {
     Deferred {
         file: Box<crate::ast::File>,

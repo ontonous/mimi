@@ -264,9 +264,17 @@ impl<'a> Interpreter<'a> {
                 // thread, which will read this context.
                 let interp_ptr: *mut Interpreter<'_> = self;
                 // SAFETY: The interpreter outlives the synchronous C call.
-                // The C call runs on the same thread and callbacks only execute
-                // during the C function's execution, which is within the scope
-                // of `self`.
+                // CRITICAL #4 analysis: The lifetime erasure to 'static is sound
+                // ONLY because:
+                //   1. The C call is synchronous — it runs to completion before
+                //      this function returns, so the interpreter is still alive.
+                //   2. Callbacks execute on the same thread during the C call.
+                //   3. The pointer is NOT stored beyond the C call's scope.
+                //   4. If C stores the callback pointer for later async use,
+                //      this would be use-after-free — but our FFI contract
+                //      requires callbacks to be invoked synchronously only.
+                // The previous context is restored after the call (see prev_ctx
+                // restoration below), ensuring no stale pointers survive.
                 #[allow(clippy::unnecessary_cast)]
                 let static_ptr = interp_ptr as *mut Interpreter<'static>;
                 super::ffi::callback::FFI_CALLBACK_CTX.with(|c| {

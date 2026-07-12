@@ -48,7 +48,7 @@ type NetError {
 
 // NetOps: Trait for network operations on file descriptors and URLs.
 trait NetOps {
-    func send(data: string) -> Result<i64, NetError>
+    func send(data: string) -> Result<i32, NetError>
     func recv(buf_size: i32) -> Result<string, NetError>
     func fetch() -> Result<string, NetError>
     func fetch_post(body: string) -> Result<string, NetError>

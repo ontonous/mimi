@@ -422,8 +422,12 @@ mod tests {
         }
         let state = VerifierState::new(&file).unwrap();
         assert!(!state.is_done());
+        // 2 functions in queue → 2 Step transitions process them,
+        // then a 3rd Step transitions to Done (empty queue → Done).
         let state = state.transition(FlowEvent::Step).unwrap();
         assert!(!state.is_done());
+        let state = state.transition(FlowEvent::Step).unwrap();
+        // After processing all functions, one more Step to reach Done.
         let state = state.transition(FlowEvent::Step).unwrap();
         assert!(state.is_done());
         let acc = state.into_output();

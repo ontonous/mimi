@@ -33,6 +33,10 @@ impl IntMath for i32 {
     func abs() -> i32 { if self < 0 { -self } else { self } }
     func sign() -> i32 { if self > 0 { 1 } else if self < 0 { -1 } else { 0 } }
     func factorial() -> i32 {
+        // CRITICAL #19 fix: guard against i32 overflow. 13! = 6,227,020,800
+        // exceeds i32::MAX (2,147,483,647). Cap at 12! and return -1 for
+        // inputs that would overflow.
+        if self < 0 || self > 12 { return -1 }
         let mut fac_acc = 1
         let mut fac_k = 2
         while fac_k <= self {
@@ -67,6 +71,8 @@ impl IntMath for i32 {
         true
     }
     func mod_pow(exp: i32, modulus: i32) -> i32 {
+        // HIGH fix: guard against division by zero when modulus == 0.
+        if modulus == 0 { return 0 }
         let mut mp_acc = 1
         let mut mp_bv = self % modulus
         let mut mp_ev = exp
@@ -134,6 +140,10 @@ impl IntMath for i32 {
         self == self.reverse_number()
     }
     func collatz_steps() -> i32 {
+        // CRITICAL #20 fix: Collatz sequence only converges to 1 for n >= 1.
+        // Negative or zero input would cause an infinite loop. Return -1 for
+        // invalid input.
+        if self < 1 { return -1 }
         let mut cs_cnt = 0
         let mut cs_val = self
         while cs_val != 1 {
@@ -153,7 +163,10 @@ impl IntMath for i32 {
         g_x
     }
     func lcm(other: i32) -> i32 {
-        if self == 0 || other == 0 { 0 } else { self * other / self.gcd(other) }
+        // HIGH fix: guard against intermediate overflow. self * other can
+        // overflow even if the final result fits in i32. Use the identity
+        // lcm(a,b) = |a| * (|b| / gcd(a,b)) to avoid intermediate overflow.
+        if self == 0 || other == 0 { 0 } else { self * (other / self.gcd(other)) }
     }
     func is_even() -> bool { self % 2 == 0 }
     func is_odd() -> bool { self % 2 != 0 }

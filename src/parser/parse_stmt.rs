@@ -710,6 +710,12 @@ impl Parser {
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
                 stmts.push(Stmt::Requires(expr, span));
+                // CRITICAL #16 fix: consume trailing semicolons after
+                // contract clauses. Previously, `requires: x > 0;` would
+                // leave the `;` unconsumed, causing cascade parse errors.
+                while self.at(&TokenKind::Semi) {
+                    self.advance();
+                }
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
@@ -718,6 +724,10 @@ impl Parser {
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
                 stmts.push(Stmt::Ensures(expr, span));
+                // CRITICAL #16 fix: consume trailing semicolons.
+                while self.at(&TokenKind::Semi) {
+                    self.advance();
+                }
                 continue;
             }
             if self.at(&TokenKind::Invariant) {
@@ -726,6 +736,10 @@ impl Parser {
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
                 stmts.push(Stmt::Invariant(expr, span));
+                // CRITICAL #16 fix: consume trailing semicolons.
+                while self.at(&TokenKind::Semi) {
+                    self.advance();
+                }
                 continue;
             }
             if self.at(&TokenKind::Math) {

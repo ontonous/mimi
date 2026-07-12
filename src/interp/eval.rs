@@ -1036,7 +1036,14 @@ impl<'a> Interpreter<'a> {
             }
             // Bind the delegate arg
             self.bind("__arg", val)?;
+            // HIGH fix: save/restore early_return for closure calls, matching
+            // call_func behavior. Without this, a `return` inside a closure
+            // body would leak to the outer function call.
+            let saved_early_return = self.early_return.take();
             let result = self.eval_block(body);
+            // If the closure set early_return, use it as the closure's result.
+            let result = self.early_return.take().map_or(result, |v| Ok(Some(v)));
+            self.early_return = saved_early_return;
             self.pop_scope();
             result.map(|v| v.unwrap_or(Value::Unit))
         } else {

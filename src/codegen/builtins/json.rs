@@ -374,4 +374,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         Ok(result.into())
     }
+
+    /// CRITICAL #18 fix: compile json_has_key(json, key) -> i64 (1 or 0).
+    pub(super) fn compile_json_has_key(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "json_has_key expects 2 arguments".into(),
+            ));
+        }
+        let json_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let key_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let func = self
+            .module
+            .get_function("json_has_key")
+            .ok_or_else(|| "codegen: json_has_key not declared".to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(json_ptr),
+                    BasicMetadataValueEnum::PointerValue(key_ptr),
+                ],
+                "json_has_key_call",
+            )
+            .map_err(|e| format!("json_has_key error: {}", e))?
+            .try_as_basic_value_opt()
+            .ok_or("json_has_key returned void")?;
+        Ok(result)
+    }
 }

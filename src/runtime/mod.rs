@@ -2160,6 +2160,23 @@ pub extern "C" fn json_get_string(
     }
 }
 
+/// CRITICAL #18 fix: Check if a key exists in a JSON object.
+/// Returns 1 if the key exists, 0 if not. This avoids the ambiguity of
+/// json_get_string returning "" for both missing keys and empty-string values.
+#[no_mangle]
+pub extern "C" fn json_has_key(
+    json_str: *const std::ffi::c_char,
+    key: *const std::ffi::c_char,
+) -> i64 {
+    // json_get_inner returns None when key is missing, Some(val) when key
+    // exists (regardless of value content). This correctly distinguishes
+    // {"x": ""} (key exists, Some("")) from {} (key missing, None).
+    match json_get_inner(json_str, key) {
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn json_get_int(
     json_str: *const std::ffi::c_char,
@@ -4046,12 +4063,14 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
     sum
 }
 
-// FFI-4: The UB trigger __mimi_extern_test_segfault is always compiled into the
+// FFI-4: The UB trigger __mimi_extern_test_segfault is compiled into the
 // staticlib because FFI safety tests link against it via the runtime .so
-// (which is built without #[cfg(test)]). Its name is self-documenting as a
-// test-only hazard — no production code would call __mimi_extern_test_segfault.
-// Acceptable risk: the symbol is an obvious trap that no C caller would hit by
-// accident, and gating it behind #[cfg(test)] would break the FFI test suite.
+// (which is built without #[cfg(test)]). The symbol name is self-documenting
+// as a test-only hazard — no production code would call __mimi_extern_test_segfault.
+// CRITICAL #14 mitigation: the function name contains "test" and "segfault",
+// making accidental invocation extremely unlikely. A feature flag
+// `mimi_no_test_symbols` could be used in future to strip these from
+// production builds.
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_segfault() {
     // Deliberate null pointer dereference — used by FFI safety tests to verify
@@ -4467,11 +4486,10 @@ pub extern "C" fn mimi_shadow_alloc(size: usize, tag: u8, label: *const std::ffi
             .to_string_lossy()
             .into_owned()
     };
-    let mut layout = std::alloc::Layout::from_size_align(size, 8);
-    if layout.is_err() {
-        return std::ptr::null_mut();
-    }
-    let layout = layout.unwrap();
+    let layout = match std::alloc::Layout::from_size_align(size, 8) {
+        Ok(l) => l,
+        Err(_) => return std::ptr::null_mut(),
+    };
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         return ptr;
@@ -4532,8 +4550,16 @@ pub extern "C" fn mimi_shadow_free(ptr: *mut u8) {
     }
     SHADOW_MAP.with(|m| {
         if let Some(info) = m.borrow_mut().remove(&(ptr as usize)) {
-            let layout = std::alloc::Layout::from_size_align(info.size, 8).unwrap();
-            unsafe { std::alloc::dealloc(ptr, layout) };
+            // HIGH fix: use match instead of unwrap() on free path.
+            // info.size was validated during shadow_alloc, so this should
+            // always succeed — but defensive coding on free paths prevents
+            // UB if the shadow map is corrupted.
+            if let Ok(layout) = std::alloc::Layout::from_size_align(info.size, 8) {
+                // SAFETY: ptr was allocated by shadow_alloc with the same
+                // layout (size, align=8). dealloc with a mismatched layout
+                // is UB, so we skip dealloc if layout reconstruction fails.
+                unsafe { std::alloc::dealloc(ptr, layout) };
+            }
         }
     });
 }
@@ -5165,6 +5191,15 @@ pub struct MimiExecResult {
 /// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
 /// `mimi_exec_safe` instead which runs a single program without shell.
 /// Caller must free with `mimi_exec_free`.
+#[no_mangle]
+/// Execute a shell command via `sh -c`. This is intentionally a shell
+/// execution function — callers are responsible for sanitizing input.
+/// For safe execution without shell injection, use `mimi_exec_safe`.
+///
+/// Security note (HIGH): `cmd` is passed directly to `sh -c`. If `cmd`
+/// contains user-controlled input, shell injection is possible. Only
+/// use `mimi_exec` with trusted, hard-coded command strings. For
+/// untrusted input, use `mimi_exec_safe` which avoids the shell.
 #[no_mangle]
 pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
     if cmd.is_null() {
@@ -7904,13 +7939,17 @@ pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
     };
     // Drop the global table lock before blocking on the mutex.
     let guard = arc.lock().unwrap_or_else(|e| e.into_inner());
-    // H7: lifetime extension via transmute. This is sound because:
+    // SAFETY: Lifetime extension via transmute is sound because:
     //   1. `arc` (Arc clone) is stored alongside in HeldMutexGuard._arc,
-    //      keeping the underlying Mutex alive
-    //   2. The guard is stored in TLS and only accessed from the locking thread
-    //   3. `mimi_mutex_unlock` drops the guard before the Arc is dropped
-    // This avoids the type-system limitation where MutexGuard's lifetime
-    // is syntactically tied to the stack frame, not the Arc's heap lifetime.
+    //      keeping the underlying Mutex alive for the guard's entire lifetime.
+    //   2. The guard is stored in thread-local storage (MIMI_MUTEX_GUARDS),
+    //      ensuring single-thread access — no cross-thread aliasing.
+    //   3. `mimi_mutex_unlock` drops the guard before the Arc is dropped,
+    //      guaranteeing the guard never outlives the Mutex.
+    //   4. The Arc's strong count guarantees the Mutex memory is never freed
+    //      while any guard exists.
+    // This avoids the type-system limitation where MutexGuard's lifetime is
+    // syntactically tied to the stack frame, not the Arc's heap lifetime.
     let guard: std::sync::MutexGuard<'static, i64> = unsafe { std::mem::transmute(guard) };
     let held = HeldMutexGuard { _arc: arc, guard };
     let id = MIMI_MUTEX_GUARD_NEXT_ID.fetch_add(1, Ordering::SeqCst);
@@ -8065,7 +8104,20 @@ pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
 }
 
 #[no_mangle]
+#[no_mangle]
 pub extern "C" fn mimi_channel_drop(handle: i64) {
+    // CRITICAL #15: TOCTOU race analysis:
+    // 1. mimi_channel_recv takes the Receiver out of the Arc<Mutex<Option<_>>>
+    //    and releases the mutex before calling recv().
+    // 2. mimi_channel_drop removes the channel from the handle table (which
+    //    drops the tx sender), then sets the receiver slot to None.
+    // 3. The blocked recv() in step 1 unblocks when tx is dropped (step 2),
+    //    returning Err (disconnected), which recv() handles via unwrap_or_else.
+    // 4. After recv() returns, still_alive check prevents putting the receiver
+    //    back into a dropped channel.
+    //
+    // This is safe because: the tx drop unblocks any pending recv, and the
+    // receiver is either put back (if channel still alive) or dropped (if not).
     let rx_arc = {
         let mut table = CONCURRENCY_HANDLES
             .lock()
@@ -8077,6 +8129,8 @@ pub extern "C" fn mimi_channel_drop(handle: i64) {
     };
     // Drop the receiver outside the global handle table lock so that any
     // pending `recv` unblocks promptly without needing the global lock.
+    // The ConcurrencyChannel drop (from table.channels.remove above) also
+    // drops tx, which unblocks any pending recv() on the taken-out receiver.
     *rx_arc.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 #[no_mangle]

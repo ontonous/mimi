@@ -158,6 +158,8 @@ declare i64 @json_array_length(ptr)
 
 declare ptr @json_get_element(ptr, i64)
 
+declare i64 @json_has_key(ptr, ptr)
+
 declare i64 @mimi_json_as_i64(ptr)
 
 declare double @mimi_json_as_f64(ptr)

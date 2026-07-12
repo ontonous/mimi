@@ -6,6 +6,14 @@ impl Parser {
     pub(crate) fn parse_match_arms(&mut self) -> Result<Vec<MatchArm>, ParseError> {
         let mut arms = Vec::new();
         self.skip_newlines();
+        // CRITICAL #6 fix: ensure record literals are allowed in match arm
+        // bodies. The match scrutinee parser temporarily disables
+        // allow_record_literal to disambiguate `match Foo { ... }` (scrutinee
+        // Foo, body `{...}`) from `match Foo { x: 1 }` (scrutinee = record).
+        // But the save/restore in parse_expr.rs only covers the scrutinee;
+        // arm bodies must re-enable it explicitly.
+        let saved_allow_record = self.allow_record_literal;
+        self.allow_record_literal = true;
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let pat = self.parse_pattern()?;
             let guard = if self.at(&TokenKind::If) {
@@ -29,6 +37,7 @@ impl Parser {
                 self.skip_newlines();
             }
         }
+        self.allow_record_literal = saved_allow_record;
         Ok(arms)
     }
 

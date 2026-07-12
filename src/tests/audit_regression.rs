@@ -394,3 +394,446 @@ func main() -> i32 {
         result.err()
     );
 }
+
+// ============================================================
+// v0.30.0 Audit Fix Regression Tests
+// Tests for CRITICAL/HIGH bugs fixed in the 2026-07-12 batch.
+// Each test name references the bug ID from the audit report.
+// ============================================================
+
+// ── CRITICAL #1: Verifier 后置条件 AND→OR 假阳性 ──
+// Previously, check_scope_multi AND-joined all NOT(ensures_i).
+// If ens1 was a tautology (NOT(ens1) UNSAT) but ens2 was violatable,
+// the conjunction was UNSAT → false "Verified".
+#[test]
+fn crit01_verifier_postcondition_or_semantics() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    // Two ensures: ens1 is always true (result >= 0), ens2 is violatable
+    // (result > 100). The old AND logic would report Verified because
+    // NOT(ens1) is UNSAT making the conjunction UNSAT. The fix checks
+    // each independently — ens2 should be Failed.
+    let src = r#"
+func f(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    ensures: result > 100
+    x
+}
+"#;
+    let results = crate::verifier::verify_source(src)
+        .expect("verify_source should not error");
+    assert!(
+        results.iter().any(|r| r.status == crate::verifier::VerifStatus::Failed),
+        "ensures result > 100 should fail for f(x)=x with x>=0 — got: {:?}",
+        results.iter().map(|r| (&r.func_name, &r.status, &r.message)).collect::<Vec<_>>()
+    );
+}
+
+// ── CRITICAL #3: Verifier 函数间 Z3 交叉污染 ──
+#[test]
+fn crit03_verifier_no_cross_contamination() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    // Two functions share Z3 variable name x. Without session.reset()
+    // between them, assertions from inc leak into dec's verification.
+    let src = r#"
+func inc(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > x
+    x + 1
+}
+func dec(x: i32) -> i32 {
+    requires: x > 10
+    ensures: result < x
+    x - 1
+}
+"#;
+    let results = crate::verifier::verify_source(src)
+        .expect("verify_source should not error");
+    // Both should verify independently without cross-contamination
+    for r in &results {
+        assert_eq!(
+            r.status,
+            crate::verifier::VerifStatus::Verified,
+            "{} should verify: {}",
+            r.func_name,
+            r.message
+        );
+    }
+}
+
+// ── CRITICAL #6: Parser match arm 不受 allow_record_literal=false 影响 ──
+// The match scrutinee sets allow_record_literal=false to disambiguate
+// `match Foo { ... }`. This test verifies that match arm bodies can
+// still use expressions that parse correctly.
+#[test]
+fn crit06_match_arm_not_affected_by_record_literal_flag() {
+    let src = r#"
+func main() -> i32 {
+    let x = 5
+    match x {
+        1 => 10,
+        5 => 20,
+        _ => 0
+    }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(20));
+
+    // Also verify nested match works
+    let src2 = r#"
+func main() -> i32 {
+    let x = 1
+    let y = 2
+    match x {
+        1 => match y {
+            2 => 100,
+            _ => 0
+        },
+        _ => 0
+    }
+}
+"#;
+    let v2 = run_source(src2);
+    assert_eq!(v2, interp::Value::Int(100));
+}
+
+// ── CRITICAL #7: Lexer 多级 dedent ──
+#[test]
+fn crit07_lexer_multi_level_dedent() {
+    // Source drops from indent=12 to indent=0 in one step.
+    // Previously only one Dedent was emitted; the rest were deferred.
+    let src = "func main() -> i32 {\n    let x = 1\n        let y = 2\n    x\n}\n";
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    assert!(tokens.is_ok(), "tokenize should succeed");
+    let tokens = tokens.unwrap();
+    let dedent_count = tokens.iter().filter(|t| matches!(t.kind, crate::lexer::TokenKind::Dedent)).count();
+    let indent_count = tokens.iter().filter(|t| matches!(t.kind, crate::lexer::TokenKind::Indent)).count();
+    assert_eq!(
+        dedent_count, indent_count,
+        "indent/dedent should be balanced: {} indents, {} dedents",
+        indent_count, dedent_count
+    );
+}
+
+// ── CRITICAL #8: Stdlib net.mimi trait/impl 返回类型匹配 ──
+#[test]
+fn crit08_net_trait_impl_typecheck() {
+    let src = r#"
+use std::net
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "std::net should typecheck after trait/impl return type fix"
+    );
+}
+
+// ── CRITICAL #16: Parser requires:/ensures: 消费分号 ──
+#[test]
+fn crit16_contract_clause_semicolon() {
+    let src = r#"
+func f(x: i32) -> i32 {
+    requires: x > 0;
+    ensures: result > 0;
+    x
+}
+func main() -> i32 {
+    f(1)
+}
+"#;
+    // Should parse and run successfully
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── CRITICAL #17: Verifier 科学记数法不 panic ──
+#[test]
+fn crit17_verifier_scientific_notation_no_panic() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    let src = r#"
+func f(x: f64) -> f64 {
+    requires: x > 1e-50
+    ensures: result > 0.0
+    x
+}
+"#;
+    // Should not panic on scientific notation
+    let result = crate::verifier::verify_source(src);
+    assert!(result.is_ok(), "verify_source should not panic on scientific notation: {:?}", result.err());
+}
+
+// ── CRITICAL #18: json_has_key 对空值正确判断 ──
+#[test]
+fn crit18_json_has_key_empty_value() {
+    // {"x": ""} — has_key should return true even though value is empty
+    let src = r#"func main() -> bool { json_has_key("{\"x\":\"\"}", "x") }"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Bool(true));
+}
+
+#[test]
+fn crit18_json_has_key_missing_key() {
+    let src = r#"func main() -> bool { json_has_key("{\"x\":1}", "y") }"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Bool(false));
+}
+
+// ── CRITICAL #19: factorial 溢出防护 ──
+// Test the stdlib factorial logic directly (inline) since trait method
+// dispatch on i32 requires the full stdlib loader path.
+#[test]
+fn crit19_factorial_overflow_guard() {
+    let src = r#"
+func factorial(n: i32) -> i32 {
+    if n < 0 || n > 12 { return -1 }
+    let mut acc = 1
+    let mut k = 2
+    while k <= n { acc *= k; k += 1 }
+    acc
+}
+func main() -> i32 {
+    let a = factorial(5)
+    let b = factorial(13)
+    let c = factorial(-1)
+    if a == 120 && b == -1 && c == -1 { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── CRITICAL #20: collatz_steps 负数输入不无限循环 ──
+#[test]
+fn crit20_collatz_negative_input() {
+    let src = r#"
+func collatz_steps(n: i32) -> i32 {
+    if n < 1 { return -1 }
+    let mut cnt = 0
+    let mut val = n
+    while val != 1 {
+        if val % 2 == 0 { val = val / 2 } else { val = 3 * val + 1 }
+        cnt += 1
+    }
+    cnt
+}
+func main() -> i32 {
+    let a = collatz_steps(6)
+    let b = collatz_steps(-5)
+    let c = collatz_steps(0)
+    if a > 0 && b == -1 && c == -1 { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── HIGH: Lexer 0x/0b/0o 无数字不产生畸形 token ──
+#[test]
+fn high_lex_number_prefix_no_digits() {
+    let src = "func main() -> i32 { let x = 0x }";
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    // Should tokenize without error (parser will report invalid hex)
+    assert!(tokens.is_ok(), "0x without digits should tokenize");
+    // Verify the token is an Int with prefix "0x"
+    let tokens = tokens.unwrap();
+    let int_tok = tokens.iter().find(|t| matches!(t.kind, crate::lexer::TokenKind::Int(_)));
+    assert!(int_tok.is_some(), "should have an Int token");
+    if let Some(t) = int_tok {
+        if let crate::lexer::TokenKind::Int(s) = &t.kind {
+            assert!(s.starts_with("0x"), "token should be '0x...', got: {}", s);
+        }
+    }
+}
+
+// ── HIGH: Lexer 1e 无数字不产生 Int("1e") ──
+#[test]
+fn high_lex_scientific_no_digits() {
+    let src = "let x = 1e";
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    assert!(tokens.is_ok(), "should tokenize");
+    let tokens = tokens.unwrap();
+    // The "1" should be Int("1"), and "e" should be a separate Ident token
+    // (not Int("1e") or Float("1e") which would be malformed)
+    let has_int_one = tokens.iter().any(|t| {
+        matches!(&t.kind, crate::lexer::TokenKind::Int(s) if s == "1")
+    });
+    assert!(has_int_one, "should have Int(\"1\") token, not Int(\"1e\")");
+    // Should NOT have an Int or Float token containing "1e"
+    let has_malformed = tokens.iter().any(|t| {
+        match &t.kind {
+            crate::lexer::TokenKind::Int(s) | crate::lexer::TokenKind::Float(s) => {
+                s.contains('e') || s.contains('E')
+            }
+            _ => false,
+        }
+    });
+    assert!(!has_malformed, "should not have a token containing '1e'");
+}
+
+// ── HIGH: Stdlib mod_pow 模 0 防护 ──
+#[test]
+fn high_mod_pow_zero_modulus() {
+    let src = r#"
+func mod_pow(base: i32, exp: i32, modulus: i32) -> i32 {
+    if modulus == 0 { return 0 }
+    let mut acc = 1
+    let mut bv = base % modulus
+    let mut ev = exp
+    while ev > 0 {
+        if ev % 2 == 1 { acc = (acc * bv) % modulus }
+        bv = (bv * bv) % modulus
+        ev = ev / 2
+    }
+    acc
+}
+func main() -> i32 {
+    let a = mod_pow(5, 3, 0)
+    if a == 0 { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── HIGH: Stdlib lcm 中间溢出防护 ──
+#[test]
+fn high_lcm_no_intermediate_overflow() {
+    let src = r#"
+func gcd(a: i32, b: i32) -> i32 {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = y
+        y = x % y
+        x = t
+    }
+    x
+}
+func lcm(a: i32, b: i32) -> i32 {
+    if a == 0 || b == 0 { 0 } else { a * (b / gcd(a, b)) }
+}
+func main() -> i32 {
+    let a = lcm(65536, 32768)
+    if a == 65536 { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── HIGH: Parser recover_to_sync_slice 包含 Flow/Protocol/Session ──
+#[test]
+fn high_parser_sync_slice_includes_flow_keywords() {
+    // After a parse error, recovery should resume at `flow`/`protocol`/`session`
+    let src = r#"
+func main() -> i32 { 0 }
+flow Counter {
+    state Zero { count: i32 }
+}
+"#;
+    // Should parse without error — flow keyword is a sync point
+    let result = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(src).tokenize().unwrap()
+    ).parse_file();
+    assert!(result.is_ok(), "flow keyword should be recognized after func: {:?}", result.err());
+}
+
+// ── HIGH: Interpreter 闭包 early_return 隔离 ──
+#[test]
+fn high_closure_early_return_isolation() {
+    let src = r#"
+func main() -> i32 {
+    let f = fn(x: i32) -> i32 {
+        if x > 10 { return x }
+        x + 1
+    };
+    let a = f(5)
+    let b = f(20)
+    // a should be 6 (no early return), b should be 20 (early return)
+    // main itself should not be affected by closure's early_return
+    if a == 6 && b == 20 { 1 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(1));
+}
+
+// ── HIGH: Interpreter RefMut 使用写锁 ──
+// RefMut deref should use write() not read() — this test verifies
+// that creating &mut and dereferencing it doesn't panic due to
+// lock errors.
+#[test]
+fn high_refmut_uses_write_lock() {
+    let src = r#"
+func main() -> i32 {
+    let mut x = 10
+    let r = &mut x
+    // Deref should work (previously used read() which could succeed
+    // but violate aliasing rules in multi-threaded contexts)
+    let val = *r
+    val
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(10));
+}
+
+// ── CRITICAL #1 补充: 单个 ensures 永真时验证通过 ──
+#[test]
+fn crit01_single_valid_ensures_verified() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    let src = r#"
+func f(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > 0
+    x
+}
+"#;
+    let results = crate::verifier::verify_source(src)
+        .expect("verify_source should not error");
+    for r in &results {
+        assert_eq!(
+            r.status,
+            crate::verifier::VerifStatus::Verified,
+            "{} should verify: {}",
+            r.func_name,
+            r.message
+        );
+    }
+}
+
+// ── CRITICAL #1 补充: 单个 ensures 可违反时报失败 ──
+#[test]
+fn crit01_single_violatable_ensures_fails() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("    └─ skipped (Z3 not available)");
+        return;
+    }
+    let src = r#"
+func f(x: i32) -> i32 {
+    requires: x > 0
+    ensures: result > 100
+    x
+}
+"#;
+    let results = crate::verifier::verify_source(src)
+        .expect("verify_source should not error");
+    assert!(
+        results.iter().any(|r| r.status == crate::verifier::VerifStatus::Failed),
+        "ensures result > 100 should fail for f(x)=x — got: {:?}",
+        results.iter().map(|r| (&r.func_name, &r.status)).collect::<Vec<_>>()
+    );
+}

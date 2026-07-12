@@ -582,14 +582,20 @@ impl<'a> Checker<'a> {
                 return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
             }
             "has_key" => {
-                if args.len() != 2 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "has_key expects 2 arguments",
-                    );
-                } else {
+                // has_key can be called as a 2-arg global function (json, key)
+                // or as a 1-arg trait method (key) with implicit self.
+                // Only validate arg count for the 2-arg form; the 1-arg form
+                // is handled by trait method dispatch.
+                if args.len() == 2 {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
+                } else if args.len() == 1 {
+                    self.infer_expr(&args[0], scopes);
+                } else {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "has_key expects 1 or 2 arguments",
+                    );
                 }
                 return Type::Name("bool".into(), vec![]);
             }
@@ -1428,6 +1434,18 @@ impl<'a> Checker<'a> {
                     self.infer_expr(&args[1], scopes);
                 }
                 return Type::Name("string".into(), vec![]);
+            }
+            "json_has_key" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "json_has_key expects 2 arguments",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
             }
             "socket" => {
                 if args.len() != 3 {

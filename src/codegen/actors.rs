@@ -535,6 +535,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             &format!(".mn_{}_{}", actor.name, m.name),
                         )
                         .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+                    // SAFETY: `arr_ty` is an array type allocated by build_alloca
+                    // above (valid pointer, valid type). The indices [0, i] are
+                    // in-bounds because `i` ranges from 0 to actor.methods.len()-1
+                    // and the array has n elements where n = actor.methods.len().
                     let gep = unsafe {
                         self.builder
                             .build_in_bounds_gep(

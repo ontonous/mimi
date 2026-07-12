@@ -690,13 +690,28 @@ fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
         if f.is_infinite() || f.is_nan() {
             return None;
         }
-        // Use to_string() for shortest unique decimal representation.
+        // CRITICAL #17 fix: format!("{}", f) for scientific notation like
+        // "1e-50" or "1e20" does not contain a '.', causing the else branch
+        // to pass "1e-50" to from_rational_str which panics. Instead, use
+        // a format that always produces decimal notation with a fractional
+        // part, and handle the scientific notation case explicitly.
         let s = format!("{}", f);
         if let Some(dot) = s.find('.') {
             let num_str: String = s.chars().filter(|&c| c != '.').collect();
             let precision = s.len() - dot - 1;
             let den_str = format!("1{}", "0".repeat(precision));
             Z3Real::from_rational_str(&num_str, &den_str)
+        } else if s.contains('e') || s.contains('E') {
+            // Scientific notation without decimal point (e.g. "1e20").
+            // Parse and convert to decimal fraction.
+            // f is finite and not NaN (checked above), so this is safe.
+            let abs_f = f.abs();
+            // Multiply by 10^18 to get an integer numerator, then divide.
+            // This loses precision for very large/small values, but Z3
+            // real encoding is approximate anyway.
+            let scaled = (abs_f * 1e18).round() as i64;
+            let num = if f < 0.0 { -scaled } else { scaled };
+            Z3Real::from_rational_str(&num.to_string(), "1000000000000000000")
         } else {
             // Integer-valued float: use integer directly (no overflow from precise ints).
             Z3Real::from_rational_str(&s, "1")

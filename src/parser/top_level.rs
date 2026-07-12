@@ -815,7 +815,14 @@ impl Parser {
                             annotations.push(FlowAnnotation::MaxChildren(n));
                         }
                     }
-                    _ => {}
+                    _ => {
+                        // HIGH fix: previously silently ignored unknown @annotations
+                        // with parentheses. Now emit a diagnostic warning.
+                        eprintln!(
+                            "[mimi parser] WARN: unknown flow annotation '@{}' — ignored",
+                            ann_name
+                        );
+                    }
                     }
                     self.expect(TokenKind::RParen, "`)`")?;
                     continue;

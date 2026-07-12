@@ -383,6 +383,9 @@ impl<'a> Interpreter<'a> {
             Value::String(s) => s.clone(),
             _ => return Err(InterpError::new("http_get: url must be string")),
         };
+        // CRITICAL #13 fix: SSRF protection — reject non-http schemes and
+        // private/loopback addresses.
+        Self::validate_http_url(&url)?;
         // Parse URL: http://host[:port][/path]
         let url = url.trim_start_matches("http://");
         let (host, rest) = url.split_once('/').unwrap_or((url, ""));
@@ -399,6 +402,7 @@ impl<'a> Interpreter<'a> {
         } else {
             (host, 80)
         };
+        Self::validate_host_ssrf(host)?;
         let fd = Self::http_connect(host, port)?;
         let request = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
@@ -411,6 +415,58 @@ impl<'a> Interpreter<'a> {
             .map(|(_, b)| b)
             .unwrap_or(&response);
         Ok(Value::String(body.to_string()))
+    }
+
+    /// CRITICAL #13: Validate URL scheme and reject non-http URLs to prevent
+    /// SSRF via file://, gopher://, etc.
+    fn validate_http_url(url: &str) -> Result<(), InterpError> {
+        let lower = url.to_lowercase();
+        if lower.starts_with("https://") || lower.starts_with("http://") {
+            return Ok(());
+        }
+        // Reject other schemes (file://, ftp://, gopher://, etc.)
+        if lower.contains("://") {
+            return Err(InterpError::new(
+                "http_get/http_post: only http:// and https:// schemes are allowed",
+            ));
+        }
+        // Allow bare host:port/path (implicit http://)
+        Ok(())
+    }
+
+    /// CRITICAL #13: Block SSRF by rejecting private/loopback addresses.
+    fn validate_host_ssrf(host: &str) -> Result<(), InterpError> {
+        // Reject obvious private/internal hostnames
+        let blocked_hosts = [
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+            "metadata.google.internal",
+        ];
+        if blocked_hosts.iter().any(|b| host == *b) {
+            return Err(InterpError::new(
+                "http_get/http_post: SSRF protection — loopback addresses are blocked",
+            ));
+        }
+        // Block private IP ranges (simplified: check prefixes)
+        let private_prefixes = [
+            "127.",   // loopback
+            "10.",    // private A
+            "172.16.", "172.17.", "172.18.", "172.19.",
+            "172.20.", "172.21.", "172.22.", "172.23.",
+            "172.24.", "172.25.", "172.26.", "172.27.",
+            "172.28.", "172.29.", "172.30.", "172.31.", // private B
+            "192.168.", // private C
+            "169.254.", // link-local
+            "::1", "fc", "fd", // IPv6 loopback + ULA
+        ];
+        if private_prefixes.iter().any(|p| host.starts_with(p)) {
+            return Err(InterpError::new(
+                "http_get/http_post: SSRF protection — private/internal addresses are blocked",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn builtin_http_post(&self, args: Vec<Value>) -> Result<Value, InterpError> {
@@ -427,6 +483,8 @@ impl<'a> Interpreter<'a> {
             Value::String(s) => s.clone(),
             _ => return Err(InterpError::new("http_post: body must be string")),
         };
+        // CRITICAL #13 fix: SSRF protection.
+        Self::validate_http_url(&url)?;
         let url = url.trim_start_matches("http://");
         let (host, rest) = url.split_once('/').unwrap_or((url, ""));
         let path = if rest.is_empty() {
@@ -442,6 +500,7 @@ impl<'a> Interpreter<'a> {
         } else {
             (host, 80)
         };
+        Self::validate_host_ssrf(host)?;
         let fd = Self::http_connect(host, port)?;
         let request = format!(
             "POST {} HTTP/1.0\r\nHost: {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n{}",

@@ -369,6 +369,7 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     s.push('x');
                     self.advance();
+                    let digit_start = s.len();
                     while let Some(c) = self.peek() {
                         if c.is_ascii_hexdigit() || c == '_' {
                             s.push(c);
@@ -377,6 +378,12 @@ impl<'a> super::Lexer<'a> {
                             break;
                         }
                     }
+                    // HIGH fix: reject "0x" with no hex digits.
+                    // Keep the prefix so the parser can produce a clear error.
+                    if s.len() == digit_start {
+                        // No digits after prefix — emit as error token.
+                        return TokenKind::Int(s); // parser will report invalid hex
+                    }
                     return TokenKind::Int(s);
                 }
                 Some('b') | Some('B') => {
@@ -384,6 +391,7 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     s.push('b');
                     self.advance();
+                    let digit_start = s.len();
                     while let Some(c) = self.peek() {
                         if c == '0' || c == '1' || c == '_' {
                             s.push(c);
@@ -392,6 +400,10 @@ impl<'a> super::Lexer<'a> {
                             break;
                         }
                     }
+                    // HIGH fix: reject "0b" with no binary digits.
+                    if s.len() == digit_start {
+                        return TokenKind::Int(s); // parser will report invalid binary
+                    }
                     return TokenKind::Int(s);
                 }
                 Some('o') | Some('O') => {
@@ -399,6 +411,7 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     s.push('o');
                     self.advance();
+                    let digit_start = s.len();
                     while let Some(c) = self.peek() {
                         if c.is_ascii_digit() && c != '8' && c != '9' || c == '_' {
                             s.push(c);
@@ -406,6 +419,10 @@ impl<'a> super::Lexer<'a> {
                         } else {
                             break;
                         }
+                    }
+                    // HIGH fix: reject "0o" with no octal digits.
+                    if s.len() == digit_start {
+                        return TokenKind::Int(s); // parser will report invalid octal
                     }
                     return TokenKind::Int(s);
                 }
@@ -439,17 +456,25 @@ impl<'a> super::Lexer<'a> {
         // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
         if let Some(ch) = self.peek() {
             if ch == 'e' || ch == 'E' {
-                s.push(ch);
-                self.advance();
-                // Optional sign
-                if let Some(sign) = self.peek() {
-                    if sign == '+' || sign == '-' {
-                        s.push(sign);
-                        self.advance();
+                // HIGH fix: "1e" without following digits should not consume 'e'.
+                // self.chars points to characters AFTER the peeked 'e'/'E'.
+                let mut tmp = self.chars.clone();
+                let first_after_e = tmp.next();
+                let first_digit = if first_after_e == Some('+') || first_after_e == Some('-') {
+                    tmp.next()
+                } else {
+                    first_after_e
+                };
+                if first_digit.map_or(false, |d| d.is_ascii_digit()) {
+                    s.push(ch);
+                    self.advance();
+                    // Optional sign
+                    if let Some(sign) = self.peek() {
+                        if sign == '+' || sign == '-' {
+                            s.push(sign);
+                            self.advance();
+                        }
                     }
-                }
-                // At least one digit required
-                if self.peek().map_or(false, |d| d.is_ascii_digit()) {
                     is_float = true;
                     while let Some(d) = self.peek() {
                         if d.is_ascii_digit() || d == '_' {
@@ -460,6 +485,8 @@ impl<'a> super::Lexer<'a> {
                         }
                     }
                 }
+                // If no valid digit follows 'e', don't consume it — leave as
+                // start of an identifier token.
             }
         }
         if is_float {
