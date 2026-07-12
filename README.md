@@ -1,271 +1,198 @@
 <div align="center">
 
-# 🧬 Mimi Language
+# Mimi Language
 
-**A system programming language with contract verification, structured concurrency, and linear capabilities**
+**A Typestate-Oriented system programming language — Flow state machines, contract verification, and structured concurrency**
 
-[![Version](https://img.shields.io/badge/version-0.28.30--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.30.0--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2859+%20passed%20%7C%200%20failed-brightgreen.svg)](#)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-3100+%20passed-brightgreen.svg)](#)
+[![Flow](https://img.shields.io/badge/flow-v0.29%20complete-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-MimiSpec Production Compiler Backend · Z3 Formal Verification · LLVM Native Compilation · Interpreter + Codegen Dual Backend
+Interpreter + LLVM 18 Codegen Dual Backend · Z3 Formal Verification · Typestate-Oriented · Flow State Machines · Protocol/Session Types · Actor Model
 
 ---
-
-> **⚠️ Development Status**
-> Mimi is under **active pre-stable development**. Version `0.x` means the language, APIs, standard library, and CLI are all subject to change. **Not yet recommended for production use.**
-> Early adopters are warmly welcome to test, report issues, and join the discussion — every issue and every suggestion matters.
-
 </div>
 
 ---
 
-## Table of Contents
+## What is Mimi?
 
-- [Get Involved](#get-involved)
-- [Features Overview](#features-overview)
-- [Quick Start](#quick-start)
-- [Examples](#examples)
-- [Standard Library](#standard-library)
-- [CLI Commands](#cli-commands)
-- [Project Structure](#project-structure)
-- [Version History](#version-history)
-- [Development](#development)
-- [Contributing](#contributing)
-- [License](#license)
+Mimi is a **Typestate-Oriented** system programming language. Its core insight: **replace lifetime annotations and `&mut self` with business-logic state machines (Flow)**. Every resource's lifecycle is bound to a business state — the compiler guarantees safety through state transitions, not borrow checking.
 
----
+```mimi
+flow Door {
+    state Open   { opened_at: i64 }
+    state Closed { locked: bool }
 
-## Get Involved
+    transition open(Closed) -> Open {
+        do { return Open { opened_at: timestamp() } }
+    }
+    transition close(Open { opened_at }) -> Closed {
+        do { return Closed { locked: false } }
+    }
+    transition lock(Closed) -> Closed {
+        do { return Closed { locked: true } }
+    }
+}
+```
 
-Mimi is evolving fast and we'd love your feedback. Whether you're a programming language enthusiast, a systems software developer, or just curious about contract-driven development, there's a place for you here.
-
-### Current Status
-
-- **Core Language**: Type system, borrow checking, concurrency model — foundational components are in place and continuously refined.
-- **Standard Library**: 22 modules covering common scenarios; interfaces may still evolve.
-- **Toolchain**: Compiler, LSP, and package manager are all functional, though not yet at 1.0 stability.
-- **Verification & Codegen**: LLVM native compilation and Z3 contract verification are improving steadily; some advanced verification scenarios may still be incomplete.
-
-### How to Get Involved
-
-| Method | Path |
-|---|---|
-| **Report Bugs** | Open an [Issue](https://github.com/ontonous/mimi/issues) with reproduction steps, platform info, and a minimal reproducer. |
-| **Feature Requests** | Describe your use case and expected behavior via an Issue. |
-| **Improve Docs** | Syntax reference, standard library comments, example programs — any change that makes Mimi easier to learn is welcome. |
-| **Contribute Code** | Read [CONTRIBUTING.md](CONTRIBUTING.md) and start with a `good first issue`. |
-| **Write Examples & Tutorials** | Share your Mimi programs to help others understand the language. |
-| **Join Discussions** | GitHub Issues & Discussions — ask questions, share experiences, or talk about design trade-offs. |
-
-### When Will It Be Stable?
-
-There is no fixed release date yet. The team iterates based on internal roadmaps and community feedback, with milestones recorded in [CHANGELOG.md](CHANGELOG.md). If you depend on a specific feature or want API freeze, let us know in an Issue — use cases directly drive priorities.
-
-> 💡 Even starring the repo or telling a friend you're trying Mimi makes a difference.
+The compiler auto-completes the transition matrix — every undefined (state, event) pair gets `→ Fault`. No dangling states, no forgotten transitions.
 
 ---
 
-## Features Overview
+## Features
 
-Mimi is the production compiler backend for the **MimiSpec** intent-description language, differentiated by **contract verification, structured concurrency, and linear capabilities**.
-
-| Feature | Description |
-|---|---|
-| **Contract Verification** | `requires`/`ensures` pre/post conditions + Z3 formal verification + runtime assertions |
-| **Structured Concurrency** | `parasteps` parallelism + `spawn`/`await` + `on failure` LIFO compensation |
-| **Linear Capabilities** | `cap` type-level resource tracking + `Allocator` custom allocators |
-| **Dual Backend** | Interpreter (rapid dev) + LLVM 18 codegen (native compilation) |
-| **Borrow Checking** | `&T`/`&mut T`, path-sensitive, arena escape detection, reborrowing |
-| **Reference Counting** | `shared`/`local_shared`/`weak` ownership model |
-| **Generics & Lifetimes** | `<T: Clone>` bounds, lifetime elision, recursive types |
-| **Option / Result** | `Option<T>` full path + `Result<T, E>` + `?` operator |
-| **ADT & Pattern Matching** | Enums/records/tuples, `match` exhaustiveness, `while let` |
-| **FFI** | `extern "C"`, `repr(C)` struct-by-value, callbacks, multi-language binding generation (C/C++/Rust/Go/Node.js/Java/Python/TypeScript) via `mimi bindgen` |
-| **async** | `async fn` → Future state machine + Executor cooperative scheduling |
-| **LSP** | Language server: completion, hover, goto-definition, contract lens |
-| **Package Management** | `mimi.toml` + registry + git dependencies + dependency tree |
-| **Standard Library** | 22 modules: io, fs, net, json, csv, crypto (SHA-256/Base64), regex, template, array, iter, and more |
-| **MimiSpec Integration** | `.mms` parsing, `mms{}` placeholders, rule consistency checking |
-| **Compile Targets** | Native x86_64, cross-compilation to Windows, shared library `.so` |
+| Category | Feature | Status |
+|----------|---------|--------|
+| **Flow** | `flow`/`state`/`transition` declarations, state payloads, transfer dispatch | ✅ v0.29.9 |
+| **Flow** | Transition matrix auto-completion (+1 fallback to Fault) | ✅ v0.29.10 |
+| **Flow** | Fault absorbing state + automatic resource drop | ✅ v0.29.11 |
+| **Flow** | SystemTrace provenance (`last_state`, `unexpected_event`, snapshot) | ✅ v0.29.12 |
+| **Flow** | Reset / Recover system verbs (Fault → root state, persistent keep) | ✅ v0.29.13 |
+| **Flow** | Persistent payload + `@transactional` WAL rollback | ✅ v0.29.14 |
+| **Flow** | `delegate view/mutate/consume` (3-level permission delegation) | ✅ v0.29.15 |
+| **Flow** | `pinned { timeout }` FFI memory anchor | ✅ v0.29.16 |
+| **Flow** | Subflow synchronous nesting (depth-first drop) | ✅ v0.29.17 |
+| **Flow** | Protocol interface abstraction (conservative projection subtyping) | ✅ v0.29.18 |
+| **Flow** | Session types: `session`/`dual`/`end`, compile-time linearity | ✅ v0.29.19 |
+| **Flow** | PeerFault cross-Actor propagation | ✅ v0.29.20 |
+| **Flow** | Mailbox backpressure auto-governance | ✅ v0.29.21 |
+| **Flow** | Progressive typestate (script → implicit `flow Main { state Single }`) | ✅ v0.29.22 |
+| **Flow** | `view`/`mutate` local borrowing (zero-overhead GEP pass) | ✅ v0.29.23 |
+| **Flow** | Spawn quota control (`@max_children(N)`) | ✅ v0.29.24 |
+| **Flow** | Polymorphic broadcast (`Vec<Protocol>`) | ✅ v0.29.25 |
+| **Flow** | Protocol methods, session_pair, lifecycle | ✅ v0.29.27–31 |
+| **Contract** | `requires:` / `ensures:` / `invariant:` in function bodies | ✅ |
+| **Contract** | Z3 SMT solver integration (`mimi verify`) | ✅ |
+| **Contract** | Runtime contract assertions (`mimi build --verify-contracts`) | ✅ |
+| **Actor** | `actor` keyword, mutable fields, mailbox dispatch, worker thread | ✅ |
+| **Dual Backend** | Interpreter (fast dev) + LLVM 18 codegen (native binary) | ✅ |
+| **Generics** | `<T: Bound>` type parameters, recursive types | ✅ |
+| **ADT** | Enums / records / tuples, `match` exhaustiveness, `while let` | ✅ |
+| **Option/Result** | `Option<T>` / `Result<T, E>` / `?` operator | ✅ |
+| **FFI** | `extern "C"`, `repr(C)`, multi-language bindgen (C/C++/Rust/Go/Node.js/Java/Python) | ✅ |
+| **Comptime** | `comptime func` + `quote!` AST generation | ✅ |
+| **LSP** | Completion, hover, goto-definition, contract lens | ✅ |
+| **Package** | `mimi.toml` manifest, registry, git deps, dependency tree | ✅ |
+| **Cross-compile** | `--target` flag, shared library `.so` output | ✅ |
 
 ---
 
 ## Quick Start
 
-### Build from Source
+### Build
 
 ```bash
-# Clone
 git clone https://github.com/ontonous/mimi
 cd mimi
-
-# Setup LLVM 18
 bash scripts/setup-llvm-wrapper.sh
-
-# Build
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
-
-# Verify
-./target/release/mimi --version
 ```
 
-### Hello World
+### Hello, Flow
 
 ```mimi
-func greet(name: string) -> string {
-    "Hello, " + name + "!"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition inc(Positive) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition reset(Positive) -> Zero {
+        do { return Zero { count: 0 } }
+    }
 }
 
 func main() -> i32 {
-    println(greet("World"));
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let s2 = Counter::inc(s1)
+    println(s2.count)   // 2
+    let s3 = Counter::reset(s2)
+    println(s3.count)   // 0
     0
 }
 ```
 
 ```bash
-./target/release/mimi run hello.mimi
-# => Hello, World!
+./target/release/mimi run counter.mimi
+# => 2
+# => 0
 ```
 
 ### Run Tests
 
 ```bash
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
-# 2859+ passed, 0 failed, 6 ignored
 ```
 
 ---
 
-## Examples
-
-### Function with Contracts
-
-```mimi
-pub func divide(a: i32, b: i32) -> i32 {
-    requires: b != 0          // divisor must not be zero
-    ensures:  result == a / b // result must be correct
-    a / b
-}
-```
-
-Enable Z3 formal verification with `mimi build --verify-contracts`.
-
-### ADT & Pattern Matching
-
-```mimi
-type Tree<T> {
-    Leaf(T)
-    Node(Tree<T>, Tree<T>)
-}
-
-func depth<T>(t: Tree<T>) -> i32 {
-    match t {
-        Leaf(_) => 1,
-        Node(l, r) => 1 + max(depth(l), depth(r)),
-    }
-}
-```
-
-### Concurrency & Compensation
-
-```mimi
-func process() -> Result<i32, string> {
-    let data = fetch_data()?;
-    on failure { cleanup(data) }
-
-    let result = compute(data)?;
-    on failure { revert(result) }
-
-    Ok(result)
-}
-```
-
-### FFI Calls
-
-```mimi
-extern "C" {
-    func strlen(s: string) -> i64;
-    func puts(s: string) -> i32;
-}
-
-func main() {
-    let len = strlen("Mimi");
-    puts("Hello from Mimi FFI!");
-}
-```
-
-> More examples in [`examples/`](examples/) (28 `.mimi` programs).
-
----
-
-## Standard Library
+## Standard Library (24 modules)
 
 | Module | File | Description |
-|---|---|---|---|
-| `io` | `io.mimi` | I/O: `print_line`, `input_line` |
-| `fs` | `fs.mimi` | Filesystem: `read`, `write`, `exists` |
-| `strings` | `strings.mimi` | Strings: `split`, `join`, `replace_all` |
-| `collections` | `collections.mimi` | Collections: `sort`, `map`, `filter`, `reduce` |
-| `maps` | `maps.mimi` | Map ops: `get`, `set`, `merge`, `pick` |
-| `set` | `set.mimi` | Set ops: `contains`, `insert`, `remove` |
-| `json` | `json.mimi` | JSON: `to_json`, `from_json`, typed deserialization |
-| `net` | `net.mimi` | Networking: TCP socket, HTTP fetch |
-| `csv` | `csv.mimi` | CSV parsing and serialization |
-| `crypto` | `crypto.mimi` | Crypto: SHA256, base64, hex |
-| `template` | `template.mimi` | String template rendering |
-| `regex` | (builtins) | Regex match/find/replace |
-| `time` / `datetime` | `time.mimi` / `datetime.mimi` | Timestamp / datetime utilities |
-| `env` | `env.mimi` | Env vars / CLI arguments |
-| `mymath` | `mymath.mimi` | Math: gcd, lcm, is_prime |
-| `array` | `array.mimi` | Fixed-size arrays: fill, slice, rotate, binary_search |
-| `iter` | `iter.mimi` | Iterators: range, zip, enumerate, take, drop, chain |
-| `random` | `random.mimi` | Random number utilities |
-| `text` | `text.mimi` | Text: slugify, indent, wrap |
-| `result` | `result.mimi` | Result combinators |
-| `prelude` | `prelude.mimi` | Utilities: clamp, pipe, compose |
-| `testing` | `testing.mimi` | Test assertions |
+|--------|------|-------------|
+| `prelude` | `prelude.mimi` | identity, clamp, lerp, compose, pipe, fail, assert_msg |
+| `io` | `io.mimi` | print_line, input_line, print_format, IoOps trait |
+| `fs` | `fs.mimi` | read, write, exists, read_lines, write_lines, file_size |
+| `strings` | `strings.mimi` | split, join, replace_all, capitalize, reverse, truncate, pad |
+| `collections` | `collections.mimi` | sort, map, filter, reduce, partition, group_by, chunks, dedup |
+| `maps` | `maps.mimi` | get, set, merge, pick, omit, has_key, from_list, filter_keys |
+| `set` | `set.mimi` | contains, insert, remove, to_list, is_empty |
+| `json` | `json.mimi` | to_json, from_json, get_int, get_bool, get_string, JsonExt trait |
+| `net` | `net.mimi` | TCP socket, HTTP fetch/fetch_post, NetError |
+| `csv` | `csv.mimi` | parse_csv, serialize_csv |
+| `crypto` | `crypto.mimi` | sha256, base64_encode/decode, hex_encode/decode |
+| `template` | `template.mimi` | render_template |
+| `regex` | (builtins) | regex_match, regex_find, regex_replace |
+| `time` / `datetime` | `time.mimi` / `datetime.mimi` | timestamp, sleep_ms, duration, days_from_now, time_since |
+| `env` | `env.mimi` | get_var, cli_args, has_var, get_int, get_float |
+| `mymath` | `mymath.mimi` | gcd, lcm, factorial, fibonacci, is_prime, is_power_of_two |
+| `array` | `array.mimi` | fill, slice, rotate, binary_search |
+| `iter` | `iter.mimi` | range, zip, enumerate, take, drop, chain |
+| `random` | `random.mimi` | random_int, random_float, random_range |
+| `text` | `text.mimi` | slugify, indent, wrap |
+| `result` | `result.mimi` | unwrap, map, map_err, and_then, or_else |
+| `testing` | `testing.mimi` | assert_eq_int, assert_true, assert_approx_eq_float |
+
+Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`AtomicI64`/`AtomicBool`, `Channel<T>`, `broadcast`.
 
 ---
 
 ## CLI Commands
 
 | Command | Description |
-|---|---|
-| `mimi check <file>` | Type check |
-| `mimi run <file>` | Run (type check + interpret) |
-| `mimi build <file>` | Compile to native binary |
-| `mimi build --verify-contracts` | Build with contract assertions |
-| `mimi test <file>` | Run `test_*` functions |
-| `mimi fmt <files>` | Format code |
-| `mimi lint <files>` | Lint |
-| `mimi verify <file>` | Z3 formal verification |
-| `mimi lsp` | Start LSP server |
-| `mimi init <name>` | Initialize project |
-| `mimi add <name>` | Add dependency |
+|---------|-------------|
+| `mimi check <path>` | Type-check with full error reporting |
+| `mimi run <path>` | Run (interpret) with optional `--verify-contracts` / `--profile` / `--watch` |
+| `mimi test <path>` | Run `test_*` functions with `--filter` and `--verbose` |
+| `mimi build <path>` | Compile to native binary (LLVM). `--emit-ir`, `--shared`, `--target`, `--verify-contracts` |
+| `mimi fmt <files>` | Format code (`--check` for CI) |
+| `mimi lint <files>` | Static analysis (`--fail-on-warnings`) |
+| `mimi verify <path>` | Z3 formal verification |
+| `mimi lsp` | Start LSP server (stdin/stdout) |
+| `mimi init [name]` | Initialize `mimi.toml` |
+| `mimi add <name>` | Add dependency (`--version`, `--git`, `--path`) |
 | `mimi remove <name>` | Remove dependency |
-| `mimi install` | Install dependencies |
+| `mimi install` | Install dependencies (`--frozen`, `--offline`) |
 | `mimi update` | Update dependencies |
 | `mimi list` | List dependencies |
 | `mimi tree` | Show dependency tree |
 | `mimi publish` | Publish to local registry |
 | `mimi search <query>` | Search packages |
-| `mimi doc <file>` | Generate docs |
-| `mimi promote <file>` | `.mms` → `.mimi` promotion |
+| `mimi doc <path>` | Generate documentation |
+| `mimi promote <path>` | Upgrade `.mms` → `.mimi` |
 | `mimi mms <files>` | Process MimiSpec files |
-| `mimi stats <file>` | Usage statistics (function-level call counts) |
-| `mimi emit-c-headers <file>` | Emit C headers |
-| `mimi emit-cpp-bindings <file>` | Emit C++ RAII bindings |
-| `mimi emit-rust-bindings <file>` | Emit Rust FFI bindings |
-| `mimi emit-go-bindings <file>` | Emit Go CGO bindings |
-| `mimi emit-node-bindings <file>` | Emit Node.js N-API bindings + TypeScript `.d.ts` |
-| `mimi emit-java-bindings <file>` | Emit Java JNI bindings |
-| `mimi emit-py-bindings <file>` | Emit Python pybind11 bindings |
-| `mimi bindgen <file> -o <dir>` | Generate all language bindings at once |
-| `mimi stat [path]` | Directory statistics (files, dirs, extensions) |
-| `mimi run --profile <file>` | Run with function-level profiling |
+| `mimi stats <path>` | Usage statistics |
+| `mimi stat <path>` | Directory analysis |
+| `mimi bindgen <path>` | Generate multi-language FFI bindings |
+| `mimi emit-c-headers` / `emit-py-bindings` / `emit-rust-bindings` / `emit-go-bindings` / `emit-node-bindings` / `emit-cpp-bindings` / `emit-java-bindings` | Language-specific FFI binding generation |
 
 ---
 
@@ -273,95 +200,64 @@ func main() {
 
 ```
 mimi/
-├── src/                   # Rust source code
-│   ├── main.rs            # CLI entry point
-│   ├── lib.rs             # Library entry point
-│   ├── ast.rs             # AST definitions
-│   ├── parser/            # Parser
-│   ├── lexer/             # Lexer
-│   ├── core/              # Type checking & inference
-│   ├── interp/            # Interpreter backend
-│   ├── codegen/           # LLVM codegen backend
-│   ├── verifier/          # Z3 formal verifier
-│   ├── ffi/               # FFI system (multi-language binding generation)
-│   ├── lsp/               # LSP server
-│   ├── contracts.rs       # (removed in v0.28.30 — was for MMS contract extraction)
-│   ├── runtime/           # Rust runtime + profiler
-│   ├── fmt.rs             # Formatter
-│   ├── lint.rs            # Linter
-│   ├── manifest.rs        # Package manifest
-│   ├── loader.rs          # Module loader
-│   ├── diagnostic/        # Error codes & formatting
-│   ├── main/              # CLI subcommand implementations
-│   └── tests/             # Test suite (2859+ tests)
-├── std/                   # Standard library (22 modules)
-├── examples/              # Examples (28 programs)
-├── docs/                  # Documentation
-│   ├── adr/               # Architecture Decision Records
-│   ├── syntax-reference.md
-│   └── ...
-├── scripts/               # Build/test scripts
-├── benches/               # Benchmarks
-├── CHANGELOG.md           # Full changelog
-├── CONTRIBUTING.md        # Contributing guide
-├── CODE_OF_CONDUCT.md     # Code of conduct
-├── SECURITY.md            # Security policy
-└── LICENSE                # Apache-2.0
+├── src/                       # Rust compiler (323 files, ~172k LOC)
+│   ├── main.rs                # CLI entry point (clap derive)
+│   ├── lib.rs                 # Library entry point
+│   ├── ast.rs                 # AST: FlowDef, StateDef, TransitionDef, ProtocolDef, ...
+│   ├── flow_matrix.rs         # Transition matrix + Fault auto-completion (+1 fallback)
+│   ├── session.rs             # Session type duality + sequencing check
+│   ├── progressive.rs         # Script → implicit flow Main { state Single }
+│   ├── parser/                # Flow parser (strict Flow state machine)       ✅ v0.29.0
+│   ├── lexer/                 # Flow lexer (strict Flow state machine)        ✅ v0.29.1
+│   ├── core/                  # Type inference & checking (relaxed Flow)      ✅ v0.29.8
+│   ├── interp/                # Interpreter (relaxed Flow)                    ✅ v0.29.6
+│   ├── codegen/               # LLVM 18 codegen via inkwell
+│   │   └── builtins/          # Builtin function codegen (io, string, json, ...)
+│   ├── verifier/              # Z3 contract verifier (strict Flow)            ✅ v0.29.7
+│   │   └── flow.rs            # Verifier as Flow state machine
+│   ├── ffi/                   # Multi-language binding generation (7 langs)
+│   ├── lsp/                   # LSP server (strict Flow)                     ✅ v0.29.5
+│   ├── loader/                # Module loader (strict Flow)                   ✅ v0.29.4
+│   ├── runtime/               # Rust runtime + actor mailbox + profiler
+│   ├── fmt.rs                 # Code formatter
+│   ├── lint.rs                # Static linter
+│   ├── main/                  # CLI subcommand implementations
+│   ├── diagnostic/            # Error codes & formatting
+│   └── tests/                 # 3100+ tests across 96 modules
+├── std/                       # Standard library (24 modules)
+├── examples/                  # Example programs (28+)
+├── demos/                     # Demo programs (23+)
+├── devdocs/                   # Design docs: white paper, flow drafts, ADRs
+├── scripts/                   # Build & CI scripts
+├── Cargo.toml
+└── CHANGELOG.md
 ```
 
 ---
 
-## Version History
+## Architecture: Flow Paradigm
 
-| Version | Highlight |
-|---|---|---|
-| **v0.28.30** | Actor field mutate + codegen map_get string ABI (mimichat #3/#4) |
-| **v0.28.29** | `from_json::<List<T>>` returns owned mutable List (mimichat #2) |
-| **v0.28.28** | Actor user function calls + shared program context (mimichat #1) |
-| **v0.28.27** | Real code codegen sprint: reduce/trait self/newtype/35 real_world green |
-| **v0.28.26** | Quality gate + JSON throughput: `from_json/to_json List<RecordType>` codegen |
-| **v0.28.25** | Package import + MimiSpec syntax cleanup + prelude auto-load |
-| **v0.28.21** | Comptime/Quote codegen + LSP completion/goto/hover |
-| **v0.28.20** | Concurrency primitives: Mutex, Atomic, Channel |
-| **v0.28.19** | Actor Codegen: real mailbox + worker thread |
-| **v0.28.18** | FFI complete: complex repr(C) return, cross-thread callback |
-| **v0.28.17** | CLI consistency: unified type checker, SAFETY annotations |
-| **v0.28.16** | Codegen root fix: shared/weak lifecycle, string leak, Miri |
-| **v0.28.15** | Security review: all #[ignore] gaps closed, 270 unsafe audits |
-| **v0.28.14** | Diagnostics & formatting: error recovery, multi-position, lint |
-| **v0.28.13** | stdlib expansion: mymath, array, iter + codegen inline/GVN |
-| **v0.28.12** | Package management: add/install/remove/tree hardened |
-| **v0.28.11** | LSP: hover, completion, goto-definition, rename |
-| **v0.28.10** | Codegen gaps closed: sort_str, const, Set<T>, from_json |
-| **v0.28.9** | FFI export wrapper + multi-language bindgen + repr(C) |
-| **v0.28.8** | Codegen quality refactor + helper tests + lexer/parse dual |
-| **v0.28.7** | Multi-line syntax + mimi-make + mimi-lint + push() fix |
-| **v0.28.2** | Usability: Record/Any, map codegen, const, as cast |
-| **v0.28.1** | mimi-kv, map type inference, dual-backend map tests |
-| **v0.28** 🚀 | Use-driven: dir/path/crypto, 7-lang FFI, profiler, bindgen |
-| **v0.27** 🔨 | Audit: P0/P1/P2/P3 safety (arena, FFI, JSON, runtime) |
-| **v0.26** | Type unification + bidirectional inference + FFI security |
-| **v0.25** | TypeId Arena refactor + Newtype/ADT codegen |
-| **v0.24** | Structured concurrency state machine |
-| **v0.23** 🔨 | Z3 deep fix + internal audit |
-| **v0.22** | Language completion: Option, nested generics, loop, pipe, LSP |
-| **v0.21** | Clippy zero + codegen gap closure + docs |
-| **v0.20** | Structured concurrency: Future/Waker/Executor/poll codegen |
-| **v0.19** | Path-sensitive borrow + reborrow + conditional return |
-| **v0.18** | Generic bounds + lifetime elision + built-in traits |
-| **v0.17** | GEP safety abstraction + 62 unsafe removals |
-| **v0.16** | FFI fix + effect system + pattern exhaustiveness |
-| **v0.15** | C runtime → Rust runtime rewrite |
-| **v0.14** | Diagnostics: error codes + Z3 debug output |
-| **v0.13** | Verification coverage: closure/spawn/await/string |
-| **v0.12** | FFI zero-copy + crypto/CSV/template stdlib |
-| **v0.11** | Windows target + net stdlib |
-| **v0.10** | Backend alignment + CI/CD |
-| **v0.9** | Safety: arena escape/race detection |
-| **v0.8** | Package management + docs pipeline |
-| **v0.7** | Z3 verification + FFI codegen |
+The compiler itself is built on the same Flow paradigm it compiles — each module is a state machine:
 
-> Full changelog in [CHANGELOG.md](CHANGELOG.md).
+| Module | Flow Degree | Status |
+|--------|-------------|--------|
+| Parser | Strict Flow | ✅ v0.29.0 (454 LOC) |
+| Lexer | Strict Flow | ✅ v0.29.1 (970 LOC) |
+| Loader | Strict Flow | ✅ v0.29.4 |
+| LSP | Strict Flow | ✅ v0.29.5 |
+| Verifier | Strict Flow | ✅ v0.29.7 |
+| Core Checker | Relaxed Flow | ✅ v0.29.8 |
+| Interpreter | Relaxed Flow | ✅ v0.29.6 |
+| Codegen | Non-Flow (LLVM API) | N/A |
+| Runtime | Non-Flow (C-style unsafe) | N/A |
+| FFI | Non-Flow (text generator) | N/A |
+
+**Five rules** of the Flow paradigm:
+1. No `&mut self` — use `fn transition(self, event) -> Self`
+2. No `Arc<Mutex<T>>` — use `enum + transition`
+3. No `unsafe` in Flow modules
+4. No `transmute` or lifetime annotations
+5. No bare `panic!`/`unwrap()`/`expect()` — return `Result<Self, Error>`
 
 ---
 
@@ -374,19 +270,27 @@ mimi/
 - **libffi** (FFI support)
 - **Z3** (contract verification; handled by `cargo build`)
 
-### Command Quick Reference
+### Testing Tiers
+
+| Tier | Test | Meaning |
+|------|------|---------|
+| **L1** | `cargo test dual_` | Dual-backend equivalence (interp == codegen) |
+| **L2** | `cargo test typecheck::` | Type system soundness (bad code rejected) |
+| **L3** | `cargo test e2e_asan -- --ignored` | Memory safety (Valgrind/ASan/Miri) |
+
+### Commands
 
 ```bash
-# Run all tests
+# Full test suite
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
 
-# L1 dual-backend equivalence
+# Dual-backend equivalence (L1)
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
 
-# L2 type system soundness
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test typecheck::
+# Type system soundness (L2)
+LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
 
-# Real-world MCDD suite
+# Real-world MCDD test suite
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test real_world
 
 # Clippy (zero-warnings gate)
@@ -394,33 +298,35 @@ LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 
 # Format
 LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
-
-# Benchmarks
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench
 ```
 
-### Development Principles
-
-| Tier | Test Category | Meaning |
-|---|---|---|
-| **L1** | Dual-backend equivalence | Interpreter and codegen produce identical results |
-| **L2** | Type system soundness | Invalid code is correctly rejected |
-| **L3** | Memory safety | Zero Valgrind/ASan warnings |
+> **Memory note**: `cargo test` in debug mode can use ~12 GB RAM. Use `ulimit -v 20000000` and `--test-threads=1` on memory-constrained systems. See [AGENTS.md](AGENTS.md) for details.
 
 ---
 
-## Contributing
+## Version History
 
-We warmly welcome all forms of contribution:
+| Version | Highlight |
+|---------|-----------|
+| **v0.30.0** | **止血 (Hemostasis)**: Zero new features — architecture debt repair (sprintf→snprintf, path safety, malloc checks, values_equal, build_unreachable, fmt tokenization) |
+| **v0.29.41** | White paper freeze: all 38 capabilities complete ✅ |
+| **v0.29.37** | Actor lifecycle: SystemKill cascade + `spawn detached` |
+| **v0.29.34** | Session dual-end runtime: send/recv/close push endpoints |
+| **v0.29.32** | Pinned collaborative watchdog: `pinned { timeout }` |
+| **v0.29.25** | Flow polymorphic broadcast, session_pair, mutate forwarding |
+| **v0.29.18** | Protocol interface abstraction (conservative projection subtyping) |
+| **v0.29.14** | Persistent payload + `@transactional` WAL rollback |
+| **v0.29.9** | Flow language baseline: `state`/`transition` dual-backend |
+| **v0.29.0–8** | Compiler internal Flow architecture replacement (Parser→Lexer→Loader→LSP→Interp→Verifier→Checker) |
+| **v0.28.37** | Feature bugs zero — last v0.28 release |
+| **v0.28.0** | Use-driven: 7-lang FFI, profiler, bindgen, package manager |
+| **v0.27** | Safety audit: P0/P1/P2/P3 (arena, FFI, JSON, runtime) |
+| **v0.24** | Structured concurrency state machine |
+| **v0.20** | Future/Waker/Executor/poll codegen |
+| **v0.15** | C runtime → Rust runtime rewrite |
+| **v0.7** | Z3 verification + FFI codegen |
 
-- **Try it & give feedback**: Build the project, run the examples, and file Issues for anything confusing or broken.
-- **Documentation & translation**: Fix typos, add comments, translate sections — help Mimi reach more developers.
-- **Write tests & examples**: Contribute programs under `examples/` or write tutorials for existing features.
-- **Code contributions**: See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and the submission process. Start with a `good first issue`.
-- **Design discussions**: Participate in Issues on language features, API design, error messages — your use case is the best design input.
-- **Community building**: Answer questions, share the project on social media, and help build a welcoming community.
-
-> All participants must adhere to the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately via the [Security Policy](SECURITY.md).
+> Full changelog in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
