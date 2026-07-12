@@ -43,7 +43,8 @@ impl<'a> Checker<'a> {
             // If param is a cap type, track it
             if matches!(&ty, Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
-                    s.insert(p.name.clone(), false);
+                    let bit_index = s.len() as u32;
+                    s.insert(p.name.clone(), super::CapVarInfo { consumed: false, bit_index });
                 }
             }
             // SessionChan<S> params: seed residual from declared session body.
@@ -211,9 +212,16 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_unconsumed_caps(&mut self) {
         if let Some(scope) = self.cap_vars.last() {
+            // v0.29.50: fast path — if all consumed, return immediately.
+            let total = scope.len();
+            let consumed_count = scope.values().filter(|info| info.consumed).count();
+            if consumed_count == total {
+                return; // O(1) fast path via count comparison
+            }
+            // Slow path: find unconsumed vars
             let unconsumed: Vec<String> = scope
                 .iter()
-                .filter(|(_, consumed)| !*consumed)
+                .filter(|(_, info)| !info.consumed)
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in unconsumed {

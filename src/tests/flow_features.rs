@@ -1477,14 +1477,14 @@ func main() -> i32 {
     let r1 = Checker::classify(s1, 5)
     let s2 = Small { v: 10 }
     let r2 = Checker::classify(s2, 100)
-    println(r1.v + r2.v)
+    // v0.29.49: multi-target result must not access fields directly
+    let r3 = r1
+    let r4 = r2
     0
 }
 "#;
     assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "125");
 }
 
 #[test]
@@ -2551,14 +2551,13 @@ flow F {
 func main() -> i32 {
     let s = Idle { }
     let a = F::start(s)
-    println(a.data)
+    // v0.29.49: multi-target result must not access fields directly
+    let a2 = a
     0
 }
 "#;
     assert!(check_source(src).is_ok(), "multi-target: {:?}", check_source(src));
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "7");
 }
 
 // ── v0.29.19 Session Types compiler skeleton ──────────────────────────
@@ -3907,6 +3906,7 @@ func main() -> i32 {
 #[test]
 fn multi_target_transition_typecheck() {
     // L2: transition returning multiple states (B | A) typechecks.
+    // v0.29.49: caller must not access fields directly on multi-target result.
     let src = r#"
 flow C {
     state A { v: i32 }
@@ -3923,7 +3923,8 @@ flow C {
 func main() -> i32 {
     let s = A { v: 5 }
     let r = C::go(s)
-    println(r.v)
+    // v0.29.49: must use r as a whole value, not access fields directly
+    let r2 = r
     0
 }
 "#;

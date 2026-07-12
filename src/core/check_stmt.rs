@@ -697,7 +697,8 @@ impl<'a> Checker<'a> {
                 if let Type::Cap(cap_name) = &final_ty {
                     if let Pattern::Variable(name) = pat {
                         if let Some(s) = self.cap_vars.last_mut() {
-                            s.insert(name.clone(), false);
+                            let bit_index = s.len() as u32;
+                            s.insert(name.clone(), crate::core::checker::CapVarInfo { consumed: false, bit_index });
                         }
                         // Introduce the cap as an effect
                         if let Some(s) = self.available_effects.last_mut() {
@@ -1258,8 +1259,8 @@ impl<'a> Checker<'a> {
                 // Mark the capability as consumed
                 if let Expr::Ident(name) = expr {
                     if let Some(cap_scope) = self.cap_vars.last_mut() {
-                        if let Some(consumed) = cap_scope.get_mut(name) {
-                            if *consumed {
+                        if let Some(info) = cap_scope.get_mut(name) {
+                            if info.consumed {
                                 self.errors.push(
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0304,
@@ -1271,7 +1272,7 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             } else {
-                                *consumed = true;
+                                info.consumed = true;
                             }
                         }
                     }
@@ -1374,6 +1375,7 @@ impl<'a> Checker<'a> {
     /// v0.29.49: Check if an expression is a Flow::transition() call and
     /// return the list of target state types if the transition has >1 to_states.
     /// Returns None if not a multi-target transition call.
+    /// Only counts user-declared targets (excludes Fault from matrix expansion).
     fn check_multi_target_transition(&self, expr: &Expr) -> Option<Vec<Type>> {
         // C::go(s) is parsed as Expr::Call(Expr::Field(Expr::Ident("C"), "go"), [s])
         if let Expr::Call(callee, _) = expr {
@@ -1385,9 +1387,10 @@ impl<'a> Checker<'a> {
                         if let crate::ast::Item::Flow(f) = item {
                             if f.name == *flow_name {
                                 for t in &f.transitions {
-                                    if t.name == *method {
+                                    if t.name == *method && !t.is_fallback {
                                         for ts in &t.to_states {
-                                            if !targets.contains(ts) {
+                                            // Exclude Fault — it's a system target, not a user choice
+                                            if ts != "Fault" && !targets.contains(ts) {
                                                 targets.push(ts.clone());
                                             }
                                         }

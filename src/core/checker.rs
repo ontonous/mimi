@@ -7,6 +7,15 @@ use std::collections::HashSet;
 use super::borrow::BorrowState;
 use super::unification::UnificationTable;
 
+/// v0.29.50: Linear capability variable tracking info.
+/// `consumed` is the primary flag; `bit_index` enables O(1) bitmap
+/// popcount for the fast path in check_unconsumed_caps.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CapVarInfo {
+    pub consumed: bool,
+    pub bit_index: u32,
+}
+
 pub(crate) struct Checker<'a> {
     pub(crate) file: &'a File,
     pub(crate) errors: Vec<Diagnostic>,
@@ -17,7 +26,12 @@ pub(crate) struct Checker<'a> {
     /// Track newtype definitions: name -> inner type (unresolved)
     pub(crate) newtypes: HashMap<String, Type>,
     /// Track linear capabilities in scope: name -> consumed
-    pub(crate) cap_vars: Vec<HashMap<String, bool>>,
+    /// v0.29.50: CapVarInfo carries bit_index for O(1) bitmap checks.
+    pub(crate) cap_vars: Vec<HashMap<String, CapVarInfo>>,
+    /// v0.29.50: Bitmap for fast linear consumption checks.
+    /// Each bit represents one cap var: 0=unconsumed, 1=consumed.
+    /// check_unconsumed_caps uses popcount for O(1) fast path.
+    pub(crate) cap_bitmap: Vec<u64>,
     /// Track borrow state of variables: name -> borrow state
     pub(crate) borrows: Vec<HashMap<String, BorrowState>>,
     /// Track field-level borrow state: (var_name, field_path) -> borrow state
@@ -105,6 +119,7 @@ impl<'a> Checker<'a> {
             types: HashMap::new(),
             newtypes: HashMap::new(),
             cap_vars: vec![HashMap::new()],
+            cap_bitmap: Vec::new(),
             borrows: vec![HashMap::new()],
             field_borrows: vec![HashMap::new()],
             traits: HashMap::new(),

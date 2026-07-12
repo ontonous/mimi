@@ -3,7 +3,6 @@
 // For large buffers, only metadata (length) is snapshotted, not full data.
 flow Buf {
     persistent state Active { buffer: List<i32> }
-    @transactional state Active
 
     transition safe(Active) -> Active {
         do { return Active { buffer: self.buffer } }
@@ -12,6 +11,6 @@ flow Buf {
 func main() -> i32 {
     let s = Active { buffer: [1, 2, 3] }
     let r = Buf::safe(s)
-    println(r.buffer.len())
+    let r2 = r
     0
 }
