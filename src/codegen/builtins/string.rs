@@ -28,24 +28,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Allocate 2 bytes: char + null terminator
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(
-                    self.context.i64_type().const_int(2, false),
-                )],
-                "char_malloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort for NULL check.
+        let buf = self.malloc_or_abort(
+            self.context.i64_type().const_int(2, false),
+            "char_buf",
+        )?;
         // Handle both string representations:
         // - PointerValue: char* directly (literal strings)
         // - StructValue: {i8*, i64} (builtin function results)

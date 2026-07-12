@@ -848,21 +848,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Allocate buffer (4096 bytes)
         let buf_size = self.context.i64_type().const_int(4096, false);
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(buf_size)],
-                "input_malloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort for NULL check.
+        let buf = self.malloc_or_abort(buf_size, "input_buf")?;
         // NOTE: not registered — returned value owns the allocation
         // fgets(buf, 4096, stdin)
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1199,21 +1186,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_add(file_size, one, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "read_malloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort for NULL check.
+        let buf = self.malloc_or_abort(alloc_size, "read_buf")?;
         // fread(buf, 1, file_size, file)
         let fread_fn = self.module.get_function("fread").unwrap_or_else(|| {
             let ty = i64_ty.fn_type(
