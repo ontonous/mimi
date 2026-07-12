@@ -1,0 +1,69 @@
+// MCDD real_world: Flow complex interaction — File System Simulator
+// Combines: multi-field state payloads, subflow for file operations,
+// persistent data across recover, Fault on permission errors.
+//
+// Tests: complex payload construction, field access chains, 
+// subflow nesting, recover preserving persistent fields.
+
+flow FileHandle {
+    state Closed
+    state Open { path: string, pos: i32 }
+    state Locked { path: string, pos: i32, owner: string }
+
+    transition open(Closed) -> Open {
+        do { return Open { path: "test.txt", pos: 0 } }
+    }
+    transition seek(Open) -> Open {
+        do { return Open { path: self.path, pos: self.pos + 10 } }
+    }
+    transition lock(Open) -> Locked {
+        do { return Locked { path: self.path, pos: self.pos, owner: "root" } }
+    }
+    transition unlock(Locked) -> Open {
+        do { return Open { path: self.path, pos: self.pos } }
+    }
+    transition close(Open) -> Closed {
+        do { return Closed { } }
+    }
+    transition close_locked(Locked) -> Closed {
+        do { return Closed { } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Open → Seek → Close
+    let f0 = Closed { }
+    let f1 = FileHandle::open(f0)
+    println(f1.path)
+    println(f1.pos)
+    let f2 = FileHandle::seek(f1)
+    println(f2.pos)
+    let f3 = FileHandle::seek(f2)
+    println(f3.pos)
+    let f4 = FileHandle::close(f3)
+    
+    // Test 2: Open → Lock → Unlock → Close
+    let f5 = Closed { }
+    let f6 = FileHandle::open(f5)
+    let f7 = FileHandle::lock(f6)
+    println(f7.owner)
+    println(f7.path)
+    let f8 = FileHandle::unlock(f7)
+    println(f8.path)
+    println(f8.pos)
+    let f9 = FileHandle::close(f8)
+    
+    // Test 3: Fault on seek(Closed) — undefined transition
+    let f10 = Closed { }
+    let fault = FileHandle::seek(f10)
+    println(fault.last_state)
+    println(fault.unexpected_event)
+    
+    // Test 4: Lock → close_locked → Closed (alternate path)
+    let f11 = Closed { }
+    let f12 = FileHandle::open(f11)
+    let f13 = FileHandle::lock(f12)
+    let f14 = FileHandle::close_locked(f13)
+    
+    0
+}

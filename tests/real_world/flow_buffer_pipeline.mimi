@@ -1,0 +1,67 @@
+// MCDD real_world: Flow complex interaction — Buffer Pipeline
+// Combines: single-target transitions, Fault on invalid transition,
+// field access on Fault trace, subflow with multiple states.
+//
+// Tests: transition dispatch, Fault absorption with trace fields,
+// field access on different state variants.
+
+flow Buffer {
+    state Empty { capacity: i32 }
+    state Partial { data: i32, capacity: i32 }
+    state Full { data: i32, capacity: i32 }
+
+    transition write(Empty) -> Partial {
+        do { return Partial { data: 1, capacity: self.capacity } }
+    }
+    transition fill(Partial) -> Full {
+        do { return Full { data: self.data + 1, capacity: self.capacity } }
+    }
+    transition top_off(Full) -> Full {
+        do { return Full { data: self.data + 1, capacity: self.capacity } }
+    }
+    transition read(Full) -> Partial {
+        do { return Partial { data: self.data - 1, capacity: self.capacity } }
+    }
+    transition drain(Partial) -> Empty {
+        do { return Empty { capacity: self.capacity } }
+    }
+    transition drain_all(Full) -> Empty {
+        do { return Empty { capacity: self.capacity } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Fill buffer: Empty → Partial → Full
+    let b0 = Empty { capacity: 3 }
+    let b1 = Buffer::write(b0)
+    println(b1.data)
+    let b2 = Buffer::fill(b1)
+    println(b2.data)
+    
+    // Test 2: Read from Full → Partial
+    let b3 = Buffer::read(b2)
+    println(b3.data)
+    
+    // Test 3: Drain Partial → Empty
+    let b4 = Buffer::drain(b3)
+    println(b4.capacity)
+    
+    // Test 4: Top off a Full buffer
+    let b5 = Empty { capacity: 5 }
+    let b6 = Buffer::write(b5)
+    let b7 = Buffer::fill(b6)
+    let b8 = Buffer::top_off(b7)
+    println(b8.data)
+    
+    // Test 5: Drain all from Full
+    let b9 = Buffer::drain_all(b8)
+    println(b9.capacity)
+    
+    // Test 6: Fault on drain(Empty) — undefined transition
+    let b10 = Empty { capacity: 3 }
+    let f = Buffer::drain(b10)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    0
+}

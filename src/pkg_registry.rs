@@ -3,7 +3,18 @@ use std::path::Path;
 
 /// Compute a deterministic content-based checksum for a directory.
 /// Walks all files (sorted by path), hashes path + content with FNV1a.
+///
+/// audit (MEDIUM — FNV hash collision):
+/// FNV-1a is a non-cryptographic hash.  It is suitable for file
+/// identification and change detection (its intended use here), but is
+/// NOT collision-resistant against adversarial input.  An attacker who
+/// controls file contents can craft collisions that produce the same
+/// checksum.  Do not use this checksum for integrity verification,
+/// tamper detection, or any security-sensitive purpose — use SHA-256
+/// instead (see `crypto.mimi` / `mimi_sha256`).
 pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
+    // FNV-1a offset basis and prime (64-bit).
+    // Non-cryptographic: see function-level audit comment above.
     let mut entries: Vec<_> = Vec::new();
     collect_files(dir, dir, &mut entries).map_err(|e| format!("failed to read dir: {}", e))?;
     entries.sort();

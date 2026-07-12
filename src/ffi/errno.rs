@@ -448,17 +448,33 @@ impl Errno {
             132 => Self::ERFKILL,
             133 => Self::EHWPOISON,
             _ => {
+                // audit (MEDIUM — libc::strerror thread safety):
+                // `strerror` uses a static buffer that is shared across
+                // threads, making it a data race hazard.  We use the
+                // thread-safe `strerror_r` (XPG POSIX) variant instead,
+                // which writes into a caller-provided buffer.
+                let mut buf = [0u8; 256];
                 let name = unsafe {
-                    // SAFETY: `libc::strerror` is thread-unsafe in some libcs, but
-                    // `Errno::name` is only used for diagnostic formatting; the
-                    // returned `*c_char` is owned by the C library and stays valid
-                    // long enough to be copied into an owned `String`.
-                    let c_str = libc::strerror(code);
-                    if !c_str.is_null() {
-                        std::ffi::CStr::from_ptr(c_str)
+                    // SAFETY: `strerror_r` writes at most `buflen` bytes
+                    // (including the NUL terminator) into `buf`.  The
+                    // return value is 0 on success, or a positive errno
+                    // on failure — it never reads past `buflen`.  `buf`
+                    // is a stack array owned exclusively by this frame,
+                    // so there is no aliasing.
+                    let rc = libc::strerror_r(
+                        code,
+                        buf.as_mut_ptr() as *mut libc::c_char,
+                        buf.len(),
+                    );
+                    if rc == 0 {
+                        // The buffer is NUL-terminated by strerror_r.
+                        std::ffi::CStr::from_bytes_until_nul(&buf)
+                            .unwrap_or_else(|_| std::ffi::CStr::from_bytes_with_nul(b"\0").unwrap())
                             .to_string_lossy()
                             .into_owned()
                     } else {
+                        // strerror_r itself failed (rare: invalid code on
+                        // some platforms).  Fall back to a generic label.
                         format!("Unknown (code {})", code)
                     }
                 };

@@ -4,9 +4,15 @@ use mimi::manifest;
 /// `mimi remove <name>` — drop a dependency from mimi.toml, mimi.lock,
 /// and `.mimi/deps/<name>`.
 pub(crate) fn remove(name: &str) -> Result<(), String> {
-    // Reject names with path separators — prevent traversal attacks
-    // where `name = "../../src"` would resolve to `<project>/src`.
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
+    // audit (MEDIUM — mimi_remove path traversal):
+    // Reject names with path separators or traversal sequences to
+    // prevent `std::fs::remove_dir_all` from deleting arbitrary
+    // directories outside `.mimi/deps/`.  This check is sufficient
+    // because `dir.join(".mimi").join("deps").join(name)` can only
+    // escape the deps directory if `name` contains `..`, `/`, or `\`.
+    // NUL bytes are also rejected (they would truncate the path in C
+    // APIs, though Rust's `Path` handles them safely).
+    if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains('\0') {
         return Err(format!(
             "invalid dependency name '{}': must not contain path separators",
             name

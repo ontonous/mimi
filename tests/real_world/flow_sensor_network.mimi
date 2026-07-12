@@ -1,0 +1,73 @@
+// MCDD real_world: Flow complex interaction — Sensor Network
+// Two independent sensor flows with distinct state names.
+// Tests: multi-flow composition, field preservation, Fault trace.
+
+flow TempSensor {
+    state TempIdle { sensor_id: string }
+    state TempActive { data: i32, sensor_id: string, samples: i32 }
+
+    transition start(TempIdle) -> TempActive {
+        do { return TempActive { data: 0, sensor_id: self.sensor_id, samples: 0 } }
+    }
+    transition read(TempActive) -> TempActive {
+        do { return TempActive { data: self.data + 1, sensor_id: self.sensor_id, samples: self.samples + 1 } }
+    }
+    transition stop(TempActive) -> TempIdle {
+        do { return TempIdle { sensor_id: self.sensor_id } }
+    }
+}
+
+flow HumiditySensor {
+    state HumIdle { sensor_id: string }
+    state HumActive { humidity: i32, sensor_id: string }
+
+    transition start(HumIdle) -> HumActive {
+        do { return HumActive { humidity: 50, sensor_id: self.sensor_id } }
+    }
+    transition measure(HumActive) -> HumActive {
+        do { return HumActive { humidity: self.humidity + 1, sensor_id: self.sensor_id } }
+    }
+    transition stop(HumActive) -> HumIdle {
+        do { return HumIdle { sensor_id: self.sensor_id } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Temperature sensor lifecycle
+    let t0 = TempIdle { sensor_id: "temp_01" }
+    let t1 = TempSensor::start(t0)
+    println(t1.sensor_id)
+    println(t1.samples)
+    let t2 = TempSensor::read(t1)
+    println(t2.data)
+    let t3 = TempSensor::read(t2)
+    println(t3.data)
+    println(t3.samples)
+    let t4 = TempSensor::stop(t3)
+    println(t4.sensor_id)
+    
+    // Test 2: Humidity sensor subflow
+    let h0 = HumIdle { sensor_id: "hum_01" }
+    let h1 = HumiditySensor::start(h0)
+    println(h1.humidity)
+    let h2 = HumiditySensor::measure(h1)
+    println(h2.humidity)
+    let h3 = HumiditySensor::stop(h2)
+    
+    // Test 3: Fault on read(TempIdle) — sensor not started
+    let t5 = TempIdle { sensor_id: "temp_02" }
+    let f = TempSensor::read(t5)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    // Test 4: Multiple read cycles
+    let t6 = TempIdle { sensor_id: "temp_03" }
+    let t7 = TempSensor::start(t6)
+    let t8 = TempSensor::read(t7)
+    let t9 = TempSensor::read(t8)
+    let t10 = TempSensor::read(t9)
+    println(t10.data)
+    println(t10.samples)
+    
+    0
+}
