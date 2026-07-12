@@ -69,21 +69,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(len_val, sizeof_i64, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let data_ptr = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort for NULL check.
+        let data_ptr = self.malloc_or_abort(alloc_size, "list_data")?;
         let data_ptr_i64 = self
             .builder
             .build_bit_cast(

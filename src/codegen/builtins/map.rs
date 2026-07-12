@@ -384,32 +384,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(list_len, sizeof_pair, "map_from_list_alloc")
             .map_err(|e| format!("mul error: {}", e))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let keys_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "map_from_list_keys_malloc",
-            )
-            .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
-        let values_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "map_from_list_values_malloc",
-            )
-            .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort for NULL check.
+        let keys_data = self.malloc_or_abort(alloc_size, "map_keys")?;
+        let values_data = self.malloc_or_abort(alloc_size, "map_values")?;
         let keys_ptr = self
             .builder
             .build_bit_cast(

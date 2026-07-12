@@ -543,17 +543,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Allocate a buffer of `size` bytes via malloc.
+    /// B4: includes NULL check — aborts on OOM.
     fn malloc_buffer(&self, size: IntValue<'ctx>) -> MimiResult<PointerValue<'ctx>> {
-        let malloc_fn = self.get_runtime_fn("malloc")?;
-        Ok(self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(size)],
-                "malloc_call",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
-            .into_pointer_value())
+        self.malloc_or_abort(size, "str_buf")
     }
 
     /// Copy `len` bytes from `src` to `dst`.
