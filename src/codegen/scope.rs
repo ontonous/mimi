@@ -137,8 +137,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )],
             "abort_call",
         )?;
-        self.build_br(pass_bb)?;
-
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(pass_bb);
         Ok(())
     }

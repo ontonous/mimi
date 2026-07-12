@@ -404,8 +404,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )],
             "assert_exit",
         )?;
-        self.build_br(ok_bb)?;
-
+        // SAFETY: exit(1) is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
     }
@@ -557,8 +559,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )],
             "aeq_exit",
         )?;
-        self.build_br(ok_bb)?;
-
+        // SAFETY: exit(1) is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
     }
@@ -707,8 +711,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )],
             "ane_exit",
         )?;
-        self.build_br(ok_bb)?;
-
+        // SAFETY: exit(1) is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
     }
@@ -823,7 +829,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )],
             "aaeq_exit",
         )?;
-        self.build_br(ok_bb)?;
+        // SAFETY: exit(1) is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
         self.builder.position_at_end(ok_bb);
         Ok(self.context.i64_type().const_int(0, false).into())
     }
