@@ -159,23 +159,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(buf.into())
             }
             _ => {
-                // String: wrap in quotes using sprintf("\"%s\"", str)
+                // String: use mimi_json_escape_string to properly escape special chars.
+                // DAT-C2 (deep audit): sprintf("\"%s\"", str) does not escape
+                // backslash, quotes, newlines — producing invalid JSON and enabling
+                // JSON injection. Use the runtime escape function instead.
                 if let Ok(raw_ptr) = self.extract_raw_str_ptr(&args[0]) {
-                    let fmt = self
-                        .builder
-                        .build_global_string_ptr("\"%s\"", "json_str_fmt")
-                        .map_err(|e| format!("fmt error: {}", e))?;
+                    let escape_fn = self.get_runtime_fn("mimi_json_escape_string")?;
+                    let escaped = self
+                        .build_call(
+                            escape_fn,
+                            &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                            "json_escaped",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_json_escape_string returned void")?
+                        .into_pointer_value();
+                    // Copy escaped string into buf (which is already allocated with str_len+3).
+                    // The escaped string may be longer than the original if it contains
+                    // special chars. Use strcpy which copies until null terminator.
                     self.builder
                         .build_call(
-                            sprintf_fn,
+                            strcpy_fn,
                             &[
                                 BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                BasicMetadataValueEnum::PointerValue(escaped),
                             ],
-                            "json_sprintf",
+                            "json_strcpy_escaped",
                         )
-                        .map_err(|e| format!("sprintf error: {}", e))?;
+                        .map_err(|e| format!("strcpy error: {}", e))?;
+                    // Free the escaped string (it's heap-allocated by the runtime).
+                    let free_fn = self.module.get_function("free")
+                        .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
+                    let _ = self.build_call(free_fn, &[BasicMetadataValueEnum::PointerValue(escaped)], "free_escaped");
                     Ok(buf.into())
                 } else {
                     // CG-H2 (audit): pointer values in `to_json` are List/Record/Map/Set,

@@ -340,14 +340,20 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     let lst = unsafe { &mut *list };
     let len = lst.len;
     let cap = list_cap(lst);
-    if len + 1 > cap {
-        let nc = if cap <= 0 { 4 } else { cap * 2 };
+    // MEM-C10 (deep audit): use checked_add to prevent integer overflow on len+1.
+    let new_len = match len.checked_add(1) {
+        Some(n) => n,
+        None => return, // len overflow — can't push more
+    };
+    if new_len > cap {
+        // MEM-C10: use checked_mul for cap*2 to prevent overflow.
+        let nc = if cap <= 0 { 4 } else { match cap.checked_mul(2) { Some(c) => c, None => return } };
         let nd = realloc_list_data(lst.data, nc);
         if nd.is_null() {
             return;
         }
         lst.data = nd;
-        // SAFETY: after growth `nd` has capacity >= `len + 1`; writing at index `len` is in bounds.
+        // SAFETY: after growth `nd` has capacity >= `new_len`; writing at index `len` is in bounds.
         unsafe {
             *(nd as *mut i64).add(len as usize) = element;
         }
@@ -1131,7 +1137,12 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
     if ptr.is_null() || len <= 0 {
         return 0;
     }
-    let buf = unsafe { libc::malloc((len + 1) as usize) as *mut u8 };
+    // MEM-C9 (deep audit): use checked_add to prevent integer overflow on len+1.
+    let alloc_len = match (len as usize).checked_add(1) {
+        Some(n) => n,
+        None => return 0, // overflow — can't allocate
+    };
+    let buf = unsafe { libc::malloc(alloc_len) as *mut u8 };
     if buf.is_null() {
         return 0;
     }
@@ -1140,6 +1151,37 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
         *buf.add(len as usize) = 0;
     }
     buf as ValueHandle
+}
+
+/// Escape a C string for safe JSON string embedding.
+/// Returns a new heap-allocated string (caller must free with mimi_string_free).
+/// Handles: \ " \n \r \t \b \f and control chars as \uXXXX.
+#[no_mangle]
+pub extern "C" fn mimi_json_escape_string(ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: ptr is non-null C string from caller.
+    let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy();
+    let mut escaped = String::with_capacity(s.len() + 2);
+    escaped.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('"');
+    alloc_c_string(&escaped)
 }
 
 #[no_mangle]

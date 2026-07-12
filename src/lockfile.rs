@@ -32,13 +32,22 @@ impl Lockfile {
         Ok(Some(lockfile))
     }
 
-    /// Save mimi.lock to a directory
+    /// Save mimi.lock to a directory (atomic write via temp+rename)
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let lock_path = dir.join("mimi.lock");
+        let tmp_path = dir.join("mimi.lock.tmp");
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize lockfile: {}", e))?;
-        std::fs::write(&lock_path, content)
-            .map_err(|e| format!("failed to write {}: {}", lock_path.display(), e))?;
+        // CL-H3 (deep audit): use atomic write (temp + rename) to prevent
+        // corruption on crash or concurrent access.
+        std::fs::write(&tmp_path, &content)
+            .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+        std::fs::rename(&tmp_path, &lock_path)
+            .map_err(|e| {
+                // Clean up temp file on rename failure
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("failed to rename {} to {}: {}", tmp_path.display(), lock_path.display(), e)
+            })?;
         Ok(())
     }
 

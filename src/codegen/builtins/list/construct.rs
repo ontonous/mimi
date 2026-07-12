@@ -47,10 +47,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         // Create a list struct: { i64 len, i64* data }
         // For simplicity in codegen, we use a runtime-allocated array
-        let len_val = self
+        let raw_len = self
             .builder
             .build_int_sub(end, start, "range_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
+        // CG-H4 (deep audit): clamp len to >= 0 when end < start to prevent
+        // negative length and NULL data pointer in the resulting list.
+        let zero = i64_ty.const_int(0, false);
+        let is_neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, raw_len, zero, "range_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let len_val = self
+            .builder
+            .build_select(is_neg, zero, raw_len, "range_len_clamped")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();;
         // Allocate array: len * sizeof(i64)
         let sizeof_i64 = self.list_elem_size();
         let alloc_size = self

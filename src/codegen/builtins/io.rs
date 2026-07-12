@@ -1321,6 +1321,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("fopen returned void")?
             .into_pointer_value();
+        // CG-H11 (deep audit): check fopen result for NULL (file not writable).
+        let null_check_bb = self.context.append_basic_block(
+            self.current_function().ok_or(CompileError::LlvmError("no current function".into()))?,
+            "fopen_null_check"
+        );
+        let write_bb = self.context.append_basic_block(
+            self.current_function().unwrap(),
+            "fopen_not_null"
+        );
+        let is_null = self.builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                file,
+                self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                "fopen_is_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_null, null_check_bb, write_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        self.builder.position_at_end(null_check_bb);
+        // Return empty string on fopen failure
+        let empty_str = self.builder
+            .build_global_string_ptr("", "empty_str")
+            .map_err(|e| CompileError::LlvmError(format!("gstr error: {}", e)))?;
+        let ret_val: BasicValueEnum = empty_str.as_pointer_value().into();
+        self.build_return(Some(&ret_val))?;
+        self.builder.position_at_end(write_bb);
         // strlen(content) for length
         let strlen_fn = self
             .module
@@ -1872,38 +1900,53 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let alloca = self.build_alloca(stat_result_ty, "stat_result")?;
 
-        // Extract fields from MimiStatResult (or use defaults if null)
+        // MEM-C7 (deep audit): use conditional branch instead of select.
+        // LLVM evaluates both sides of a select, so GEP+load on NULL would execute
+        // even when is_null is true, causing UB. Branch to avoid the GEP entirely.
         let zero_i64 = i64_ty.const_int(0, false);
         let neg_one_i64 = i64_ty.const_int((-1i64) as u64, false);
         let false_val = bool_ty.const_int(0, false);
+        let true_val = bool_ty.const_int(1, false);
 
+        let function = self.current_function()
+            .ok_or(CompileError::LlvmError("no current function for file_stat".into()))?;
+        let null_bb = self.context.append_basic_block(function, "stat_null_bb");
+        let nonnull_bb = self.context.append_basic_block(function, "stat_nonnull_bb");
+        let merge_bb = self.context.append_basic_block(function, "stat_merge_bb");
+
+        self.builder
+            .build_conditional_branch(is_null, null_bb, nonnull_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+
+        // Null path: use default values
+        self.builder.position_at_end(null_bb);
+        let null_size = neg_one_i64;
+        let null_mod = zero_i64;
+        let null_isf = false_val;
+        let null_isd = false_val;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+        // Non-null path: load fields from stat_ptr
+        self.builder.position_at_end(nonnull_bb);
         // size
         let size_gep = self
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 0, "size_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let size_loaded = self
+        let nn_size = self
             .build_load(i64_ty, size_gep, "size_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let size_val = self
-            .builder
-            .build_select(is_null, neg_one_i64, size_loaded, "size_sel")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // modified
         let mod_gep = self
             .gep()
             .build_struct_gep(mimi_stat_ty, stat_ptr, 1, "mod_ptr")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let mod_loaded = self
+        let nn_mod = self
             .build_load(i64_ty, mod_gep, "mod_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
-            .into_int_value();
-        let mod_val = self
-            .builder
-            .build_select(is_null, zero_i64, mod_loaded, "mod_sel")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // is_file
         let isf_gep = self
@@ -1914,15 +1957,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, isf_gep, "isf_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let isf_bool = self
+        let nn_isf = self
             .builder
             .build_int_compare(inkwell::IntPredicate::NE, isf_raw, zero_i64, "isf_cmp")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let isf_val = self
-            .builder
-            .build_select(is_null, false_val, isf_bool, "isf_sel")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
         // is_dir
         let isd_gep = self
             .gep()
@@ -1932,15 +1970,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, isd_gep, "isd_loaded")
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_int_value();
-        let isd_bool = self
+        let nn_isd = self
             .builder
             .build_int_compare(inkwell::IntPredicate::NE, isd_raw, zero_i64, "isd_cmp")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let isd_val = self
-            .builder
-            .build_select(is_null, false_val, isd_bool, "isd_sel")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+        // Merge: phi nodes for each field
+        self.builder.position_at_end(merge_bb);
+        let size_phi = self.builder.build_phi(i64_ty, "size_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        size_phi.add_incoming(&[(&null_size, null_bb), (&nn_size, nonnull_bb)]);
+        let size_val: BasicValueEnum = size_phi.as_basic_value();
+        let mod_phi = self.builder.build_phi(i64_ty, "mod_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        mod_phi.add_incoming(&[(&null_mod, null_bb), (&nn_mod, nonnull_bb)]);
+        let mod_val: BasicValueEnum = mod_phi.as_basic_value();
+        let isf_phi = self.builder.build_phi(bool_ty, "isf_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        isf_phi.add_incoming(&[(&null_isf, null_bb), (&nn_isf, nonnull_bb)]);
+        let isf_val: BasicValueEnum = isf_phi.as_basic_value();
+        let isd_phi = self.builder.build_phi(bool_ty, "isd_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
+        isd_phi.add_incoming(&[(&null_isd, null_bb), (&nn_isd, nonnull_bb)]);
+        let isd_val: BasicValueEnum = isd_phi.as_basic_value();
 
         // Store into StatResult struct
         let s0 = self
