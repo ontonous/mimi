@@ -692,6 +692,13 @@ pub extern "C" fn mimi_rc_release(ptr: *mut std::ffi::c_void) {
     }
     let hdr = unsafe { rc_header_from_ptr(ptr) };
     // SAFETY: atomic decrement with Release ordering; if it returns 1, we own the last strong reference.
+    // B7: TOCTOU analysis — after fetch_sub returns 1 (strong is now 0), a
+    // concurrent weak_retain may be running its CAS loop. However, weak_retain
+    // checks strong==0 && weak==0 and returns early if both are zero. So:
+    // - If weak_retain sees strong=0, weak=0 → it returns (no increment)
+    // - If weak_retain sees strong=0, weak>0 → it CAS-increments weak
+    // In the latter case, our weak==0 load will see weak>0 and skip dealloc,
+    // deferring to the final weak_release. This is the standard Arc drop pattern.
     if unsafe { (*hdr).strong.fetch_sub(1, Ordering::Release) } == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         // H3 fix: Use Acquire ordering for the weak count load to synchronize
