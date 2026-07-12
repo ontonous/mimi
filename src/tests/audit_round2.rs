@@ -616,15 +616,37 @@ func main() -> i32 {
 
 #[test]
 fn list_grow_large() {
-    // Large list literal tests realloc_list_data capacity handling.
+    // Large list growth via push() — tests realloc_list_data capacity.
+    // This also tests the push write-back fix: push() must mutate the
+    // list variable even without `mut` (matching codegen behavior).
     let src = r#"
 func main() -> i32 {
-    let xs: List<i32> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    return xs[19]
+    let xs: List<i32> = []
+    let mut i = 0
+    while i < 1000 {
+        push(xs, i)
+        i = i + 1
+    }
+    return xs[999]
 }
 "#;
     assert!(check_source(src).is_ok());
-    assert_eq!(run_source(src).as_int().unwrap_or(-1), 19);
+    assert_eq!(run_source(src).as_int().unwrap_or(-1), 999);
+}
+
+#[test]
+fn list_push_without_mut() {
+    // push() should work without `let mut` — matches codegen behavior.
+    // This is a dual-backend consistency test (L1 invariant).
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i32> = [1, 2, 3]
+    push(xs, 4)
+    return xs[3]
+}
+"#;
+    assert!(check_source(src).is_ok());
+    assert_eq!(run_source(src).as_int().unwrap_or(-1), 4);
 }
 
 #[test]

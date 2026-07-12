@@ -505,11 +505,14 @@ impl<'a> Interpreter<'a> {
                 if name == "push" && !args.is_empty() {
                     if let Value::List(_) = &result {
                         match &args[0] {
-                            // Case 1: push(var, val) — assign result back to var
+                            // Case 1: push(var, val) — assign result back to var.
+                            // push mutates the list in place in the codegen
+                            // backend regardless of `mut`. The interpreter must
+                            // match this behavior — do NOT require `mut` for
+                            // push write-back, otherwise `push(xs, x)` silently
+                            // drops the new element (L1 dual-backend inconsistency).
                             Expr::Ident(var_name) => {
-                                if self.is_mutable(var_name) {
-                                    self.assign(var_name, result.clone())?;
-                                }
+                                self.force_update(var_name, result.clone());
                                 return Ok(Value::Unit);
                             }
                             // Case 2: push(self.field, val) — update actor field

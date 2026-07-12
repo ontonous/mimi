@@ -174,6 +174,19 @@ impl ScopeEnv {
         )))
     }
 
+    /// Force-update a variable's value, bypassing the mutability check.
+    /// Used by `push()` write-back — push mutates in place in codegen
+    /// regardless of `mut`, so the interpreter must match (L1 consistency).
+    pub fn force_update(&mut self, name: &str, value: Value) {
+        for (scope, moved) in self.env.iter_mut().zip(self.moved_vars.iter_mut()).rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.into(), value);
+                moved.insert(name.into(), false);
+                return;
+            }
+        }
+    }
+
     /// Convert a string error into an InterpError with current call stack context.
     pub fn interp_err(&self, msg: String) -> InterpError {
         InterpError::new(msg).with_call_stack(self.call_stack.clone())

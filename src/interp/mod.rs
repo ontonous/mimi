@@ -1064,6 +1064,13 @@ impl<'a> Interpreter<'a> {
         self.scope_env.assign(name, value)
     }
 
+    /// Force-update a variable's value, bypassing the mutability check.
+    /// Used by `push()` write-back — push mutates in place in codegen
+    /// regardless of `mut`, so the interpreter must match.
+    fn force_update(&mut self, name: &str, value: Value) {
+        self.scope_env.force_update(name, value);
+    }
+
     /// Push a new compensation scope level
     fn push_compensation_scope(&mut self) {
         self.compensation_stack.push(Vec::new());
