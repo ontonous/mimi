@@ -864,6 +864,9 @@ fn shadow_persistent_into_fault(
 }
 
 /// Like `drop_fault_payload` but skips fields listed in `persistent`.
+/// L1: short-circuit nested actors; Shared/Mutex/List recurse so nested
+/// actors are still reached. Non-actor heap resources rely on scope-exit
+/// cleanup (process lifetime for orphaned buffers is acceptable here).
 fn drop_fault_payload_except(val: &Value, persistent: &[String]) {
     match val {
         Value::Actor(handle) => {
@@ -948,10 +951,22 @@ fn clear_faulted_actors(val: &Value) {
 }
 
 fn format_panic_snapshot(e: &InterpError, call_stack: &[String]) -> String {
+    // L2: redact absolute paths from stack frames; keep function-ish tails.
     let stack = if call_stack.is_empty() {
         String::from("<empty>")
     } else {
-        call_stack.join(" <- ")
+        call_stack
+            .iter()
+            .map(|frame| {
+                // Drop directory prefixes that may leak host paths.
+                frame
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(frame.as_str())
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" <- ")
     };
     format!("{} [{}] stack: {}", e.message(), e.code(), stack)
 }

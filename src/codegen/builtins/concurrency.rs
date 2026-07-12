@@ -6,7 +6,7 @@
 
 use super::super::call_try_basic_value;
 use super::CodeGenerator;
-use crate::error::MimiResult;
+use crate::error::{CompileError, MimiResult};
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
@@ -957,25 +957,35 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// v0.29.34: session_send(ch, val) — delegates to mimi_channel_send.
+    /// M7: errors use CompileError variants (not bare string).
     pub(super) fn compile_session_send(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 2 {
-            return Err("session_send expects 2 arguments".into());
+            return Err(CompileError::WrongArgCount(
+                "session_send expects 2 arguments".into(),
+            ));
         }
         let h = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => return Err("session_send: handle must be i64".into()),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "session_send: handle must be i64".into(),
+                ))
+            }
         };
         let v = match args[1] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => return Err("session_send: value must be i64".into()),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "session_send: value must be i64".into(),
+                ))
+            }
         };
-        let func = self
-            .module
-            .get_function("mimi_channel_send")
-            .ok_or("mimi_channel_send not declared")?;
+        let func = self.module.get_function("mimi_channel_send").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_channel_send".into())
+        })?;
         self.builder
             .build_call(
                 func,
@@ -985,7 +995,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 "session_send",
             )
-            .map_err(|e| format!("session_send error: {}", e))?;
+            .map_err(|e| CompileError::LlvmError(format!("session_send error: {}", e)))?;
         // M5-note: returning i64(0) is equivalent to unit in codegen — unit
         // values are represented as zero-width i64 in the LLVM backend. The
         // interp returns Value::Unit which is also 0 when used in arithmetic.
@@ -1000,21 +1010,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err("session_recv expects 1 argument".into());
+            return Err(CompileError::WrongArgCount(
+                "session_recv expects 1 argument".into(),
+            ));
         }
         let h = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => return Err("session_recv: handle must be i64".into()),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "session_recv: handle must be i64".into(),
+                ))
+            }
         };
-        let func = self
-            .module
-            .get_function("mimi_channel_recv")
-            .ok_or("mimi_channel_recv not declared")?;
+        let func = self.module.get_function("mimi_channel_recv").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_channel_recv".into())
+        })?;
         let result = self
             .builder
             .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_recv")
-            .map_err(|e| format!("session_recv error: {}", e))?;
-        Ok(call_try_basic_value(&result).ok_or("mimi_channel_recv returned void")?)
+            .map_err(|e| CompileError::LlvmError(format!("session_recv error: {}", e)))?;
+        call_try_basic_value(&result).ok_or_else(|| {
+            CompileError::LlvmError("mimi_channel_recv returned void".into())
+        })
     }
 
     /// v0.29.34: session_close(ch) — delegates to mimi_channel_drop.
@@ -1023,40 +1040,99 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
-            return Err("session_close expects 1 argument".into());
+            return Err(CompileError::WrongArgCount(
+                "session_close expects 1 argument".into(),
+            ));
         }
         let h = match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
-            _ => return Err("session_close: handle must be i64".into()),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "session_close: handle must be i64".into(),
+                ))
+            }
         };
-        let func = self
-            .module
-            .get_function("mimi_channel_drop")
-            .ok_or("mimi_channel_drop not declared")?;
+        let func = self.module.get_function("mimi_channel_drop").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_channel_drop".into())
+        })?;
         self.builder
             .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_close")
-            .map_err(|e| format!("session_close error: {}", e))?;
+            .map_err(|e| CompileError::LlvmError(format!("session_close error: {}", e)))?;
         Ok(BasicValueEnum::IntValue(
             self.context.i64_type().const_int(0, false),
         ))
     }
 
     pub(super) fn compile_session_open(&self, _args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
-        let f = self.module.get_function("mimi_session_pair").ok_or("mimi_session_pair not declared")?;
-        let pair = self.builder.build_call(f, &[], "sp").map_err(|e| format!("sp: {}", e))?;
-        let packed = call_try_basic_value(&pair).ok_or("sp void")?.into_int_value();
-        let lo_f = self.module.get_function("mimi_session_lo").ok_or("lo")?;
-        let hi_f = self.module.get_function("mimi_session_hi").ok_or("hi")?;
-        let lo = call_try_basic_value(&self.builder.build_call(lo_f, &[packed.into()], "lo").map_err(|e| format!("lo: {}", e))?).ok_or("lo void")?.into_int_value();
-        let hi = call_try_basic_value(&self.builder.build_call(hi_f, &[packed.into()], "hi").map_err(|e| format!("hi: {}", e))?).ok_or("hi void")?.into_int_value();
+        let f = self.module.get_function("mimi_session_pair").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_session_pair".into())
+        })?;
+        let pair = self
+            .builder
+            .build_call(f, &[], "sp")
+            .map_err(|e| CompileError::LlvmError(format!("session_pair: {}", e)))?;
+        let packed = call_try_basic_value(&pair)
+            .ok_or_else(|| CompileError::LlvmError("session_pair returned void".into()))?
+            .into_int_value();
+        let lo_f = self.module.get_function("mimi_session_lo").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_session_lo".into())
+        })?;
+        let hi_f = self.module.get_function("mimi_session_hi").ok_or_else(|| {
+            CompileError::UndefinedFunc("mimi_session_hi".into())
+        })?;
+        let lo = call_try_basic_value(
+            &self
+                .builder
+                .build_call(lo_f, &[packed.into()], "lo")
+                .map_err(|e| CompileError::LlvmError(format!("session_lo: {}", e)))?,
+        )
+        .ok_or_else(|| CompileError::LlvmError("session_lo returned void".into()))?
+        .into_int_value();
+        let hi = call_try_basic_value(
+            &self
+                .builder
+                .build_call(hi_f, &[packed.into()], "hi")
+                .map_err(|e| CompileError::LlvmError(format!("session_hi: {}", e)))?,
+        )
+        .ok_or_else(|| CompileError::LlvmError("session_hi returned void".into()))?
+        .into_int_value();
         let i64_ty = self.context.i64_type();
-        let data = self.builder.build_array_malloc(i64_ty, i64_ty.const_int(2, false), "spd").map_err(|e| format!("malloc: {}", e))?;
+        let data = self
+            .builder
+            .build_array_malloc(i64_ty, i64_ty.const_int(2, false), "spd")
+            .map_err(|e| CompileError::LlvmError(format!("session_pair malloc: {}", e)))?;
+        // SAFETY (M9): in_bounds GEP with indices 0 and 1 on a freshly allocated
+        // 2-element i64 array; stores write only within that allocation.
         unsafe {
-            self.builder.build_store(self.builder.build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(0, false)], "s0").map_err(|e| format!("gep: {}", e))?, lo).map_err(|e| format!("st: {}", e))?;
-            self.builder.build_store(self.builder.build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(1, false)], "s1").map_err(|e| format!("gep: {}", e))?, hi).map_err(|e| format!("st: {}", e))?;
+            self.builder
+                .build_store(
+                    self.builder
+                        .build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(0, false)], "s0")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+                    lo,
+                )
+                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
+            self.builder
+                .build_store(
+                    self.builder
+                        .build_in_bounds_gep(i64_ty, data, &[i64_ty.const_int(1, false)], "s1")
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+                    hi,
+                )
+                .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
         }
-        let di8 = self.builder.build_bit_cast(data, self.context.ptr_type(inkwell::AddressSpace::default()), "spi8").map_err(|e| format!("cast: {}", e))?.into_pointer_value();
-        Ok(BasicValueEnum::PointerValue(self.alloc_list_result(i64_ty.const_int(2, false), di8)?))
+        let di8 = self
+            .builder
+            .build_bit_cast(
+                data,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "spi8",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?
+            .into_pointer_value();
+        Ok(BasicValueEnum::PointerValue(
+            self.alloc_list_result(i64_ty.const_int(2, false), di8)?,
+        ))
     }
 
     // ── v0.29.44: Shadow memory tagging codegen ───────────────────────

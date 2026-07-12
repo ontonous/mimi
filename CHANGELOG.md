@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased] — v0.30.0-dev (止血清零)
+
+### v0.30.0 — 两轮审计剩余项清零（0 新 Feature）
+
+> 进入 v0.30 止血版本。修复原始审查遗留 CO-C1 + 深度审查剩余 HIGH/MEDIUM/LOW。
+
+#### CRITICAL
+- **CO-C1 / H16**: 接通 `generalize`/`instantiate` let-多态
+  - 不可变非 ref 的 `let` 绑定对 free TypeVar 泛化
+  - `lookup_var` / 闭包调用路径 `instantiate` ForAll
+  - lambda `fn(x: _)` 参数改为 fresh TypeVar（可泛化）
+  - 顶层泛型函数作为值时包装 ForAll 再实例化
+  - mut 绑定保持单态（value restriction）
+
+#### HIGH
+- **H1**: codegen Fault 吸收递归 walk 嵌套 Actor handle（record/state 字段 GEP）
+- **H2**: 文档化 codegen recover 与 interp dirty 语义对齐边界（注入 recover 保留 persistent shadow；mid-turn WAL 脏检测为 interp 主路径）
+
+#### MEDIUM
+- **M6**: 多目标转移 codegen 返回类型文档化（first-target nominal + E0420 穷尽 match）
+- **M7**: `session_*` codegen 错误改为 `CompileError` 变体
+- **M10**: `argv.offset(i)` 补 SAFETY 注释
+- **M12**: 补偿块失败计数 + 明确日志（不再静默吞）
+
+#### LOW
+- **L1–L12**: 资源 drop 注释、panic 栈路径脱敏、wall_clock 失败不回 0、broadcast 8-byte expect、spawn_detached 锁中毒恢复、`call_try_basic_value` unwrap→Err、协议状态缺失诊断、FFI expect 消息、Any/unknown 逃生口 TODO + 单侧 unknown unify 拒绝
+
+#### 测试
+- `co_c1_let_polymorphism_*` L2 回归
+- audit / typecheck / flow_features / dual_ 全绿
+
 ## [Unreleased] — v0.29.50-audit1 (深度审查 Bug 修复)
 
 ### v0.29.50-audit1 — 深度审查 Bug 修复（8 CRITICAL + 12 HIGH + 10 MEDIUM）

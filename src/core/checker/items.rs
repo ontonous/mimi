@@ -1197,9 +1197,19 @@ impl<'a> Checker<'a> {
                         // Check payload compatibility: protocol state has payload_type,
                         // flow state must have a matching field
                         if let Some(ref proto_payload_ty) = ps.payload_type {
-                            let flow_state = f.states.iter()
-                                .find(|s| s.name == ps.name)
-                                .unwrap();
+                            // L7: missing flow state for protocol state → diagnostic, not ICE.
+                            let Some(flow_state) =
+                                f.states.iter().find(|s| s.name == ps.name)
+                            else {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0412,
+                                    format!(
+                                        "protocol state '{}' not found on flow '{}' during payload check",
+                                        ps.name, f.name
+                                    ),
+                                );
+                                continue;
+                            };
                             let has_field = flow_state.payload.as_ref()
                                 .map(|fields| fields.iter().any(|field| {
                                     let field_ty = self.resolve_type(&field.ty);

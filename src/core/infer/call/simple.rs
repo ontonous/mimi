@@ -1555,11 +1555,14 @@ impl<'a> Checker<'a> {
         // functions. Check scopes first before falling back to global function
         // signatures; otherwise a prelude parameter named `f` would incorrectly
         // resolve to a user-defined top-level function `f`.
+        // CO-C1: instantiate ForAll so polymorphic let-bound closures get fresh TypeVars.
         if let Some(local_ty) = scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
         {
+            let resolved = self.unification.resolve(&local_ty);
+            let local_ty = self.instantiate(&resolved);
             match local_ty {
                 Type::Func(param_types, ret_ty) => {
                     if args.len() != param_types.len() {
@@ -1591,7 +1594,8 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    return *ret_ty;
+                    // Resolve return type after argument unification so TypeVars fill in.
+                    return self.unification.resolve(&ret_ty);
                 }
                 _ => {
                     self.emit_code(
@@ -1608,14 +1612,21 @@ impl<'a> Checker<'a> {
             None => {
                 // Try closure/lambda variable lookup: check if the name is a local
                 // variable with a function type (let f = fn(x) { ... }; f(42))
-                let closure_sig: Option<(Vec<Type>, Type)> = scopes
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(name).cloned())
+                // CO-C1: instantiate ForAll before matching Func.
+                let closure_sig: Option<(Vec<Type>, Type)> = {
+                    let raw = scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name).cloned());
+                    raw.map(|ty| {
+                        let resolved = self.unification.resolve(&ty);
+                        self.instantiate(&resolved)
+                    })
                     .and_then(|ty| match ty {
                         Type::Func(params, ret) => Some((params, *ret)),
                         _ => None,
-                    });
+                    })
+                };
                 if let Some((param_types, ret_ty)) = closure_sig {
                     if args.len() != param_types.len() {
                         self.emit_code(
@@ -1647,7 +1658,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    return ret_ty;
+                    return self.unification.resolve(&ret_ty);
                 }
                 // Try built-in Option/Result constructors as fallback
                 match name {

@@ -101,10 +101,23 @@ impl<'a> Interpreter<'a> {
     pub(crate) fn spawn_detached_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
         let handle_val = self.spawn_actor(actor_name)?;
         if let Value::Actor(ref handle) = handle_val {
-            // Mark as detached
-            if let Ok(mut instance) = handle.inner.write() {
-                instance.is_detached = true;
-                instance.parent_id = None;
+            // L5: surface write-lock failure instead of silently skipping detach.
+            match handle.inner.write() {
+                Ok(mut instance) => {
+                    instance.is_detached = true;
+                    instance.parent_id = None;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "spawn_detached: failed to mark actor detached (poisoned lock): {}",
+                        e
+                    );
+                    // Still recover the guard and set flags — detach is best-effort
+                    // but must not be silently skipped.
+                    let mut instance = e.into_inner();
+                    instance.is_detached = true;
+                    instance.parent_id = None;
+                }
             }
         }
         Ok(handle_val)

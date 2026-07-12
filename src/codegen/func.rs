@@ -1895,7 +1895,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let start = self.builder
                             .build_call(wc_fn, &[], "pin_start_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
-                        Some(start.try_as_basic_value_opt().unwrap().into_int_value())
+                        Some(
+                            start
+                                .try_as_basic_value_opt()
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(
+                                        "mimi_wall_clock_ms returned void (L6)".into(),
+                                    )
+                                })?
+                                .into_int_value(),
+                        )
                     } else {
                         None
                     };
@@ -1913,7 +1922,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let now_call = self.builder
                             .build_call(wc_fn, &[], "pin_now_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
-                        let now_ms = now_call.try_as_basic_value_opt().unwrap().into_int_value();
+                        let now_ms = now_call
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(
+                                    "mimi_wall_clock_ms returned void (L6)".into(),
+                                )
+                            })?
+                            .into_int_value();
                         let elapsed = self.builder
                             .build_int_sub(now_ms, start_ms, "pin_elapsed")
                             .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;

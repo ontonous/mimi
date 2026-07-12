@@ -79,6 +79,8 @@ pub struct Interpreter<'a> {
     /// Each scope level contains compensation blocks registered in that scope
     /// Push a new scope when entering a block, pop when exiting
     compensation_stack: Vec<Vec<Vec<Stmt>>>,
+    /// M12: count of compensation blocks that failed (not silently lost).
+    pub(crate) compensation_error_count: usize,
     /// Arena memory blocks (arena_id -> Arena)
     arenas: Vec<Arena>,
     /// Current arena scope depth (track nesting for error messages)
@@ -220,6 +222,7 @@ impl<'a> Interpreter<'a> {
             failure_variants,
             cap_defs,
             compensation_stack: Vec::new(),
+            compensation_error_count: 0,
             arenas: Vec::new(),
             arena_depth: 0,
             verify_contracts: true,
@@ -1078,7 +1081,13 @@ impl<'a> Interpreter<'a> {
                 for block in scope.iter().rev() {
                     for stmt in block {
                         if let Err(e) = self.eval_stmt(stmt) {
-                            eprintln!("compensation error: {} (ignored)", e);
+                            // M12: surface compensation failures (count + log).
+                            self.compensation_error_count =
+                                self.compensation_error_count.saturating_add(1);
+                            eprintln!(
+                                "compensation error #{}: {} (continuing remaining compensations)",
+                                self.compensation_error_count, e
+                            );
                         }
                     }
                 }
@@ -1097,7 +1106,13 @@ impl<'a> Interpreter<'a> {
             for block in scope.iter().rev() {
                 for stmt in block {
                     if let Err(e) = self.eval_stmt(stmt) {
-                        eprintln!("compensation error: {} (ignored)", e);
+                        // M12: surface compensation failures (count + log).
+                        self.compensation_error_count =
+                            self.compensation_error_count.saturating_add(1);
+                        eprintln!(
+                            "compensation error #{}: {} (continuing remaining compensations)",
+                            self.compensation_error_count, e
+                        );
                     }
                 }
             }

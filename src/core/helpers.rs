@@ -229,8 +229,8 @@ pub fn subst_type_params(
 }
 
 pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
-    // `Any` is the dynamic/erased top type: any value can be passed where
-    // `Any` is expected and `Any` can be provided where any type is expected.
+    // L10: `Any` is the dynamic/erased top type (escape hatch).
+    // TODO(#v0.31-type-engine): scope Any to explicit annotations only.
     if matches!(a, Type::Name(n, _) if n == "Any") || matches!(b, Type::Name(n, _) if n == "Any") {
         return true;
     }

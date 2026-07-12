@@ -219,9 +219,24 @@ impl UnificationTable {
             // Name("_") — inference placeholder, compatible with anything
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
-            // `Any` is the dynamic top type: compatible with any concrete type.
+            // L11: `Any` dynamic top type escape hatch.
+            // TODO(#v0.31-type-engine): restrict Any unification to explicit boundaries.
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
             (_, Type::Name(n, _)) if n == "Any" => Ok(()),
+            // L12: single-sided "unknown" must not unify (helpers already reject);
+            // both-unknown is allowed as a cascade placeholder only.
+            (Type::Name(na, _), Type::Name(nb, _)) if na == "unknown" && nb != "unknown" => {
+                Err(UnifyError::Mismatch(format!(
+                    "cannot unify unknown with {}",
+                    nb
+                )))
+            }
+            (Type::Name(na, _), Type::Name(nb, _)) if nb == "unknown" && na != "unknown" => {
+                Err(UnifyError::Mismatch(format!(
+                    "cannot unify {} with unknown",
+                    na
+                )))
+            }
             // Type::Infer — inference placeholder, compatible with anything
             (Type::Infer, _) | (_, Type::Infer) => Ok(()),
 

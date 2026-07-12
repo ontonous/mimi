@@ -665,7 +665,11 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
                         PENDING_C_STRINGS.with(|pending| {
                             let mut pending = pending.borrow_mut();
                             pending.push(c_str);
-                            pending.last().unwrap().as_ptr()
+                            // L8: just pushed, so last is always Some.
+                            pending
+                                .last()
+                                .expect("PENDING_C_STRINGS non-empty after push")
+                                .as_ptr()
                         })
                     }
                     Err(_) => {
