@@ -106,6 +106,7 @@ pub(crate) mod lsp_e2e;
 
 // === Audit regression tests ===
 pub(crate) mod audit_regression;
+pub(crate) mod audit_round2;
 
 use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
