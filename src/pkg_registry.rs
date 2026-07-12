@@ -72,6 +72,8 @@ pub fn registry_dir() -> Result<std::path::PathBuf, String> {
 
 /// Recursively copy a directory, skipping entries rejected by `filter`.
 /// `filter` receives entry file names (not full paths); return true to skip.
+///
+/// B1/SEC-C8: Symlinks are skipped to prevent escaping the source tree.
 pub fn copy_dir_recursive_filtered(
     src: &Path,
     dst: &Path,
@@ -87,7 +89,12 @@ pub fn copy_dir_recursive_filtered(
         }
         let src_path = entry.path();
         let dst_path = dst.join(fname);
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let file_type = entry.file_type().map_err(|e| format!("file_type: {}", e))?;
+        if file_type.is_symlink() {
+            // B1/SEC-C8: Skip symlinks to prevent directory traversal attacks.
+            continue;
+        }
+        if file_type.is_dir() {
             copy_dir_recursive_filtered(&src_path, &dst_path, filter)?;
         } else {
             std::fs::copy(&src_path, &dst_path)
@@ -97,14 +104,21 @@ pub fn copy_dir_recursive_filtered(
     Ok(())
 }
 
-/// Recursively copy a directory
+/// Recursively copy a directory.
+///
+/// B1/SEC-C8: Symlinks are skipped to prevent escaping the source tree.
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
     for entry in std::fs::read_dir(src).map_err(|e| format!("read_dir {}: {}", src.display(), e))? {
         let entry = entry.map_err(|e| format!("read_dir entry: {}", e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let file_type = entry.file_type().map_err(|e| format!("file_type: {}", e))?;
+        if file_type.is_symlink() {
+            // B1/SEC-C8: Skip symlinks to prevent directory traversal attacks.
+            continue;
+        }
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)

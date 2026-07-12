@@ -83,8 +83,8 @@ impl Manifest {
             .as_ref()
             .and_then(|p| p.entry.as_deref())
             .unwrap_or("main.mimi");
-        // SEC-C3 (deep audit): validate entry to prevent path traversal.
-        if entry.contains("..") || entry.contains('\0') {
+        // B1: use unified path safety validation.
+        if crate::path_safety::validate_safe_path(base_dir, entry).is_err() {
             return base_dir.join("main.mimi");
         }
         base_dir.join(entry)

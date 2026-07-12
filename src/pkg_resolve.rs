@@ -34,29 +34,9 @@ fn resolve_git_dep(
 ) -> Result<ResolvedDep, String> {
     let tag_arg = dep.tag.as_deref().unwrap_or("main");
 
-    // SEC-C2 (deep audit): validate git_url to prevent command injection.
-    // - Reject URLs starting with '-' (git option injection)
-    // - Reject ext:: protocol (arbitrary command execution)
-    // - Only allow standard git URL prefixes
-    fn validate_git_url(url: &str) -> Result<(), String> {
-        if url.starts_with('-') {
-            return Err(format!("invalid git URL: starts with '-' (possible option injection): {}", url));
-        }
-        if url.starts_with("ext::") {
-            return Err(format!("invalid git URL: ext:: protocol is forbidden (RCE risk): {}", url));
-        }
-        let safe = url.starts_with("https://")
-            || url.starts_with("http://")
-            || url.starts_with("ssh://")
-            || url.starts_with("git@")
-            || url.starts_with("file://")
-            || url.starts_with("git://");
-        if !safe {
-            return Err(format!("invalid git URL: must start with https://, http://, ssh://, git@, git://, or file://: {}", url));
-        }
-        Ok(())
-    }
-    validate_git_url(git_url)?;
+    // B1: use unified path safety validation.
+    crate::path_safety::validate_git_url(git_url)?;
+    let git_url = git_url;
 
     // Validate tag to prevent option injection
     if tag_arg.starts_with('-') {
@@ -154,21 +134,9 @@ fn resolve_path_dep(
     dst: &Path,
     source: &str,
 ) -> Result<ResolvedDep, String> {
-    // SEC-C7 (deep audit): validate path dependency to prevent arbitrary file exfiltration.
-    // Only allow relative paths without '..' that escape the project root.
+    // B1: use unified path safety validation.
+    crate::path_safety::validate_path_dep(source)?;
     let src = PathBuf::from(source);
-    if src.is_absolute() {
-        return Err(format!(
-            "path dependency '{}' must be a relative path, got absolute: {}",
-            dep.name, source
-        ));
-    }
-    if source.contains("..") {
-        return Err(format!(
-            "path dependency '{}' must not contain '..': {}",
-            dep.name, source
-        ));
-    }
     if !src.exists() {
         return Err(format!(
             "path dependency '{}' not found at {}",

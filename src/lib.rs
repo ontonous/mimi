@@ -73,6 +73,7 @@ pub mod core;
 pub mod doc_core;
 pub mod pkg_registry;
 pub mod pkg_resolve;
+pub mod path_safety;
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod runtime;
 
