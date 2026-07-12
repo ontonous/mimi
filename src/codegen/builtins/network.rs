@@ -401,6 +401,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_http_get returned void")?
             .into_pointer_value();
+        // audit (MEDIUM): mimi_http_get returns null on error. If null,
+        // substitute a static empty string so downstream strlen doesn't
+        // dereference null (UB). The user-visible behavior matches the
+        // interpreter: empty string on failure.
+        let empty_str = self
+            .builder
+            .build_global_string_ptr("", "http_empty_str")
+            .map_err(|e| format!("global str error: {}", e))?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                result,
+                self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                "http_is_null",
+            )
+            .map_err(|e| format!("icmp error: {}", e))?;
+        let safe_ptr = self
+            .builder
+            .build_select(is_null, empty_str.as_pointer_value(), result, "http_safe_ptr")
+            .map_err(|e| format!("select error: {}", e))?
+            .into_pointer_value();
+        let result = safe_ptr;
         // NOTE: not registered — returned value owns the allocation
         // Build Mimi string struct {i8*, i64}
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -480,6 +503,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_http_post returned void")?
             .into_pointer_value();
+        // audit (MEDIUM): null-safe substitution (same as http_get)
+        let empty_str = self
+            .builder
+            .build_global_string_ptr("", "http_post_empty_str")
+            .map_err(|e| format!("global str error: {}", e))?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                result,
+                self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                "http_post_is_null",
+            )
+            .map_err(|e| format!("icmp error: {}", e))?;
+        let safe_ptr = self
+            .builder
+            .build_select(is_null, empty_str.as_pointer_value(), result, "http_post_safe_ptr")
+            .map_err(|e| format!("select error: {}", e))?
+            .into_pointer_value();
+        let result = safe_ptr;
         // NOTE: not registered — returned value owns the allocation
         // Build Mimi string struct {i8*, i64}
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());

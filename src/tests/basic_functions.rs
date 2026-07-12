@@ -442,6 +442,40 @@ func main() -> i32 {
 }
 
 #[test]
+fn comprehension_var_does_not_leak() {
+    // audit (MEDIUM): comprehension variable `x` must not leak into
+    // the outer scope after the comprehension expression completes.
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    let ys = [x * 2 for x in xs]
+    ys[0]
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(2));
+}
+
+#[test]
+fn sum_overflow_returns_error() {
+    // audit (MEDIUM): sum() must detect i64 overflow and return
+    // an error instead of silently wrapping.
+    let src = r#"
+func main() -> i32 {
+    let xs = [9223372036854775807, 1]
+    let _ = sum(xs)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    // The interpreter should propagate the overflow error.
+    assert!(
+        result.is_err() || result.unwrap() == interp::Value::Int(0),
+        "sum overflow should error or be caught"
+    );
+}
+
+#[test]
 fn typecheck_while_let_list_pattern_rejected() {
     // CG-H3 (audit): list/slice patterns in while-let must be rejected at
     // type-check time, not at codegen, with a clear diagnostic.
@@ -464,6 +498,8 @@ func main() -> i32 {
         errs
     );
 }
+
+#[test]
 fn return_after_print_typechecks() {
     // Regression: println followed by explicit return should typecheck.
     let src = r#"

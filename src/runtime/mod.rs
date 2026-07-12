@@ -3310,7 +3310,9 @@ pub extern "C" fn mimi_http_get(url: *const std::ffi::c_char) -> *mut std::ffi::
             let s = String::from_utf8_lossy(&body).into_owned();
             alloc_c_string(&s)
         }
-        None => alloc_c_string(""),
+        // audit (MEDIUM): return null on error so callers can distinguish
+        // failure from a legitimate empty response body.
+        None => std::ptr::null_mut(),
     }
 }
 
@@ -3352,7 +3354,9 @@ pub extern "C" fn mimi_http_post(
             let s = String::from_utf8_lossy(&body).into_owned();
             alloc_c_string(&s)
         }
-        None => alloc_c_string(""),
+        // audit (MEDIUM): return null on error so callers can distinguish
+        // failure from a legitimate empty response body.
+        None => std::ptr::null_mut(),
     }
 }
 
