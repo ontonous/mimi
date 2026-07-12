@@ -6,6 +6,11 @@ use crate::span::Span;
 use std::collections::HashMap;
 
 /// Replace type parameters in `ty` according to `subst`.
+/// audit (MEDIUM): field-level substitution depth is bounded by the number of
+/// nested generic arguments in practice (typically < 8), but a self-referencing
+/// type could cause infinite recursion. The overload in record.rs (used for
+/// record literal inference) guards against this with MAX_SUBST_DEPTH.
+#[allow(clippy::only_used_in_recursion)]
 fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     match ty {
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {

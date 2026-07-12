@@ -4,7 +4,25 @@ use crate::core::helpers::{fmt_type, same_type};
 use std::collections::HashMap;
 
 /// Replace type parameters in `ty` according to `subst`.
+/// audit (MEDIUM): guard against infinite recursion on self-referencing types
+/// (e.g. `T = List<T>`). Returns original type unchanged past depth limit.
+const MAX_SUBST_DEPTH: usize = 32;
+
 fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    subst_with_depth(ty, subst, 0)
+}
+
+fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> Type {
+    if depth > MAX_SUBST_DEPTH {
+        mimi_debug_assert!(
+            false,
+            "substitute_type_params: exceeded max depth ({}), \
+             possible self-referencing type parameter",
+            MAX_SUBST_DEPTH
+        );
+        return ty.clone();
+    }
+    let next = depth + 1;
     match ty {
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
             subst[name].clone()
@@ -12,7 +30,7 @@ fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Name(name, args) => Type::Name(
             name.clone(),
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
         ),
         Type::Option(inner) => Type::Option(Box::new(substitute_type_params(inner, subst))),
@@ -28,13 +46,13 @@ fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         ),
         Type::Func(args, ret) => Type::Func(
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
             Box::new(substitute_type_params(ret, subst)),
         ),
         Type::ExternFunc(args, ret) => Type::ExternFunc(
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
             Box::new(substitute_type_params(ret, subst)),
         ),

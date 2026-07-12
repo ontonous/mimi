@@ -812,6 +812,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                 a.get_zero_extended_constant()?,
                 b.get_zero_extended_constant()?,
             ),
+            (BasicValueEnum::FloatValue(a), BasicValueEnum::FloatValue(b)) => {
+                // audit (MEDIUM): fold float constants at compile time.
+                // get_constant() returns Option<(f64, bool)> where bool is
+                // the "is lossy" flag — we only care about the value.
+                let (fa, _) = a.get_constant()?;
+                let (fb, _) = b.get_constant()?;
+                let result = match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        let v = match op {
+                            BinOp::Add => fa + fb,
+                            BinOp::Sub => fa - fb,
+                            BinOp::Mul => fa * fb,
+                            BinOp::Div => if fb == 0.0 { return None; } else { fa / fb },
+                            _ => unreachable!(),
+                        };
+                        Some(BasicValueEnum::FloatValue(self.context.f64_type().const_float(v)))
+                    }
+                    BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        let b = match op {
+                            BinOp::EqCmp => fa == fb,
+                            BinOp::NeCmp => fa != fb,
+                            BinOp::Lt => fa < fb,
+                            BinOp::Le => fa <= fb,
+                            BinOp::Gt => fa > fb,
+                            BinOp::Ge => fa >= fb,
+                            _ => unreachable!(),
+                        };
+                        Some(BasicValueEnum::IntValue(self.context.bool_type().const_int(b as u64, false)))
+                    }
+                    _ => None,
+                };
+                return result;
+            }
             _ => return None,
         };
         match op {
