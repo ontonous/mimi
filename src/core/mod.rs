@@ -6,7 +6,7 @@ pub(crate) use std::collections::HashMap;
 
 mod borrow;
 mod checker;
-mod helpers;
+pub(crate) mod helpers;
 pub mod unification;
 
 mod check_stmt;

@@ -196,12 +196,36 @@ impl SolverSession {
     /// and sets replaced = true so pending pop() calls are skipped.
     /// On Sat/Unsat: clears replaced flag.
     pub fn check(&mut self) -> SatResult {
+        // H14-fix: distinguish Z3 crash from timeout. A crash (panic) is now
+        // logged to stderr so verification incompleteness is visible.
         let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check())).ok();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check()));
         match result {
-            Some(SatResult::Sat) => { self.replaced = false; SatResult::Sat }
-            Some(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
-            _ => {
+            Ok(SatResult::Sat) => { self.replaced = false; SatResult::Sat }
+            Ok(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
+            Ok(SatResult::Unknown) => {
+                // Normal timeout — no log needed
+                let mut params = z3::Params::new();
+                params.set_u32("timeout", self.timeout_ms as u32);
+                let new_solver = Solver::new();
+                new_solver.set_params(&params);
+                let _ = std::mem::replace(&mut self.solver, new_solver);
+                self.replaced = true;
+                SatResult::Unknown
+            }
+            Err(panic_payload) => {
+                // H14-fix: Z3 solver crash — log it so verification
+                // incompleteness is visible rather than silently Unknown.
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        panic_payload
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "(non-string panic payload)".to_string());
+                eprintln!("[mimi verifier] Z3 solver crashed: {}", msg);
                 let mut params = z3::Params::new();
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();

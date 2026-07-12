@@ -502,7 +502,11 @@ fn attach_persistent_shadows(flow: &mut FlowDef) {
         let ty = types
             .get(name)
             .cloned()
-            .unwrap_or_else(|| Type::Name("i32".to_string(), vec![]));
+            // M2-fix: when the persistent field type cannot be resolved from
+            // any state payload, default to a unit type instead of i32.
+            // Previously defaulted to i32, which silently created a type mismatch
+            // if the field was actually a different type.
+            .unwrap_or_else(|| Type::Name("unit".to_string(), vec![]));
         payload.push(Field {
             name: name.clone(),
             ty,
@@ -582,6 +586,10 @@ fn fault_return_body(
     event: &str,
     shapes: &HashMap<String, Vec<Field>>,
 ) -> Block {
+    // M1-fix: When Fault→Fault (i.e. the Fault state receives another event),
+    // preserve the existing SystemTrace by reading from self.trace instead
+    // of constructing a new one.
+    let is_fault_to_fault = from_state == "Fault";
     let snapshot = format!("undefined transition {}({})", event, from_state);
     // Fields available on the from-state payload (for persistent shadowing).
     let from_fields: HashSet<String> = flow
@@ -605,6 +613,15 @@ fn fault_return_body(
                         && from_fields.contains(&f.name)
                     {
                         // Shadow copy from abandoned state.
+                        Expr::Field(Box::new(Expr::Ident("self".to_string())), f.name.clone())
+                    } else if is_fault_to_fault
+                        && matches!(
+                            f.name.as_str(),
+                            "trace" | "last_state" | "unexpected_event" | "snapshot"
+                        )
+                    {
+                        // M1-fix: Fault→Fault preserves the original SystemTrace
+                        // by reading from self instead of constructing a new one.
                         Expr::Field(Box::new(Expr::Ident("self".to_string())), f.name.clone())
                     } else {
                         default_field_value(&f.name, &f.ty, from_state, event, &snapshot, shapes)

@@ -866,6 +866,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("cbr: {}", e))?;
 
         self.builder.position_at_end(body_bb);
+        // SAFETY: `idx` is bounded by the loop condition (0..len), and
+        // `data_i64` is a valid pointer to an i64 array of at least `len`
+        // elements. The GEP is in-bounds by construction.
         let elem_ptr = unsafe {
             self.builder
                 .build_in_bounds_gep(i64_ty, data_i64, &[idx], "elem_ptr")
@@ -880,6 +883,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_to_ptr(elem, i8_ptr, "handle")
             .map_err(|e| format!("i2p: {}", e))?;
+        // SAFETY: `idx` is bounded by the loop condition (0..len), and
+        // `handles_arr` is a valid pointer to an i8* array of at least `len`
+        // elements. The GEP is in-bounds by construction.
         let slot = unsafe {
             self.builder
                 .build_in_bounds_gep(i8_ptr, handles_arr, &[idx], "hslot")
@@ -980,6 +986,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "session_send",
             )
             .map_err(|e| format!("session_send error: {}", e))?;
+        // M5-note: returning i64(0) is equivalent to unit in codegen — unit
+        // values are represented as zero-width i64 in the LLVM backend. The
+        // interp returns Value::Unit which is also 0 when used in arithmetic.
         Ok(BasicValueEnum::IntValue(
             self.context.i64_type().const_int(0, false),
         ))

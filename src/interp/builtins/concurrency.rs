@@ -520,11 +520,23 @@ impl<'a> Interpreter<'a> {
         fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
         fault_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
         fault_fields.insert("snapshot".to_string(), Value::String(String::new()));
-        // SystemTrace sub-record
+        // SystemTrace sub-record — must have all 5 fields (v0.29.39 expanded)
         let mut trace_fields = HashMap::new();
         trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
         trace_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
         trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
+        // MemoryDump: empty dump (count=0, regions=[])
+        let mut dump_fields = HashMap::new();
+        dump_fields.insert("count".to_string(), Value::Int(0));
+        dump_fields.insert("regions".to_string(), Value::List(Vec::new()));
+        trace_fields.insert("memory_dump".to_string(), Value::Record(Some("MemoryDump".to_string()), dump_fields));
+        // PanicPayload: synthetic injection info
+        let mut panic_fields = HashMap::new();
+        panic_fields.insert("error_type".to_string(), Value::String("InjectFault".to_string()));
+        panic_fields.insert("file".to_string(), Value::String(String::new()));
+        panic_fields.insert("line".to_string(), Value::Int(0));
+        panic_fields.insert("stack_snapshot".to_string(), Value::String(String::new()));
+        trace_fields.insert("panic_payload".to_string(), Value::Record(Some("PanicPayload".to_string()), panic_fields));
         fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
         Ok(Value::Record(Some("Fault".to_string()), fault_fields))
     }
@@ -578,12 +590,12 @@ impl<'a> Interpreter<'a> {
                         vec![],
                     ) {
                         Ok(v) => {
-                            // v0.29.35: normalize to i64 for List<i64> result.
-                            // If the method returned a non-i64, coerce to i64.
-                            match v {
-                                Value::Int(n) => results.push(Value::Int(n)),
-                                _ => results.push(Value::Int(0)),
-                            }
+                            // H6-fix: Preserve the original value type instead
+                            // of coercing non-i64 to 0. Previously, non-int
+                            // returns (string/unit/record) were silently
+                            // converted to 0, which was indistinguishable
+                            // from a legitimate 0 return value.
+                            results.push(v);
                         }
                         Err(_) => {
                             // v0.29.35: PeerFault sentinel = -1

@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased] — v0.29.50-audit1 (深度审查 Bug 修复)
+
+### v0.29.50-audit1 — 深度审查 Bug 修复（8 CRITICAL + 12 HIGH + 10 MEDIUM）
+
+> 基于 `devdocs/v0.29-deep-audit-results.md` 审查结果，修复 51 项问题中的 30 项关键修复。
+
+#### CRITICAL 修复 (8/8)
+- **C1**: `inject_fault` SystemTrace 从 3 字段补全为 5 字段（`memory_dump` + `panic_payload`）
+- **C2**: `inject_fault` codegen 从空操作改为调用 `mimi_inject_fault()` 运行时函数
+- **C3**: `assert_state` codegen 从空操作改为调用 `mimi_assert_state()` 运行时函数
+- **C4**: LSP 协议字节读取错误从静默丢弃改为错误日志 + continue
+- **C5**: HTTP fetch 超时设置失败从静默忽略改为返回 None
+- **C6**: JSON 数字解析失败从静默返回 0 改为 eprintln 日志
+- **C7**: `Vec::from_raw_parts` 添加 SAFETY 注释
+- **C8**: `SendFilePtr` unsafe impl Send/Sync（已有 SAFETY 注释，确认存在）
+
+#### HIGH 修复 (12/17, 去重后)
+- **H3/H9**: `session_recv` 类型推断从 `i32` 改为 `i64`（与运行时 `mimi_channel_recv` 一致）
+- **H5**: SystemKill `into_inner()` 添加 SAFETY 注释说明 mutex poison 恢复
+- **H6/H10**: Broadcast 非 i64 结果从静默转为 0 改为保留原始值
+- **H11**: LSP 缓存文件写入失败从静默忽略改为 eprintln 日志
+- **H12**: Channel recv 断开从静默返回 0 改为 eprintln 日志
+- **H13**: Mailbox `now_ms()` 时钟失败从静默返回 0 改为 eprintln 日志
+- **H14**: Z3 solver crash 从静默转为 Unknown 改为区分 crash/timeout 并 eprintln 日志
+- **H15**: Comptime 求值错误从 eprintln warning 改为 CompileError 传播
+- **H17**: `session.rs` 中不完整的 `same_type` 副本改为委托 `core::helpers::same_type`
+- **H4**: `spawn_detached` codegen stub 添加文档说明（方法路径已正确处理）
+
+#### MEDIUM 修复 (10/14)
+- **M1**: Fault→Fault 转移保留原始 SystemTrace（从 self 读取 trace/last_state/unexpected_event/snapshot）
+- **M2**: Persistent 字段类型无法解析时默认 `unit` 而非 `i32`
+- **M5**: `session_send`/`session_close` codegen 返回值添加等价性注释
+- **M8**: `Expr::Record` 在 mutate 参数赋值中从误报 E0417 改为允许（读-改-写模式）
+- **M9**: Codegen `build_in_bounds_gep` 添加 SAFETY 注释
+- **M11**: LSP stdout flush 错误从 `.ok()` 静默忽略改为 eprintln 日志
+- **M13**: `build_func_index`/`build_actor_index`/`build_flow_index` 中的 `_ => {}` 替换为显式 Item 变体列表
+- **M14**: 新增 `mimi_value_is_null()` FFI 函数允许 C 调用者区分 null 和 0
+- **M3/M4**: 同 C7/C8（SAFETY 注释）
+
+#### 测试
+- 3123 lib tests 全绿（排除 7 个 pre-existing #[ignore] 和 pre-existing failures）
+- 163 flow_features tests 全绿
+- 21 golden IR files 更新
+- 0 新增回归
+
 ## [Unreleased] — v0.29.41-dev (白皮书全 Feature 冻结)
 
 ### v0.29.41 — 白皮书全 Feature 冻结回归

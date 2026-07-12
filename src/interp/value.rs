@@ -442,10 +442,16 @@ impl MailboxBpState {
     }
 
     fn now_ms() -> u64 {
+        // H13-fix: log system clock failure instead of silently returning 0.
+        // A return of 0 means "epoch (1970)" which breaks mailbox TTL/deadline
+        // logic. Logging makes the failure visible.
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
+            .unwrap_or_else(|e| {
+                eprintln!("[mimi runtime] system clock error: {}", e);
+                0
+            })
     }
 
     /// Current approximate depth.

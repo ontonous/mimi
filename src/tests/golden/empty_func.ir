@@ -267,6 +267,36 @@ declare i64 @mimi_actor_call(ptr, i32, ptr, i64, ptr)
 
 declare void @mimi_actor_drop(ptr)
 
+declare void @mimi_actor_fault(ptr)
+
+declare i32 @mimi_actor_is_faulted(ptr)
+
+declare void @mimi_actor_set_mailbox_depth(ptr, i64)
+
+declare i64 @mimi_actor_mailbox_depth(ptr)
+
+declare i32 @mimi_actor_is_muted(ptr)
+
+declare void @mimi_actor_set_max_children(i64)
+
+declare i64 @mimi_actor_spawn_count()
+
+declare i64 @mimi_actor_max_children()
+
+declare i64 @mimi_session_pair()
+
+declare i64 @mimi_session_lo(i64)
+
+declare i64 @mimi_session_hi(i64)
+
+declare void @mimi_actor_set_method_names(ptr, ptr, i64)
+
+declare i32 @mimi_actor_method_id(ptr, ptr)
+
+declare ptr @mimi_broadcast(ptr, i64, ptr, ptr)
+
+declare void @mimi_broadcast_free(ptr, i64)
+
 declare i64 @mimi_atomic_i32_new(i32)
 
 declare i32 @mimi_atomic_i32_load(i64)

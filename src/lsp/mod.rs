@@ -171,10 +171,16 @@ impl LspServer {
             entries,
         };
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            // H11-fix: propagate directory creation failure instead of silently ignoring
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("[mimi lsp] failed to create cache directory: {}", e);
+            }
         }
         if let Ok(data) = serde_json::to_string(&cache) {
-            let _ = fs::write(path, data);
+            // H11-fix: propagate write failure instead of silently ignoring
+            if let Err(e) = fs::write(path, data) {
+                eprintln!("[mimi lsp] failed to write cache file: {}", e);
+            }
         }
     }
 
@@ -283,11 +289,17 @@ impl LspServer {
             // but some clients send only \n. Handle both by reading one byte and
             // optionally discarding a \r:
             let mut single = [0u8; 1];
-            let _ = reader.read(&mut single);
+            if let Err(e) = reader.read(&mut single) {
+                eprintln!("[mimi lsp] failed to read separator byte: {}", e);
+                continue;
+            }
             if single[0] == b'\r' {
                 // \r\n — consume the trailing \n too
                 let mut nl = [0u8; 1];
-                let _ = reader.read(&mut nl);
+                if let Err(e) = reader.read(&mut nl) {
+                    eprintln!("[mimi lsp] failed to read newline byte: {}", e);
+                    continue;
+                }
             }
 
             reader
@@ -316,7 +328,10 @@ impl LspServer {
                         *self = new_self;
                         let resp_str = serde_json::to_string(&response).unwrap_or_default();
                         print!("Content-Length: {}\r\n\r\n{}", resp_str.len(), resp_str);
-                        io::stdout().flush().ok();
+                        // M11-fix: log flush failure instead of silently ignoring
+                        if let Err(e) = io::stdout().flush() {
+                            eprintln!("[mimi lsp] failed to flush stdout: {}", e);
+                        }
                     }
                     Ok((new_self, None)) => {
                         *self = new_self;

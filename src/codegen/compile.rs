@@ -586,8 +586,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Drive the same `eval_comptime_funcs` step `Interpreter::run`
         // uses so we get a `comptime_results` map populated before any
         // user-level `Expr::Comptime` block is asked to fold.
+        // H15-fix: comptime errors should be compile errors, not silent warnings.
+        // Previously downgraded to eprintln warning, which could cause generated
+        // code to use wrong constants. Now propagated as a CompileError.
         if let Err(e) = interp.eval_comptime_block(&Vec::new()) {
-            eprintln!("warning: fold_comptime_items bootstrap: {}", e);
+            return Err(CompileError::Generic(format!(
+                "comptime evaluation error: {}", e
+            )));
         }
         // Drain every pre-computed comptime result into the codegen cache.
         for (name, value) in interp.drain_comptime_results() {

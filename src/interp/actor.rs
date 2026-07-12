@@ -112,8 +112,18 @@ impl<'a> Interpreter<'a> {
 
     /// v0.29.37: SystemKill — cascade terminate all non-detached children
     /// of the given parent actor id. Called when parent faults or is dropped.
+    /// H5-fix: We use unwrap_or_else(|e| e.into_inner()) to recover from
+    /// mutex poison. This is intentional: during SystemKill, an actor thread
+    /// may have panicked while holding the lock. Aborting the entire cascade
+    /// would be worse than proceeding with potentially stale data, since
+    /// we're killing children anyway. The lock is only used for the actor
+    /// registry, not for mutable actor state.
     pub(crate) fn system_kill_children(&self, parent_id: usize) {
         let handles = crate::interp::value::actor_handles();
+        // SAFETY: into_inner() on a poisoned mutex is safe — it returns the
+        // inner data. The data may be inconsistent, but we only read the
+        // parent_id and is_detached fields which are set at spawn time and
+        // not modified during normal operation.
         let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
         let child_ids: Vec<usize> = registry
             .iter()

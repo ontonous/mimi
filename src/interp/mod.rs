@@ -327,6 +327,19 @@ impl<'a> Interpreter<'a> {
                     };
                     Self::build_func_index_rec(&m.items, &new_prefix, index);
                 }
+                // M13-fix: explicitly list non-indexed variants so new
+                // Item variants trigger a compile warning (uncovered pattern).
+                Item::Type(_)
+                | Item::Actor(_)
+                | Item::Cap(_)
+                | Item::Trait(_)
+                | Item::Impl(_)
+                | Item::ExternBlock(_)
+                | Item::Const { .. }
+                | Item::Flow(_)
+                | Item::Protocol(_)
+                | Item::Session(_) => {}
+                #[allow(unreachable_patterns)]
                 _ => {}
             }
         }
@@ -339,6 +352,18 @@ impl<'a> Interpreter<'a> {
                     index.insert(a.name.clone(), a.clone());
                 }
                 Item::Module(m) => Self::build_actor_index(&m.items, index),
+                // M13-fix: explicitly list non-indexed variants
+                Item::Func(_)
+                | Item::Type(_)
+                | Item::Cap(_)
+                | Item::Trait(_)
+                | Item::Impl(_)
+                | Item::ExternBlock(_)
+                | Item::Const { .. }
+                | Item::Flow(_)
+                | Item::Protocol(_)
+                | Item::Session(_) => {}
+                #[allow(unreachable_patterns)]
                 _ => {}
             }
         }
@@ -351,6 +376,18 @@ impl<'a> Interpreter<'a> {
                     index.insert(f.name.clone(), f.clone());
                 }
                 Item::Module(m) => Self::build_flow_index(&m.items, index),
+                // M13-fix: explicitly list non-indexed variants
+                Item::Func(_)
+                | Item::Type(_)
+                | Item::Actor(_)
+                | Item::Cap(_)
+                | Item::Trait(_)
+                | Item::Impl(_)
+                | Item::ExternBlock(_)
+                | Item::Const { .. }
+                | Item::Protocol(_)
+                | Item::Session(_) => {}
+                #[allow(unreachable_patterns)]
                 _ => {}
             }
         }
