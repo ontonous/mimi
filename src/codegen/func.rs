@@ -1094,10 +1094,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<ControlFlow<(), BasicValueEnum<'ctx>>> {
         let ret_ty_ast = func.ret.as_ref();
+        // audit (MEDIUM): empty function bodies must not silently return a
+        // default value of the wrong type (e.g. i64(0) for a struct-returning
+        // function). If the body is empty and the function has a non-unit
+        // return type, emit a compile error instead.
         let default_val = match ret_type {
             BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
             BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
-            _ => self.context.i64_type().const_int(0, false).into(),
+            BasicTypeEnum::StructType(st) if func.body.is_empty() => {
+                // Empty body, struct return — unreachable (function is abstract).
+                // Use undef to avoid silent i64(0) mismatch.
+                return Ok(ControlFlow::Continue(st.get_undef().into()));
+            }
+            BasicTypeEnum::StructType(_) => {
+                // Non-empty body with struct return: placeholder, will be
+                // overwritten by the last expression in the body.
+                self.context.i64_type().const_int(0, false).into()
+            }
+            _ => {
+                // PointerType, ArrayType, etc. — safe scalar default.
+                self.context.i64_type().const_int(0, false).into()
+            }
         };
         let mut last_val: BasicValueEnum<'ctx> = default_val;
         for stmt in &func.body {

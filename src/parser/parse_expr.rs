@@ -966,6 +966,16 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Desc
             | TokenKind::Rule
             | TokenKind::Loop
+            | TokenKind::Do
+            | TokenKind::Pinned
+            | TokenKind::Delegate
+            | TokenKind::Shared
+            | TokenKind::Const
+            | TokenKind::Func
+            | TokenKind::Type
+            | TokenKind::Module
+            | TokenKind::Extern
+            | TokenKind::Use
     )
 }
 
@@ -973,4 +983,60 @@ fn is_stmt_start_keyword(kind: &TokenKind) -> bool {
 /// Add new keywords there, not here.
 fn is_keyword_token(kind: &TokenKind) -> bool {
     crate::lexer::is_keyword_kind(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::token::TokenKind;
+
+    #[test]
+    fn is_stmt_start_keyword_covers_all_keywords() {
+        // audit (MEDIUM): is_stmt_start_keyword previously omitted many
+        // keywords (Loop, Do, Pinned, Delegate, Shared, Const, Func, Type,
+        // Module, Extern, Use). This test ensures they are recognized so
+        // that block expressions containing these statements as their first
+        // element are correctly parsed as blocks, not as map/set literals.
+        for kind in [
+            TokenKind::Let,
+            TokenKind::If,
+            TokenKind::While,
+            TokenKind::For,
+            TokenKind::Return,
+            TokenKind::Break,
+            TokenKind::Continue,
+            TokenKind::Match,
+            TokenKind::Loop,
+            TokenKind::Do,
+            TokenKind::Pinned,
+            TokenKind::Delegate,
+            TokenKind::Shared,
+            TokenKind::Const,
+            TokenKind::Func,
+            TokenKind::Type,
+            TokenKind::Module,
+            TokenKind::Extern,
+            TokenKind::Use,
+            TokenKind::Arena,
+            TokenKind::Unsafe,
+            TokenKind::Spawn,
+            TokenKind::Await,
+            TokenKind::Alloc,
+            TokenKind::Drop,
+            TokenKind::Steps,
+            TokenKind::Parasteps,
+            TokenKind::Failure,
+            TokenKind::Requires,
+            TokenKind::Ensures,
+            TokenKind::Math,
+            TokenKind::Invariant,
+            TokenKind::Desc,
+            TokenKind::Rule,
+        ] {
+            assert!(
+                is_stmt_start_keyword(&kind),
+                "{kind:?} should be a statement-start keyword"
+            );
+        }
+    }
 }
