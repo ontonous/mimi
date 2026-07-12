@@ -266,14 +266,20 @@ impl LspServer {
                 if reader.read_line(&mut header).is_err() || header.is_empty() {
                     return Ok(());
                 }
-                if header.starts_with("Content-Length:") {
+                // CL-H9 (deep audit): LSP headers are case-insensitive.
+                // Also handle optional whitespace after colon.
+                let header_lower = header.to_lowercase();
+                if header_lower.starts_with("content-length:") {
                     break;
                 }
             }
 
+            // CL-H9: use case-insensitive strip + trim for robust parsing.
             let len: usize = header
                 .trim()
-                .strip_prefix("Content-Length: ")
+                .to_lowercase()
+                .strip_prefix("content-length:")
+                .map(|s| s.trim())
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
@@ -314,11 +320,12 @@ impl LspServer {
 
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
-                // CL-C4: catch panic to prevent server crash. AssertUnwindSafe
-                // is needed because flow::transition takes &mut self via take().
-                // If the closure panics, self is reset to LspServer::new() (below)
-                // and the client will reconnect. The should_exit flag is lost,
-                // but that's acceptable — the panic indicates a bug.
+                // SEC-C5 (deep audit): preserve document state across panic recovery.
+                // Instead of replacing self with LspServer::new() (which loses all
+                // documents), we save/restore documents and workspace_root.
+                let backup_docs = self.documents.clone();
+                let backup_workspace = self.workspace_root.clone();
+                let backup_should_exit = self.should_exit;
                 let saved = std::mem::replace(self, LspServer::new());
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     flow::transition(saved, &msg)
@@ -337,10 +344,15 @@ impl LspServer {
                         *self = new_self;
                     }
                     Err(_) => {
-                        // self was already reset to LspServer::new() before catch_unwind,
-                        // so the server continues in a clean state.
+                        // Restore critical state lost by the panic.
+                        // The new_self from catch_unwind is lost (panic happened),
+                        // so self is currently LspServer::new(). Restore documents
+                        // and workspace_root so the server remains functional.
+                        self.documents = backup_docs;
+                        self.workspace_root = backup_workspace;
+                        self.should_exit = backup_should_exit;
                         eprintln!(
-                            "[lsp] handler panicked for method {:?}, continuing",
+                            "[lsp] handler panicked for method {:?}, state preserved",
                             msg.get("method").and_then(|v| v.as_str())
                         );
                     }

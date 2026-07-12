@@ -14,7 +14,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         match args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
                 // abs(x) = x < 0 ? -x : x
+                // MEM-C14 (deep audit): for i64::MIN, -x overflows back to i64::MIN.
+                // Add a special case: if x == i64::MIN, return i64::MAX (saturating abs).
                 let zero = self.context.i64_type().const_int(0, true);
+                let i64_min = self.context.i64_type().const_int(i64::MIN as u64, false);
+                let i64_max = self.context.i64_type().const_int(i64::MAX as u64, false);
                 let neg = self
                     .builder
                     .build_int_sub(zero, iv, "neg")
@@ -28,11 +32,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "is_neg",
                     )
                     .map_err(|e| format!("cmp error: {}", e))?;
-                let result = self
+                let abs_val = self
                     .builder
                     .build_select(cmp, neg, iv, "abs_val")
-                    .map_err(|e| format!("select error: {}", e))?;
-                Ok(result)
+                    .map_err(|e| format!("select error: {}", e))?
+                    .into_int_value();
+                let is_min = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, iv, i64_min, "is_min")
+                    .map_err(|e| format!("cmp error: {}", e))?;
+                let result = self
+                    .builder
+                    .build_select(is_min, i64_max, abs_val, "abs_safe")
+                    .map_err(|e| format!("select error: {}", e))?
+                    .into_int_value();
+                Ok(result.into())
             }
             BasicMetadataValueEnum::FloatValue(_fv) => {
                 // Use fabs

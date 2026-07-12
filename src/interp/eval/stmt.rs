@@ -356,11 +356,16 @@ impl<'a> Interpreter<'a> {
             other => return Err(InterpError::new(format!("cannot iterate over {}", other))),
         };
         for item in list {
+            // IN-H5 (deep audit): push a scope per iteration so the loop variable
+            // doesn't leak into the enclosing scope (matching while_let behavior).
+            self.scope_env.push_scope();
             self.bind(var, item)?;
             if self.early_return.is_some() {
+                self.scope_env.pop_scope();
                 break;
             }
             self.eval_block(body)?;
+            self.scope_env.pop_scope();
             if self.early_return.is_some() {
                 break;
             }
@@ -588,12 +593,19 @@ impl<'a> Interpreter<'a> {
                 }
                 let obj_val = self.eval_expr(obj)?;
                 match obj_val {
-                    Value::Record(_, mut fields) => {
+                    Value::Record(type_name, mut fields) => {
                         if fields.contains_key(field.as_str()) {
                             if let std::collections::hash_map::Entry::Occupied(mut e) =
                                 fields.entry(field.clone())
                             {
                                 e.insert(v);
+                            }
+                            // DAT-C4 (deep audit): write the modified record back to the variable.
+                            // Without this, `r.x = 10` silently fails — the record clone is
+                            // modified but never stored back.
+                            if let Expr::Ident(name) = obj.as_ref() {
+                                let updated = Value::Record(type_name, fields);
+                                self.assign(name, updated)?;
                             }
                         } else {
                             return Err(InterpError::field_not_found(format!(

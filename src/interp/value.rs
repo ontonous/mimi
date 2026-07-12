@@ -478,8 +478,15 @@ impl MailboxBpState {
             .load(std::sync::atomic::Ordering::Acquire);
         let now = Self::now_ms();
         if until == 0 || now >= until {
-            // Cooldown elapsed — may still be over HWM; leave muted flag for
-            // try_unmute to clear when depth drops.
+            // DAT-C5 (deep audit): cooldown elapsed — check if depth is still over limit.
+            // If depth is under the limit, we can unmute now. Otherwise stay muted.
+            let d = self.depth.load(std::sync::atomic::Ordering::Acquire);
+            let limit = self.depth_limit.load(std::sync::atomic::Ordering::Acquire);
+            if d <= limit {
+                // Depth is under limit — clear the mute flag ourselves (don't wait for try_unmute).
+                self.muted.store(false, std::sync::atomic::Ordering::Release);
+                return false;
+            }
             return true;
         }
         true
@@ -1236,6 +1243,16 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
 }
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
+    values_equal_depth(a, b, 0)
+}
+
+const VALUES_EQUAL_MAX_DEPTH: u32 = 256;
+
+fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
+    // IN-H3 (deep audit): prevent infinite recursion on cyclic Shared/Ref values.
+    if depth > VALUES_EQUAL_MAX_DEPTH {
+        return false; // assume not equal on cycle/overflow
+    }
     match (a, b) {
         (Value::Int(a), Value::Int(b)) => a == b,
         // Cross numeric comparison: widen the integer side to float.
@@ -1286,53 +1303,54 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                 && a_slice
                     .iter()
                     .zip(b_slice.iter())
-                    .all(|(x, y)| values_equal(x, y))
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Tuple(a), Value::Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Variant(an, av), Value::Variant(bn, bv)) => {
             an == bn
                 && av.len() == bv.len()
-                && av.iter().zip(bv.iter()).all(|(x, y)| values_equal(x, y))
+                && av.iter().zip(bv.iter()).all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Record(_, a), Value::Record(_, b)) => {
             a.len() == b.len()
                 && a.iter()
-                    .all(|(k, v)| b.get(k).map(|bv| values_equal(v, bv)).unwrap_or(false))
+                    .all(|(k, v)| b.get(k).map(|bv| values_equal_depth(v, bv, depth + 1)).unwrap_or(false))
         }
-        (Value::Newtype(_, a), Value::Newtype(_, b)) => values_equal(a, b),
+        (Value::Newtype(_, a), Value::Newtype(_, b)) => values_equal_depth(a, b, depth + 1),
         (Value::Ref(a), Value::Ref(b)) | (Value::RefMut(a), Value::RefMut(b)) => {
             if let (Ok(va), Ok(vb)) = (a.read(), b.read()) {
-                values_equal(&va, &vb)
+                values_equal_depth(&va, &vb, depth + 1)
             } else {
                 false
             }
         }
         (Value::Ref(a), _) => {
             if let Ok(va) = a.read() {
-                values_equal(&va, b)
+                values_equal_depth(&va, b, depth + 1)
             } else {
                 false
             }
         }
         (_, Value::Ref(b)) => {
             if let Ok(vb) = b.read() {
-                values_equal(a, &vb)
+                values_equal_depth(a, &vb, depth + 1)
             } else {
                 false
             }
         }
         (Value::Shared(a), Value::Shared(b)) => {
             if let (Ok(va), Ok(vb)) = (a.read(), b.read()) {
-                values_equal(&va, &vb)
+                values_equal_depth(&va, &vb, depth + 1)
             } else {
                 false
             }
         }
-        (Value::LocalShared(a), Value::LocalShared(b)) => values_equal(
+        (Value::LocalShared(a), Value::LocalShared(b)) => values_equal_depth(
             &a.0.lock().expect("local_shared lock not poisoned"),
             &b.0.lock().expect("local_shared lock not poisoned"),
+            depth + 1,
         ),
         (Value::Cap(a), Value::Cap(b)) => a == b,
         (

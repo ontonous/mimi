@@ -62,12 +62,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // char = data_ptr[index]
+        // MEM-C6 (deep audit): bounds-check index against string length.
+        // Get string length: for struct {i8*, i64}, extract field 1; for char*, use strlen.
+        let s_len = match &args[0] {
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 1, "str_len")
+                .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?
+                .into_int_value(),
+            BasicMetadataValueEnum::PointerValue(_) => {
+                let strlen_fn = self.get_runtime_fn("strlen")?;
+                self.build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(data_ptr)], "strlen")?
+                    .try_as_basic_value_opt()
+                    .ok_or("strlen returned void")?
+                    .into_int_value()
+            }
+            _ => return Err(CompileError::TypeMismatch("str_char_at: first arg must be string".to_string())),
+        };
+        // Clamp index to [0, len-1] using select: if index >= len, use len-1 (last char).
+        let i64_ty = self.context.i64_type();
+        let oob = self.builder
+            .build_int_compare(inkwell::IntPredicate::SGE, index, s_len, "idx_oob")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let neg = self.builder
+            .build_int_compare(inkwell::IntPredicate::SLT, index, i64_ty.const_int(0, false), "idx_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let clamped_lo = self.builder
+            .build_select(neg, i64_ty.const_int(0, false), index, "idx_clamped_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let last_valid = self.builder
+            .build_int_sub(s_len, i64_ty.const_int(1, false), "last_valid")
+            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
+        let safe_idx = self.builder
+            .build_select(oob, last_valid, clamped_lo, "safe_idx")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // char = data_ptr[safe_idx]
         let char_ptr = {
             self.gep().build_in_bounds_gep(
                 BasicTypeEnum::IntType(self.context.i8_type()),
                 data_ptr,
-                &[index],
+                &[safe_idx],
                 "char_ptr",
             )
         }

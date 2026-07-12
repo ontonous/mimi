@@ -83,6 +83,10 @@ impl Manifest {
             .as_ref()
             .and_then(|p| p.entry.as_deref())
             .unwrap_or("main.mimi");
+        // SEC-C3 (deep audit): validate entry to prevent path traversal.
+        if entry.contains("..") || entry.contains('\0') {
+            return base_dir.join("main.mimi");
+        }
         base_dir.join(entry)
     }
 
@@ -118,13 +122,20 @@ impl Manifest {
         }
     }
 
-    /// Save mimi.toml to a directory
+    /// Save mimi.toml to a directory (atomic write via temp+rename)
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let toml_path = dir.join("mimi.toml");
+        let tmp_path = dir.join("mimi.toml.tmp");
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize manifest: {}", e))?;
-        std::fs::write(&toml_path, content)
-            .map_err(|e| format!("failed to write {}: {}", toml_path.display(), e))?;
+        // M42 (deep audit): atomic write to prevent corruption.
+        std::fs::write(&tmp_path, &content)
+            .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+        std::fs::rename(&tmp_path, &toml_path)
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("failed to rename manifest: {}", e)
+            })?;
         Ok(())
     }
 

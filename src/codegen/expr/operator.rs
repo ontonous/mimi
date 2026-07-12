@@ -300,11 +300,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // CG-H1 (deep audit): division by zero is UB (SIGFPE on x86).
+        // Emit a runtime check that returns 0 instead of crashing.
+        if matches!(op, BinOp::Div) {
+            let i64_ty = self.context.i64_type();
+            let zero = i64_ty.const_int(0, false);
+            let is_zero = self.builder
+                .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "div_by_zero")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+            let safe_r = self.builder
+                .build_select(is_zero, i64_ty.const_int(1, false), r, "safe_divisor")
+                .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+                .into_int_value();
+            let div = self.builder.build_int_signed_div(l, safe_r, "div")
+                .map_err(|e| CompileError::LlvmError(format!("div error: {}", e)))?;
+            let result = self.builder
+                .build_select(is_zero, zero, div, "div_result")
+                .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+            return Ok(result);
+        }
         let res = match op {
             BinOp::Add => self.builder.build_int_add(l, r, "add"),
             BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
             BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
-            BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
+            BinOp::Div => unreachable!(), // handled above
             _ => return Err(format!("unsupported integer arithmetic operator {:?}", op).into()),
         };
         Ok(res
@@ -338,11 +357,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match (lhs, rhs) {
-            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => Ok(self
-                .builder
-                .build_int_signed_rem(l, r, "rem")
-                .map_err(|e| CompileError::LlvmError(format!("rem error: {}", e)))?
-                .into()),
+            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                // CG-H1 (deep audit): modulo by zero is UB (SIGFPE).
+                let i64_ty = self.context.i64_type();
+                let zero = i64_ty.const_int(0, false);
+                let is_zero = self.builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "mod_by_zero")
+                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+                let safe_r = self.builder
+                    .build_select(is_zero, i64_ty.const_int(1, false), r, "safe_mod_divisor")
+                    .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+                    .into_int_value();
+                let rem = self.builder.build_int_signed_rem(l, safe_r, "rem")
+                    .map_err(|e| CompileError::LlvmError(format!("rem error: {}", e)))?;
+                let result = self.builder
+                    .build_select(is_zero, zero, rem, "mod_result")
+                    .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
+                Ok(result)
+            }
             _ => Err("mod requires integer types".into()),
         }
     }

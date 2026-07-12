@@ -373,16 +373,50 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let i8_ty = self.context.i8_type();
         let i64_ty = self.context.i64_type();
+        let s_len = self.string_len(s_ptr)?;
+
+        // MEM-C5 (deep audit): clamp start and end to [0, s_len] and ensure end >= start.
+        let zero = i64_ty.const_int(0, false);
+        let start_neg = self.builder
+            .build_int_compare(inkwell::IntPredicate::SLT, start, zero, "start_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let start_oob = self.builder
+            .build_int_compare(inkwell::IntPredicate::SGT, start, s_len, "start_oob")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let start_clamped = self.builder
+            .build_select(start_neg, zero, start, "start_clamped_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let start_clamped = self.builder
+            .build_select(start_oob, s_len, start_clamped, "start_clamped_hi")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+
+        let end_neg = self.builder
+            .build_int_compare(inkwell::IntPredicate::SLT, end, start_clamped, "end_lt_start")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let end_oob = self.builder
+            .build_int_compare(inkwell::IntPredicate::SGT, end, s_len, "end_oob")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let end_clamped = self.builder
+            .build_select(end_neg, start_clamped, end, "end_clamped_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let end_clamped = self.builder
+            .build_select(end_oob, s_len, end_clamped, "end_clamped_hi")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+
         let sub_len = self
             .builder
-            .build_int_sub(end, start, "sub_len")
+            .build_int_sub(end_clamped, start_clamped, "sub_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
         let alloc_size = self
             .builder
             .build_int_add(sub_len, i64_ty.const_int(1, false), "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
         let buf = self.malloc_buffer(alloc_size)?;
-        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start], "src")?;
+        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start_clamped], "src")?;
         self.memcpy_buffer(buf, src, sub_len, "memcpy_call")?;
         self.null_terminate(buf, sub_len)?;
         Ok(buf.into())

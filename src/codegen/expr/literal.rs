@@ -167,11 +167,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             compiled_parts.push(CompiledPart::InterpStr(temp_buf.into()));
                         }
                         BasicValueEnum::FloatValue(fv) => {
+                            // MEM-C1 (deep audit): %f can produce up to 317 chars for extreme
+                            // float values (e.g. DBL_MAX). Use 512-byte buffer to be safe.
                             let temp_buf = self
                                 .build_call(
                                     malloc_fn,
                                     &[BasicMetadataValueEnum::IntValue(
-                                        i64_ty.const_int(64, false),
+                                        i64_ty.const_int(512, false),
                                     )],
                                     &format!("fstr_temp_{}", i),
                                 )?

@@ -173,7 +173,41 @@ impl Formatter {
                         out.push('-');
                     }
                 }
-                '+' | '*' | '/' | '<' | '>' | '|' | '&' => {
+                '/' => {
+                    // DAT-C1 (deep audit): don't insert spaces inside // or /* or */
+                    // comments — this corrupts the comment syntax.
+                    if i + 1 < chars.len() && chars[i + 1] == '/' {
+                        // Line comment: copy rest of line verbatim
+                        out.push('/');
+                        out.push('/');
+                        i += 1;
+                        while i + 1 < chars.len() {
+                            i += 1;
+                            out.push(chars[i]);
+                        }
+                    } else if i + 1 < chars.len() && chars[i + 1] == '*' {
+                        // Block comment start: copy verbatim
+                        out.push('/');
+                        out.push('*');
+                        i += 1;
+                    } else {
+                        // Division operator: normal spacing
+                        if i > 0
+                            && chars[i - 1] != ' '
+                            && !matches!(chars.get(i - 1), Some('(' | '[' | '{'))
+                        {
+                            out.push(' ');
+                        }
+                        out.push('/');
+                        if i + 1 < chars.len()
+                            && chars[i + 1] != ' '
+                            && !matches!(chars.get(i + 1), Some(')' | ']' | '}' | ',' | ';'))
+                        {
+                            out.push(' ');
+                        }
+                    }
+                }
+                '+' | '*' | '<' | '>' | '|' | '&' => {
                     // Space before operator (unless at start or preceded by space/punct)
                     if i > 0
                         && chars[i - 1] != ' '
