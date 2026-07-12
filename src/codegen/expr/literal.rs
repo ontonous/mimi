@@ -119,16 +119,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let val = self.compile_expr(expr, vars)?;
                     match val {
                         BasicValueEnum::IntValue(iv) => {
-                            let ext_iv = if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_z_extend(
-                                        iv,
-                                        self.context.i64_type(),
-                                        &format!("fstr_ext_{}", i),
-                                    )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("zext error: {}", e))
-                                    })?
+                            let bw = iv.get_type().get_bit_width();
+                            let ext_iv = if bw < 64 {
+                                // A1: s_extend for signed ints, z_extend for bool (i1).
+                                if bw == 1 {
+                                    self.builder
+                                        .build_int_z_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            &format!("fstr_ext_{}", i),
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("zext error: {}", e))
+                                        })?
+                                } else {
+                                    self.builder
+                                        .build_int_s_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            &format!("fstr_ext_{}", i),
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("sext error: {}", e))
+                                        })?
+                                }
                             } else {
                                 iv
                             };

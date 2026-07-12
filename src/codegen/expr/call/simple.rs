@@ -1232,10 +1232,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         fmt.push_str(&format!("\"{}\":%ld", field.name));
                         let iv = field_val.into_int_value();
                         if n == "i32" {
-                            let ext = self
-                                .builder
-                                .build_int_z_extend(iv, i64_ty, &format!("{}_ext", field.name))
-                                .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?;
+                            // A1: use s_extend for signed integers.
+                            let bw = iv.get_type().get_bit_width();
+                            let ext = if bw == 1 {
+                                self.builder
+                                    .build_int_z_extend(iv, i64_ty, &format!("{}_ext", field.name))
+                                    .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?
+                            } else {
+                                self.builder
+                                    .build_int_s_extend(iv, i64_ty, &format!("{}_ext", field.name))
+                                    .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                            };
                             sprintf_args.push(BasicMetadataValueEnum::IntValue(ext));
                         } else {
                             sprintf_args.push(BasicMetadataValueEnum::IntValue(iv));

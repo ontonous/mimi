@@ -296,11 +296,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Store the return value (extended to i64 if needed).
             let ret_as_i64 = match ret_val {
                 BasicValueEnum::IntValue(iv) => {
-                    if iv.get_type().get_bit_width() < 64 {
-                        self.builder
-                            .build_int_z_extend(iv, i64_ty, "ret_zext")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                            .into()
+                    let bw = iv.get_type().get_bit_width();
+                    if bw < 64 {
+                        // A1: use s_extend for signed integers (width > 1),
+                        // z_extend for bool (i1 — sign bit would make true = -1).
+                        if bw == 1 {
+                            self.builder
+                                .build_int_z_extend(iv, i64_ty, "ret_zext")
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .into()
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "ret_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .into()
+                        }
                     } else {
                         iv.into()
                     }
@@ -1315,11 +1325,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Extend int values to i64 for uniform blob storage.
             let stored_val = match val {
                 BasicValueEnum::IntValue(iv) => {
-                    if iv.get_type().get_bit_width() < 64 {
-                        self.builder
-                            .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                            .into()
+                    let bw = iv.get_type().get_bit_width();
+                    if bw < 64 {
+                        // A1: use s_extend for signed integers (width > 1),
+                        // z_extend for bool (i1 — sign bit would make true = -1).
+                        if bw == 1 {
+                            self.builder
+                                .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .into()
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, &format!("arg_sext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .into()
+                        }
                     } else {
                         iv.into()
                     }

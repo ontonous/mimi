@@ -801,10 +801,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if src_w == dst_w {
                     Ok(iv.into())
                 } else if src_w < dst_w {
-                    self.builder
-                        .build_int_z_extend(iv, ti, "zext")
-                        .map(|v| v.into())
-                        .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))
+                    // A1: use s_extend for signed integers (width > 1),
+                    // z_extend for bool (i1 — sign bit would make true = -1).
+                    if src_w == 1 {
+                        self.builder
+                            .build_int_z_extend(iv, ti, "zext")
+                            .map(|v| v.into())
+                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))
+                    } else {
+                        self.builder
+                            .build_int_s_extend(iv, ti, "sext")
+                            .map(|v| v.into())
+                            .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))
+                    }
                 } else {
                     self.builder
                         .build_int_truncate(iv, ti, "trunc")

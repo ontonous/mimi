@@ -3165,6 +3165,37 @@ fn dual_actor_bool_field() {
 }
 
 #[test]
+fn dual_actor_negative_int_field() {
+    if !can_link() {
+        return;
+    }
+    // A1: Negative integers must survive actor blob storage without
+    // corruption. Previously z_extend turned -1 into 0xFFFFFFFF (4294967295).
+    dual_assert!(
+        r#"
+        actor Counter {
+            mut value: i32 = -42;
+            func get() -> i32 { return self.value; }
+            func set(v: i32) { self.value = v; }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn();
+            let v1 = c.get();
+            println(v1);
+            c.set(-1);
+            let v2 = c.get();
+            println(v2);
+            c.set(-2147483648);
+            let v3 = c.get();
+            println(v3);
+            0
+        }
+    "#,
+        "-42\n-1\n-2147483648"
+    );
+}
+
+#[test]
 fn dual_actor_f64_return() {
     if !can_link() {
         return;
