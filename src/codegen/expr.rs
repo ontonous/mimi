@@ -154,11 +154,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(format!("truncate error: {}", e)))?
                             .into())
                     } else {
-                        Ok(self
-                            .builder
-                            .build_int_z_extend(iv, i32_ty, "cast_i32")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                            .into())
+                        // A1: use s_extend for signed integers (width > 1),
+                        // z_extend for bool (i1 — sign bit would make true = -1).
+                        if iv.get_type().get_bit_width() == 1 {
+                            Ok(self
+                                .builder
+                                .build_int_z_extend(iv, i32_ty, "cast_i32")
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .into())
+                        } else {
+                            Ok(self
+                                .builder
+                                .build_int_s_extend(iv, i32_ty, "cast_i32")
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .into())
+                        }
                     }
                 }
                 BasicValueEnum::FloatValue(fv) => Ok(self
@@ -174,11 +184,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if iv.get_type() == i64_ty {
                         Ok(val)
                     } else {
-                        Ok(self
-                            .builder
-                            .build_int_z_extend(iv, i64_ty, "cast_i64")
-                            .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                            .into())
+                        // A1: use s_extend for signed integers (width > 1),
+                        // z_extend for bool (i1 — sign bit would make true = -1).
+                        if iv.get_type().get_bit_width() == 1 {
+                            Ok(self
+                                .builder
+                                .build_int_z_extend(iv, i64_ty, "cast_i64")
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .into())
+                        } else {
+                            Ok(self
+                                .builder
+                                .build_int_s_extend(iv, i64_ty, "cast_i64")
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .into())
+                        }
                     }
                 }
                 BasicValueEnum::FloatValue(fv) => Ok(self

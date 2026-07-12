@@ -108,10 +108,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
+                            // A1: sign-extend for signed integers, zero-extend for bool.
                             let ext = if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_z_extend(iv, i64_ty, "payload_zext")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                if iv.get_type().get_bit_width() == 1 {
+                                    self.builder
+                                        .build_int_z_extend(iv, i64_ty, "payload_zext")
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                } else {
+                                    self.builder
+                                        .build_int_s_extend(iv, i64_ty, "payload_sext")
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                }
                             } else {
                                 iv
                             };
@@ -146,7 +153,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string()))
             }
             BasicMetadataValueEnum::IntValue(iv) => {
-                Ok((BasicMetadataValueEnum::IntValue(*iv), "%ld".to_string()))
+                // A1: Ensure integer is i64 for printf("%ld").
+                // i32 values must be sign-extended to preserve negatives.
+                let bw = iv.get_type().get_bit_width();
+                let ext_iv = if bw < 64 {
+                    if bw == 1 {
+                        self.builder
+                            .build_int_z_extend(*iv, i64_ty, "print_zext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        self.builder
+                            .build_int_s_extend(*iv, i64_ty, "print_sext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    }
+                } else {
+                    *iv
+                };
+                Ok((BasicMetadataValueEnum::IntValue(ext_iv), "%ld".to_string()))
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 // P0-3: use %g (shortest round-trip) to match the

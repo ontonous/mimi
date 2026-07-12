@@ -131,6 +131,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Some(inkwell::module::Linkage::External),
                         )
                     });
+                    // A1: Ensure integer is i64 for snprintf("%ld").
+                    // i32 values must be sign-extended (not zero-extended)
+                    // to preserve negative values.
+                    let iv_i64 = if iv.get_type().get_bit_width() < 64 {
+                        if iv.get_type().get_bit_width() == 1 {
+                            self.builder
+                                .build_int_z_extend(iv, self.context.i64_type(), "int_zext")
+                                .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))?
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, self.context.i64_type(), "int_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                        }
+                    } else {
+                        iv
+                    };
                     self.builder
                         .build_call(
                             snprintf_fn,
@@ -138,7 +154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 BasicMetadataValueEnum::PointerValue(buf),
                                 BasicMetadataValueEnum::IntValue(alloc_size),
                                 BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(iv),
+                                BasicMetadataValueEnum::IntValue(iv_i64),
                             ],
                             "snprintf_int",
                         )
