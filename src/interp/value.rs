@@ -1277,13 +1277,25 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
         (Value::List(a), Value::List(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+            // B8: use values_equal_depth to propagate depth tracking.
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Set(a), Value::Set(b)) => {
-            a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| values_equal(x, y)))
+            // B8: use values_equal_depth to propagate depth tracking.
+            a.len() == b.len()
+                && a
+                    .iter()
+                    .all(|x| b.iter().any(|y| values_equal_depth(x, y, depth + 1)))
         }
         (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+            // B8: use values_equal_depth to propagate depth tracking.
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (
             Value::Slice {
@@ -1373,7 +1385,7 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
                 concrete_type: bt,
                 ..
             },
-        ) => at == bt && values_equal(ad, bd),
+        ) => at == bt && values_equal_depth(ad, bd, depth + 1),
         _ => false,
     }
 }
