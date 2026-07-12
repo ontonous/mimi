@@ -375,6 +375,21 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
     matches!(t, Type::Name(n, _) if n == "i32" || n == "i64" || n == "f64")
 }
 
+/// CG-H2 (audit): predicates whether the codegen for `to_json` can serialize
+/// the given type. Only primitive scalars and strings are supported in codegen.
+/// Complex types (List/Record/Map/Set) need a recursive serializer that has not
+/// been implemented; reject them at type-check time with a clear diagnostic.
+pub(crate) fn is_json_serializable(t: &Type) -> bool {
+    match t {
+        Type::Name(n, _) => {
+            matches!(n.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit")
+        }
+        Type::Option(_) | Type::Result(_, _) => false, // requires recursive serializer
+        Type::Infer => true,                           // _ placeholder — defer
+        _ => false,
+    }
+}
+
 /// Compute the common type of two numeric operands for binary operators.
 /// Returns `None` if either operand is not numeric.  Widening follows the
 /// usual numeric-promotion rules: any `f64` operand produces `f64`, otherwise

@@ -157,6 +157,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Try(inner) => Self::collect_uses_in_expr(inner, uses),
+            Expr::OptionalChain(inner, _) => Self::collect_uses_in_expr(inner, uses),
             Expr::Spawn(inner) => Self::collect_uses_in_expr(inner, uses),
             Expr::Await(inner) => Self::collect_uses_in_expr(inner, uses),
             Expr::Range { start, end } => {

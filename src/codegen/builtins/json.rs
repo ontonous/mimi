@@ -178,8 +178,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| format!("sprintf error: {}", e))?;
                     Ok(buf.into())
                 } else {
-                    // Complex type (List, Record, etc.) — return graceful error
-                    Err("to_json: complex types not yet supported in codegen".into())
+                    // CG-H2 (audit): pointer values in `to_json` are List/Record/Map/Set,
+                    // not C strings. Return a compile-time error rather than silently
+                    // treating them as raw C strings (which would read garbage).
+                    // TODO(#v0.31-codegen): implement recursive JSON serialization for
+                    // List<T>, Record, Map<K,V> via heap traversal.
+                    Err(CompileError::Generic(
+                        "to_json: complex types (List/Record/Map/Set) not yet supported \
+                         in codegen; cast to string first or use std::json::get_* helpers"
+                            .into(),
+                    ))
                 }
             }
         }

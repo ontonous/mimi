@@ -397,10 +397,22 @@ impl Parser {
                 ));
             }
         };
-        // ? after an identifier: check for a separate Question token.
+        // ? after an identifier: check for `?.` (optional chain) vs plain `?` (try).
+        // PA-H3 (audit): handle `?.field` BEFORE plain `?` so the field access
+        // is consumed as part of the optional chain, not as a separate
+        // postfix operation on `Try(expr)`.
         if self.at(&TokenKind::Question) {
-            self.advance();
-            expr = expr.try_expr();
+            let next_is_dot = self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].kind == TokenKind::Dot;
+            if next_is_dot {
+                self.advance(); // consume `?`
+                self.advance(); // consume `.`
+                let field = self.expect_ident()?;
+                expr = Expr::OptionalChain(Box::new(expr), field);
+            } else {
+                self.advance();
+                expr = expr.try_expr();
+            }
         }
         Ok(expr)
     }
@@ -408,6 +420,9 @@ impl Parser {
     /// Parse postfix operations (calls, field access, indexing) on a base expression
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
         loop {
+            // PA-H3 (audit): the optional-chain `?.field` and the try `?`
+            // operator are handled by parse_primary BEFORE this loop runs.
+            // parse_postfix handles the remaining postfix operations.
             if self.at(&TokenKind::LParen) {
                 self.advance();
                 let args = self.parse_args()?;

@@ -492,6 +492,10 @@ impl<'a> Interpreter<'a> {
             Expr::Index(obj_expr, idx_expr) => self.eval_index(obj_expr, idx_expr),
             Expr::SliceExpr { target, start, end } => self.eval_slice_expr(target, start, end),
             Expr::Try(expr) => self.eval_try(expr),
+            // PA-H3 (audit): optional chaining `x?.y`. If `x` is `Some(v)`
+            // return `Some(v.y)`; if `None`, return `None`. Other types are
+            // a runtime error.
+            Expr::OptionalChain(inner, field) => self.eval_optional_chain(inner, field),
             Expr::Spawn(expr) => self.eval_spawn(expr),
             Expr::Await(expr) => self.eval_await(expr),
             Expr::QuoteInterpolate(expr) => {

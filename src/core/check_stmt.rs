@@ -39,6 +39,16 @@ impl<'a> Checker<'a> {
             if i > 0 {
                 self.release_borrows_at_last_use(block, i);
             }
+            // CO-H2 (audit): update the fallback error span to the actual
+            // statement position so type errors reference the offending
+            // expression instead of the enclosing function declaration.
+            // Only `Let` carries a positional source marker; for other Stmts
+            // we keep the function-level fallback and rely on the more
+            // specific span-aware emitters (e.g. check_expr) for finer
+            // diagnostic locations.
+            if let Stmt::Let { pos, .. } = stmt {
+                self.set_pos(pos.0, pos.1);
+            }
             self.check_stmt(stmt, ret, scopes);
         }
         // Only the actual last statement determines the implicit return type.
@@ -293,7 +303,8 @@ impl<'a> Checker<'a> {
             | Expr::Try(e)
             | Expr::Old(e)
             | Expr::TypeOf(e)
-            | Expr::Cast(e, _) => {
+            | Expr::Cast(e, _)
+            | Expr::OptionalChain(e, _) => {
                 self.collect_shared_writes_in_expr(e, scopes, writes);
             }
             Expr::Call(callee, args) => {
@@ -514,7 +525,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_parasteps_safe(&f.value, scopes);
                 }
             }
-            Expr::Try(e) | Expr::Old(e) | Expr::TypeOf(e) | Expr::Cast(e, _) => {
+            Expr::Try(e) | Expr::Old(e) | Expr::TypeOf(e) | Expr::Cast(e, _) | Expr::OptionalChain(e, _) => {
                 self.check_expr_parasteps_safe(e, scopes);
             }
             Expr::SliceExpr { target, start, end } => {
@@ -826,6 +837,16 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
             }
             Stmt::WhileLet { pat, init, body } => {
+                // CG-H3 (audit): reject list/slice patterns at type-check time so the
+                // user gets a clear error instead of an opaque codegen failure later.
+                if matches!(pat, Pattern::Array(_) | Pattern::Slice(_, _)) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0251,
+                        "while-let does not support list/slice patterns; \
+                         use a regular for loop, an index-based while loop, \
+                         or destructure into individual variables".to_string(),
+                    );
+                }
                 let it = self.infer_expr(init, scopes);
                 scopes.push(HashMap::new());
                 self.check_pattern(pat, &it, scopes);
