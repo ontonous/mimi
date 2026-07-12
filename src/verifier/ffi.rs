@@ -187,8 +187,17 @@ impl VerifierCtx {
     fn assert_func_requires(&mut self, session: &mut SolverSession, func: &FuncDef, vars: &mut Z3VarMap) {
         for stmt in &func.body {
             if let Stmt::Requires(expr, _) = stmt {
-                if let Some(z3_bool) = expr::expr_to_z3_bool(expr, vars) {
-                    session.assert(&z3_bool);
+                match expr::expr_to_z3_bool(expr, vars) {
+                    Some(z3_bool) => session.assert(&z3_bool),
+                    None => {
+                        // HIGH fix: previously silently dropped unencodable
+                        // requires. Now log a warning so users know their
+                        // precondition was not verified.
+                        eprintln!(
+                            "[mimi verify] WARN: could not encode requires in function '{}' — precondition not asserted",
+                            func.name
+                        );
+                    }
                 }
             }
         }

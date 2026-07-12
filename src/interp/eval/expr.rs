@@ -95,9 +95,17 @@ impl<'a> Interpreter<'a> {
                 Ok(Value::RefMut(Arc::new(RwLock::new(v))))
             }
             UnOp::Deref => match v {
-                Value::Ref(rc) | Value::RefMut(rc) => Ok(rc
+                Value::Ref(rc) => Ok(rc
                     .read()
                     .map_err(|e| InterpError::lock_error(format!("read lock failed: {}", e)))?
+                    .clone()),
+                // CRITICAL #12 fix: RefMut represents &mut (exclusive borrow).
+                // Using read() allows concurrent readers to observe the value
+                // while a &mut is outstanding, violating Rust aliasing rules.
+                // Use write() to enforce exclusive access.
+                Value::RefMut(rc) => Ok(rc
+                    .write()
+                    .map_err(|e| InterpError::lock_error(format!("write lock for RefMut deref: {}", e)))?
                     .clone()),
                 Value::Shared(arc) => Ok(arc
                     .read()

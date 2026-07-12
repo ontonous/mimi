@@ -22,6 +22,11 @@ impl VerifierCtx {
             match item {
                 Item::Func(f) => {
                     if !f.body.is_empty() {
+                        // CRITICAL #3 fix: reset solver between functions to
+                        // prevent cross-contamination of Z3 assertions. Without
+                        // reset(), assertions from verify_func(inc) persist into
+                        // verify_func(dec), causing false positives/negatives.
+                        session.reset();
                         results.push(self.verify_func(session, f));
                     }
                 }
@@ -29,6 +34,7 @@ impl VerifierCtx {
                 Item::ExternBlock(block) => {
                     for func in &block.funcs {
                         if func.requires.is_some() || func.ensures.is_some() {
+                            session.reset();
                             results.push(self.verify_extern_func(session, func));
                         }
                     }
@@ -542,25 +548,47 @@ impl VerifierCtx {
         match session.check() {
             SatResult::Sat => {
                 if !ensures_exprs.is_empty() {
-                    let not_ensures: Vec<Z3Bool> = ensures_exprs
-                        .iter()
-                        .filter_map(|e| expr::expr_to_z3_bool(e, &mut vars).map(|b| b.not()))
-                        .collect();
-                    let (result, model) = session.check_scope_multi(not_ensures);
-                    match result {
-                        SatResult::Unsat => {
-                            VerificationResult {
-                                func_name: func.name.clone(),
-                                status: VerifStatus::Verified,
-                                message: "postconditions verified".into(),
-                                diagnostic: annotate_parse_errors(None, &parse_errors),
-                                duration_us: start.elapsed().as_micros() as u64,
-                                constraint_count,
+                    // Bug fix (CRITICAL #1): The previous implementation used
+                    // check_scope_multi which AND-joins all NOT(ensures_i) and
+                    // checks once. If ensures_1 is a tautology (NOT(ens1) is
+                    // UNSAT) but ensures_2 is violatable (NOT(ens2) is SAT),
+                    // the conjunction is UNSAT → false "Verified" report.
+                    //
+                    // Correct logic: verify each ensures_i independently. A
+                    // postcondition is violated if NOT(ensures_i) is SAT.
+                    // Only if ALL NOT(ensures_i) are UNSAT do we report
+                    // Verified. This is OR semantics: a single SAT means
+                    // violation; all UNSAT means verified.
+                    // Check each ensures independently. We need to determine
+                    // if any NOT(ensures_i) is SAT (violation). Unknown is
+                    // treated as inconclusive — reported but not a violation.
+                    let mut found_violation = false;
+                    let mut found_unknown = false;
+                    let mut viol_model: Option<z3::Model> = None;
+                    for e in ensures_exprs.iter() {
+                        match expr::expr_to_z3_bool(e, &mut vars) {
+                            Some(b) => {
+                                let (result, model) = session.check_scope(b.not());
+                                match result {
+                                    SatResult::Sat => {
+                                        found_violation = true;
+                                        viol_model = model;
+                                        break;
+                                    }
+                                    SatResult::Unknown => {
+                                        found_unknown = true;
+                                    }
+                                    SatResult::Unsat => {
+                                        // This ensures holds; continue checking.
+                                    }
+                                }
                             }
+                            None => {}
                         }
-                        SatResult::Sat => {
+                    }
+                    if found_violation {
                             let counterexample =
-                                self.extract_counterexample(&model, &vars, &ensures_exprs);
+                                self.extract_counterexample(&viol_model, &vars, &ensures_exprs);
                             let diagnostic = self.build_failure_narrative(
                                 func,
                                 &counterexample,
@@ -577,8 +605,7 @@ impl VerifierCtx {
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                             }
-                        }
-                        SatResult::Unknown => {
+                    } else if found_unknown {
                             let elapsed = start.elapsed();
                             let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
                                 format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
@@ -595,7 +622,15 @@ impl VerifierCtx {
                                 duration_us: elapsed.as_micros() as u64,
                                 constraint_count,
                             }
-                        }
+                    } else {
+                            VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::Verified,
+                                message: "postconditions verified".into(),
+                                diagnostic: annotate_parse_errors(None, &parse_errors),
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                            }
                     }
                 } else {
                     VerificationResult {

@@ -353,7 +353,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .find(|t| t.from_state == from_type)
             .or_else(|| candidates.first())
             .copied()
-            .unwrap();
+            .expect("candidates is non-empty (checked above)");
 
         let is_fallback = t.is_fallback;
         let enters_fault = is_fallback || t.to_states.iter().any(|s| s == "Fault");

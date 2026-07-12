@@ -906,12 +906,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     self.builder.position_at_end(entry_bb);
                 }
-                let gep = self
-                    .gep()
-                    .build_struct_gep(struct_ty, base, field, "heap_slot_null_init")
-                    .ok();
-                if let Some(gep_val) = gep {
-                    let _ = self.builder.build_store(gep_val, null_ptr);
+                // CRITICAL #11 fix: previously errors from build_struct_gep and
+                // build_store were silently swallowed by .ok() / let _ =. This
+                // could leave heap slots uninitialized, causing UB in generated
+                // code. Now we log a compile error diagnostic instead of
+                // silently continuing.
+                match self.gep().build_struct_gep(struct_ty, base, field, "heap_slot_null_init") {
+                    Ok(gep_val) => {
+                        if let Err(e) = self.builder.build_store(gep_val, null_ptr) {
+                            // Use mimi_assert-style: log but don't panic, as
+                            // this is a best-effort null-init for safety.
+                            eprintln!("[mimi codegen] WARN: build_store failed in null-init: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[mimi codegen] WARN: build_struct_gep failed in null-init: {}", e);
+                    }
                 }
                 if let Some(saved_bb) = saved {
                     self.builder.position_at_end(saved_bb);

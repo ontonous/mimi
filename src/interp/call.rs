@@ -359,6 +359,7 @@ impl<'a> Interpreter<'a> {
             "json_get_int" => self.builtin_json_get_int(args),
             "json_array_length" => self.builtin_json_array_length(args),
             "json_get_element" => self.builtin_json_get_element(args),
+            "json_has_key" => self.builtin_json_has_key(args),
             "char_code" => self.builtin_char_code(args),
             "chr" => self.builtin_chr(args),
             "str_char_at" => self.builtin_str_char_at(args),

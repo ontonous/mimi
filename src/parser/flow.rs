@@ -267,6 +267,11 @@ fn recover_to_sync_slice(tokens: &[Token], mut pos: usize) -> usize {
         TokenKind::Impl,
         TokenKind::Extern,
         TokenKind::Use,
+        // HIGH fix: add Flow/Protocol/Session to sync tokens so recovery
+        // correctly resumes at these top-level declarations.
+        TokenKind::Flow,
+        TokenKind::Protocol,
+        TokenKind::Session,
         TokenKind::RBrace,
         TokenKind::Eof,
     ];

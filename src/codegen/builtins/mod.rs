@@ -824,6 +824,18 @@ fn register_json_fns_stubs_for_codegen<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // json_has_key(json: i8*, key: i8*) -> i64 (1 = exists, 0 = missing)
+    module.add_function(
+        "json_has_key",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_json_as_i64(json: i8*) -> i64
     module.add_function(
         "mimi_json_as_i64",
@@ -1409,7 +1421,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "test_sandbox"
         | "option_value_or"
         | "to_json" | "from_json"
-        | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length"
+        | "json_get_string" | "json_get_int" | "json_get_element" | "json_is_valid" | "json_array_length" | "json_has_key"
         // Network builtins
         | "socket" | "connect" | "bind" | "listen" | "accept"
         | "send" | "recv" | "close_fd"
@@ -1579,6 +1591,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "json_get_int" => self.compile_json_get_int(args),
             "json_array_length" => self.compile_json_array_length(args),
             "json_get_element" => self.compile_json_get_element(args),
+            "json_has_key" => self.compile_json_has_key(args),
             "range" => self.compile_range(args),
             "len" => self.compile_len(args),
             "push" => self.compile_push(args),

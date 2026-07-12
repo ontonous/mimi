@@ -139,4 +139,22 @@ impl<'a> Interpreter<'a> {
             _ => Err(InterpError::new("json_get_element expects (string, int)")),
         }
     }
+
+    /// CRITICAL #18 fix: json_has_key checks whether a key exists in a JSON
+    /// object, returning true/false unambiguously. Previously, has_key used
+    /// `json_get_string(self, key) != ""` which incorrectly returns false
+    /// when the key exists but its value is an empty string "".
+    pub(crate) fn builtin_json_has_key(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("json_has_key expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(json), Value::String(key)) => {
+                let jv: serde_json::Value = serde_json::from_str(json)
+                    .map_err(|e| InterpError::new(format!("json_has_key parse error: {}", e)))?;
+                Ok(Value::Bool(jv.as_object().is_some_and(|obj| obj.contains_key(key))))
+            }
+            _ => Err(InterpError::new("json_has_key expects (string, string)")),
+        }
+    }
 }

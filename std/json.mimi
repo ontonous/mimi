@@ -49,11 +49,15 @@ impl JsonExt for string {
         else { Err("not a boolean") }
     }
     func get_float(key: string) -> f64 {
+        // HIGH fix: previously returned 0.0 silently when key was missing or
+        // value was not a valid float. Now returns NaN to distinguish invalid
+        // values from legitimate 0.0.
         let v = json_get_string(self, key)
+        if !has_key(key) { return 0.0 / 0.0 }
         let parsed = str_parse_float(v)
-        if parsed.0 { parsed.1 } else { 0.0 }
+        if parsed.0 { parsed.1 } else { 0.0 / 0.0 }
     }
-    func has_key(key: string) -> bool { json_get_string(self, key) != "" }
+    func has_key(key: string) -> bool { json_has_key(self, key) }
     func is_valid() -> bool { json_is_valid(self) }
     func to_string_pretty() -> string { self }
     func get_object(key: string) -> string { json_get_string(self, key) }
@@ -101,15 +105,17 @@ pub func get_bool(json: string, key: string) -> Result<bool, string> {
 }
 
 // get_float: Gets a float field from a JSON object by key.
+// Returns NaN if key is missing or value is not a valid float.
 pub func get_float(json: string, key: string) -> f64 {
     let v = json_get_string(json, key)
+    if !json_has_key(json, key) { return 0.0 / 0.0 }
     let parsed = str_parse_float(v)
-    if parsed.0 { parsed.1 } else { 0.0 }
+    if parsed.0 { parsed.1 } else { 0.0 / 0.0 }
 }
 
 // has_key: Returns true if the JSON object contains the given key.
 pub func has_key(json: string, key: string) -> bool {
-    json_get_string(json, key) != ""
+    json_has_key(json, key)
 }
 
 // is_valid_json: Returns true if s is syntactically valid JSON.
