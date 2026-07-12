@@ -476,6 +476,37 @@ func main() -> i32 {
 }
 
 #[test]
+fn keyword_and_or_not_work_as_operators() {
+    // audit (LOW): `and`/`or`/`not` keywords must work as logical operators,
+    // equivalent to `&&`/`||`/`!`.
+    let src = r#"
+func main() -> i32 {
+    let x = true and false
+    let y = true or false
+    let z = not false
+    if x { 1 } else if y { 2 } else if z { 3 } else { 0 }
+}
+"#;
+    let v = run_source(src);
+    // x = false, y = true, z = true → first match is y → 2
+    assert_eq!(v, interp::Value::Int(2));
+}
+
+#[test]
+fn nan_is_falsy() {
+    // audit (LOW): f64::NAN must be falsy in boolean context.
+    // Use sqrt(-1.0) to produce NaN at runtime.
+    let src = r#"
+func main() -> i32 {
+    let nan = sqrt(-1.0)
+    if nan { 1 } else { 42 }
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(42));
+}
+
+#[test]
 fn typecheck_while_let_list_pattern_rejected() {
     // CG-H3 (audit): list/slice patterns in while-let must be rejected at
     // type-check time, not at codegen, with a clear diagnostic.

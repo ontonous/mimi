@@ -1223,7 +1223,9 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
         Value::Int(0) => false,
-        Value::Float(x) => *x != 0.0,
+        // audit (LOW): f64::NAN was previously truthy because NAN != 0.0
+        // is true. Standard semantics: NAN should be falsy.
+        Value::Float(x) => *x != 0.0 && !x.is_nan(),
         Value::String(s) => !s.is_empty(),
         Value::List(l) => !l.is_empty(),
         Value::Set(s) => !s.is_empty(),
