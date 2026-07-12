@@ -323,9 +323,31 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("channel_recv expects 1 argument"));
         }
         let h = args[0].as_i64_for_handle()?;
-        // SAFETY: handle is a valid channel handle.
-        let v = crate::runtime::mimi_channel_recv(h);
-        Ok(Value::Int(v))
+        // IN-H8 (audit): the interpreter must not block the entire interpreter
+        // thread on `rx.recv()`. Use `try_recv` with a brief spin budget so we
+        // surface progress to other ready interpreter tasks without hanging
+        // forever. After the budget is exhausted, return 0 with a warning so
+        // the user knows the channel was empty. The codegen path still uses
+        // the blocking `mimi_channel_recv` since compiled programs run their
+        // own threads.
+        const TRY_RECV_BUDGET: u32 = 1000;
+        for _ in 0..TRY_RECV_BUDGET {
+            // SAFETY: handle is a valid channel handle.
+            let v = crate::runtime::mimi_channel_try_recv(h);
+            if v != -1 {
+                return Ok(Value::Int(v));
+            }
+            // Cooperative yield: std::thread::yield_now() lets other OS threads
+            // run; combined with try_recv polling this approximates the
+            // semantic of `recv` without stalling the interpreter driver.
+            std::thread::yield_now();
+        }
+        eprintln!(
+            "[mimi interp] channel_recv: timed out after {} try_recv attempts; \
+             returning 0. Use channel_try_recv for non-blocking polling.",
+            TRY_RECV_BUDGET
+        );
+        Ok(Value::Int(0))
     }
 
     pub(crate) fn builtin_channel_try_recv(&self, args: Vec<Value>) -> Result<Value, InterpError> {

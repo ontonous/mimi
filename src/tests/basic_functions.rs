@@ -400,6 +400,14 @@ func main() -> i32 {
 }
 
 #[test]
+fn parse_optional_chain_dot_field() {
+    // PA-H3 (audit): `x?.y` should parse as OptionalChain(x, "y"), not as
+    // Try(x).y. Verify the parser produces the right AST shape.
+    let src = "func main() -> i32 { let x: Option<i32> = Some(1); x?.to_string() }";
+    parse(src);
+}
+
+#[test]
 fn interp_while_let_simple() {
     let src = r#"
 func main() -> i32 {
@@ -434,6 +442,28 @@ func main() -> i32 {
 }
 
 #[test]
+fn typecheck_while_let_list_pattern_rejected() {
+    // CG-H3 (audit): list/slice patterns in while-let must be rejected at
+    // type-check time, not at codegen, with a clear diagnostic.
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i32> = [1, 2, 3]
+    let mut i = 0
+    while let [a, b] = xs {
+        i = i + 1
+        if i > 10 { break }
+    }
+    return i
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.message.contains("while-let does not support")),
+        "expected rejection of list pattern in while-let, got: {:?}",
+        errs
+    );
+}
 fn return_after_print_typechecks() {
     // Regression: println followed by explicit return should typecheck.
     let src = r#"

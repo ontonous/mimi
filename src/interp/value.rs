@@ -141,6 +141,8 @@ pub enum QuotedAst {
         fields: Vec<RecordFieldExprQuoted>,
     },
     Try(Box<QuotedAst>),
+    /// PA-H3 (audit): optional chain `x?.y`
+    OptionalChain(Box<QuotedAst>, String),
     Spawn(Box<QuotedAst>),
     Await(Box<QuotedAst>),
     Interpolate(Box<Value>),

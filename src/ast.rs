@@ -388,6 +388,9 @@ pub enum Expr {
     Block(Block),
     /// `?` operator for Result/Option error propagation
     Try(Box<Expr>),
+    /// Optional chaining: `x?.y` → `if x is Some(v) { v.y } else { None }`
+    /// PA-H3 (audit): currently parsed as `Try(x).y` which is incorrect.
+    OptionalChain(Box<Expr>, String),
     /// Spawn a new task/actor
     Spawn(Box<Expr>),
     /// Await a future

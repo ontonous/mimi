@@ -198,9 +198,20 @@ impl LspServer {
 
         // First, find the definition location
         if let Some(file) = self.parse_with_recovery(text) {
+            // CL-H1 (audit): prefer AST positions over text search when the
+            // AST is available. The audit notes this is a broad LSP rewrite;
+            // here we at least consume the parsed AST position when present
+            // and fall back to text search only for legacy/unparsed sources.
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
+                        // CL-H1: use the AST-recorded position (f.pos) when
+                        // available to avoid substring-search false positives.
+                        if f.pos.0 > 0 || f.pos.1 > 0 {
+                            def_line = Some(f.pos.0);
+                            def_col = Some(f.pos.1);
+                            break;
+                        }
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("func {}", word)));
@@ -212,6 +223,9 @@ impl LspServer {
                         break;
                     }
                     Item::Type(t) if t.name == word => {
+                        // CL-H1: TypeDef doesn't carry pos in the AST; fall
+                        // back to text search. Future v0.31+ may extend
+                        // TypeDef with a pos field to enable AST-based lookup.
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("type {}", word)));
@@ -223,6 +237,7 @@ impl LspServer {
                         break;
                     }
                     Item::Module(m) if m.name == word => {
+                        // Module doesn't carry a pos in current AST; fall back.
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("module {}", word)));
@@ -603,9 +618,20 @@ impl LspServer {
 
         // Find definition location
         if let Some(file) = self.parse_with_recovery(text) {
+            // CL-H1 (audit): prefer AST positions over text search when the
+            // AST is available. The audit notes this is a broad LSP rewrite;
+            // here we at least consume the parsed AST position when present
+            // and fall back to text search only for legacy/unparsed sources.
             for item in &file.items {
                 match item {
                     Item::Func(f) if f.name == word => {
+                        // CL-H1: use the AST-recorded position (f.pos) when
+                        // available to avoid substring-search false positives.
+                        if f.pos.0 > 0 || f.pos.1 > 0 {
+                            def_line = Some(f.pos.0);
+                            def_col = Some(f.pos.1);
+                            break;
+                        }
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("func {}", word)));
@@ -617,6 +643,9 @@ impl LspServer {
                         break;
                     }
                     Item::Type(t) if t.name == word => {
+                        // CL-H1: TypeDef doesn't carry pos in the AST; fall
+                        // back to text search. Future v0.31+ may extend
+                        // TypeDef with a pos field to enable AST-based lookup.
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("type {}", word)));
@@ -628,6 +657,7 @@ impl LspServer {
                         break;
                     }
                     Item::Module(m) if m.name == word => {
+                        // Module doesn't carry a pos in current AST; fall back.
                         def_line = text
                             .lines()
                             .position(|l| l.contains(&format!("module {}", word)));

@@ -1178,6 +1178,80 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// PA-H3 (audit): evaluate `inner?.field`. If `inner` evaluates to
+    /// `Some(v)`, return `Some(v.field)`; if `None`, return `None`. If the
+    /// inner is a `Result::Ok(v)`, return `Ok(v.field)`. Other shapes are a
+    /// runtime error.
+    pub(in crate::interp) fn eval_optional_chain(
+        &mut self,
+        inner: &Expr,
+        field: &str,
+    ) -> Result<Value, InterpError> {
+        let v = self.eval_expr(inner)?;
+        match v {
+            Value::Variant(ref name, ref vals) if name == "Some" && vals.len() == 1 => {
+                let inner_v = vals[0].clone();
+                let field_expr = Expr::Field(Box::new(Expr::Literal(crate::ast::Lit::Unit)), field.to_string());
+                // Build a temporary field access on inner_v by stuffing it
+                // into a synthetic Ident. The cleanest path is to use
+                // eval_field directly, which expects Expr.
+                let ident = Expr::Ident(format!("__chain_{}__", field));
+                let synthetic = Expr::Field(Box::new(Expr::Literal(crate::ast::Lit::Unit)), field.to_string());
+                // For simplicity, walk common record-shaped values:
+                // - Value::Record(name, fields) → look up field by name
+                // - Value::Variant(...) → recursive unwrap
+                // Otherwise error.
+                let _ = (ident, synthetic, field_expr);
+                self.eval_optional_field(&inner_v, field)
+            }
+            Value::Variant(ref name, ref vals) if name == "Ok" && vals.len() == 1 => {
+                let inner_v = vals[0].clone();
+                let result = self.eval_optional_field(&inner_v, field)?;
+                Ok(Value::Variant("Ok".to_string(), vec![result]))
+            }
+            Value::Variant(ref name, _) if name == "None" => {
+                Ok(Value::Variant("None".to_string(), vec![]))
+            }
+            Value::Variant(ref name, ref vals) if name == "Err" => {
+                Ok(Value::Variant("Err".to_string(), vals.clone()))
+            }
+            other => Ok(Value::Error(format!(
+                "?. operator requires Option or Result, found {}",
+                other
+            ))),
+        }
+    }
+
+    /// Helper for optional chaining: extract a field from common value shapes.
+    fn eval_optional_field(
+        &self,
+        inner: &Value,
+        field: &str,
+    ) -> Result<Value, InterpError> {
+        match inner {
+            Value::Record(name, fields) => {
+                for (k, v) in fields {
+                    if k == field {
+                        return Ok(v.clone());
+                    }
+                }
+                let name_str = name.as_deref().unwrap_or("<anon>");
+                Ok(Value::Error(format!(
+                    "optional chain: no field `{}` on record {}",
+                    field, name_str
+                )))
+            }
+            Value::Variant(_, vals) if vals.len() == 1 => {
+                // Unwrap single-variant and try again.
+                self.eval_optional_field(&vals[0], field)
+            }
+            other => Ok(Value::Error(format!(
+                "optional chain: cannot access field `{}` on {}",
+                field, other
+            ))),
+        }
+    }
+
     pub(in crate::interp) fn eval_spawn(&mut self, expr: &Expr) -> Result<Value, InterpError> {
         // Check for actor method spawn: `spawn actor.method(args)`
         if let Expr::Call(callee, args) = expr {

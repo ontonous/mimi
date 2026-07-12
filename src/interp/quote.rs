@@ -191,6 +191,11 @@ impl<'a> Interpreter<'a> {
                 ))
             }
             Expr::Try(e) => Ok(QuotedAst::Try(Box::new(self.quote_expr(e)?))),
+            // PA-H3 (audit): optional chain `x?.y` is preserved as-is in quoted AST
+            Expr::OptionalChain(inner, field) => Ok(QuotedAst::OptionalChain(
+                Box::new(self.quote_expr(inner)?),
+                field.clone(),
+            )),
             Expr::Spawn(e) => Ok(QuotedAst::Spawn(Box::new(self.quote_expr(e)?))),
             Expr::Await(e) => Ok(QuotedAst::Await(Box::new(self.quote_expr(e)?))),
             Expr::Old(e) => {

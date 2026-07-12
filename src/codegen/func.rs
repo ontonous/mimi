@@ -39,6 +39,78 @@ fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
 use super::CodeGenerator;
 use super::VarEntry;
 
+/// CG-H10 (audit): collect all identifier names referenced via `old(name)`
+/// inside a postcondition expression, recursively walking through nested
+/// `Old(...)` wrappers and other Expr variants.
+fn collect_old_idents(expr: &crate::ast::Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_old_idents_inner(expr, &mut out);
+    out
+}
+
+fn collect_old_idents_inner(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Old(inner) => {
+            // Recurse into inner to handle `old(old(x))` and nested Idents
+            // inside `old(...)`. We collect Idents at any depth under Old.
+            collect_old_ident_names(inner, out);
+        }
+        Expr::Binary(_, l, r) => {
+            collect_old_idents_inner(l, out);
+            collect_old_idents_inner(r, out);
+        }
+        Expr::Unary(_, e) | Expr::Field(e, _) | Expr::Index(e, _) => {
+            collect_old_idents_inner(e, out);
+        }
+        Expr::Call(callee, args) => {
+            collect_old_idents_inner(callee, out);
+            for a in args {
+                collect_old_idents_inner(a, out);
+            }
+        }
+        Expr::Tuple(es) | Expr::List(es) => {
+            for e in es {
+                collect_old_idents_inner(e, out);
+            }
+        }
+        Expr::Block(stmts) => {
+            for s in stmts {
+                if let Stmt::Expr(e) = s {
+                    collect_old_idents_inner(e, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect identifier names nested under an `old(...)` expression. The
+/// "top-level" Ident is the variable being snapshotted; deeper Idents are
+/// field accesses (`old(x.foo)` → snapshot `x`).
+fn collect_old_ident_names(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Ident(name) => out.push(name.clone()),
+        Expr::Field(inner, _) | Expr::Index(inner, _) => {
+            collect_old_ident_names(inner, out);
+        }
+        Expr::Binary(_, l, r) => {
+            collect_old_ident_names(l, out);
+            collect_old_ident_names(r, out);
+        }
+        Expr::Unary(_, e) => collect_old_ident_names(e, out),
+        Expr::Call(callee, args) => {
+            collect_old_ident_names(callee, out);
+            for a in args {
+                collect_old_ident_names(a, out);
+            }
+        }
+        Expr::Old(inner) => collect_old_ident_names(inner, out),
+        _ => {}
+    }
+}
+
 // Submodules for clearly independent method groups. The originally suggested
 // groups (params, actor, shared) do not map to standalone methods in this file:
 //
@@ -370,16 +442,30 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Snapshot live variable values at function entry so that `old(x)` in
     /// postconditions refers to the value at call time, not the current value.
+    ///
+    /// CG-H10 (audit): only snapshot variables that are actually referenced
+    /// via `old(name)` inside `ensures` clauses. The previous implementation
+    /// allocated a fresh alloca + load + store for *every* parameter and
+    /// local, which produced O(N) wasted instructions on every function with
+    /// postconditions.
     fn snapshot_old_values(&mut self, vars: &HashMap<String, VarEntry<'ctx>>) -> MimiResult<()> {
         self.old_snapshots.clear();
         if self.ensures_stmts.is_empty() {
             return Ok(());
         }
-        for (name, &(alloca, ty)) in vars {
-            let old_alloca = self.build_alloca(ty, &format!("{}_old", name))?;
-            let val = self.build_load(ty, alloca, &format!("{}_snap", name))?;
-            self.build_store(old_alloca, val)?;
-            self.old_snapshots.insert(name.clone(), (old_alloca, ty));
+        let needed: std::collections::HashSet<String> = self
+            .ensures_stmts
+            .iter()
+            .flat_map(|e| collect_old_idents(e))
+            .filter(|name| vars.contains_key(name))
+            .collect();
+        for name in needed {
+            if let Some(&(alloca, ty)) = vars.get(&name) {
+                let old_alloca = self.build_alloca(ty, &format!("{}_old", name))?;
+                let val = self.build_load(ty, alloca, &format!("{}_snap", name))?;
+                self.build_store(old_alloca, val)?;
+                self.old_snapshots.insert(name, (old_alloca, ty));
+            }
         }
         Ok(())
     }
@@ -653,11 +739,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_add(len_iv, i64_ty.const_int(1, false), "ret_str_alloc_len")
             .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        // CG-H6 (audit): round `alloc_len` up to an 8-byte boundary so the
+        // returned buffer is always 8-byte aligned. malloc() is allowed to
+        // return any alignment, but downstream SIMD/word-size memcpy and
+        // GEP operations assume 8-byte alignment on architectures such as
+        // ARM/SPARC. Without this round-up we can produce UB on those
+        // platforms.
+        let seven = i64_ty.const_int(7, false);
+        let rounded_minus_one = self
+            .builder
+            .build_int_add(alloc_len, seven, "ret_str_align_add")
+            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+        let aligned_len = self
+            .builder
+            .build_and(
+                rounded_minus_one,
+                i64_ty.const_int(!7u64, false),
+                "ret_str_align",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
         let malloc_fn = self.get_runtime_fn("malloc")?;
         let heap_ptr = self
             .build_call(
                 malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_len)],
+                &[BasicMetadataValueEnum::IntValue(aligned_len)],
                 "ret_str_malloc",
             )?
             .try_as_basic_value_opt()

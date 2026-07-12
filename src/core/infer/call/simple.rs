@@ -1,7 +1,8 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
-    fmt_type, is_bool, is_int, is_numeric, is_numeric_coercion, same_type, subst_type_params,
+    fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion, same_type,
+    subst_type_params,
     suggest_name,
 };
 use crate::diagnostic::Diagnostic;
@@ -373,7 +374,21 @@ impl<'a> Checker<'a> {
                         "to_json expects 1 argument",
                     );
                 } else {
-                    self.infer_expr(&args[0], scopes);
+                    let arg_ty = self.infer_expr(&args[0], scopes);
+                    // CG-H2 (audit): reject complex types at type-check time so the user
+                    // gets a clear diagnostic instead of an opaque codegen error.
+                    // to_json is only implemented in codegen for primitive scalars and strings.
+                    if !is_json_serializable(&arg_ty) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "to_json: cannot serialize type `{}`; \
+                                 only i32/i64/f64/bool/string are supported in codegen. \
+                                 Use std::json::to_json_record() for complex types",
+                                crate::core::helpers::fmt_type(&arg_ty)
+                            ),
+                        );
+                    }
                 }
                 return Type::Name("string".into(), vec![]);
             }

@@ -204,13 +204,17 @@ impl SolverSession {
             Ok(SatResult::Sat) => { self.replaced = false; SatResult::Sat }
             Ok(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
             Ok(SatResult::Unknown) => {
-                // Normal timeout — no log needed
+                // Normal timeout — solver may be in an inconsistent state.
+                // Replace with a fresh solver. The new solver is explicitly
+                // reset so it starts at Z3 depth 0, matching the invariant
+                // that the next reset()/push() sequence expects.
                 let mut params = z3::Params::new();
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
+                new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.replaced = true;
+                self.replaced = false; // fresh solver, no pending pops
                 SatResult::Unknown
             }
             Err(panic_payload) => {
@@ -230,13 +234,23 @@ impl SolverSession {
                 params.set_u32("timeout", self.timeout_ms as u32);
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
+                // RT-H5 (audit): after replacing, explicitly reset the new
+                // solver so it starts at Z3 depth 0 — the same invariant a
+                // fresh-from-Solver::new() solver has. This ensures that
+                // subsequent callers that depend on reset() + push() do not
+                // observe stale depth or leftover assertions from a
+                // half-initialized solver.
+                new_solver.reset();
                 let _ = std::mem::replace(&mut self.solver, new_solver);
-                self.replaced = true;
+                self.replaced = false; // fresh solver has no pending pops
                 SatResult::Unknown
             }
         }
     }
 
+    /// RT-H5 (audit): reset clears all assertions and resets Z3 depth to 0.
+    /// This is always safe to call regardless of `replaced` state — a fresh
+    /// Solver::new() followed by reset() is idempotent with a reused solver.
     pub fn reset(&mut self) { self.solver.reset(); self.replaced = false; }
 
     pub fn push(&mut self) { self.solver.push(); }

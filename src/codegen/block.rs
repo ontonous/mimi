@@ -204,24 +204,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
                         val = self.adjust_int_val(val, target)?;
-                        // v0.28.26: list-returning builtins hand back a pointer to a
-                        // list struct alloca. Load the struct value so that list
-                        // variables hold the struct by value, matching how other
-                        // list operations expect to receive them.
+                        // CG-H4 (audit): for `let xs: List<T> = ...`, do NOT load the
+                        // struct from the pointer — that creates a stack temporary copy
+                        // whose mutations are lost. Keep the pointer so subsequent
+                        // list operations update the original alloca.
+                        // For non-List complex types we still need the load because
+                        // compile_pattern_bind stores into a fresh alloca by value.
                         if let crate::ast::Type::Name(tn, _) = decl_ty {
                             if tn == "List" {
-                                if let BasicValueEnum::PointerValue(pv) = val {
-                                    let loaded = self
-                                        .builder
-                                        .build_load(target, pv, "list_var_load")
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "list var load error: {}",
-                                                e
-                                            ))
-                                        })?;
-                                    val = loaded;
-                                }
+                                // Skip the load — val stays as PointerValue. The
+                                // downstream compile_pattern_bind will store the
+                                // pointer into the variable's alloca (PointerType
+                                // matches the struct pointer).
                             }
                         }
                     }

@@ -10,8 +10,8 @@
 /// - W008: `== true` / `== false` anti-pattern (use direct boolean expression)
 /// - W009: Recursive function without base case
 /// - W010: Unused import
-use crate::ast::{BinOp, Expr, File, FuncDef, Item, Lit, Pattern, Stmt};
-use crate::diagnostic::codes::{W002, W003, W004, W006, W007, W008, W009, W010};
+use crate::ast::{BinOp, Expr, File, FuncDef, Item, Lit, Pattern, Stmt, Type};
+use crate::diagnostic::codes::{W002, W003, W004, W006, W007, W008, W009, W010, W012};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
@@ -147,6 +147,9 @@ impl Linter {
 
         // W009: Recursion depth hint — direct recursion without a conditional guard
         detect_recursive_no_base(func, diagnostics);
+
+        // W012: type escape hatch detection (`_` / `Any` at let-binding or param)
+        detect_escape_hatch_type_annotations(func, diagnostics);
     }
 }
 
@@ -402,7 +405,7 @@ fn collect_refs_in_expr(expr: &Expr, info: &mut VarUsage) {
             }
         }
         Expr::Block(b) => collect_refs_in_block(b, info),
-        Expr::Try(e) | Expr::Spawn(e) | Expr::Await(e) | Expr::TypeOf(e) => {
+        Expr::Try(e) | Expr::Spawn(e) | Expr::Await(e) | Expr::TypeOf(e) | Expr::OptionalChain(e, _) => {
             collect_refs_in_expr(e, info);
         }
         Expr::If { cond, then_, else_ } => {
@@ -592,7 +595,8 @@ fn detect_eq_bool_in_expr(
         | Expr::Await(e)
         | Expr::TypeOf(e)
         | Expr::QuoteInterpolate(e)
-        | Expr::Old(e) => {
+        | Expr::Old(e)
+        | Expr::OptionalChain(e, _) => {
             detect_eq_bool_in_expr(e, diagnostics, func_pos);
         }
         Expr::Comprehension {
@@ -845,7 +849,8 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
         | Expr::Await(e)
         | Expr::TypeOf(e)
         | Expr::QuoteInterpolate(e)
-        | Expr::Old(e) => expr_calls_name(e, name),
+        | Expr::Old(e)
+        | Expr::OptionalChain(e, _) => expr_calls_name(e, name),
         Expr::Lambda { body, .. } => calls_self_directly(body, name),
         Expr::Quote(b) | Expr::Comptime(b) | Expr::Arena(b) => calls_self_directly(b, name),
         Expr::SliceExpr { target, start, end } => {
@@ -1067,6 +1072,7 @@ fn collect_names_in_expr(expr: &Expr, names: &mut std::collections::HashSet<Stri
         | Expr::TypeOf(e)
         | Expr::QuoteInterpolate(e)
         | Expr::Old(e)
+        | Expr::OptionalChain(e, _)
         | Expr::NamedArg(_, e) => {
             collect_names_in_expr(e, names);
         }
@@ -1322,5 +1328,136 @@ mod tests {
         // For now, unused import is best-effort — `io::print_line` references `io`
         // but the parser may resolve the path differently. Just verify no crash.
         let _ = result;
+    }
+
+    #[test]
+    fn lint_escape_hatch_infer_at_let() {
+        // CO-C2 audit: `let x: _ = ...` triggers W012 warning
+        let src = "func main() -> i32 { let x: _ = 42; x }";
+        let file = parse_source(src);
+        let linter = Linter::new();
+        let result = linter.lint(&file, src);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W012)),
+            "should detect `_` escape hatch at let-binding"
+        );
+    }
+
+    #[test]
+    fn lint_escape_hatch_any_at_let() {
+        // CO-C2 audit: `let x: Any = ...` triggers W012 warning
+        let src = "func main() -> i32 { let x: Any = 42; x }";
+        let file = parse_source(src);
+        let linter = Linter::new();
+        let result = linter.lint(&file, src);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W012)),
+            "should detect `Any` escape hatch at let-binding"
+        );
+    }
+
+    #[test]
+    fn lint_escape_hatch_no_false_positive_concrete() {
+        // Concrete typed let should NOT trigger W012
+        let src = "func main() -> i32 { let x: i32 = 42; x }";
+        let file = parse_source(src);
+        let linter = Linter::new();
+        let result = linter.lint(&file, src);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W012)),
+            "concrete type annotation should not trigger W012"
+        );
+    }
+}
+
+// ---- W012: type escape hatch detection (CO-C2 audit fix) ----
+
+/// Detect `let x: _ = ...` and `let x: Any = ...` patterns that bypass the
+/// type checker via the unification escape hatches. W012 warns the user that
+/// such bindings propagate the escape hatch into all downstream usages.
+fn detect_escape_hatch_type_annotations(
+    func: &FuncDef,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut check_stmt = |stmt: &Stmt| {
+        if let Stmt::Let { ty: Some(t), pos, .. } = stmt {
+            if is_escape_hatch_type(t) {
+                diagnostics.push(Diagnostic::warning_code(
+                    W012,
+                    format!(
+                        "type escape hatch `{}` at let-binding bypasses type checks; \
+                         consider using a concrete type or `Any` only at FFI boundaries",
+                        crate::core::helpers::fmt_type(t)
+                    ),
+                    Span::single(pos.0, pos.1),
+                ));
+            }
+        }
+    };
+    walk_stmts(&func.body, &mut check_stmt);
+
+    // Also check function parameters with escape-hatch types
+    for param in &func.params {
+        if is_escape_hatch_type(&param.ty) {
+            diagnostics.push(Diagnostic::warning_code(
+                W012,
+                format!(
+                    "type escape hatch `{}` in parameter `{}` bypasses type checks",
+                    crate::core::helpers::fmt_type(&param.ty),
+                    param.name
+                ),
+                Span::single(func.pos.0, func.pos.1),
+            ));
+        }
+    }
+}
+
+fn is_escape_hatch_type(t: &Type) -> bool {
+    match t {
+        Type::Infer => true,
+        Type::Name(n, _) if n == "_" || n == "Any" => true,
+        _ => false,
+    }
+}
+
+fn walk_stmts(stmts: &[Stmt], visit: &mut impl FnMut(&Stmt)) {
+    for stmt in stmts {
+        visit(stmt);
+        walk_stmt_inner(stmt, visit);
+    }
+}
+
+fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
+    match stmt {
+        Stmt::Block(stmts) | Stmt::Parasteps(stmts) | Stmt::OnFailure(stmts) | Stmt::Do(stmts) => {
+            walk_stmts(stmts, visit)
+        }
+        Stmt::If {
+            then_,
+            else_,
+            ..
+        } => {
+            walk_stmts(then_, visit);
+            if let Some(e) = else_ {
+                walk_stmts(e, visit);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
+            walk_stmts(body, visit)
+        }
+        Stmt::WhileLet { body, .. } => walk_stmts(body, visit),
+        Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Alloc { body, .. } => {
+            walk_stmts(body, visit)
+        }
+        _ => {}
     }
 }

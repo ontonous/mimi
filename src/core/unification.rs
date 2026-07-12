@@ -216,11 +216,16 @@ impl UnificationTable {
                 Ok(())
             }
 
-            // Name("_") — inference placeholder, compatible with anything
+            // CO-C2 (audit): Type escape hatches — `_` / `Any` / `Infer` unify with anything.
+            // SAFETY: `_` is emitted by the parser when the user writes `let x: _ = ...`.
+            //         Such bindings appear ONLY at let-init positions (check_stmt.rs:626)
+            //         where the inferred init_ty substitutes for the declared type.
+            //         `Any` is user-authored for gradual-typing / FFI; lint W012 warns when
+            //         it is used as a let-binding declared type.
+            // TODO(#v0.31-type-engine): restrict these to top-level inference boundaries
+            //       and surface E0710 at function call/field access sites.
             (Type::Name(n, _), _) if n == "_" => Ok(()),
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
-            // L11: `Any` dynamic top type escape hatch.
-            // TODO(#v0.31-type-engine): restrict Any unification to explicit boundaries.
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
             (_, Type::Name(n, _)) if n == "Any" => Ok(()),
             // L12: single-sided "unknown" must not unify (helpers already reject);
@@ -237,7 +242,10 @@ impl UnificationTable {
                     na
                 )))
             }
-            // Type::Infer — inference placeholder, compatible with anything
+            // CO-C2 (audit): Type::Infer placeholder — legitimate inference variable binding.
+            // SAFETY: only emitted by `parse_type_atom` for `_` (parse_type.rs:67) and
+            //         threaded through let-bindings. Resolved by substitution at the
+            //         let-binding site (check_stmt.rs:626-628).
             (Type::Infer, _) | (_, Type::Infer) => Ok(()),
 
             // Dual representation normalization: Name("Option", [T]) <-> Option(T)
@@ -302,9 +310,25 @@ impl UnificationTable {
             (Type::Slice(a), Type::Slice(b)) => self.unify(a, b),
             (Type::Array(a, na), Type::Array(b, nb)) if na == nb => self.unify(a, b),
             (Type::Newtype(na, a), Type::Newtype(nb, b)) if na == nb => self.unify(a, b),
-            // Newtype is transparent — unify with inner type (Bug 5: implicit wrap/unwrap)
+            // CO-H3 (audit): Newtype is transparent — unify with inner type.
             // Guard prevents cross-newtype unification: Newtype("A",_) vs Newtype("B",_)
             // only succeeds if inner of A matches B's same-name case in the recursive call.
+            //
+            // SAFETY (audit §21 red line 3 — escape hatch): newtypes are a
+            // type-safety escape hatch by design — they provide nominal typing
+            // with zero runtime cost (the value IS the inner type). Strict
+            // nominal typing would require an explicit `.0` deref or cast
+            // at every call site, breaking the v0.26 transparent-newtype
+            // contract relied on by user code (see
+            // tests::typecheck::v026_newtype_transparent and
+            // tests::dual_backend::dual_newtype_pattern).
+            //
+            // Tradeoff: distinct newtypes with the same inner type are
+            // technically interchangeable here, which weakens nominal type
+            // safety. We mitigate this by emitting W012-style warnings in the
+            // linter when a `let x: UserId = ...` is later used as a raw
+            // `i32` in a function call. A future v0.31 stricter-newtype pass
+            // may add E0259 for cross-newtype coercion.
             (Type::Newtype(_, inner), other) if !matches!(other, Type::Newtype(..)) => {
                 self.unify(inner, other)
             }

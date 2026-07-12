@@ -298,7 +298,13 @@ impl VerifierCtx {
             } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
                 // List parameters get a length variable for modeling sort() etc.
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
-                vars.insert_list_len(p.name.as_str(), Z3Int::new_const(format!("{}_len", p.name)));
+                let len_var = Z3Int::new_const(format!("{}_len", p.name));
+                // RT-H10 (audit): constrain list length to be >= 0 so the
+                // solver does not produce unconstrained values that could
+                // satisfy vacuously true postconditions.
+                let zero = Z3Int::from_i64(0);
+                session.solver.assert(&len_var.ge(&zero));
+                vars.insert_list_len(p.name.as_str(), len_var);
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -327,7 +333,10 @@ impl VerifierCtx {
                 vars.insert_string_var(old_name, Z3String::new_const(old_name));
             } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
-                vars.insert_list_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
+                let old_len_var = Z3Int::new_const(format!("{}_len", old_name));
+                let zero = Z3Int::from_i64(0);
+                session.solver.assert(&old_len_var.ge(&zero));
+                vars.insert_list_len(old_name, old_len_var);
             } else {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
             }
