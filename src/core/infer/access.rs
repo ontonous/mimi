@@ -6,12 +6,20 @@ use crate::span::Span;
 use std::collections::HashMap;
 
 /// Replace type parameters in `ty` according to `subst`.
-/// audit (MEDIUM): field-level substitution depth is bounded by the number of
-/// nested generic arguments in practice (typically < 8), but a self-referencing
-/// type could cause infinite recursion. The overload in record.rs (used for
-/// record literal inference) guards against this with MAX_SUBST_DEPTH.
-#[allow(clippy::only_used_in_recursion)]
+/// audit (MEDIUM): depth guard prevents infinite recursion on self-referencing
+/// types (e.g. T = Option<T>). MAX_SUBST_DEPTH=32 is well above any realistic
+/// nesting depth. The same pattern is used in record.rs.
+const MAX_SUBST_DEPTH: u32 = 32;
+
 fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    subst_with_depth(ty, subst, 0)
+}
+
+fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Type {
+    if depth >= MAX_SUBST_DEPTH {
+        return ty.clone();
+    }
+    let next = depth + 1;
     match ty {
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
             subst[name].clone()
@@ -19,58 +27,58 @@ fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Name(name, args) => Type::Name(
             name.clone(),
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
         ),
-        Type::Option(inner) => Type::Option(Box::new(substitute_type_params(inner, subst))),
+        Type::Option(inner) => Type::Option(Box::new(subst_with_depth(inner, subst, next))),
         Type::Result(ok, err) => Type::Result(
-            Box::new(substitute_type_params(ok, subst)),
-            Box::new(substitute_type_params(err, subst)),
+            Box::new(subst_with_depth(ok, subst, next)),
+            Box::new(subst_with_depth(err, subst, next)),
         ),
         Type::Tuple(elems) => Type::Tuple(
             elems
                 .iter()
-                .map(|e| substitute_type_params(e, subst))
+                .map(|e| subst_with_depth(e, subst, next))
                 .collect(),
         ),
         Type::Func(args, ret) => Type::Func(
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
-            Box::new(substitute_type_params(ret, subst)),
+            Box::new(subst_with_depth(ret, subst, next)),
         ),
         Type::ExternFunc(args, ret) => Type::ExternFunc(
             args.iter()
-                .map(|a| substitute_type_params(a, subst))
+                .map(|a| subst_with_depth(a, subst, next))
                 .collect(),
-            Box::new(substitute_type_params(ret, subst)),
+            Box::new(subst_with_depth(ret, subst, next)),
         ),
         Type::Ref(lt, inner) => {
-            Type::Ref(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+            Type::Ref(lt.clone(), Box::new(subst_with_depth(inner, subst, next)))
         }
         Type::RefMut(lt, inner) => {
-            Type::RefMut(lt.clone(), Box::new(substitute_type_params(inner, subst)))
+            Type::RefMut(lt.clone(), Box::new(subst_with_depth(inner, subst, next)))
         }
-        Type::Shared(inner) => Type::Shared(Box::new(substitute_type_params(inner, subst))),
+        Type::Shared(inner) => Type::Shared(Box::new(subst_with_depth(inner, subst, next))),
         Type::LocalShared(inner) => {
-            Type::LocalShared(Box::new(substitute_type_params(inner, subst)))
+            Type::LocalShared(Box::new(subst_with_depth(inner, subst, next)))
         }
-        Type::Weak(inner) => Type::Weak(Box::new(substitute_type_params(inner, subst))),
-        Type::WeakLocal(inner) => Type::WeakLocal(Box::new(substitute_type_params(inner, subst))),
-        Type::RawPtr(inner) => Type::RawPtr(Box::new(substitute_type_params(inner, subst))),
-        Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(substitute_type_params(inner, subst))),
-        Type::CShared(inner) => Type::CShared(Box::new(substitute_type_params(inner, subst))),
-        Type::CBorrow(inner) => Type::CBorrow(Box::new(substitute_type_params(inner, subst))),
-        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(substitute_type_params(inner, subst))),
-        Type::CBuffer(inner) => Type::CBuffer(Box::new(substitute_type_params(inner, subst))),
-        Type::Array(inner, n) => Type::Array(Box::new(substitute_type_params(inner, subst)), *n),
-        Type::Slice(inner) => Type::Slice(Box::new(substitute_type_params(inner, subst))),
+        Type::Weak(inner) => Type::Weak(Box::new(subst_with_depth(inner, subst, next))),
+        Type::WeakLocal(inner) => Type::WeakLocal(Box::new(subst_with_depth(inner, subst, next))),
+        Type::RawPtr(inner) => Type::RawPtr(Box::new(subst_with_depth(inner, subst, next))),
+        Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(subst_with_depth(inner, subst, next))),
+        Type::CShared(inner) => Type::CShared(Box::new(subst_with_depth(inner, subst, next))),
+        Type::CBorrow(inner) => Type::CBorrow(Box::new(subst_with_depth(inner, subst, next))),
+        Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(subst_with_depth(inner, subst, next))),
+        Type::CBuffer(inner) => Type::CBuffer(Box::new(subst_with_depth(inner, subst, next))),
+        Type::Array(inner, n) => Type::Array(Box::new(subst_with_depth(inner, subst, next)), *n),
+        Type::Slice(inner) => Type::Slice(Box::new(subst_with_depth(inner, subst, next))),
         Type::Newtype(name, inner) => {
-            Type::Newtype(name.clone(), Box::new(substitute_type_params(inner, subst)))
+            Type::Newtype(name.clone(), Box::new(subst_with_depth(inner, subst, next)))
         }
         Type::ForAll(params, body) => Type::ForAll(
             params.clone(),
-            Box::new(substitute_type_params(body, subst)),
+            Box::new(subst_with_depth(body, subst, next)),
         ),
         Type::TypeVar(id) => Type::TypeVar(*id),
         Type::Infer

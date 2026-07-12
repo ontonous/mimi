@@ -207,9 +207,10 @@ impl LspServer {
                     Item::Func(f) if f.name == word => {
                         // CL-H1: use the AST-recorded position (f.pos) when
                         // available to avoid substring-search false positives.
+                        // Parser positions are 1-indexed; LSP is 0-indexed.
                         if f.pos.0 > 0 || f.pos.1 > 0 {
-                            def_line = Some(f.pos.0);
-                            def_col = Some(f.pos.1);
+                            def_line = Some(f.pos.0.saturating_sub(1));
+                            def_col = Some(f.pos.1.saturating_sub(1));
                             break;
                         }
                         def_line = text
@@ -627,9 +628,10 @@ impl LspServer {
                     Item::Func(f) if f.name == word => {
                         // CL-H1: use the AST-recorded position (f.pos) when
                         // available to avoid substring-search false positives.
+                        // Parser positions are 1-indexed; LSP is 0-indexed.
                         if f.pos.0 > 0 || f.pos.1 > 0 {
-                            def_line = Some(f.pos.0);
-                            def_col = Some(f.pos.1);
+                            def_line = Some(f.pos.0.saturating_sub(1));
+                            def_col = Some(f.pos.1.saturating_sub(1));
                             break;
                         }
                         def_line = text

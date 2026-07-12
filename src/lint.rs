@@ -1458,6 +1458,10 @@ fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
         Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Alloc { body, .. } => {
             walk_stmts(body, visit)
         }
+        // audit (MEDIUM): recurse into nested function bodies and pinned
+        // blocks so W012 escape-hatch detection covers all scopes.
+        Stmt::Pinned { body, .. } => walk_stmts(body, visit),
+        Stmt::Func(f) => walk_stmts(&f.body, visit),
         _ => {}
     }
 }

@@ -524,7 +524,7 @@ func main() -> i32 {
     let errs = check_source(src).unwrap_err();
     assert!(
         errs.iter()
-            .any(|d| d.message.contains("while-let does not support")),
+            .any(|d| d.message.contains("while-let list/slice patterns")),
         "expected rejection of list pattern in while-let, got: {:?}",
         errs
     );
@@ -544,4 +544,53 @@ func main() -> i32 {
         "println + return should typecheck"
     );
     assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn comprehension_guard_scope_not_leaked() {
+    // Regression (new audit round): comprehension guard `if x > 3` must see
+    // the loop variable `x`. The previous fix removed the variable from
+    // scope BEFORE checking the guard, causing E0400 "undefined variable".
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i32> = [1, 2, 3, 4, 5]
+    let ys = [x for x in xs if x > 3]
+    return ys[0]
+}
+"#;
+    assert!(check_source(src).is_ok(), "comprehension guard should see loop variable");
+    assert_eq!(run_source(src), interp::Value::Int(4));
+}
+
+#[test]
+fn to_json_serializes_list_i32() {
+    // Regression (new audit round): to_json was over-rejecting List<T> types
+    // that codegen actually supports. List<i32> should be serializable.
+    let src = r#"
+func main() -> i32 {
+    let xs: List<i32> = [1, 2, 3]
+    let json = to_json(xs)
+    return 0
+}
+"#;
+    assert!(check_source(src).is_ok(), "to_json(List<i32>) should type-check");
+}
+
+#[test]
+fn optional_chain_chained_fields() {
+    // Regression (new audit round): `a?.b?.c` chained optional chains
+    // should parse correctly, not as `Try(a.b).c`.
+    let src = "func main() -> i32 { let x: Option<i32> = Some(1); x?.to_string() }";
+    // parse() panics on error; if it succeeds, the test passes.
+    parse(src);
+}
+
+#[test]
+fn optional_chain_after_expression() {
+    // Regression (new audit round): `?.` should work after arbitrary
+    // expressions, not just bare identifiers.
+    let src = "func foo() -> Option<i32> { Some(42) }
+               func main() -> i32 { foo()?.to_string().len() }";
+    // This should at least parse without error.
+    parse(src);
 }

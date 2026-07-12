@@ -108,6 +108,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "named argument '{}' in codegen: named arguments must be resolved before codegen (use positional args or evaluate at comptime)", name
             ))),
             Expr::Cast(inner, target_type) => self.compile_cast_expr(inner, target_type, vars),
+            Expr::OptionalChain(inner, field) => {
+                // PA-H3 (audit): `x?.field` optional chain. The interpreter
+                // supports this via eval_optional_chain, but codegen support
+                // is not yet implemented. Emit a clear error instead of
+                // falling through to the catch-all.
+                //
+                // TODO: implement codegen for OptionalChain — needs to:
+                // 1. Evaluate inner expression
+                // 2. Check if the Option discriminant is Some
+                // 3. If Some, extract the payload and load the field
+                // 4. If None, return None
+                Err(CompileError::Generic(format!(
+                    "optional chain `?.{}` is not yet supported in codegen; \
+                     use `mimi run` or desugar to match on Option",
+                    field
+                )))
+            }
             #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
         }

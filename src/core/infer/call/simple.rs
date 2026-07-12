@@ -383,8 +383,8 @@ impl<'a> Checker<'a> {
                             crate::diagnostic::codes::E0242,
                             format!(
                                 "to_json: cannot serialize type `{}`; \
-                                 only i32/i64/f64/bool/string are supported in codegen. \
-                                 Use std::json::to_json_record() for complex types",
+                                 only i32/i64/f64/bool/string, List<T>, and Record \
+                                 types with serializable fields are supported in codegen",
                                 crate::core::helpers::fmt_type(&arg_ty)
                             ),
                         );

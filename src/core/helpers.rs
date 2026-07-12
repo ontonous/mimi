@@ -376,16 +376,47 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 }
 
 /// CG-H2 (audit): predicates whether the codegen for `to_json` can serialize
-/// the given type. Only primitive scalars and strings are supported in codegen.
-/// Complex types (List/Record/Map/Set) need a recursive serializer that has not
-/// been implemented; reject them at type-check time with a clear diagnostic.
+/// the given type. The codegen supports:
+/// - Primitive scalars: i32, i64, f64, bool, string, unit
+/// - List<T> where T is a primitive or a Record (via mimi_list_*_to_json
+///   and mimi_list_record_to_json)
+/// - Record types (field-by-field sprintf serialization)
+/// - Newtype (transparent — delegates to inner type)
+/// - Any (escape hatch — interpreter handles all value types)
+/// - Infer/_ (defer to runtime)
+///
+/// Genuinely unsupported: Option, Result, Map, Set, Tuple (no codegen path).
 pub(crate) fn is_json_serializable(t: &Type) -> bool {
     match t {
-        Type::Name(n, _) => {
-            matches!(n.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit")
-        }
-        Type::Option(_) | Type::Result(_, _) => false, // requires recursive serializer
         Type::Infer => true,                           // _ placeholder — defer
+        Type::Newtype(_, inner) => is_json_serializable(inner), // transparent
+        Type::Name(n, args) => {
+            // Primitive scalars
+            if matches!(n.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "Any") {
+                return true;
+            }
+            // List<T> is supported if T is serializable
+            if n == "List" && !args.is_empty() {
+                return is_json_serializable(&args[0]);
+            }
+            // Records are supported by the codegen record-to-json sprintf path.
+            // We can't distinguish Records from other Name types here, so we
+            // allow any Name with args (e.g. "Point", "User") — the codegen will
+            // produce its own error if the record has unsupported field types.
+            // Exclude known unsupported container types.
+            if !args.is_empty() && !matches!(n.as_str(),
+                "Option" | "Result" | "Map" | "Set" | "Tuple" | "Channel"
+                | "Future" | "Weak" | "AtomicI32" | "AtomicI64" | "AtomicBool") {
+                return true;
+            }
+            // Bare names without args that aren't primitives — allow (might be a record alias)
+            if args.is_empty() && !matches!(n.as_str(),
+                "Option" | "Result" | "Map" | "Set" | "Tuple" | "Channel"
+                | "Future" | "Weak" | "AtomicI32" | "AtomicI64" | "AtomicBool") {
+                return true;
+            }
+            false
+        }
         _ => false,
     }
 }

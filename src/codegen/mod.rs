@@ -562,7 +562,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         if let BasicValueEnum::PointerValue(pv) = val {
             let ret_type = self.current_fn_ret_type().unwrap_or_else(|| {
-                // SAFETY: fallback to `i64` when no function context (top-level
+                // NOTE: fallback to `i64` when no function context (top-level
                 // expressions or test harness). `i64` is a safe default for the
                 // scalar-skip path — the branch below only matters when the
                 // return type is a StructType (tuple/record/string alloca → by-value
@@ -805,7 +805,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             // audit (MEDIUM): no active scope — create one as a safety net
             // so the allocation does not leak silently. The caller may have
             // a codegen ordering bug (alloc before scope push), but we
-            // recover gracefully by providing the scope.
+            // recover gracefully by providing the scope. Log a warning so
+            // the underlying bug is visible during development.
+            eprintln!(
+                "[mimi codegen] warning: register_heap_alloc with no active scope \
+                 (codegen ordering bug); creating recovery scope"
+            );
             guard.push(vec![HeapEntry::Ptr(ptr)]);
         }
     }
