@@ -13,21 +13,10 @@
 use crate::ast::{SessionType, Type};
 use std::collections::HashMap;
 
-fn same_type(a: &Type, b: &Type) -> bool {
-    match (a, b) {
-        (Type::Name(na, aa), Type::Name(nb, ab)) => {
-            na == nb
-                && aa.len() == ab.len()
-                && aa.iter().zip(ab.iter()).all(|(x, y)| same_type(x, y))
-        }
-        (Type::Option(a), Type::Option(b)) => same_type(a, b),
-        (Type::Result(a1, a2), Type::Result(b1, b2)) => same_type(a1, b1) && same_type(a2, b2),
-        (Type::Tuple(a), Type::Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| same_type(x, y))
-        }
-        _ => false,
-    }
-}
+// H17-fix: removed incomplete same_type copy — now delegates to the
+// canonical implementation in core::helpers which handles all Type
+// variants including Any, _, unknown, Ref, RefMut, Func, ForAll, etc.
+use crate::core::helpers::same_type;
 
 fn fmt_type(ty: &Type) -> String {
     match ty {

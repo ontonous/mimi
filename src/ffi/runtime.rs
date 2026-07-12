@@ -544,6 +544,14 @@ pub unsafe extern "C" fn mimi_value_as_int(ptr: *const Value) -> i64 {
     }
 }
 
+/// M14-fix: Check if a Value pointer is null (not a valid value).
+/// This allows C callers to distinguish "no value" from "value is 0"
+/// when using mimi_value_as_int, which returns 0 for both cases.
+#[no_mangle]
+pub extern "C" fn mimi_value_is_null(ptr: *const Value) -> bool {
+    ptr.is_null()
+}
+
 /// Read a boolean from a Value pointer. Returns false if the pointer is null or
 /// does not contain a boolean.
 ///

@@ -1010,8 +1010,12 @@ impl<'a> Checker<'a> {
                                 Expr::Literal(_) => true,
                                 // List literal → realloc (allocates new backing store)
                                 Expr::List(_) => true,
-                                // Record/struct construction → realloc
-                                Expr::Record { .. } => true,
+                                // M8-fix: Record construction is allowed for mutate
+                                // params — the common pattern `param = Record { ...fields,
+                                // modified_field: new_val }` is a legitimate read-modify-write
+                                // that reads existing fields and constructs a new record.
+                                // Previously this was flagged as wholesale realloc (E0417).
+                                Expr::Record { .. } => false,
                                 // Assignment to an ident that isn't self → replacement
                                 Expr::Ident(rhs) if rhs != name => true,
                                 // Otherwise (math/binop/field/call) → likely read-modify-write, allow

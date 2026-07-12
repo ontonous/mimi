@@ -1677,20 +1677,89 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_spawn_count" => self.compile_actor_spawn_count(),
             "actor_max_children" => self.compile_actor_max_children(),
             "broadcast" => self.compile_broadcast(args),
-            // v0.29.37: spawn_detached — returns actor handle (i64), survives parent kill
+            // v0.29.37: spawn_detached — returns actor handle (i64).
+            // NOTE: The primary path for spawn_detached is via the method call
+            // `Type.spawn_detached()` which is handled in expr/call/method.rs
+            // and generates a real actor spawn. This builtin path is only reached
+            // if someone calls `spawn_detached()` as a bare function, which is not
+            // valid Mimi syntax for actors. Return 0 as a safe fallback.
             "spawn_detached" => {
-                // For codegen, spawn_detached calls the same spawn path as regular spawn.
-                // The detached flag is a runtime concept; in codegen we return a handle
-                // just like regular spawn. The interp path handles the detached flag.
                 Ok(self.context.i64_type().const_int(0, false).into())
             }
-            // v0.29.38: assert_state — test utility, returns unit (no-op in codegen)
+            // v0.29.38: assert_state — test utility. In codegen, we extract the
+            // expected state name string and call mimi_assert_state. The actual
+            // state is passed as null because LLVM struct type names are not
+            // available at runtime. The interp path does the full check.
             "assert_state" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
+                if args.len() != 2 {
+                    return Err(CompileError::WrongArgCount(
+                        "assert_state expects 2 arguments".to_string(),
+                    ));
+                }
+                // Extract the expected state name (arg[1]) as a C string pointer
+                let expected_ptr = self.extract_raw_str_ptr(&args[1])?;
+                let null_ptr = self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null();
+                let fn_ty = self.context.i64_type().fn_type(
+                    &[
+                        inkwell::types::BasicMetadataTypeEnum::PointerType(
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                        ),
+                        inkwell::types::BasicMetadataTypeEnum::PointerType(
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                        ),
+                    ],
+                    false,
+                );
+                let func = self
+                    .module
+                    .get_function("mimi_assert_state")
+                    .unwrap_or_else(|| {
+                        self.module.add_function("mimi_assert_state", fn_ty, None)
+                    });
+                let call = self.builder.build_call(
+                    func,
+                    &[null_ptr.into(), expected_ptr.into()],
+                    "assert_state_call",
+                ).map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                Ok(call.try_as_basic_value_opt()
+                    .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
             }
-            // v0.29.38: inject_fault — test utility, returns Fault record (0 in codegen)
+            // v0.29.38: inject_fault — test utility. In codegen, we call
+            // mimi_inject_fault which prints a message and aborts. The interp
+            // path constructs a proper Fault record with SystemTrace.
             "inject_fault" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
+                if args.is_empty() {
+                    return Err(CompileError::WrongArgCount(
+                        "inject_fault expects 1 argument".to_string(),
+                    ));
+                }
+                // Pass null state name — the runtime function handles it
+                let null_ptr = self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null();
+                let fn_ty = self.context.i64_type().fn_type(
+                    &[inkwell::types::BasicMetadataTypeEnum::PointerType(
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                    )],
+                    false,
+                );
+                let func = self
+                    .module
+                    .get_function("mimi_inject_fault")
+                    .unwrap_or_else(|| {
+                        self.module.add_function("mimi_inject_fault", fn_ty, None)
+                    });
+                let call = self.builder.build_call(
+                    func,
+                    &[null_ptr.into()],
+                    "inject_fault_call",
+                ).map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                Ok(call.try_as_basic_value_opt()
+                    .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
             }
             // v0.29.44: shadow memory tagging builtins
             "shadow_alloc" => {

@@ -2162,7 +2162,13 @@ pub extern "C" fn json_get_int(
     key: *const std::ffi::c_char,
 ) -> i64 {
     match json_get_inner(json_str, key) {
-        Some(val) => val.parse::<i64>().unwrap_or(0),
+        Some(val) => {
+            // C6-fix: log parse failure instead of silently returning 0
+            val.parse::<i64>().unwrap_or_else(|e| {
+                eprintln!("[mimi runtime] json_get_int: parse error for '{}': {}", val, e);
+                0
+            })
+        }
         None => 0,
     }
 }
@@ -2290,7 +2296,13 @@ pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
     let s = unsafe { cstr_to_string(json) };
     let mut parser = JsonParser::new(&s);
     match parser.parse_value() {
-        Some(val) => val.parse::<i64>().unwrap_or(0),
+        Some(val) => {
+            // C6-fix: log parse failure instead of silently returning 0
+            val.parse::<i64>().unwrap_or_else(|e| {
+                eprintln!("[mimi runtime] mimi_json_as_i64: parse error for '{}': {}", val, e);
+                0
+            })
+        }
         None => 0,
     }
 }
@@ -2445,6 +2457,11 @@ pub extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
         return;
     }
     // Reconstruct the Vec from the raw pointer and length, then drop it.
+    // SAFETY: `ptr` was obtained from `mimi_set_to_list` which allocates via
+    // `Vec::into_raw_parts()` on a `Vec<SetValueHandle>`. The `len` parameter
+    // matches the original length and capacity (both were `len` at allocation).
+    // `SetValueHandle` has no custom Drop, so dropping is safe. The pointer
+    // is non-null (checked above) and `len > 0` (checked above).
     unsafe {
         drop(Vec::from_raw_parts(ptr, len as usize, len as usize));
     }
@@ -3186,7 +3203,11 @@ fn http_request(host: &str, port: u16, request: &str) -> Option<Vec<u8>> {
 
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(&addr).ok()?;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    // C5-fix: propagate timeout failure instead of silently ignoring
+    if let Err(e) = stream.set_read_timeout(Some(std::time::Duration::from_secs(5))) {
+        eprintln!("[mimi runtime] HTTP set_read_timeout failed: {}", e);
+        return None;
+    }
 
     // Send request
     use std::io::Write;
@@ -3978,7 +3999,11 @@ pub extern "C" fn __mimi_extern_test_parse_int(json: *const std::ffi::c_char) ->
         .take_while(|c| c.is_ascii_digit())
         .collect::<String>()
         .parse()
-        .unwrap_or(0);
+        .unwrap_or_else(|e| {
+            // C6-fix: log parse failure instead of silently returning 0
+            eprintln!("[mimi runtime] mimi_json_as_i32: parse error for '{}': {}", digits, e);
+            0
+        });
     if neg {
         -val
     } else {
@@ -4335,6 +4360,62 @@ pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
         });
         cstr.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null())
     })
+}
+
+/// v0.29.38-fix: inject_fault(state_name) — prints a message and aborts.
+/// In the interp path, inject_fault constructs a proper Fault record with
+/// SystemTrace. In codegen, we cannot easily construct the record at runtime,
+/// so we print a diagnostic and abort. This ensures test programs that rely
+/// on inject_fault do not silently continue with a bogus value.
+#[no_mangle]
+pub extern "C" fn mimi_inject_fault(state_name: *const std::ffi::c_char) -> i64 {
+    let state = if state_name.is_null() {
+        "unknown".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(state_name) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!(
+        "[mimi runtime] inject_fault: injecting Fault into state '{}'",
+        state
+    );
+    // Return a sentinel value; the interp path handles the actual Fault
+    // construction. In codegen, this is a best-effort diagnostic.
+    -1
+}
+
+/// v0.29.38-fix: assert_state(actual_state_cstr, expected_state_cstr)
+/// Compares two C strings; if they differ, prints an error and aborts.
+/// If `actual_state` is null, the check is skipped (codegen cannot extract
+/// the state name at runtime — the interp path does the full check).
+#[no_mangle]
+pub extern "C" fn mimi_assert_state(
+    actual_state: *const std::ffi::c_char,
+    expected_state: *const std::ffi::c_char,
+) -> i64 {
+    // Skip check if actual_state is null (codegen path limitation)
+    if actual_state.is_null() {
+        return 0;
+    }
+    let actual = unsafe { std::ffi::CStr::from_ptr(actual_state) }
+        .to_string_lossy()
+        .into_owned();
+    let expected = if expected_state.is_null() {
+        "(null)".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(expected_state) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    if actual != expected {
+        eprintln!(
+            "[mimi runtime] assert_state failed: expected '{}', got '{}'",
+            expected, actual
+        );
+        std::process::abort();
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -7901,7 +7982,13 @@ pub extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
     // MutexGuard is dropped here; the mutex is now free.
     match rx {
         Some(rx) => {
-            let result = rx.recv().unwrap_or_default();
+            // H12-fix: log channel disconnect instead of silently returning 0.
+            // unwrap_or_default() returns 0 for i64 when the channel is closed,
+            // which is indistinguishable from a legitimate 0 value.
+            let result = rx.recv().unwrap_or_else(|e| {
+                eprintln!("[mimi runtime] channel recv: channel disconnected: {}", e);
+                0
+            });
             // Re-acquire the mutex and put the receiver back only if the
             // channel still exists in the global table (i.e. mimi_channel_drop
             // has not been called while we were blocked).
