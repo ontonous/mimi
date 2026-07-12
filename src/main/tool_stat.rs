@@ -116,8 +116,13 @@ fn scan_dir(
 }
 
 fn simple_hash(data: &str) -> String {
-    // Simple FNV-1a hash for quick file identification (not cryptographic)
-    let mut hash: u64 = 0xcbf29ce484222325;
+    // audit (MEDIUM — FNV hash collision):
+    // FNV-1a is a non-cryptographic hash used here for quick file
+    // identification and change detection in `mimi stat` output.
+    // It is NOT collision-resistant: an attacker can craft inputs
+    // that produce the same hash.  Do not rely on this for integrity
+    // verification or any security-sensitive purpose — use SHA-256.
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis (64-bit)
     for byte in data.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);

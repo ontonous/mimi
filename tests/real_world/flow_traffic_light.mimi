@@ -1,0 +1,68 @@
+// MCDD real_world: Flow complex interaction — Traffic Light Controller
+// Combines: state machine with timers, Fault on invalid transition,
+// persistent payload across recover, nested flow for pedestrian crossing.
+//
+// Tests: state enumeration, transition dispatch, payload field access,
+// Fault trace fields, persistent recovery.
+
+flow Timer {
+    state Stopped { remaining: i32 }
+    state Running { remaining: i32 }
+
+    transition start(Stopped) -> Running {
+        do { return Running { remaining: self.remaining } }
+    }
+    transition tick(Running) -> Running {
+        do {
+            return Running { remaining: self.remaining - 1 }
+        }
+    }
+    transition stop(Running) -> Stopped {
+        do { return Stopped { remaining: self.remaining } }
+    }
+}
+
+flow TrafficLight {
+    state Red { timer: i32 }
+    state Green { timer: i32 }
+    state Yellow { timer: i32 }
+
+    transition to_green(Red) -> Green {
+        do { return Green { timer: 30 } }
+    }
+    transition to_yellow(Green) -> Yellow {
+        do { return Yellow { timer: 5 } }
+    }
+    transition to_red(Yellow) -> Red {
+        do { return Red { timer: 30 } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Full traffic light cycle
+    let t0 = Red { timer: 0 }
+    let t1 = TrafficLight::to_green(t0)
+    println(t1.timer)
+    let t2 = TrafficLight::to_yellow(t1)
+    println(t2.timer)
+    let t3 = TrafficLight::to_red(t2)
+    println(t3.timer)
+    
+    // Test 2: Timer subflow
+    let timer0 = Stopped { remaining: 10 }
+    let timer1 = Timer::start(timer0)
+    let timer2 = Timer::tick(timer1)
+    let timer3 = Timer::tick(timer2)
+    println(timer3.remaining)
+    let timer4 = Timer::stop(timer3)
+    println(timer4.remaining)
+    
+    // Test 3: Fault on invalid transition (Red -> Yellow is undefined)
+    let t4 = Red { timer: 30 }
+    // to_yellow(Red) is undefined → auto-fallback → Fault
+    let f = TrafficLight::to_yellow(t4)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    0
+}

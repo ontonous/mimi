@@ -78,7 +78,16 @@ impl Lockfile {
         self.package.iter().find(|p| p.name == name)
     }
 
-    /// Resolve version constraint against available versions
+    /// Resolve version constraint against available versions.
+    ///
+    /// audit (MEDIUM — lockfile O(n) linear scan):
+    /// This function performs a linear scan over `available` to find
+    /// the best matching version.  For typical package counts (tens to
+    /// low hundreds of versions per package) this is negligible.  The
+    /// scan is not sorted or indexed, so in the pathological case of a
+    /// package with thousands of versions the O(n) cost becomes visible.
+    /// This is a known limitation; if it becomes a bottleneck, switch
+    /// to a sorted-and-indexed lookup.
     pub fn resolve_version(constraint: &str, available: &[&str]) -> Option<String> {
         if constraint == "*" || constraint.is_empty() {
             return available.last().map(|s| s.to_string());

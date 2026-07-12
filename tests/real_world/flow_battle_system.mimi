@@ -1,0 +1,92 @@
+// MCDD real_world: Flow complex interaction — Turn-Based Battle System
+// Combines: multi-field state payloads, subflow for status effects,
+// Fault trace access on invalid transition.
+//
+// Tests: complex payload construction, field preservation across transitions,
+// subflow interaction, Fault absorption with trace fields.
+// Design: each transition name maps to a single target state (avoids E0420).
+
+flow StatusEffect {
+    state Inactive
+    state Active { turns_left: i32, magnitude: i32 }
+
+    transition apply(Inactive) -> Active {
+        do { return Active { turns_left: 3, magnitude: 10 } }
+    }
+    transition tick(Active) -> Active {
+        do { return Active { turns_left: self.turns_left - 1, magnitude: self.magnitude } }
+    }
+    transition expire(Active) -> Inactive {
+        do { return Inactive { } }
+    }
+}
+
+flow BattleUnit {
+    state Fresh { hp: i32, atk: i32 }
+    state Hurt { hp: i32, atk: i32 }
+    state Defeated
+
+    // Each transition name has a single target state
+    transition damage(Fresh) -> Hurt {
+        do { return Hurt { hp: self.hp - 20, atk: self.atk } }
+    }
+    transition defeat(Hurt) -> Defeated {
+        do { return Defeated { } }
+    }
+    transition heal(Hurt) -> Fresh {
+        do { return Fresh { hp: self.hp + 15, atk: self.atk } }
+    }
+    transition buff(Fresh) -> Fresh {
+        do { return Fresh { hp: self.hp, atk: self.atk + 5 } }
+    }
+    transition recover(Fresh) -> Fresh {
+        do { return Fresh { hp: self.hp + 5, atk: self.atk } }
+    }
+    transition recover_hurt(Hurt) -> Hurt {
+        do { return Hurt { hp: self.hp + 5, atk: self.atk } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Take damage and heal
+    let u0 = Fresh { hp: 100, atk: 10 }
+    let u1 = BattleUnit::damage(u0)
+    println(u1.hp)
+    let u2 = BattleUnit::heal(u1)
+    println(u2.hp)
+    
+    // Test 2: Power up while fresh
+    let u3 = Fresh { hp: 100, atk: 10 }
+    let u4 = BattleUnit::buff(u3)
+    println(u4.atk)
+    let u5 = BattleUnit::recover(u4)
+    println(u5.hp)
+    println(u5.atk)
+    
+    // Test 3: Defeat path: Fresh → Hurt → Defeated
+    let u6 = Fresh { hp: 100, atk: 10 }
+    let u7 = BattleUnit::damage(u6)
+    let u8 = BattleUnit::defeat(u7)
+    
+    // Test 4: Status effect subflow
+    let s0 = Inactive { }
+    let s1 = StatusEffect::apply(s0)
+    println(s1.turns_left)
+    println(s1.magnitude)
+    let s2 = StatusEffect::tick(s1)
+    println(s2.turns_left)
+    let s3 = StatusEffect::expire(s2)
+    
+    // Test 5: Fault on buff(Defeated) — undefined
+    let f = BattleUnit::buff(u8)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    // Test 6: Rest on Hurt
+    let u9 = Fresh { hp: 50, atk: 5 }
+    let u10 = BattleUnit::damage(u9)
+    let u11 = BattleUnit::recover_hurt(u10)
+    println(u11.hp)
+    
+    0
+}

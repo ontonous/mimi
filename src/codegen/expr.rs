@@ -962,11 +962,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // is a runtime computation and we must not pretend to
                     // know its value — returning Some(0) here would be a
                     // silent miscompilation.
-                    let n = iv.get_zero_extended_constant()?;
+                    //
+                    // audit (MEDIUM — fold_const_unary unsigned negation):
+                    // Previously used `(!n).wrapping_add(1)` on the
+                    // unsigned value from `get_zero_extended_constant()`.
+                    // While the bit-level arithmetic is correct for
+                    // two's complement, it is fragile and unclear.  We
+                    // now interpret the constant as a signed i64 and
+                    // use `wrapping_neg()` for a straightforward signed
+                    // negation, then pass the sign-extended bit pattern
+                    // to `const_int`.
+                    let n = iv.get_sign_extended_constant()?;
                     Some(BasicValueEnum::IntValue(
                         self.context
                             .i64_type()
-                            .const_int((!n).wrapping_add(1), true),
+                            .const_int(n.wrapping_neg() as u64, true),
                     ))
                 }
                 BasicValueEnum::FloatValue(_) => {
@@ -980,6 +990,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicValueEnum::IntValue(iv) => {
                     // Only fold if the operand is a compile-time constant;
                     // see §21 red line 2 (silent error swallow).
+                    //
+                    // audit (MEDIUM — fold_const_unary unsigned):
+                    // Uses `get_zero_extended_constant()` (unsigned) here.
+                    // For `Not` (logical negation) this is safe because
+                    // the comparison `n == 0` gives the same result
+                    // regardless of signedness.
                     let n = iv.get_zero_extended_constant()?;
                     Some(BasicValueEnum::IntValue(
                         self.context.i64_type().const_int((n == 0) as u64, false),

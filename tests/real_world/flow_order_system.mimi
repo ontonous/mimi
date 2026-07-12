@@ -1,0 +1,95 @@
+// MCDD real_world: Flow complex interaction — Order Processing System
+// Combines: state machine with payment, shipping, and cancellation,
+// subflow for inventory, Fault recovery.
+//
+// Tests: multi-flow composition, string field payloads, conditional
+// logic in transition bodies, Fault on invalid cancellation attempts.
+
+flow Inventory {
+    state InStock { sku: string, qty: i32 }
+    state Reserved { sku: string, qty: i32 }
+    state OutOfStock { sku: string }
+
+    transition reserve(InStock) -> Reserved {
+        do { return Reserved { sku: self.sku, qty: self.qty - 1 } }
+    }
+    transition restock(Reserved) -> InStock {
+        do { return InStock { sku: self.sku, qty: self.qty + 10 } }
+    }
+    transition deplete(Reserved) -> OutOfStock {
+        do { return OutOfStock { sku: self.sku } }
+    }
+    transition restock_empty(OutOfStock) -> InStock {
+        do { return InStock { sku: self.sku, qty: 50 } }
+    }
+}
+
+flow Order {
+    state Pending { item: string, qty: i32 }
+    state Paid { item: string, qty: i32, amount: i32 }
+    state Shipped { item: string, qty: i32, tracking: string }
+    state Delivered { item: string, qty: i32 }
+    state Cancelled { reason: string }
+
+    transition pay(Pending) -> Paid {
+        do { return Paid { item: self.item, qty: self.qty, amount: self.qty * 100 } }
+    }
+    transition ship(Paid) -> Shipped {
+        do { return Shipped { item: self.item, qty: self.qty, tracking: "TRK12345" } }
+    }
+    transition deliver(Shipped) -> Delivered {
+        do { return Delivered { item: self.item, qty: self.qty } }
+    }
+    transition cancel_pending(Pending) -> Cancelled {
+        do { return Cancelled { reason: "user_cancelled_before_payment" } }
+    }
+    transition cancel_paid(Paid) -> Cancelled {
+        do { return Cancelled { reason: "refund_issued" } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Full order lifecycle: Pending → Paid → Shipped → Delivered
+    let o0 = Pending { item: "widget", qty: 3 }
+    let o1 = Order::pay(o0)
+    println(o1.amount)
+    let o2 = Order::ship(o1)
+    println(o2.tracking)
+    let o3 = Order::deliver(o2)
+    println(o3.item)
+    println(o3.qty)
+    
+    // Test 2: Cancel before payment
+    let o4 = Pending { item: "gadget", qty: 1 }
+    let o5 = Order::cancel_pending(o4)
+    println(o5.reason)
+    
+    // Test 3: Cancel after payment (refund)
+    let o6 = Pending { item: "doohickey", qty: 5 }
+    let o7 = Order::pay(o6)
+    let o8 = Order::cancel_paid(o7)
+    println(o8.reason)
+    
+    // Test 4: Inventory subflow
+    let inv0 = InStock { sku: "ABC", qty: 10 }
+    let inv1 = Inventory::reserve(inv0)
+    println(inv1.qty)
+    let inv2 = Inventory::restock(inv1)
+    println(inv2.qty)
+    
+    // Test 5: Inventory depletion and restock
+    let inv3 = InStock { sku: "XYZ", qty: 1 }
+    let inv4 = Inventory::reserve(inv3)
+    let inv5 = Inventory::deplete(inv4)
+    println(inv5.sku)
+    let inv6 = Inventory::restock_empty(inv5)
+    println(inv6.qty)
+    
+    // Test 6: Fault on ship(Pending) — must pay first
+    let o9 = Pending { item: "thingamajig", qty: 2 }
+    let f = Order::ship(o9)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    0
+}

@@ -1,0 +1,91 @@
+// MCDD real_world: Flow complex interaction — TCP Connection State Machine
+// Classic TCP states with transitions, testing multi-field payloads
+// and conditional transition logic.
+//
+// Tests: realistic state machine, field preservation across transitions,
+// Fault on invalid state transitions (e.g., SYN_SENT → CLOSE_WAIT).
+
+flow TCPConnection {
+    state Closed
+    state Listen { port: i32 }
+    state SynSent { port: i32, target: string }
+    state Established { port: i32, peer: string, bytes_sent: i32 }
+    state CloseWait { port: i32, peer: string }
+    state TimeWait { port: i32 }
+
+    transition listen(Closed) -> Listen {
+        do { return Listen { port: 8080 } }
+    }
+    transition connect(Closed) -> SynSent {
+        do { return SynSent { port: 8080, target: "192.168.1.1" } }
+    }
+    transition accept(Listen) -> Established {
+        do { return Established { port: self.port, peer: "client_1", bytes_sent: 0 } }
+    }
+    transition syn_ack(SynSent) -> Established {
+        do { return Established { port: self.port, peer: self.target, bytes_sent: 0 } }
+    }
+    transition send(Established) -> Established {
+        do { return Established { port: self.port, peer: self.peer, bytes_sent: self.bytes_sent + 100 } }
+    }
+    transition fin(Established) -> CloseWait {
+        do { return CloseWait { port: self.port, peer: self.peer } }
+    }
+    transition close(CloseWait) -> TimeWait {
+        do { return TimeWait { port: self.port } }
+    }
+    transition timeout(TimeWait) -> Closed {
+        do { return Closed { } }
+    }
+    transition close_listen(Listen) -> Closed {
+        do { return Closed { } }
+    }
+    transition close_synsent(SynSent) -> Closed {
+        do { return Closed { } }
+    }
+}
+
+func main() -> i32 {
+    // Test 1: Server path: Closed → Listen → Established → CloseWait → TimeWait → Closed
+    let s0 = Closed { }
+    let s1 = TCPConnection::listen(s0)
+    println(s1.port)
+    let s2 = TCPConnection::accept(s1)
+    println(s2.peer)
+    println(s2.bytes_sent)
+    let s3 = TCPConnection::send(s2)
+    println(s3.bytes_sent)
+    let s4 = TCPConnection::send(s3)
+    println(s4.bytes_sent)
+    let s5 = TCPConnection::fin(s4)
+    println(s5.peer)
+    let s6 = TCPConnection::close(s5)
+    println(s6.port)
+    let s7 = TCPConnection::timeout(s6)
+    
+    // Test 2: Client path: Closed → SynSent → Established
+    let c0 = Closed { }
+    let c1 = TCPConnection::connect(c0)
+    println(c1.target)
+    let c2 = TCPConnection::syn_ack(c1)
+    println(c2.peer)
+    println(c2.bytes_sent)
+    let c3 = TCPConnection::send(c2)
+    println(c3.bytes_sent)
+    
+    // Test 3: Fault on fin(Closed) — invalid transition
+    let f0 = Closed { }
+    let f = TCPConnection::fin(f0)
+    println(f.last_state)
+    println(f.unexpected_event)
+    
+    // Test 4: Close from Listen and SynSent
+    let l0 = Closed { }
+    let l1 = TCPConnection::listen(l0)
+    let l2 = TCPConnection::close_listen(l1)
+    let sc0 = Closed { }
+    let sc1 = TCPConnection::connect(sc0)
+    let sc2 = TCPConnection::close_synsent(sc1)
+    
+    0
+}

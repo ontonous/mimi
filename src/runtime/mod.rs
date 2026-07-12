@@ -1165,8 +1165,13 @@ pub extern "C" fn mimi_str_split(
     // SAFETY: `cstr_to_string` handles null pointers safely.
     let d = unsafe { cstr_to_string(delim) };
 
+    // audit (MEDIUM — mimi_str_split empty delimiter O(n)):
+    // Empty delimiter splits the string into individual characters.
+    // This is O(n) in the string length (one String allocation per char),
+    // which is the expected semantic — there is no infinite loop here.
+    // The result is bounded by the input length, so there is no DoS
+    // amplification: a 1 MiB string produces at most 1 MiB of output.
     let parts: Vec<String> = if d.is_empty() {
-        // Empty delimiter: split into individual characters
         if ss.is_empty() {
             vec!["".to_string()]
         } else {
@@ -2378,8 +2383,30 @@ pub extern "C" fn mimi_json_as_bool(json: *const std::ffi::c_char) -> i64 {
 
 // ─── Set operations ─────────────────────────────────────────────
 
+// audit (MEDIUM — SetHandle pointer shrink on 32-bit):
+// `SetHandle` stores a `Box<MimiSet>` raw pointer.  On 64-bit targets a
+// pointer fits in i64, but on 32-bit targets `i64` is wider than a pointer
+// and the `as SetHandle` / `as *mut MimiSet` round-trip is sound (the
+// high bits are zero-extended).  The reverse direction — casting a 64-bit
+// handle down to a 32-bit pointer — would lose bits, but that can only
+// happen if the pointer was originally 64-bit, which is impossible on a
+// 32-bit target.  We use a static assertion so the build fails if a future
+// target ever has pointers wider than 64 bits.
+//
+// Mimi only targets 32-bit and 64-bit platforms (aarch64, x86_64, i686,
+// aarch32), where this invariant holds.
 type SetHandle = i64;
 type SetValueHandle = i64;
+
+// Static assertion: pointer width must not exceed 64 bits.
+const _: () = {
+    const fn assert_ptr_fits_i64() {
+        let _ok = (std::mem::size_of::<usize>() <= 8) as bool;
+        // consteval panic if the condition is false (pointer > 64 bits).
+        let _ = [(); 1][!_ok as usize];
+    }
+    const _: () = assert_ptr_fits_i64();
+};
 
 struct MimiSet {
     inner: std::collections::HashSet<SetValueHandle>,

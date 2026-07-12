@@ -946,11 +946,16 @@ impl LspServer {
     }
 
     /// Recursively checks whether `word` appears in an expression as an
-    /// Ident, a substring of a Literal display, or a Call callee name.
+    /// Ident, or a Call callee name.
+    ///
+    /// audit (MEDIUM — LSP hover substring match):
+    /// Previously used `format!("{:?}", lit).contains(w)` for literals,
+    /// which is a substring match and can produce false positives (e.g.
+    /// hovering over `a` would match a string literal `"cat"`).  Now we
+    /// only match on identifiers and call names, not literal contents.
     fn expr_contains_word(e: &Expr, w: &str) -> bool {
         match e {
             Expr::Ident(name) => name == w,
-            Expr::Literal(lit) => format!("{:?}", lit).contains(w),
             Expr::Field(obj, name) => name == w || Self::expr_contains_word(obj, w),
             Expr::Index(obj, idx) => {
                 Self::expr_contains_word(obj, w) || Self::expr_contains_word(idx, w)

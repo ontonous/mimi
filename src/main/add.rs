@@ -8,6 +8,18 @@ pub(crate) fn add(
     tag: Option<&str>,
     dry_run: bool,
 ) -> Result<(), String> {
+    // audit (MEDIUM — mimi_add path traversal):
+    // Reject package names containing path separators or traversal
+    // sequences.  Without this check, `name = "../../src"` would cause
+    // `reg.join(name)` to escape the registry directory and potentially
+    // overwrite arbitrary files during `mimi install`.
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "invalid dependency name '{}': must not contain path separators or '..'",
+            name
+        ));
+    }
+
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
     let (dir, mut manifest) = match manifest::Manifest::find(&cwd)? {
         Some((d, m)) => (d, m),
