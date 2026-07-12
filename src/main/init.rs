@@ -1,4 +1,5 @@
 use mimi::manifest;
+use mimi::path_safety;
 use std::path::Path;
 
 pub(crate) fn init(base_dir: &Path, name: Option<&str>) -> Result<(), String> {
@@ -23,6 +24,8 @@ pub(crate) fn init(base_dir: &Path, name: Option<&str>) -> Result<(), String> {
     }
 
     let pkg_name = name.unwrap_or("my-package");
+    // B1: validate package name to prevent path traversal.
+    path_safety::validate_package_name(pkg_name)?;
     let manifest = manifest::Manifest::new(pkg_name);
     manifest.save(&project_dir)?;
     println!("✓ Created mimi.toml for package '{}'", pkg_name);

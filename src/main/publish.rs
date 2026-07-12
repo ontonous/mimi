@@ -1,4 +1,5 @@
 use mimi::manifest;
+use mimi::path_safety;
 use mimi::pkg_registry;
 
 fn should_skip_entry(name: &str) -> bool {
@@ -28,24 +29,9 @@ pub(crate) fn publish(name: Option<&str>, version: Option<&str>) -> Result<(), S
     let pkg_name = name.unwrap_or(&pkg.name);
     let pkg_version = version.or(pkg.version.as_deref()).unwrap_or("0.1.0");
 
-    // SEC-C1 (deep audit): validate pkg_name and pkg_version to prevent path traversal.
-    // Without this, `mimi publish --name "../../.ssh"` could write to arbitrary paths.
-    fn validate_path_segment(s: &str) -> Result<(), String> {
-        if s.contains("..")
-            || s.contains('/')
-            || s.contains('\\')
-            || s.contains('\0')
-            || s.is_empty()
-        {
-            return Err(format!(
-                "invalid package name or version '{}': must not contain '..', '/', '\\', or NUL bytes",
-                s
-            ));
-        }
-        Ok(())
-    }
-    validate_path_segment(pkg_name)?;
-    validate_path_segment(pkg_version)?;
+    // B1: use unified path safety validation instead of ad-hoc check.
+    path_safety::validate_package_name(pkg_name)?;
+    path_safety::validate_package_name(pkg_version)?;
 
     let reg = pkg_registry::registry_dir()?;
     let pkg_dir = reg.join(pkg_name).join(pkg_version);

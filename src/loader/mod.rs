@@ -22,9 +22,15 @@ pub struct LoadedModule {
 /// Get the path to the built-in standard library directory.
 pub fn stdlib_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("MIMI_STDLIB") {
-        let p = PathBuf::from(dir);
-        if p.exists() {
-            return Some(p);
+        // B1: validate MIMI_STDLIB to prevent code injection via path traversal.
+        // The stdlib directory must be an absolute path (set by the system/user
+        // for legitimate override purposes), but we reject NUL bytes and
+        // check it exists.
+        if !dir.contains('\0') {
+            let p = PathBuf::from(dir);
+            if p.is_absolute() && p.exists() {
+                return Some(p);
+            }
         }
     }
     if let Ok(exe) = std::env::current_exe() {
