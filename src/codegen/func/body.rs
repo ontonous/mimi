@@ -369,6 +369,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .gep()
                         .build_struct_gep(sty, struct_ptr, idx as u32, field_name)
                         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    // Adjust integer width to match the field's declared type.
+                    // After A1 restoration, i32 fields need i32 values (not i64).
+                    let field_ty = fields[idx].ty.clone();
+                    let field_llvm = self.llvm_type_for(&field_ty).unwrap_or(val.get_type());
+                    let val = self.adjust_int_value_width(val, field_llvm, "field_assign")?;
                     self.build_store(gep, val)?;
                     return Ok(());
                 }
@@ -867,6 +872,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         match val {
             BasicValueEnum::IntValue(iv) => Ok(iv),
             _ => Err(CompileError::TypeMismatch(msg.to_string())),
+        }
+    }
+
+    /// Adjust an integer value's bit width to match a target LLVM type.
+    /// Used when storing i64 expressions into i32 fields/variables.
+    fn adjust_int_value_width(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target_ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(target_it)) = (val, target_ty) {
+            let val_bw = iv.get_type().get_bit_width();
+            let target_bw = target_it.get_bit_width();
+            if val_bw == target_bw {
+                Ok(val)
+            } else if val_bw > target_bw {
+                Ok(self
+                    .builder
+                    .build_int_truncate(iv, target_it, &format!("{}_trunc", name))
+                    .map_err(|e| CompileError::LlvmError(format!("{} trunc: {}", name, e)))?
+                    .into())
+            } else {
+                Ok(self
+                    .builder
+                    .build_int_s_extend(iv, target_it, &format!("{}_sext", name))
+                    .map_err(|e| CompileError::LlvmError(format!("{} sext: {}", name, e)))?
+                    .into())
+            }
+        } else {
+            Ok(val)
         }
     }
 }

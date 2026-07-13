@@ -113,7 +113,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
 
         let elem_val = match elem {
-            BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(iv),
+            BasicMetadataValueEnum::IntValue(iv) => {
+                // Widen narrow integers to i64 so that List<i32> stores use
+                // the full 8-byte slot (lists use i64 element slots).
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    BasicValueEnum::IntValue(
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, "push_elem_sext")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("push elem sext: {}", e))
+                            })?,
+                    )
+                } else if bw > 64 {
+                    BasicValueEnum::IntValue(
+                        self.builder
+                            .build_int_truncate(iv, i64_ty, "push_elem_trunc")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("push elem trunc: {}", e))
+                            })?,
+                    )
+                } else {
+                    BasicValueEnum::IntValue(iv)
+                }
+            }
             BasicMetadataValueEnum::FloatValue(fv) => BasicValueEnum::FloatValue(fv),
             BasicMetadataValueEnum::PointerValue(pv) => {
                 // If we know the list element type and it is a non-scalar, non-string

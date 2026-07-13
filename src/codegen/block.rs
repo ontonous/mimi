@@ -299,13 +299,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     method_name.as_str(),
                                     "map" | "and_then" | "map_err" | "ok_or"
                                 ) {
-                                    let obj_type = self.infer_object_type(obj, vars);
-                                    if obj_type.starts_with("Result") {
+                                    // ok_or converts Option<T> → Result<T,E>;
+                                    // map/and_then/map_err preserve the caller's variant type.
+                                    if method_name == "ok_or" {
                                         self.var_type_names
                                             .insert(name.clone(), "Result".to_string());
-                                    } else if obj_type.starts_with("Option") {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Option".to_string());
+                                    } else {
+                                        let obj_type = self.infer_object_type(obj, vars);
+                                        if obj_type.starts_with("Result") {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Result".to_string());
+                                        } else if obj_type.starts_with("Option") {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Option".to_string());
+                                        }
                                     }
                                 } else if matches!(method_name.as_str(), "insert" | "remove") {
                                     let obj_type = self.infer_object_type(obj, vars);
@@ -1074,13 +1081,51 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Value mode: build a phi of the values produced by each reaching branch.
+        // Unify integer widths: after A1 restoration, then and else branches
+        // may produce different-width integers (e.g. i64 literal vs i32 expr).
+        // Extend the narrower value IN ITS PREDECESSOR BLOCK (before the br)
+        // so the phi has a consistent type without SSA dominance violations.
+        let then_bw = match &then_val { Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(), _ => 0 };
+        let else_bw = match &else_val { Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(), _ => 0 };
+        let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
+            let target_ty = if then_bw > else_bw {
+                self.context.i64_type()
+            } else {
+                self.context.i32_type()
+            };
+            // Extend then_val if needed (in then_bb_end block, before terminator)
+            let then_val = if then_bw < else_bw && then_reaches {
+                self.builder.position_at_end(then_bb_end);
+                if let Some(term) = then_bb_end.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                BasicValueEnum::IntValue(self.builder.build_int_s_extend(
+                    then_val.unwrap().into_int_value(), target_ty, "if_then_sext"
+                ).map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?)
+            } else {
+                then_val.unwrap()
+            };
+            // Extend else_val if needed (in else_bb_end block, before terminator)
+            let else_val = if else_bw < then_bw && else_reaches {
+                self.builder.position_at_end(else_bb_end);
+                if let Some(term) = else_bb_end.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                BasicValueEnum::IntValue(self.builder.build_int_s_extend(
+                    else_val.unwrap().into_int_value(), target_ty, "if_else_sext"
+                ).map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?)
+            } else {
+                else_val.unwrap()
+            };
+            (then_val, else_val)
+        } else {
+            (then_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
+             else_val.unwrap_or(self.context.i64_type().const_int(0, false).into()))
+        };
         self.builder.position_at_end(merge_bb);
-        let default_i64 = self.context.i64_type().const_int(0, false).into();
-        let then_val = then_val.unwrap_or(default_i64);
-        let else_val = else_val.unwrap_or(default_i64);
-        // Determine the authoritative phi type from the then branch's value.
+        // Determine the authoritative phi type from the unified values.
         let phi_type = then_val.get_type();
-        // If the else branch's value has a different type (e.g. then is a struct
+        // If the else branch's value STILL has a different type (e.g. then is a struct
         // but else fell through with i64 0 because there was no else block),
         // promote the else value to a zero of the phi type to avoid LLVM
         // physreg COPY errors from type-mismatched phi nodes.
