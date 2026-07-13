@@ -1121,9 +1121,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(match val {
             BasicValueEnum::IntValue(iv) => {
                 let i64_ty = self.context.i64_type();
+                // Extend i32 (or narrower) to i64 before tagging — the tag
+                // scheme assumes a 64-bit slot (bit 0 = 1 for ints).
+                let iv_ext = if iv.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_s_extend(iv, i64_ty, "any_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                } else {
+                    iv
+                };
                 let shifted = self
                     .builder
-                    .build_left_shift(iv, i64_ty.const_int(1, false), "tag_shift")
+                    .build_left_shift(iv_ext, i64_ty.const_int(1, false), "tag_shift")
                     .map_err(|e| CompileError::LlvmError(format!("tag shift: {}", e)))?;
                 self.builder
                     .build_or(shifted, i64_ty.const_int(1, false), "tag_int")

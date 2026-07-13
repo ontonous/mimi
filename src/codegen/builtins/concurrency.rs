@@ -58,16 +58,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "atomic_load",
             )
             .map_err(|e| format!("atomic_i32_load error: {}", e))?;
-        // Runtime returns i32; sext to i64 (Mimi's integer width).
+        // Runtime returns i32 — after A1 restoration, i32 is a valid native type.
+        // Keep the raw i32 value; callers that need i64 will extend via adjust_int_val.
         let raw = call_try_basic_value(&result)
             .ok_or("mimi_atomic_i32_load returned void")?
             .into_int_value();
-        let i64_ty = self.context.i64_type();
-        let sext = self
-            .builder
-            .build_int_s_extend(raw, i64_ty, "atomic_i32_load_sext")
-            .map_err(|e| format!("atomic_i32_load sext error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(sext))
+        Ok(BasicValueEnum::IntValue(raw))
     }
 
     pub(super) fn compile_atomic_i32_store(
@@ -81,17 +77,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("atomic_i32_store: handle must be i64".into()),
         };
-        // The user passes an i64 value (Mimi integer width); runtime expects
-        // i32, so truncate.
-        let val_i64 = match args[1] {
+        // Input may be i32 (native) or i64 — truncate to i32 for runtime.
+        let val_in = match args[1] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("atomic_i32_store: value must be an integer".into()),
         };
         let i32_ty = self.context.i32_type();
-        let val_i32 = self
-            .builder
-            .build_int_truncate(val_i64, i32_ty, "atomic_store_trunc")
-            .map_err(|e| format!("atomic_i32_store truncate error: {}", e))?;
+        let val_i32 = if val_in.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(val_in, i32_ty, "atomic_store_trunc")
+                .map_err(|e| format!("atomic_i32_store truncate error: {}", e))?
+        } else {
+            val_in
+        };
         let func = self
             .module
             .get_function("mimi_atomic_i32_store")
@@ -123,15 +121,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("atomic_i32_fetch_add: handle must be i64".into()),
         };
-        let delta_i64 = match args[1] {
+        let delta_in = match args[1] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("atomic_i32_fetch_add: delta must be i64".into()),
         };
         let i32_ty = self.context.i32_type();
-        let delta_i32 = self
-            .builder
-            .build_int_truncate(delta_i64, i32_ty, "fetch_add_trunc")
-            .map_err(|e| format!("atomic_i32_fetch_add truncate error: {}", e))?;
+        let delta_i32 = if delta_in.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(delta_in, i32_ty, "fetch_add_trunc")
+                .map_err(|e| format!("atomic_i32_fetch_add truncate error: {}", e))?
+        } else {
+            delta_in
+        };
         let func = self
             .module
             .get_function("mimi_atomic_i32_fetch_add")
@@ -150,12 +151,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let raw = call_try_basic_value(&result)
             .ok_or("mimi_atomic_i32_fetch_add returned void")?
             .into_int_value();
-        let i64_ty = self.context.i64_type();
-        let sext = self
-            .builder
-            .build_int_s_extend(raw, i64_ty, "atomic_fetch_add_sext")
-            .map_err(|e| format!("sext error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(sext))
+        // Runtime returns i32 — keep raw i32 (A1 restoration).
+        Ok(BasicValueEnum::IntValue(raw))
     }
 
     pub(super) fn compile_atomic_i32_compare_exchange(
@@ -170,22 +167,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Err("atomic_i32_compare_exchange: handle must be i64".into()),
         };
         let i32_ty = self.context.i32_type();
-        let exp_i64 = match args[1] {
+        let exp_in = match args[1] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("expected i64 expected-value".into()),
         };
-        let new_i64 = match args[2] {
+        let new_in = match args[2] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             _ => return Err("expected i64 new-value".into()),
         };
-        let exp = self
-            .builder
-            .build_int_truncate(exp_i64, i32_ty, "cas_exp_trunc")
-            .map_err(|e| format!("cas exp truncate error: {}", e))?;
-        let nv = self
-            .builder
-            .build_int_truncate(new_i64, i32_ty, "cas_nv_trunc")
-            .map_err(|e| format!("cas nv truncate error: {}", e))?;
+        let exp = if exp_in.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(exp_in, i32_ty, "cas_exp_trunc")
+                .map_err(|e| format!("cas exp truncate error: {}", e))?
+        } else { exp_in };
+        let nv = if new_in.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(new_in, i32_ty, "cas_nv_trunc")
+                .map_err(|e| format!("cas nv truncate error: {}", e))?
+        } else { new_in };
         let func = self
             .module
             .get_function("mimi_atomic_i32_compare_exchange")
@@ -205,12 +204,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let raw = call_try_basic_value(&result)
             .ok_or("cas returned void")?
             .into_int_value();
-        let i64_ty = self.context.i64_type();
-        let sext = self
-            .builder
-            .build_int_s_extend(raw, i64_ty, "cas_sext")
-            .map_err(|e| format!("cas sext error: {}", e))?;
-        Ok(BasicValueEnum::IntValue(sext))
+        // Runtime returns i32 — keep raw i32 (A1 restoration).
+        Ok(BasicValueEnum::IntValue(raw))
     }
 
     pub(super) fn compile_atomic_drop_helper(

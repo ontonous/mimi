@@ -963,21 +963,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let converted = if let crate::ast::Type::Name(n, _) = &p.ty {
                             match n.as_str() {
                                 "i32" => {
-                                    if let BasicValueEnum::IntValue(iv) = param {
-                                        BasicValueEnum::IntValue(
-                                            self.builder
-                                                .build_int_truncate(
-                                                    iv,
-                                                    self.context.i32_type(),
-                                                    &format!("trunc_i64_i32_{}", i),
-                                                )
-                                                .map_err(|e| {
-                                                    CompileError::LlvmError(format!(
-                                                        "trunc error: {}",
-                                                        e
-                                                    ))
-                                                })?,
-                                        )
+                                     if let BasicValueEnum::IntValue(iv) = param {
+                                         // After A1 restoration, i32 values may already
+                                         // be 32-bit — only truncate if wider than i32.
+                                         if iv.get_type().get_bit_width() > 32 {
+                                             BasicValueEnum::IntValue(
+                                                 self.builder
+                                                     .build_int_truncate(
+                                                         iv,
+                                                         self.context.i32_type(),
+                                                         &format!("trunc_i64_i32_{}", i),
+                                                     )
+                                                     .map_err(|e| {
+                                                         CompileError::LlvmError(format!(
+                                                             "trunc error: {}",
+                                                             e
+                                                         ))
+                                                     })?,
+                                             )
+                                         } else {
+                                             param
+                                         }
                                     } else {
                                         param
                                     }
@@ -1353,10 +1359,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", n, f.name))
                 .map_err(|e| CompileError::LlvmError(format!("extract field: {}", e)))?;
             let truncated_i32 = match raw_val {
-                BasicValueEnum::IntValue(iv) => self
-                    .builder
-                    .build_int_truncate(iv, i32_ty, &format!("{}_{}_trunc", n, f.name))
-                    .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?,
+                BasicValueEnum::IntValue(iv) => {
+                    // After A1 restoration, i32 fields may already be 32-bit.
+                    if iv.get_type().get_bit_width() > 32 {
+                        self.builder
+                            .build_int_truncate(iv, i32_ty, &format!("{}_{}_trunc", n, f.name))
+                            .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
+                    } else {
+                        iv
+                    }
+                }
                 _ => {
                     return Err(CompileError::TypeMismatch(format!(
                         "repr(C) field {} expected i32 but got non-integer",
@@ -1421,14 +1433,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             let c_val: BasicValueEnum = match &f.ty {
                 crate::ast::Type::Name(tn, _) if tn == "i32" => match raw_val {
                     BasicValueEnum::IntValue(iv) => {
-                        let truncated = self
-                            .builder
-                            .build_int_truncate(
-                                iv,
-                                self.context.i32_type(),
-                                &format!("{}_{}_trunc", n, f.name),
-                            )
-                            .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?;
+                        // After A1 restoration, i32 fields may already be 32-bit.
+                        let truncated = if iv.get_type().get_bit_width() > 32 {
+                            self.builder
+                                .build_int_truncate(
+                                    iv,
+                                    self.context.i32_type(),
+                                    &format!("{}_{}_trunc", n, f.name),
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
+                        } else {
+                            iv
+                        };
                         BasicValueEnum::IntValue(truncated)
                     }
                     _ => {

@@ -645,12 +645,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("load payload struct: {}", e)))?;
             Ok((loaded_struct, data_ty))
         } else if let Some((false, Some(natural_ty))) = payload_info {
-            // P0-2: Single primitive payload (e.g. f64). The constructor
-            // stored the bit pattern into the i64 payload slot. Bitcast back
-            // to the natural LLVM type so the bound variable has the right
-            // representation (e.g. `Circle(5.0)` binds `r` as f64 5.0).
+            // P0-2: Single primitive payload (e.g. f64, i32). The constructor
+            // stored the value (sign-extended for ints) into the i64 payload slot.
+            // Recover the natural type:
+            //   - i64: pass through (already correct)
+            //   - i32 or narrower: truncate i64→iN (bitcast across widths is invalid)
+            //   - f64: bitcast i64→f64 (same width, valid)
             if natural_ty == BasicTypeEnum::IntType(self.context.i64_type()) {
                 Ok((payload_val, natural_ty))
+            } else if let BasicTypeEnum::IntType(nat_int_ty) = natural_ty {
+                // Truncate i64 payload back to the natural int width.
+                let truncated = self
+                    .builder
+                    .build_int_truncate(payload_val.into_int_value(), nat_int_ty, "payload_trunc_back")
+                    .map_err(|e| CompileError::LlvmError(format!("trunc payload back: {}", e)))?;
+                Ok((truncated.into(), natural_ty))
             } else {
                 let decoded = self
                     .builder
@@ -891,16 +900,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })?;
                     let lit_val = match lit {
-                        Lit::Int(n) => self.context.i64_type().const_int(*n as u64, true),
+                        // Match the scrutinee's integer width — i32 scrutinees need i32 constants.
+                        Lit::Int(n) => {
+                            let bw = scrutinee_iv.get_type().get_bit_width();
+                            if bw < 64 {
+                                self.context.i32_type().const_int(*n as u64, true)
+                            } else {
+                                self.context.i64_type().const_int(*n as u64, true)
+                            }
+                        }
                         Lit::Bool(b) => {
                             let b_val = self.context.bool_type().const_int(*b as u64, false);
+                            // Match scrutinee width for bool comparison too.
+                            let bw = scrutinee_iv.get_type().get_bit_width();
+                            let target = if bw < 64 { self.context.i32_type() } else { self.context.i64_type() };
                             self.builder
-                                .build_int_z_extend(b_val, self.context.i64_type(), "bool_ext")
+                                .build_int_z_extend(b_val, target, "bool_ext")
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("zext error: {}", e))
                                 })?
                         }
-                        Lit::Unit => self.context.i64_type().const_int(0, false),
+                        Lit::Unit => {
+                            let bw = scrutinee_iv.get_type().get_bit_width();
+                            if bw < 64 {
+                                self.context.i32_type().const_int(0, false)
+                            } else {
+                                self.context.i64_type().const_int(0, false)
+                            }
+                        }
                         _ => return Err("unsupported match literal type".into()),
                     };
                     let cmp = self
@@ -1066,16 +1093,71 @@ impl<'ctx> CodeGenerator<'ctx> {
         incoming_vals: &[BasicValueEnum<'ctx>],
         incoming_bbs: &[BasicBlock<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        self.builder.position_at_end(merge_bb);
         if incoming_vals.is_empty() {
+            self.builder.position_at_end(merge_bb);
             return Err("empty match expression".into());
         }
-        let ty = incoming_vals[0].get_type();
+        // Unify integer widths: if some arms produce i32 and others i64,
+        // s_extend all to the widest width so the phi node has a consistent type.
+        // The caller (adjust_int_val) will truncate back if the function returns i32.
+        let max_bw = incoming_vals
+            .iter()
+            .map(|v| match v {
+                BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let needs_unify = incoming_vals
+            .iter()
+            .any(|v| matches!(v, BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() != max_bw));
+
+        // For width unification, s_ext must be emitted in the PREDECESSOR block
+        // (where the value is defined), NOT in the merge block — otherwise the
+        // sext doesn't dominate all uses when another predecessor doesn't define it.
+        let unified_vals: Vec<BasicValueEnum<'ctx>> = if needs_unify && max_bw > 0 {
+            let target_ty = if max_bw <= 32 {
+                self.context.i32_type()
+            } else {
+                self.context.i64_type()
+            };
+            incoming_vals
+                .iter()
+                .zip(incoming_bbs.iter())
+                .map(|(v, pred_bb)| match v {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() < max_bw {
+                            // Position in predecessor block and insert s_ext BEFORE
+                            // the terminator (br). Otherwise the instruction goes
+                            // after the terminator which is invalid IR.
+                            self.builder.position_at_end(*pred_bb);
+                            let term = pred_bb.get_terminator();
+                            if let Some(term) = term {
+                                self.builder.position_before(&term);
+                            }
+                            let extended = self.builder
+                                .build_int_s_extend(*iv, target_ty, "phi_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("phi s_ext: {}", e)))?;
+                            Ok(BasicValueEnum::IntValue(extended))
+                        } else {
+                            Ok(*v)
+                        }
+                    }
+                    _ => Ok(*v),
+                })
+                .collect::<Result<_, CompileError>>()?
+        } else {
+            incoming_vals.to_vec()
+        };
+
+        // Now build the phi in the merge block.
+        self.builder.position_at_end(merge_bb);
+        let ty = unified_vals[0].get_type();
         let phi = self
             .builder
             .build_phi(ty, "match.result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-        let phi_incoming: Vec<_> = incoming_vals
+        let phi_incoming: Vec<_> = unified_vals
             .iter()
             .zip(incoming_bbs.iter())
             .map(|(v, bb)| (v as &dyn inkwell::values::BasicValue, *bb))
