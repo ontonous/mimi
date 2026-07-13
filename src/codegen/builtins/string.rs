@@ -67,15 +67,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Err(CompileError::TypeMismatch("str_char_at: first arg must be string".to_string())),
         };
         // Clamp index to [0, len-1] using select: if index >= len, use len-1 (last char).
+        // Index may be i32 — extend to i64 for comparison with string length.
         let i64_ty = self.context.i64_type();
+        let index_i64 = if index.get_type().get_bit_width() < 64 {
+            self.builder.build_int_s_extend(index, i64_ty, "idx_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            index
+        };
         let oob = self.builder
-            .build_int_compare(inkwell::IntPredicate::SGE, index, s_len, "idx_oob")
+            .build_int_compare(inkwell::IntPredicate::SGE, index_i64, s_len, "idx_oob")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         let neg = self.builder
-            .build_int_compare(inkwell::IntPredicate::SLT, index, i64_ty.const_int(0, false), "idx_neg")
+            .build_int_compare(inkwell::IntPredicate::SLT, index_i64, i64_ty.const_int(0, false), "idx_neg")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
         let clamped_lo = self.builder
-            .build_select(neg, i64_ty.const_int(0, false), index, "idx_clamped_lo")
+            .build_select(neg, i64_ty.const_int(0, false), index_i64, "idx_clamped_lo")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         let last_valid = self.builder

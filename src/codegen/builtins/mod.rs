@@ -400,6 +400,12 @@ fn register_string_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_json_escape_string(i8*) → i8* (heap-allocated escaped JSON string)
+    module.add_function(
+        "mimi_json_escape_string",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_to_string_f64(f64) → i8* (heap-allocated string, Rust Display)
     module.add_function(
         "mimi_to_string_f64",
@@ -2003,12 +2009,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // Truncate i64 to i32 for enum tag
+        // Truncate to i32 for enum tag (may already be i32 after A1 restoration)
         let i32_ty = self.context.i32_type();
-        let tag = self
-            .builder
-            .build_int_truncate(val, i32_ty, "from_int_trunc")
-            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+        let tag = if val.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(val, i32_ty, "from_int_trunc")
+                .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+        } else {
+            val
+        };
         Ok(tag.into())
     }
 }

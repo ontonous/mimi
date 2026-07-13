@@ -91,8 +91,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         match op {
             UnOp::Neg => {
                 if let BasicValueEnum::IntValue(iv) = v {
-                    let zero = self.context.i64_type().const_int(0, true);
-                    Ok(self
+                     // Use the operand's own type for the zero constant — i32 and i64
+                     // are both valid integer widths after the A1 type restoration.
+                     let zero = iv.get_type().const_int(0, true);
+                     Ok(self
                         .builder
                         .build_int_sub(zero, iv, "neg")
                         .map_err(|e| CompileError::LlvmError(format!("neg error: {}", e)))?
@@ -303,13 +305,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // CG-H1 (deep audit): division by zero is UB (SIGFPE on x86).
         // Emit a runtime check that returns 0 instead of crashing.
         if matches!(op, BinOp::Div) {
-            let i64_ty = self.context.i64_type();
-            let zero = i64_ty.const_int(0, false);
+            // Use operand width for constants — i32 operands need i32 constants.
+            let zero = r.get_type().const_int(0, false);
             let is_zero = self.builder
                 .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "div_by_zero")
                 .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
             let safe_r = self.builder
-                .build_select(is_zero, i64_ty.const_int(1, false), r, "safe_divisor")
+                .build_select(is_zero, r.get_type().const_int(1, false), r, "safe_divisor")
                 .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
                 .into_int_value();
             let div = self.builder.build_int_signed_div(l, safe_r, "div")
@@ -359,13 +361,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
                 // CG-H1 (deep audit): modulo by zero is UB (SIGFPE).
-                let i64_ty = self.context.i64_type();
-                let zero = i64_ty.const_int(0, false);
+                // Use operand width for constants — i32 operands need i32 constants.
+                let zero = r.get_type().const_int(0, false);
                 let is_zero = self.builder
                     .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "mod_by_zero")
                     .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
                 let safe_r = self.builder
-                    .build_select(is_zero, i64_ty.const_int(1, false), r, "safe_mod_divisor")
+                    .build_select(is_zero, r.get_type().const_int(1, false), r, "safe_mod_divisor")
                     .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
                     .into_int_value();
                 let rem = self.builder.build_int_signed_rem(l, safe_r, "rem")
@@ -593,8 +595,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(base), BasicValueEnum::IntValue(exp)) => {
-                let pow_fn_name = "__mimi_pow_i64";
+                // Runtime pow function is i64 — extend i32 operands to i64 first.
                 let i64_ty = self.context.i64_type();
+                let base_i64 = if base.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_s_extend(base, i64_ty, "pow_base_ext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                } else { base };
+                let exp_i64 = if exp.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_s_extend(exp, i64_ty, "pow_exp_ext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                } else { exp };
+                let pow_fn_name = "__mimi_pow_i64";
                 let fn_ty = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
                 let pow_fn = self.module.get_function(pow_fn_name).unwrap_or_else(|| {
                     self.module.add_function(
@@ -603,10 +614,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         Some(inkwell::module::Linkage::External),
                     )
                 });
-                Ok(self
-                    .build_call(pow_fn, &[base.into(), exp.into()], "pow_i64_call")?
+                let result = self
+                    .build_call(pow_fn, &[base_i64.into(), exp_i64.into()], "pow_i64_call")?
                     .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("pow returned void".into()))?)
+                    .ok_or_else(|| CompileError::LlvmError("pow returned void".into()))?;
+                // If the original operands were i32, truncate the result back.
+                if base.get_type().get_bit_width() < 64 {
+                    Ok(self.builder.build_int_truncate(result.into_int_value(), base.get_type(), "pow_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                        .into())
+                } else {
+                    Ok(result)
+                }
             }
             (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
                 let pow_fn = self.get_runtime_fn("llvm.pow.f64")?;

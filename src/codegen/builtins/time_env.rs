@@ -21,10 +21,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("exit")
             .ok_or_else(|| "exit not declared".to_string())?;
+        // exit() is declared as exit(i32) — truncate i64 to i32 if needed.
+        let i32_ty = self.context.i32_type();
+        let code_i32 = if code.get_type().get_bit_width() > 32 {
+            self.builder
+                .build_int_truncate(code, i32_ty, "exit_code_trunc")
+                .map_err(|e| format!("exit truncate error: {}", e))?
+        } else {
+            code
+        };
         self.builder
             .build_call(
                 exit_fn,
-                &[BasicMetadataValueEnum::IntValue(code)],
+                &[BasicMetadataValueEnum::IntValue(code_i32)],
                 "exit_call",
             )
             .map_err(|e| format!("exit error: {}", e))?;

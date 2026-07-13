@@ -155,7 +155,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let done_bb = self.context.append_basic_block(function, "trim_done");
 
         let idx_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "idx")?;
-        self.build_store(idx_alloca, start)?;
+        // Extend start to i64 if it's i32 — the index alloca is always i64.
+        let start_i64 = if start.get_type().get_bit_width() < 64 {
+            self.builder.build_int_s_extend(start, i64_ty, "start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            start
+        };
+        self.build_store(idx_alloca, start_i64)?;
         self.build_br(loop_bb)?;
 
         self.builder.position_at_end(loop_bb);
@@ -376,6 +383,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let s_len = self.string_len(s_ptr)?;
 
         // MEM-C5 (deep audit): clamp start and end to [0, s_len] and ensure end >= start.
+        // Extend i32 start/end to i64 for comparison with string length.
+        let start = if start.get_type().get_bit_width() < 64 {
+            self.builder.build_int_s_extend(start, i64_ty, "start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else { start };
+        let end = if end.get_type().get_bit_width() < 64 {
+            self.builder.build_int_s_extend(end, i64_ty, "end_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else { end };
+
         let zero = i64_ty.const_int(0, false);
         let start_neg = self.builder
             .build_int_compare(inkwell::IntPredicate::SLT, start, zero, "start_neg")

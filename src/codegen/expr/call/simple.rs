@@ -380,13 +380,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     sprintf_args.push(BasicMetadataValueEnum::PointerValue(dp));
                                 }
                                 Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64") => {
-                                    // All Mimi integer values are passed as i64 to sprintf.
-                                    // Use %ld (long) for both i32 and i64 to avoid the C UB of
-                                    // passing an 8-byte i64 value to %d (which reads 4 bytes).
+                                    // snprintf("%ld") expects a 64-bit `long` argument.
+                                    // After A1 restoration, i32 field values are genuinely
+                                    // 32-bit — s_ext to i64 before passing to snprintf.
                                     fmt.push_str(&format!("\"{}\":%ld", field.name));
-                                    sprintf_args.push(BasicMetadataValueEnum::IntValue(
-                                        field_val.into_int_value(),
-                                    ));
+                                    let field_iv = field_val.into_int_value();
+                                    let field_i64 = if field_iv.get_type().get_bit_width() < 64 {
+                                        self.builder.build_int_s_extend(field_iv, self.context.i64_type(), "json_i32_ext")
+                                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                    } else {
+                                        field_iv
+                                    };
+                                    sprintf_args.push(BasicMetadataValueEnum::IntValue(field_i64));
                                 }
                                 Type::Name(n, _) if n == "bool" => {
                                     fmt.push_str(&format!("\"{}\":%s", field.name));
@@ -542,7 +547,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             let ctor_name = format!("{}_{}", type_name, name);
             if let Some(function) = self.module.get_function(&ctor_name) {
                 let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
-                let packed_meta: Vec<_> = call_args
+                // Adjust integer arg widths to match the constructor's param types.
+                // After A1 restoration, i32 params need i32 values (not i64).
+                let adjusted_args: Vec<BasicValueEnum<'ctx>> = call_args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        if let Some(param) = function.get_nth_param(i as u32) {
+                            if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                                let arg_bw = arg_iv.get_type().get_bit_width();
+                                let param_bw = param_iv.get_type().get_bit_width();
+                                if arg_bw == param_bw {
+                                    Ok(*v)
+                                } else if arg_bw > param_bw {
+                                    Ok(self.builder
+                                        .build_int_truncate(arg_iv, param_iv.get_type(), &format!("enum_arg_trunc_{}", i))
+                                        .map_err(|e| CompileError::LlvmError(format!("enum arg trunc: {}", e)))?
+                                        .into())
+                                } else {
+                                    Ok(self.builder
+                                        .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("enum_arg_sext_{}", i))
+                                        .map_err(|e| CompileError::LlvmError(format!("enum arg s_ext: {}", e)))?
+                                        .into())
+                                }
+                            } else {
+                                Ok(*v)
+                            }
+                        } else {
+                            Ok(*v)
+                        }
+                    })
+                    .collect::<Result<_, CompileError>>()?;
+                let packed_meta: Vec<_> = adjusted_args
                     .iter()
                     .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
                     .collect();
@@ -554,7 +590,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         match name {
-            "Ok" | "Some" | "Err" | "None" => return self.compile_constructor(name, compiled_args),
+            "Ok" | "Some" | "Err" | "None" => {
+                // Wrap raw string literal pointers into string structs before
+                // passing to constructors (they use coerce_to_i64_slot which
+                // needs the full {ptr, i64} struct, not a raw i8*).
+                // Ok/Some/Err/None are not in func_defs, so maybe_wrap_string_args_for_call
+                // won't find them — wrap manually based on arg expr type.
+                for (i, arg_expr) in args.iter().enumerate() {
+                    if i >= compiled_args.len() { break; }
+                    if let BasicValueEnum::PointerValue(pv) = compiled_args[i] {
+                        // Check if the arg is a string literal or string-producing expr
+                        if matches!(arg_expr, Expr::Literal(Lit::String(_))) {
+                            compiled_args[i] = self.wrap_raw_string_ptr(pv)?;
+                        }
+                    }
+                }
+                return self.compile_constructor(name, compiled_args);
+            }
             _ => {}
         }
 
@@ -966,7 +1018,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         compiled_args: &[BasicValueEnum<'ctx>],
         name: &str,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let metadata_args: Vec<_> = compiled_args
+        // Adjust integer arg widths to match the function's parameter types.
+        // After A1 restoration, i32 params expect i32 values; a literal 99
+        // is compiled as i64 and must be truncated to i32 before the call.
+        let adjusted_args: Vec<BasicValueEnum<'ctx>> = compiled_args
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if let Some(param) = function.get_nth_param(i as u32) {
+                    if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                        let arg_bw = arg_iv.get_type().get_bit_width();
+                        let param_bw = param_iv.get_type().get_bit_width();
+                        if arg_bw == param_bw {
+                            return Ok(*v);
+                        } else if arg_bw > param_bw {
+                            // Truncate wider arg to param width (e.g. i64→i32)
+                            Ok(self.builder
+                                .build_int_truncate(arg_iv, param_iv.get_type(), &format!("arg_trunc_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
+                                .into())
+                        } else {
+                            // Extend narrower arg to param width (e.g. i32→i64)
+                            Ok(self.builder
+                                .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("arg_sext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
+                                .into())
+                        }
+                    } else {
+                        Ok(*v)
+                    }
+                } else {
+                    Ok(*v)
+                }
+            })
+            .collect::<Result<_, CompileError>>()?;
+        let metadata_args: Vec<_> = adjusted_args
             .iter()
             .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();
@@ -982,7 +1068,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let compiled_args = self.compile_arg_values(args, vars)?;
-        let metadata_args: Vec<_> = compiled_args
+        // Adjust integer arg widths to match declared parameter types.
+        let function = self.module.get_function(mangled);
+        let adjusted_args: Vec<BasicValueEnum<'ctx>> = if let Some(f) = function {
+            compiled_args
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if let Some(param) = f.get_nth_param(i as u32) {
+                        if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                            let arg_bw = arg_iv.get_type().get_bit_width();
+                            let param_bw = param_iv.get_type().get_bit_width();
+                            if arg_bw == param_bw {
+                                Ok(*v)
+                            } else if arg_bw > param_bw {
+                                Ok(self.builder
+                                    .build_int_truncate(arg_iv, param_iv.get_type(), &format!("call_arg_trunc_{}", i))
+                                    .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
+                                    .into())
+                            } else {
+                                Ok(self.builder
+                                    .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("call_arg_sext_{}", i))
+                                    .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
+                                    .into())
+                            }
+                        } else {
+                            Ok(*v)
+                        }
+                    } else {
+                        Ok(*v)
+                    }
+                })
+                .collect::<Result<_, CompileError>>()?
+        } else {
+            compiled_args
+        };
+        let metadata_args: Vec<_> = adjusted_args
             .iter()
             .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
             .collect();

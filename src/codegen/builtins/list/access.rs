@@ -187,10 +187,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")
                 .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
             match (elem, elem_val) {
-                (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) => self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, a, b, "eq")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?,
+                (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) => {
+                    // List elements are stored as i64; extend search value to i64 if narrower.
+                    let b_i64 = if b.get_type().get_bit_width() < 64 {
+                        self.builder.build_int_s_extend(b, i64_ty, "search_sext")
+                            .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                    } else {
+                        b
+                    };
+                    self.builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, a, b_i64, "eq")
+                        .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
+                }
                 _ => {
                     return Err(CompileError::TypeMismatch(
                         "contains: element comparison only supports i64 for now".to_string(),
