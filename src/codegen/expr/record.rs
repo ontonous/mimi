@@ -154,7 +154,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
         match val {
-            BasicValueEnum::IntValue(iv) => Ok(iv),
+            BasicValueEnum::IntValue(iv) => {
+                // List slots are always i64 — extend i32 (or narrower) values before storing.
+                let i64_ty = self.context.i64_type();
+                if iv.get_type().get_bit_width() < 64 {
+                    Ok(self.builder.build_int_s_extend(iv, i64_ty, "list_elem_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?)
+                } else {
+                    Ok(iv)
+                }
+            }
             BasicValueEnum::FloatValue(fv) => Ok(self
                 .build_bit_cast(fv.into(), self.context.i64_type().into(), "f64_to_i64")?
                 .into_int_value()),
@@ -538,7 +547,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
         let out_elem_ptr = self.build_in_bounds_gep(i64_ty, out_i64, &[wi], "out_elem")?;
         let result_i64 = match result {
-            BasicValueEnum::IntValue(iv) => iv,
+            BasicValueEnum::IntValue(iv) => {
+                // List slots are always i64 — extend i32 values before storing.
+                if iv.get_type().get_bit_width() < 64 {
+                    self.builder.build_int_s_extend(iv, i64_ty, "comp_elem_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+                } else {
+                    iv
+                }
+            }
             BasicValueEnum::FloatValue(fv) => self
                 .builder
                 .build_float_to_signed_int(fv, i64_ty, "f_to_i")
