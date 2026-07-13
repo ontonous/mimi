@@ -78,6 +78,8 @@ declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
 declare ptr @mimi_to_string_i64(i64)
 
+declare ptr @mimi_json_escape_string(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
@@ -384,7 +386,7 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
-define i64 @main() {
+define i32 @main() {
 entry:
   %x = alloca i64, align 8
   store i64 5, ptr %x, align 4
@@ -405,7 +407,8 @@ else:                                             ; preds = %entry
 
 ifcont:                                           ; preds = %else, %blt_merge
   %if_result = phi i64 [ %if_lastval, %blt_merge ], [ %y7, %else ]
-  ret i64 %if_result
+  %trunc = trunc i64 %if_result to i32
+  ret i32 %trunc
 
 blt_then:                                         ; preds = %then
   %x4 = load i64, ptr %x, align 4

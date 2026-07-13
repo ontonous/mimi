@@ -81,6 +81,8 @@ declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
 declare ptr @mimi_to_string_i64(i64)
 
+declare ptr @mimi_json_escape_string(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
@@ -387,7 +389,7 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
-define i64 @main() {
+define i32 @main() {
 entry:
   %list = alloca { i64, ptr }, align 8
   %heap_slot_null_init = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
@@ -451,10 +453,11 @@ bounds_ok21:                                      ; preds = %bounds_fail22, %bou
   %elem26 = getelementptr inbounds i64, ptr %data25, i64 2
   %elem_val27 = load i64, ptr %elem26, align 4
   %add28 = add i64 %add, %elem_val27
+  %trunc = trunc i64 %add28 to i32
   %heap_slot_gep = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
   %heap_slot = load ptr, ptr %heap_slot_gep, align 8
   call void @free(ptr %heap_slot)
-  ret i64 %add28
+  ret i32 %trunc
 
 bounds_fail22:                                    ; preds = %bounds_ok10
   call void @mimi_runtime_abort(ptr @oob_msg.11)

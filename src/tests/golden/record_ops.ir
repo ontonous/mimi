@@ -78,6 +78,8 @@ declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
 declare ptr @mimi_to_string_i64(i64)
 
+declare ptr @mimi_json_escape_string(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
@@ -384,7 +386,7 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
-define i64 @main() {
+define i32 @main() {
 entry:
   %x = alloca i64, align 8
   store i64 10, ptr %x, align 4
@@ -393,7 +395,8 @@ entry:
   %x1 = load i64, ptr %x, align 4
   %y2 = load i64, ptr %y, align 4
   %add = add i64 %x1, %y2
-  ret i64 %add
+  %trunc = trunc i64 %add to i32
+  ret i32 %trunc
 }
 
 define {} @Main__run__from_Single({} %0) {
