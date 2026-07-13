@@ -845,8 +845,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         val: BasicValueEnum<'ctx>,
         alloca: inkwell::values::PointerValue<'ctx>,
-        _ty: BasicTypeEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
     ) -> Result<(), CompileError> {
+        // Adjust integer width to match the alloca's declared type.
+        // After A1 restoration, i32 variables have i32 allocas, but expressions
+        // like `x + 1` produce i64 results that must be truncated before store.
+        let val = match (val, ty) {
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(slot_it)) => {
+                let val_bw = iv.get_type().get_bit_width();
+                let slot_bw = slot_it.get_bit_width();
+                if val_bw == slot_bw {
+                    val
+                } else if val_bw > slot_bw {
+                    self.builder
+                        .build_int_truncate(iv, slot_it, &format!("{}_assign_trunc", name))
+                        .map_err(|e| CompileError::LlvmError(format!("assign trunc: {}", e)))?
+                        .into()
+                } else {
+                    self.builder
+                        .build_int_s_extend(iv, slot_it, &format!("{}_assign_sext", name))
+                        .map_err(|e| CompileError::LlvmError(format!("assign sext: {}", e)))?
+                        .into()
+                }
+            }
+            _ => val,
+        };
         if self.shared_var_names.contains(name) {
             // Shared variable: load the heap pointer, store new value at that location
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());

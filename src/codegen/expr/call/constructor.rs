@@ -103,7 +103,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let disc = bool_ty.const_int(1, false);
-        let inner_ty = val.get_type();
+        // Widen integer payloads to i64 so the struct layout matches
+        // mimi_type_to_llvm's Result<T,E> which uses i64 for integer T.
+        let payload: BasicValueEnum = match val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "ok_sext")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("ok sign extend error: {}", e))
+                        })?
+                        .into()
+                } else if bw > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "ok_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("ok truncate error: {}", e)))?
+                        .into()
+                } else {
+                    iv.into()
+                }
+            }
+            _ => val,
+        };
+        let inner_ty = payload.get_type();
         let struct_ty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(bool_ty),
@@ -122,7 +145,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(struct_ty, alloca, 1, "payload")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(val_gep, val)?;
+        self.build_store(val_gep, payload)?;
         let err_gep = self
             .gep()
             .build_struct_gep(struct_ty, alloca, 2, "err_pad")
@@ -140,8 +163,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let val = compiled_args[0];
         let bool_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
         let disc = bool_ty.const_int(1, false);
-        let inner_ty = val.get_type();
+        // Widen integer payloads to i64 so the struct layout matches
+        // mimi_type_to_llvm's Option<T> which uses i64 for integer T.
+        let payload: BasicValueEnum = match val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "some_sext")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("some sign extend error: {}", e))
+                        })?
+                        .into()
+                } else if bw > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "some_trunc")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("some truncate error: {}", e))
+                        })?
+                        .into()
+                } else {
+                    iv.into()
+                }
+            }
+            _ => val,
+        };
+        let inner_ty = payload.get_type();
         let struct_ty = self
             .context
             .struct_type(&[BasicTypeEnum::IntType(bool_ty), inner_ty], false);
@@ -155,7 +204,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(struct_ty, alloca, 1, "payload")
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(val_gep, val)?;
+        self.build_store(val_gep, payload)?;
         self.build_load(struct_ty, alloca, "loaded")
     }
 
@@ -325,6 +374,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let payload_ty = Type::Name(payload_name, vec![]);
         let payload_llvm = self.llvm_type_for(&payload_ty)?;
+        // Widen integer payloads to i64 to match mimi_type_to_llvm's
+        // Result/Option layout which uses i64 for integer T.
+        let payload_llvm = match payload_llvm {
+            BasicTypeEnum::IntType(it) if it.get_bit_width() != 64 => {
+                BasicTypeEnum::IntType(i64_ty)
+            }
+            other => other,
+        };
         if type_str.starts_with("Result<") {
             Some(BasicTypeEnum::StructType(self.context.struct_type(
                 &[
@@ -405,8 +462,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 (pv, sty)
             }
             BasicValueEnum::StructValue(sv) => {
-                let sty = sv.get_type();
-                let sty_enum = BasicTypeEnum::StructType(sty);
+                // Use the INFERRED struct type (from the Mimi-level type string)
+                // rather than the actual struct value's type. After A1 restoration,
+                // Ok(21) creates {i1, i64, i64} (literal is i64), but the declared
+                // type Result<i32, E> should be {i1, i32, i64}. Since i32 and i64
+                // start at the same offset (after i1), reinterpreting through the
+                // inferred type gives correct GEP offsets and load widths.
+                let sty_enum = inferred_sty_enum;
                 let tmp = self.build_alloca(sty_enum, "variant_tmp")?;
                 self.build_store(tmp, sv)?;
                 (tmp, sty_enum)
@@ -750,9 +812,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("map requires a function argument".into());
         }
         let closure_val = self.compile_expr_or_func_ref(&args[0], vars)?;
-        let mapped_ty = self
+        let mapped_ty_raw = self
             .infer_fn_return_llvm_type(&args[0])
             .unwrap_or(ctx.payload_ty);
+        // Widen integer mapped type to i64 to match the Result/Option layout
+        // in types.rs which uses i64 for integer payloads.
+        let mapped_ty = match mapped_ty_raw {
+            BasicTypeEnum::IntType(it) if it.get_bit_width() != 64 => {
+                BasicTypeEnum::IntType(self.context.i64_type())
+            }
+            other => other,
+        };
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let result_sty = if ctx.is_result {
@@ -832,17 +902,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::PointerValue(_) => {
                 if let Expr::Ident(name) = fn_expr {
                     if let Some(func) = self.module.get_function(name) {
+                        // Adjust payload width to match the function's parameter type.
+                        // After A1 + i64-payload fix, payload is i64 but the function
+                        // may expect i32 (e.g. double(x: i32)).
+                        let adjusted_payload = if let Some(param) = func.get_nth_param(0) {
+                            self.adjust_int_width(payload, param, "map_payload")?
+                        } else {
+                            payload
+                        };
                         let meta = crate::codegen::types::basic_value_to_metadata_value(
-                            &payload,
+                            &adjusted_payload,
                             self.context.i64_type(),
                         );
                         let call = self
                             .builder
                             .build_call(func, &[meta], "map_call")
                             .map_err(|e| CompileError::LlvmError(format!("map call: {}", e)))?;
-                        return Ok(call_try_basic_value(&call).unwrap_or(
+                        let result = call_try_basic_value(&call).unwrap_or(
                             BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)),
-                        ));
+                        );
+                        // Widen integer result to i64 for uniform storage.
+                        return Ok(self.widen_int_to_i64(result, "map_result_widen"));
                     }
                 }
                 self.compile_closure_call(fn_val, &[payload], Some(ret_ty))
@@ -1237,6 +1317,65 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::StructType(st) => st.const_zero().into(),
             BasicTypeEnum::ArrayType(at) => at.get_undef().into(),
             _ => self.context.i64_type().const_zero().into(),
+        }
+    }
+
+    /// Adjust an integer value's bit width to match a target parameter's type.
+    /// Used to adapt i64 variant payloads to i32 function parameters.
+    fn adjust_int_width(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        param: BasicValueEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (val, param)
+        {
+            let arg_bw = arg_iv.get_type().get_bit_width();
+            let param_bw = param_iv.get_type().get_bit_width();
+            if arg_bw == param_bw {
+                Ok(val)
+            } else if arg_bw > param_bw {
+                Ok(self
+                    .builder
+                    .build_int_truncate(arg_iv, param_iv.get_type(), &format!("{}_trunc", name))
+                    .map_err(|e| CompileError::LlvmError(format!("adjust trunc: {}", e)))?
+                    .into())
+            } else {
+                Ok(self
+                    .builder
+                    .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("{}_sext", name))
+                    .map_err(|e| CompileError::LlvmError(format!("adjust sext: {}", e)))?
+                    .into())
+            }
+        } else {
+            Ok(val)
+        }
+    }
+
+    /// Widen an integer value to i64 if it's a narrower integer.
+    /// Non-integer values pass through unchanged.
+    fn widen_int_to_i64(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        name: &str,
+    ) -> BasicValueEnum<'ctx> {
+        if let BasicValueEnum::IntValue(iv) = val {
+            let bw = iv.get_type().get_bit_width();
+            if bw < 64 {
+                self.builder
+                    .build_int_s_extend(iv, self.context.i64_type(), &format!("{}_widen", name))
+                    .map(|v| v.into())
+                    .unwrap_or(val)
+            } else if bw > 64 {
+                self.builder
+                    .build_int_truncate(iv, self.context.i64_type(), &format!("{}_trunc", name))
+                    .map(|v| v.into())
+                    .unwrap_or(val)
+            } else {
+                val
+            }
+        } else {
+            val
         }
     }
 }

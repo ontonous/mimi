@@ -1569,13 +1569,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     method_name.as_str(),
                                     "map" | "and_then" | "map_err" | "ok_or"
                                 ) {
-                                    let obj_type = self.infer_object_type(obj, vars);
-                                    if obj_type.starts_with("Result") {
+                                    // ok_or converts Option<T> → Result<T,E>;
+                                    // map/and_then/map_err preserve the caller's variant type.
+                                    if method_name == "ok_or" {
                                         self.var_type_names
                                             .insert(name.clone(), "Result".to_string());
-                                    } else if obj_type.starts_with("Option") {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Option".to_string());
+                                    } else {
+                                        let obj_type = self.infer_object_type(obj, vars);
+                                        if obj_type.starts_with("Result") {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Result".to_string());
+                                        } else if obj_type.starts_with("Option") {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Option".to_string());
+                                        }
                                     }
                                 } else if matches!(method_name.as_str(), "insert" | "remove") {
                                     let obj_type = self.infer_object_type(obj, vars);
@@ -1915,6 +1922,38 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // Continue at merge, produce phi with only blocks that reach merge.
                     self.builder.position_at_end(merge_bb);
+                    // Unify integer widths: after A1 restoration, then_val (e.g.
+                    // i64 from a literal) and else_val (e.g. i32 from an expression)
+                    // may have different widths. Extend the narrower one in its
+                    // predecessor block before the terminator.
+                    let then_bw = match &then_val { BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(), _ => 0 };
+                    let else_bw = match &else_val { BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(), _ => 0 };
+                    let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
+                        // Extend the NARROWER value to match the WIDER value's width.
+                        let target_ty = if then_bw > else_bw { self.context.i64_type() } else { self.context.i64_type() };
+                        // Use the wider of the two types
+                        let target_ty = if then_bw >= 64 || else_bw >= 64 { self.context.i64_type() } else { self.context.i32_type() };
+                        let then_val = if then_bw < else_bw && then_reaches {
+                            self.builder.position_at_end(then_bb_end.unwrap());
+                            if let Some(term) = then_bb_end.and_then(|b| b.get_terminator()) {
+                                self.builder.position_before(&term);
+                            }
+                            BasicValueEnum::IntValue(self.builder.build_int_s_extend(then_val.into_int_value(), target_ty, "func_if_then_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("s_ext: {}", e)))?)
+                        } else { then_val };
+                        let else_val = if else_bw < then_bw && else_reaches {
+                            self.builder.position_at_end(else_bb_end.unwrap());
+                            if let Some(term) = else_bb_end.and_then(|b| b.get_terminator()) {
+                                self.builder.position_before(&term);
+                            }
+                            BasicValueEnum::IntValue(self.builder.build_int_s_extend(else_val.into_int_value(), target_ty, "func_if_else_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("s_ext: {}", e)))?)
+                        } else { else_val };
+                        self.builder.position_at_end(merge_bb);
+                        (then_val, else_val)
+                    } else {
+                        (then_val, else_val)
+                    };
                     if then_val.get_type() == else_val.get_type() {
                         let phi = self
                             .builder
