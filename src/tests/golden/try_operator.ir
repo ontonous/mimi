@@ -78,6 +78,8 @@ declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
 declare ptr @mimi_to_string_i64(i64)
 
+declare ptr @mimi_json_escape_string(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
@@ -384,35 +386,39 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
-define i64 @double(i64 %0) {
+define i32 @double(i32 %0) {
 entry:
-  %x = alloca i64, align 8
-  store i64 %0, ptr %x, align 4
-  %x1 = load i64, ptr %x, align 4
-  %mul = mul i64 %x1, 2
-  ret i64 %mul
+  %x = alloca i32, align 4
+  store i32 %0, ptr %x, align 4
+  %x1 = load i32, ptr %x, align 4
+  %promote = sext i32 %x1 to i64
+  %mul = mul i64 %promote, 2
+  %trunc = trunc i64 %mul to i32
+  ret i32 %trunc
 }
 
-define i64 @add_one(i64 %0) {
+define i32 @add_one(i32 %0) {
 entry:
-  %x = alloca i64, align 8
-  store i64 %0, ptr %x, align 4
-  %x1 = load i64, ptr %x, align 4
-  %add = add i64 %x1, 1
-  ret i64 %add
+  %x = alloca i32, align 4
+  store i32 %0, ptr %x, align 4
+  %x1 = load i32, ptr %x, align 4
+  %promote = sext i32 %x1 to i64
+  %add = add i64 %promote, 1
+  %trunc = trunc i64 %add to i32
+  ret i32 %trunc
 }
 
-define i64 @main() {
+define i32 @main() {
 entry:
-  %call = call i64 @double(i64 5)
-  %a = alloca i64, align 8
-  store i64 %call, ptr %a, align 4
-  %a1 = load i64, ptr %a, align 4
-  %call2 = call i64 @add_one(i64 %a1)
-  %b = alloca i64, align 8
-  store i64 %call2, ptr %b, align 4
-  %b3 = load i64, ptr %b, align 4
-  ret i64 %b3
+  %call = call i32 @double(i32 5)
+  %a = alloca i32, align 4
+  store i32 %call, ptr %a, align 4
+  %a1 = load i32, ptr %a, align 4
+  %call2 = call i32 @add_one(i32 %a1)
+  %b = alloca i32, align 4
+  store i32 %call2, ptr %b, align 4
+  %b3 = load i32, ptr %b, align 4
+  ret i32 %b3
 }
 
 define {} @Main__run__from_Single({} %0) {

@@ -4,10 +4,30 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::AddressSpace;
 
+/// Widen integer BasicTypeEnums to i64. Non-integer types pass through.
+/// This ensures Result<i32,E> and Option<i32> use i64 for the payload slot,
+/// matching the Ok/Some constructors which receive i64 literal values.
+fn widen_int_to_i64<'ctx>(
+    ctx: &'ctx Context,
+    ty: BasicTypeEnum<'ctx>,
+) -> BasicTypeEnum<'ctx> {
+    match ty {
+        BasicTypeEnum::IntType(it) => {
+            if it.get_bit_width() == 64 {
+                ty
+            } else {
+                BasicTypeEnum::IntType(ctx.i64_type())
+            }
+        }
+        _ => ty,
+    }
+}
+
 pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
     match ty {
         Type::Name(name, args) => match name.as_str() {
-            "i32" | "i64" => Some(BasicTypeEnum::IntType(ctx.i64_type())),
+            "i32" => Some(BasicTypeEnum::IntType(ctx.i32_type())),
+            "i64" => Some(BasicTypeEnum::IntType(ctx.i64_type())),
             "f64" => Some(BasicTypeEnum::FloatType(ctx.f64_type())),
             "bool" => Some(BasicTypeEnum::IntType(ctx.bool_type())),
             "string" => {
@@ -129,20 +149,23 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             }
         }
         Type::Option(inner) => {
-            // Option<T> represented as {i1, T} — discriminant + payload.
-            // `Type::Name("Option", [T])` canonicalizes to this arm.
-            let inner_llvm = mimi_type_to_llvm(ctx, inner)?;
+            // Option<T> represented as {i1, payload} — discriminant + payload.
+            // Integer payloads are widened to i64 so that constructor (Some(42))
+            // and method (unwrap) agree on the slot width. Non-integer payloads
+            // (strings, structs) use their natural LLVM type.
+            let inner_llvm = widen_int_to_i64(ctx, mimi_type_to_llvm(ctx, inner)?);
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             Some(BasicTypeEnum::StructType(
                 ctx.struct_type(&[disc, inner_llvm], false),
             ))
         }
         Type::Result(ok, _err) => {
-            // Result<T, E> represented as {i1, T, i64} — discriminant + ok payload + err payload (as i64).
-            // The error field uses i64 to keep the struct layout consistent across all E types.
-            // Integer values are sign-extended from their native width; pointer values use ptrtoint.
-            // `Type::Name("Result", [T, E])` canonicalizes to this arm.
-            let ok_llvm = mimi_type_to_llvm(ctx, ok)?;
+            // Result<T, E> represented as {i1, ok_payload, err_payload}.
+            // Both payloads use i64 for integer types so that Ok(21) (literal
+            // is i64) and the type map agree on slot width. Non-integer payloads
+            // (strings, structs) use their natural LLVM type. Error payload is
+            // always i64 (see compile_err_constructor).
+            let ok_llvm = widen_int_to_i64(ctx, mimi_type_to_llvm(ctx, ok)?);
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());
             Some(BasicTypeEnum::StructType(

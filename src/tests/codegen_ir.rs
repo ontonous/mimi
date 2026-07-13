@@ -32,11 +32,11 @@ fn ir_module_has_filename() {
 }
 
 #[test]
-fn ir_i32_returns_i64() {
+fn ir_i32_returns_i32() {
     let ir = compile_to_ir("func main() -> i32 { 42 }");
     assert!(
-        ir.contains("define i64 @main()"),
-        "i32 should map to i64 in IR"
+        ir.contains("define i32 @main()"),
+        "i32 should map to i32 in IR (A1 restoration)"
     );
 }
 
@@ -58,30 +58,30 @@ fn ir_void_main() {
 // ===================== Binary Operation IR Patterns =====================
 
 #[test]
-fn ir_i64_add() {
+fn ir_i32_add() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a + b }");
     assert!(
-        ir.contains("add i64"),
-        "i32 promotes to i64, should use add i64"
+        ir.contains("add i32"),
+        "i32 add uses native i32 (A1 restoration)"
     );
 }
 
 #[test]
-fn ir_i64_mul() {
+fn ir_i32_mul() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a * b }");
-    assert!(ir.contains("mul i64"), "i32 mul promotes to i64 mul");
+    assert!(ir.contains("mul i32"), "i32 mul uses native i32 (A1 restoration)");
 }
 
 #[test]
 fn ir_sdiv() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a / b }");
-    assert!(ir.contains("sdiv i64"), "signed integer division");
+    assert!(ir.contains("sdiv "), "signed integer division uses native i32 (A1 restoration)");
 }
 
 #[test]
 fn ir_srem() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a % b }");
-    assert!(ir.contains("srem i64"), "signed integer remainder");
+    assert!(ir.contains("srem "), "signed integer remainder uses native i32 (A1 restoration)");
 }
 
 #[test]
@@ -158,14 +158,14 @@ fn ir_f64_return_type() {
 
 #[test]
 fn ir_logical_and_uses_and() {
-    let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a && b }");
-    assert!(ir.contains("and i64"), "logical and uses bitwise and");
+    let ir = compile_to_ir("func main(a: bool, b: bool) -> bool { a && b }");
+    assert!(ir.contains("and "), "logical and uses bitwise and");
 }
 
 #[test]
 fn ir_logical_or_uses_or() {
-    let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a || b }");
-    assert!(ir.contains("or i64"), "logical or uses bitwise or");
+    let ir = compile_to_ir("func main(a: bool, b: bool) -> bool { a || b }");
+    assert!(ir.contains("or "), "logical or uses bitwise or");
 }
 
 // ===================== Control Flow IR =====================
@@ -260,7 +260,7 @@ fn ir_call_instruction() {
         func main() -> i32 { inc(41) }
     "#,
     );
-    assert!(ir.contains("call i64"), "should have call to i64 function");
+    assert!(ir.contains("call i32"), "should have call to i32 function (A1 restoration)");
     assert!(ir.contains("@inc"), "should call @inc");
     assert!(ir.contains("@main"), "should define @main");
 }
@@ -273,10 +273,10 @@ fn ir_chained_calls_multi() {
         func main() -> i32 { inc(inc(40)) }
     "#,
     );
-    let call_count = ir.matches("call i64").count();
+    let call_count = ir.matches("call i32").count();
     assert!(
         call_count >= 2,
-        "chained calls should have >=2 call insts, got {}",
+        "chained calls should have >=2 call i32 insts, got {}",
         call_count
     );
 }

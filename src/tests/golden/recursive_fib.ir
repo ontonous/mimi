@@ -78,6 +78,8 @@ declare ptr @mimi_str_format(i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 
 declare ptr @mimi_to_string_i64(i64)
 
+declare ptr @mimi_json_escape_string(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
@@ -384,37 +386,42 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
-define i64 @fib(i64 %0) {
+define i32 @fib(i32 %0) {
 entry:
-  %n = alloca i64, align 8
-  store i64 %0, ptr %n, align 4
-  %n1 = load i64, ptr %n, align 4
-  %le = icmp sle i64 %n1, 1
+  %n = alloca i32, align 4
+  store i32 %0, ptr %n, align 4
+  %n1 = load i32, ptr %n, align 4
+  %promote = sext i32 %n1 to i64
+  %le = icmp sle i64 %promote, 1
   br i1 %le, label %then, label %else
 
 then:                                             ; preds = %entry
-  %n2 = load i64, ptr %n, align 4
+  %n2 = load i32, ptr %n, align 4
   br label %ifcont
 
 else:                                             ; preds = %entry
-  %n3 = load i64, ptr %n, align 4
-  %sub = sub i64 %n3, 1
-  %call = call i64 @fib(i64 %sub)
-  %n4 = load i64, ptr %n, align 4
-  %sub5 = sub i64 %n4, 2
-  %call6 = call i64 @fib(i64 %sub5)
-  %add = add i64 %call, %call6
+  %n3 = load i32, ptr %n, align 4
+  %promote4 = sext i32 %n3 to i64
+  %sub = sub i64 %promote4, 1
+  %trunc = trunc i64 %sub to i32
+  %call = call i32 @fib(i32 %trunc)
+  %n5 = load i32, ptr %n, align 4
+  %promote6 = sext i32 %n5 to i64
+  %sub7 = sub i64 %promote6, 2
+  %trunc8 = trunc i64 %sub7 to i32
+  %call9 = call i32 @fib(i32 %trunc8)
+  %add = add i32 %call, %call9
   br label %ifcont
 
 ifcont:                                           ; preds = %else, %then
-  %if_result = phi i64 [ %n2, %then ], [ %add, %else ]
-  ret i64 %if_result
+  %if_result = phi i32 [ %n2, %then ], [ %add, %else ]
+  ret i32 %if_result
 }
 
-define i64 @main() {
+define i32 @main() {
 entry:
-  %call = call i64 @fib(i64 10)
-  ret i64 %call
+  %call = call i32 @fib(i32 10)
+  ret i32 %call
 }
 
 define {} @Main__run__from_Single({} %0) {
