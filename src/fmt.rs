@@ -2,6 +2,8 @@
 ///
 /// Handles: indentation normalization (4 spaces), brace style, trailing commas,
 /// blank line normalization. Does NOT reorder imports or restructure code.
+///
+/// A7: Uses `source_scan::SourceScanner` for correct string/comment tracking.
 pub struct Formatter {
     indent_size: usize,
 }
@@ -12,101 +14,48 @@ impl Formatter {
     }
 
     /// Strip string literal contents from a line so brace counting ignores braces in strings.
+    /// A7: delegates to `source_scan::SourceScanner::strip_string_contents`.
     fn strip_strings(line: &str) -> String {
-        let mut result = String::with_capacity(line.len());
-        let mut chars = line.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '"' {
-                result.push(c);
-                // Skip until closing quote
-                while let Some(&next) = chars.peek() {
-                    result.push(next);
-                    chars.next();
-                    if next == '\\' {
-                        // Escape sequence: consume the next char too
-                        if let Some(escaped) = chars.next() {
-                            result.push(escaped);
-                        }
-                    } else if next == '"' {
-                        break;
-                    }
-                }
-            } else if c == '\'' {
-                result.push(c);
-                // Skip single-quoted string (character literal)
-                while let Some(&next) = chars.peek() {
-                    result.push(next);
-                    chars.next();
-                    if next == '\\' {
-                        if let Some(escaped) = chars.next() {
-                            result.push(escaped);
-                        }
-                    } else if next == '\'' {
-                        break;
-                    }
-                }
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        crate::source_scan::SourceScanner::strip_string_contents(line)
     }
 
     /// Normalize spacing around operators and punctuation.
     /// Handles: space before `{`, after `,`, around `:`, around `->`.
     ///
-    /// String literals (`"..."`) and character literals (`'...'`) are copied
-    /// verbatim, including any escaped quotes, so formatter changes never alter
-    /// user string contents.
+    /// A7: Uses `source_scan::SourceScanner` for correct string/comment tracking.
+    /// String literals and comments are copied verbatim.
     fn normalize_spacing(line: &str) -> String {
         // Quick check: if no known punctuation needing normalization, skip
         if !line.contains(&['{', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&'][..]) {
             return line.to_string();
         }
+        // A7: Use scanner to get per-char regions, so we only normalize code chars.
+        let scanner = crate::source_scan::SourceScanner::new(line);
+        let scanned = scanner.scan();
+        let chars: Vec<char> = scanned.iter().map(|(c, _)| *c).collect();
+        let regions: Vec<crate::source_scan::Region> =
+            scanned.iter().map(|(_, r)| *r).collect();
         let mut out = String::with_capacity(line.len() + 8);
-        let chars: Vec<char> = line.chars().collect();
         let mut i = 0;
-        let mut in_string = false;
-        let mut in_char = false;
         while i < chars.len() {
             let c = chars[i];
+            let region = regions[i];
 
-            // Inside a string literal: copy verbatim and handle escapes so that
-            // escaped quotes do not terminate the literal early.
-            if in_string {
+            // Inside string/char/comment: copy verbatim and handle escapes.
+            if region != crate::source_scan::Region::Code {
                 out.push(c);
                 if c == '\\' && i + 1 < chars.len() {
                     out.push(chars[i + 1]);
                     i += 1;
-                } else if c == '"' {
-                    in_string = false;
-                }
-                i += 1;
-                continue;
-            }
-
-            // Inside a character literal: same escape-aware verbatim copy.
-            if in_char {
-                out.push(c);
-                if c == '\\' && i + 1 < chars.len() {
-                    out.push(chars[i + 1]);
-                    i += 1;
-                } else if c == '\'' {
-                    in_char = false;
                 }
                 i += 1;
                 continue;
             }
 
             match c {
-                '"' => {
-                    in_string = true;
-                    out.push('"');
-                }
-                '\'' => {
-                    in_char = true;
-                    out.push('\'');
-                }
+                // A7: String/char delimiters are already handled by the region
+                // check above (Region::Code for delimiter, StringContent/CharContent
+                // for contents). No special handling needed here.
                 '{' => {
                     // Ensure space before `{` (unless at start or preceded by space)
                     if i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '(' {
@@ -358,5 +307,77 @@ println(2)
 }
 ";
         assert!(!fmt.format_in_place(&mut input.to_string()));
+    }
+
+    // A7 regression tests
+
+    #[test]
+    fn format_preserves_line_comments() {
+        // A7/DAT-C1: `//` comments must not be corrupted to `/ /`
+        let fmt = Formatter::new();
+        let input = "func main() -> i32 {
+    // this is a comment
+    42
+}
+";
+        let result = fmt.format(input);
+        assert!(result.contains("// this is a comment"));
+        assert!(!result.contains("/ /"));
+    }
+
+    #[test]
+    fn format_preserves_block_comments() {
+        // A7: `/* */` block comments must not be corrupted
+        let fmt = Formatter::new();
+        let input = "func main() -> i32 {
+    /* block comment */
+    42
+}
+";
+        let result = fmt.format(input);
+        assert!(result.contains("/* block comment */"));
+    }
+
+    #[test]
+    fn format_string_braces_not_counted() {
+        // A7: braces inside string literals should not affect indentation
+        let fmt = Formatter::new();
+        let input = "func f() -> i32 {
+    let s = \"{not a block}\"
+    42
+}
+";
+        let result = fmt.format(input);
+        // The line after the string should still be at indent level 1 (4 spaces)
+        assert!(result.contains("    42\n"));
+    }
+
+    #[test]
+    fn format_escaped_quote_in_string() {
+        // A7: escaped quotes inside strings should not terminate the string early
+        let fmt = Formatter::new();
+        let input = "func f() -> i32 {
+    let s = \"he said \\\"hi\\\"\"
+    42
+}
+";
+        let result = fmt.format(input);
+        // The escaped quotes should be preserved, and the string should not
+        // be split across lines
+        assert!(result.contains("\\\"hi\\\""));
+    }
+
+    #[test]
+    fn format_comment_with_braces() {
+        // A7: braces in comments should not affect indentation
+        let fmt = Formatter::new();
+        let input = "func f() -> i32 {
+    // comment with { brace
+    42
+}
+";
+        let result = fmt.format(input);
+        assert!(result.contains("    42\n"));
+        assert!(result.contains("// comment with { brace"));
     }
 }

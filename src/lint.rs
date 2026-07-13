@@ -56,48 +56,40 @@ impl Linter {
         detect_redundant_parens(source, &mut diagnostics);
 
         // W003: Check for `...` placeholders in source (skip strings and comments)
-        let mut in_string = false;
-        let mut in_block_comment = false;
-        for (line_idx, line) in source.lines().enumerate() {
-            if line.trim() == "..." {
-                // Check if this `...` is inside a string or comment by scanning from previous context
-                let mut local_in_string = in_string;
-                let mut local_in_comment = in_block_comment;
-                for ch in line.chars() {
-                    if local_in_comment {
-                        if ch == '/' && line.contains("*/") {
-                            local_in_comment = false;
-                        }
-                        continue;
-                    }
-                    if ch == '"' {
-                        local_in_string = !local_in_string;
-                    }
-                }
-                if !local_in_string && !local_in_comment {
-                    diagnostics.push(Diagnostic::warning_code(
-                        W003,
-                        "placeholder `...` residual in .mimi file",
-                        Span::single(line_idx + 1, 1),
-                    ));
-                }
+        // A7: Use shared source_scan for correct string/comment tracking.
+        let scanner = crate::source_scan::SourceScanner::new(source);
+        let scanned = scanner.scan();
+        let mut line = 1usize;
+        let mut col = 1usize;
+        let mut i = 0;
+        while i < scanned.len() {
+            let (ch, region) = scanned[i];
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+                i += 1;
+                continue;
             }
-            // Update cross-line state for block comments
-            if line.contains("/*") {
-                in_block_comment = true;
+            // Check for "..." (three consecutive dots) in code region
+            if region == crate::source_scan::Region::Code
+                && ch == '.'
+                && i + 2 < scanned.len()
+                && scanned[i + 1].0 == '.'
+                && scanned[i + 2].0 == '.'
+                && scanned[i + 1].1 == crate::source_scan::Region::Code
+                && scanned[i + 2].1 == crate::source_scan::Region::Code
+            {
+                diagnostics.push(Diagnostic::warning_code(
+                    W003,
+                    "placeholder `...` residual in .mimi file",
+                    Span::single(line, col),
+                ));
+                i += 3;
+                col += 3;
+                continue;
             }
-            if line.contains("*/") {
-                in_block_comment = false;
-            }
-            if !in_block_comment {
-                let mut prev_ch = ' ';
-                for ch in line.chars() {
-                    if ch == '"' && prev_ch != '\\' {
-                        in_string = !in_string;
-                    }
-                    prev_ch = ch;
-                }
-            }
+            col += 1;
+            i += 1;
         }
 
         LintResult { diagnostics }
