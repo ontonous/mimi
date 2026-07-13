@@ -840,7 +840,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Call the function: fn(elem) or fn(env_ptr, elem)
         let result = match &fn_ref {
             FnRef::Named(fn_llvm) => {
-                let fn_call = self.build_call(*fn_llvm, &[elem_meta_for_store], "fn_call")?;
+                // Adjust element width to match the function's first parameter type.
+                // After A1 restoration, i32 params expect i32 values, but list
+                // elements are stored as i64 and must be truncated.
+                let adjusted_elem = if let Some(param) = fn_llvm.get_nth_param(0) {
+                    match (elem_for_call, param) {
+                        (BasicValueEnum::IntValue(iv), BasicValueEnum::IntValue(param_iv)) => {
+                            let arg_bw = iv.get_type().get_bit_width();
+                            let param_bw = param_iv.get_type().get_bit_width();
+                            if arg_bw == param_bw {
+                                elem_for_call
+                            } else if arg_bw > param_bw {
+                                self.builder
+                                    .build_int_truncate(iv, param_iv.get_type(), "map_elem_trunc")
+                                    .map_err(|e| CompileError::LlvmError(format!("map elem trunc: {}", e)))?
+                                    .into()
+                            } else {
+                                self.builder
+                                    .build_int_s_extend(iv, param_iv.get_type(), "map_elem_sext")
+                                    .map_err(|e| CompileError::LlvmError(format!("map elem sext: {}", e)))?
+                                    .into()
+                            }
+                        }
+                        _ => elem_for_call,
+                    }
+                } else {
+                    elem_for_call
+                };
+                let adjusted_meta = match &adjusted_elem {
+                    BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                    BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                    BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                    BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                    _ => BasicMetadataValueEnum::IntValue(elem_i64_int),
+                };
+                let fn_call = self.build_call(*fn_llvm, &[adjusted_meta], "fn_call")?;
                 call_try_basic_value(&fn_call).ok_or("function returned void")?
             }
             FnRef::Indirect {
@@ -856,7 +890,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .as_ref()
                     .and_then(|rt| types::mimi_type_to_llvm(self.context, rt))
                     .unwrap_or(BasicTypeEnum::IntType(i64_ty));
-                let metadata_params = [BasicMetadataTypeEnum::PointerType(i8_ptr), elem_meta];
+                // Determine the lambda's first parameter type to adjust the
+                // element width. After A1 restoration, i32 params expect i32
+                // values, but list elements are stored as i64.
+                let lambda_param_ty = if let Expr::Lambda { params, .. } = &args[1] {
+                    params.first().and_then(|p| {
+                        self.llvm_type_for(&p.ty)
+                            .or_else(|| types::mimi_type_to_llvm(self.context, &p.ty))
+                    })
+                } else {
+                    None
+                };
+                let (call_elem, call_meta) = if let Some(param_llvm) = lambda_param_ty {
+                    let adjusted = match (elem_for_call, param_llvm) {
+                        (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(param_it)) => {
+                            let arg_bw = iv.get_type().get_bit_width();
+                            let param_bw = param_it.get_bit_width();
+                            if arg_bw == param_bw {
+                                elem_for_call
+                            } else if arg_bw > param_bw {
+                                self.builder
+                                    .build_int_truncate(iv, param_it, "map_indirect_trunc")
+                                    .map_err(|e| CompileError::LlvmError(format!("map indirect trunc: {}", e)))?
+                                    .into()
+                            } else {
+                                self.builder
+                                    .build_int_s_extend(iv, param_it, "map_indirect_sext")
+                                    .map_err(|e| CompileError::LlvmError(format!("map indirect sext: {}", e)))?
+                                    .into()
+                            }
+                        }
+                        _ => elem_for_call,
+                    };
+                    let m = match &adjusted {
+                        BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
+                        BasicValueEnum::StructValue(sv) => BasicMetadataTypeEnum::StructType(sv.get_type()),
+                        BasicValueEnum::PointerValue(pv) => BasicMetadataTypeEnum::PointerType(pv.get_type()),
+                        BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
+                        _ => elem_meta,
+                    };
+                    (adjusted, m)
+                } else {
+                    (elem_for_call, elem_meta)
+                };
+                let metadata_params = [BasicMetadataTypeEnum::PointerType(i8_ptr), call_meta];
                 let indirect_fn_type =
                     types::build_fn_type_for(self.context, ret_llvm, &metadata_params);
                 let fn_ptr_typed = self
@@ -868,7 +945,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
                 let call_args = vec![
                     BasicMetadataValueEnum::PointerValue(*env_ptr),
-                    elem_meta_for_store,
+                    match &call_elem {
+                        BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+                        BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+                        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                        BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+                        _ => BasicMetadataValueEnum::IntValue(elem_i64_int),
+                    },
                 ];
                 let fn_call = self
                     .builder
@@ -878,13 +961,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         if is_map {
-            // For map: store result to output array
+            // For map: store result to output array (widen to i64 if needed)
             let out_elem_ptr = {
                 self.gep()
                     .build_in_bounds_gep(i64_ty, out_i64, &[idx], "out_elem")
             }
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            self.build_store(out_elem_ptr, result)?;
+            // Widen integer result to i64 for uniform list storage.
+            let store_val = match result {
+                BasicValueEnum::IntValue(iv) => {
+                    let bw = iv.get_type().get_bit_width();
+                    if bw < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, "map_result_sext")
+                            .map_err(|e| CompileError::LlvmError(format!("map result sext: {}", e)))?
+                            .into()
+                    } else if bw > 64 {
+                        self.builder
+                            .build_int_truncate(iv, i64_ty, "map_result_trunc")
+                            .map_err(|e| CompileError::LlvmError(format!("map result trunc: {}", e)))?
+                            .into()
+                    } else {
+                        result
+                    }
+                }
+                _ => result,
+            };
+            self.build_store(out_elem_ptr, store_val)?;
         } else {
             // For filter: if result is truthy (non-zero), store to output array
             let zero = i64_ty.const_int(0, false);
