@@ -17,26 +17,16 @@ pub(crate) fn span_to_range(span: &Span) -> Value {
     })
 }
 
+/// B2: Convert LSP position (line, UTF-16 character) to byte offset.
+/// Uses PositionMap for correct UTF-16 ↔ byte conversion.
 pub(crate) fn position_to_offset(text: &str, line: usize, character: usize) -> usize {
-    let mut offset = 0;
-    for (i, l) in text.lines().enumerate() {
-        if i == line {
-            return offset + character.min(l.len());
-        }
-        offset += l.len() + 1; // include newline
-    }
-    offset
+    let map = super::position_map::PositionMap::new(text);
+    map.lsp_to_byte(line, character)
 }
 
+/// B2: Convert byte offset to LSP position (line, UTF-16 character).
+/// Uses PositionMap for correct byte ↔ UTF-16 conversion.
 pub(crate) fn offset_to_position(text: &str, offset: usize) -> (usize, usize) {
-    let mut current = 0;
-    for (i, line) in text.lines().enumerate() {
-        let line_len = line.len() + 1;
-        if current + line_len > offset {
-            return (i, offset - current);
-        }
-        current += line_len;
-    }
-    let last_line = text.lines().count().saturating_sub(1);
-    (last_line, 0)
+    let map = super::position_map::PositionMap::new(text);
+    map.byte_to_lsp(offset)
 }

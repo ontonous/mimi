@@ -17,6 +17,7 @@ pub(crate) mod hover;
 pub(crate) mod inlay;
 pub(crate) mod lens;
 pub(crate) mod position;
+pub(crate) mod position_map;
 pub(crate) mod references;
 pub(crate) mod state;
 pub(crate) mod symbols;

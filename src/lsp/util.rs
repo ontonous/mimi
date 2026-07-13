@@ -168,24 +168,36 @@ impl LspServer {
 
 /// Returns (start, end) byte indices for the word at the given position.
 /// Returns None if the position is invalid.
+///
+/// B2: Uses PositionMap for correct UTF-16 → byte conversion.
 pub fn word_range_at(text: &str, line: usize, character: usize) -> Option<(usize, usize)> {
     let lines: Vec<&str> = text.lines().collect();
     let current_line = lines.get(line)?;
 
-    let before_cursor: String = current_line.chars().take(character).collect();
-    let after_cursor: String = current_line.chars().skip(character).collect();
+    // B2: Convert UTF-16 character position to byte offset within the line.
+    let byte_char = {
+        let map = super::position_map::PositionMap::new(current_line);
+        map.lsp_to_byte(0, character)
+    };
 
-    let word_start = before_cursor
+    // Work in byte space from here
+    let before_cursor = &current_line[..byte_char.min(current_line.len())];
+    let after_cursor = &current_line[byte_char.min(current_line.len())..];
+
+    // Find word boundaries in byte space
+    let word_start_byte = before_cursor
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
         .map(|i| i + 1)
         .unwrap_or(0);
-    let word_end = after_cursor
+
+    let word_end_byte = after_cursor
         .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
-        .map(|i| character + i)
+        .map(|i| byte_char + i)
         .unwrap_or(current_line.len());
 
-    if word_start >= word_end {
+    if word_start_byte >= word_end_byte {
         return None;
     }
-    Some((word_start, word_end))
+    // Return byte offsets relative to the line (as callers expect)
+    Some((word_start_byte, word_end_byte))
 }
