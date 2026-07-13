@@ -185,12 +185,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         match ty {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
-                    let iv = c_val.into_int_value();
-                    Ok(self
-                        .builder
-                        .build_int_s_extend(iv, self.context.i64_type(), "carg_i32_ext")
-                        .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
-                        .into())
+                    // After A1 restoration, internal i32 uses i32 type.
+                    // C ABI already provides i32, so pass through.
+                    Ok(c_val)
                 }
                 "bool" => {
                     let iv = c_val.into_int_value();
@@ -621,15 +618,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         match ty {
             Type::Name(name, _) => match name.as_str() {
-                "i32" => Ok(self
-                    .builder
-                    .build_int_s_extend(
-                        c_val.into_int_value(),
-                        self.context.i64_type(),
-                        "field_i32_ext",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
-                    .into()),
+                "i32" => {
+                    // After A1 restoration, internal i32 fields use i32 type.
+                    // Just truncate to i32 in case the C value came in as a wider type.
+                    let iv = c_val.into_int_value();
+                    let bw = iv.get_type().get_bit_width();
+                    if bw == 32 {
+                        Ok(iv.into())
+                    } else {
+                        Ok(self
+                            .builder
+                            .build_int_truncate(iv, self.context.i32_type(), "field_i32_trunc")
+                            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                            .into())
+                    }
+                }
                 "bool" => {
                     let zero = self.context.i8_type().const_int(0, false);
                     let b = self
@@ -804,15 +807,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         match ty {
             Type::Name(name, _) => match name.as_str() {
-                "i32" => Ok(self
-                    .builder
-                    .build_int_s_extend(
-                        c_val.into_int_value(),
-                        self.context.i64_type(),
-                        "cb_ret_i32_ext",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
-                    .into()),
+                "i32" => {
+                    // After A1 restoration, internal i32 is i32 — pass through.
+                    let iv = c_val.into_int_value();
+                    let bw = iv.get_type().get_bit_width();
+                    if bw == 32 {
+                        Ok(iv.into())
+                    } else {
+                        Ok(self
+                            .builder
+                            .build_int_truncate(iv, self.context.i32_type(), "cb_ret_i32_trunc")
+                            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                            .into())
+                    }
+                }
                 "bool" => Ok(self
                     .builder
                     .build_int_z_extend(
