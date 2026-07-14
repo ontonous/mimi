@@ -1783,9 +1783,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "assert_state_call",
                     )
                     .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                Ok(call
-                    .try_as_basic_value_opt()
-                    .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
+                call.try_as_basic_value_opt().ok_or_else(|| {
+                    CompileError::LlvmError("mimi_assert_state returned void".into())
+                })
             }
             // v0.29.38: inject_fault — test utility. In codegen, we call
             // mimi_inject_fault which prints a message and aborts. The interp
@@ -1796,11 +1796,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "inject_fault expects 1 argument".to_string(),
                     ));
                 }
-                // Pass null state name — the runtime function handles it
-                let null_ptr = self
-                    .context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .const_null();
+                // Prefer state name string when provided; else null.
+                let state_ptr = self
+                    .extract_raw_str_ptr(&args[0])
+                    .unwrap_or_else(|_| {
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null()
+                    });
                 let fn_ty = self.context.i64_type().fn_type(
                     &[inkwell::types::BasicMetadataTypeEnum::PointerType(
                         self.context.ptr_type(inkwell::AddressSpace::default()),
@@ -1813,11 +1816,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or_else(|| self.module.add_function("mimi_inject_fault", fn_ty, None));
                 let call = self
                     .builder
-                    .build_call(func, &[null_ptr.into()], "inject_fault_call")
+                    .build_call(func, &[state_ptr.into()], "inject_fault_call")
                     .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                Ok(call
-                    .try_as_basic_value_opt()
-                    .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
+                call.try_as_basic_value_opt().ok_or_else(|| {
+                    CompileError::LlvmError("mimi_inject_fault returned void".into())
+                })
             }
             // v0.29.44: shadow memory tagging builtins
             "shadow_alloc" => {
