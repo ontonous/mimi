@@ -6524,6 +6524,27 @@ fn dual_from_json_option_field() {
     );
 }
 
+/// Top-level from_json::<Option<T>>.
+#[test]
+fn dual_from_json_option_top() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<i32>>("42")
+            let b = from_json::<Option<i32>>("null")
+            let va = match a { Some(n) => n, None => -1 }
+            let vb = match b { Some(n) => n, None => -2 }
+            println(va + vb)
+            0
+        }
+        "#,
+        "40"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
