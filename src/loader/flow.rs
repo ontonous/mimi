@@ -48,7 +48,12 @@ impl Acc {
             if let Some(deps) = &manifest.dependencies {
                 for dep in deps {
                     if let Some(path_str) = &dep.path {
-                        let dep_path = dir.join(path_str);
+                        // B1: reject path deps that escape the package dir.
+                        let dep_path =
+                            match crate::path_safety::validate_safe_path(&dir, path_str) {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
                         if dep_path.exists() {
                             self.dep_paths.insert(dep.name.clone(), dep_path);
                         }

@@ -97,17 +97,18 @@ impl<'a> Checker<'a> {
             Expr::Index(obj, idx) => self.infer_index(obj, idx, scopes),
             Expr::Try(expr) => self.infer_try_expr(expr, scopes),
             // PA-H3 (audit): optional chain `x?.y` — type is `Option<field_type>`.
+            // H1 (core audit): actually resolve the field type instead of
+            // always returning Option<unknown> (which silently accepted
+            // x?.non_existent_field).
             Expr::OptionalChain(inner, field) => {
                 let inner_ty = self.infer_expr(inner, scopes);
-                let inner_inner = match &inner_ty {
+                let base_ty = match &inner_ty {
                     Type::Option(t) => t.as_ref().clone(),
                     Type::Result(ok, _) => ok.as_ref().clone(),
                     _ => inner_ty.clone(),
                 };
-                // Look up field on inner_inner; fall back to unknown.
-                let _ = inner_inner;
-                let _ = field;
-                Type::Option(Box::new(Type::Name("unknown".into(), vec![])))
+                let field_ty = self.infer_field_access_on_type(&base_ty, field, scopes);
+                Type::Option(Box::new(field_ty))
             }
             Expr::Spawn(inner) => {
                 let inner_ty = self.infer_expr(inner, scopes);

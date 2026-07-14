@@ -37,6 +37,12 @@ pub(crate) fn add(
         .map(|d| d.iter().any(|x| x.name == name))
         .unwrap_or(false);
 
+    // B1: path deps must stay under the package directory.
+    if let Some(p) = path {
+        path_safety::validate_path_dep(p)
+            .map_err(|e| format!("invalid path dependency '{}': {}", p, e))?;
+    }
+
     manifest.add_dependency(name, version, path, git, tag);
 
     // If registry dep, try to resolve a concrete version and merge into lockfile
