@@ -108,23 +108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "named argument '{}' in codegen: named arguments must be resolved before codegen (use positional args or evaluate at comptime)", name
             ))),
             Expr::Cast(inner, target_type) => self.compile_cast_expr(inner, target_type, vars),
-            Expr::OptionalChain(_inner, field) => {
-                // PA-H3 (audit): `x?.field` optional chain. The interpreter
-                // supports this via eval_optional_chain, but codegen support
-                // is not yet implemented. Emit a clear error instead of
-                // falling through to the catch-all.
-                //
-                // TODO: implement codegen for OptionalChain — needs to:
-                // 1. Evaluate inner expression
-                // 2. Check if the Option discriminant is Some
-                // 3. If Some, extract the payload and load the field
-                // 4. If None, return None
-                Err(CompileError::Generic(format!(
-                    "optional chain `?.{}` is not yet supported in codegen; \
-                     use `mimi run` or desugar to match on Option",
-                    field
-                )))
-            }
+            Expr::OptionalChain(inner, field) => self.compile_optional_chain(inner, field, vars),
             #[allow(unreachable_patterns)]
             _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
         }
@@ -234,6 +218,387 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Err(format!("unsupported cast target type: {}", target_name).into()),
         }
+    }
+
+    /// `x?.field` — if `x` is Option::Some (or Result::Ok), load field from
+    /// payload and wrap as Some; if None/Err, return None.
+    /// Type of `x?.field` is always `Option<field_ty>` (see infer_expr).
+    /// Layout: Option/Result disc is i1 (Some/Ok = 1). Ok/Some payload is field 1.
+    fn compile_optional_chain(
+        &mut self,
+        inner: &Expr,
+        field: &str,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let result_val = self.compile_expr(inner, vars)?;
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for optional chain".to_string())?;
+        let some_bb = self.context.append_basic_block(function, "optchain_some");
+        let none_bb = self.context.append_basic_block(function, "optchain_none");
+        let merge_bb = self.context.append_basic_block(function, "optchain_merge");
+
+        let obj_type = self.infer_object_type(inner, vars);
+        let is_result = obj_type.starts_with("Result<") || obj_type == "Result";
+        let base_type = Self::strip_option_or_result_ok(&obj_type);
+
+        // Built-in Option {i1, i64} / Result {i1, i64, i64} for load-from-ptr.
+        // Actual payload may be a struct; extract_value still works on the
+        // concrete struct value when we already hold a StructValue.
+        let option_load_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let result_load_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        let sv = match result_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => {
+                let load_ty = if is_result {
+                    BasicTypeEnum::StructType(result_load_ty)
+                } else {
+                    BasicTypeEnum::StructType(option_load_ty)
+                };
+                self.builder
+                    .build_load(load_ty, pv, "optchain_load")
+                    .map_err(|e| CompileError::LlvmError(format!("optchain load: {}", e)))?
+                    .into_struct_value()
+            }
+            _ => {
+                return Err(CompileError::Generic(format!(
+                    "optional chain `?.{}` requires Option or Result value",
+                    field
+                )));
+            }
+        };
+
+        let disc = self
+            .builder
+            .build_extract_value(sv, 0, "optchain_disc")
+            .map_err(|e| CompileError::LlvmError(format!("extract disc: {}", e)))?
+            .into_int_value();
+        // Some/Ok = disc != 0 (i1 true or non-zero).
+        let is_none = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                disc,
+                bool_ty.const_int(0, false),
+                "optchain_is_none",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_none, none_bb, some_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+
+        // Always emit canonical Option {i1, i64} so phi types match regardless
+        // of field payload shape (int/float/ptr/struct → i64 slot).
+        let canon = BasicTypeEnum::StructType(option_load_ty);
+
+        // ── Some/Ok path: extract payload, load field, wrap as Some ──
+        self.builder.position_at_end(some_bb);
+        let payload = self
+            .builder
+            .build_extract_value(sv, 1, "optchain_payload")
+            .map_err(|e| CompileError::LlvmError(format!("extract payload: {}", e)))?;
+
+        let field_val = self.load_optional_chain_field(payload, &base_type, field)?;
+        let some_slot = self.build_alloca(canon, "opt_some_slot")?;
+        // disc = 1
+        self.build_store(
+            self.gep()
+                .build_struct_gep(canon, some_slot, 0, "sd")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            bool_ty.const_int(1, false),
+        )?;
+        let pay_i64 = self.option_payload_to_i64(field_val)?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(canon, some_slot, 1, "sp")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            pay_i64,
+        )?;
+        let some_val = self.build_load(canon, some_slot, "some")?;
+        self.build_br(merge_bb)?;
+        let some_bb_end = self.builder.get_insert_block().unwrap_or(some_bb);
+
+        // ── None/Err path: return None ──
+        self.builder.position_at_end(none_bb);
+        let none_slot = self.build_alloca(canon, "opt_none_slot")?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(canon, none_slot, 0, "nd")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            bool_ty.const_int(0, false),
+        )?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(canon, none_slot, 1, "np")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            i64_ty.const_int(0, false),
+        )?;
+        let none_val = self.build_load(canon, none_slot, "none")?;
+        self.build_br(merge_bb)?;
+        let none_bb_end = self.builder.get_insert_block().unwrap_or(none_bb);
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(canon, "optchain_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi: {}", e)))?;
+        phi.add_incoming(&[(&some_val, some_bb_end), (&none_val, none_bb_end)]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// Pack a field value into the i64 payload slot of a canonical Option.
+    fn option_payload_to_i64(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        match val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    Ok(self
+                        .builder
+                        .build_int_s_extend(iv, i64_ty, "opt_pay_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                        .into())
+                } else if bw > 64 {
+                    Ok(self
+                        .builder
+                        .build_int_truncate(iv, i64_ty, "opt_pay_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
+                        .into())
+                } else {
+                    Ok(iv.into())
+                }
+            }
+            BasicValueEnum::PointerValue(pv) => Ok(self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "opt_pay_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+                .into()),
+            BasicValueEnum::FloatValue(fv) => {
+                // f64 bit-pattern into i64; f32 → f64 first.
+                let f64_ty = self.context.f64_type();
+                let as_f64 = if fv.get_type().get_bit_width() == 64 {
+                    fv
+                } else {
+                    self.builder
+                        .build_float_ext(fv, f64_ty, "opt_f32_to_f64")
+                        .map_err(|e| CompileError::LlvmError(format!("fpext: {}", e)))?
+                };
+                Ok(self
+                    .builder
+                    .build_bit_cast(as_f64, i64_ty, "opt_f64_bits")
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?)
+            }
+            BasicValueEnum::StructValue(sv) => {
+                // Spill struct (e.g. string {ptr,len}) and store pointer as i64.
+                let sty = sv.get_type();
+                let tmp = self.build_alloca(BasicTypeEnum::StructType(sty), "opt_pay_struct")?;
+                self.build_store(tmp, sv)?;
+                Ok(self
+                    .builder
+                    .build_ptr_to_int(tmp, i64_ty, "opt_struct_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+                    .into())
+            }
+            other => {
+                let tmp = self.build_alloca(other.get_type(), "opt_pay_tmp")?;
+                self.build_store(tmp, other)?;
+                Ok(self
+                    .builder
+                    .build_ptr_to_int(tmp, i64_ty, "opt_other_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+                    .into())
+            }
+        }
+    }
+
+    /// Strip `Option<T>` / `Result<T,E>` wrappers → `T` (for field lookup).
+    fn strip_option_or_result_ok(obj_type: &str) -> String {
+        if let Some(rest) = obj_type.strip_prefix("Option<") {
+            // Drop matching outer `>`; handle nested generics.
+            let mut depth = 0i32;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => {
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            return rest[..end].trim().to_string();
+        }
+        if let Some(rest) = obj_type.strip_prefix("Result<") {
+            let mut depth = 0i32;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    ',' if depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            return rest[..end].trim().to_string();
+        }
+        obj_type.to_string()
+    }
+
+    /// Load `field` from an Option/Result payload value of type `base_type`.
+    fn load_optional_chain_field(
+        &mut self,
+        payload: BasicValueEnum<'ctx>,
+        base_type: &str,
+        field: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let base = if let Some(lt) = base_type.find('<') {
+            &base_type[..lt]
+        } else {
+            base_type
+        };
+
+        // Numeric tuple index: payload is a tuple struct value.
+        if let Ok(idx) = field.parse::<u32>() {
+            let field_ptr = match payload {
+                BasicValueEnum::PointerValue(pv) => pv,
+                BasicValueEnum::StructValue(psv) => {
+                    let sty = psv.get_type();
+                    let tmp = self.build_alloca(BasicTypeEnum::StructType(sty), "opt_tup")?;
+                    self.build_store(tmp, psv)?;
+                    tmp
+                }
+                BasicValueEnum::IntValue(iv) => self
+                    .builder
+                    .build_int_to_ptr(
+                        iv,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "opt_tup_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?,
+                _ => {
+                    return Err(CompileError::Generic(format!(
+                        "optional chain `?.{}`: unsupported tuple payload",
+                        field
+                    )));
+                }
+            };
+            // Prefer registered struct type; else use payload's own struct type.
+            let sty = self
+                .expect_struct_type(base)
+                .or_else(|_| match payload {
+                    BasicValueEnum::StructValue(psv) => Ok(psv.get_type()),
+                    BasicValueEnum::PointerValue(_) => self.expect_struct_type(base),
+                    _ => Err(CompileError::Generic(format!(
+                        "optional chain `?.{}`: cannot resolve tuple type `{}`",
+                        field, base_type
+                    ))),
+                })?;
+            let gep = self
+                .gep()
+                .build_struct_gep(sty, field_ptr, idx, field)
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+            let loaded = self.build_load(BasicTypeEnum::IntType(i64_ty), gep, field)?;
+            return Ok(loaded);
+        }
+
+        let td = self.type_defs.get(base).ok_or_else(|| {
+            CompileError::Generic(format!(
+                "optional chain `?.{}`: cannot resolve payload type `{}`",
+                field, base_type
+            ))
+        })?;
+        let fields = match &td.kind {
+            TypeDefKind::Record(fields) => fields,
+            _ => {
+                return Err(CompileError::Generic(format!(
+                    "optional chain `?.{}`: payload type `{}` is not a record",
+                    field, base_type
+                )));
+            }
+        };
+        let idx = fields.iter().position(|f| f.name == *field).ok_or_else(|| {
+            CompileError::Generic(format!(
+                "optional chain: no field `{}` on type `{}`",
+                field, base_type
+            ))
+        })?;
+
+        let field_ptr = match payload {
+            BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::IntValue(iv) => self
+                .builder
+                .build_int_to_ptr(
+                    iv,
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "optchain_payload_ptr",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("inttoptr: {}", e)))?,
+            BasicValueEnum::StructValue(psv) => {
+                let sty = psv.get_type();
+                let tmp = self.build_alloca(BasicTypeEnum::StructType(sty), "opt_rec")?;
+                self.build_store(tmp, psv)?;
+                tmp
+            }
+            _ => {
+                return Err(CompileError::Generic(format!(
+                    "optional chain `?.{}`: unsupported payload shape",
+                    field
+                )));
+            }
+        };
+
+        let sty = self.expect_struct_type(base)?;
+        let gep = self
+            .gep()
+            .build_struct_gep(sty, field_ptr, idx as u32, field)
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        // i32 fields: load as i32 then sext to i64 (same as compile_field_expr).
+        let (load_ty, ext) = match &fields[idx].ty {
+            Type::Name(n, _) if n == "i32" => (BasicTypeEnum::IntType(self.context.i32_type()), true),
+            _ => (
+                self.llvm_type_for(&fields[idx].ty)
+                    .unwrap_or(BasicTypeEnum::IntType(i64_ty)),
+                false,
+            ),
+        };
+        let loaded = self.build_load(load_ty, gep, field)?;
+        if ext {
+            if let BasicValueEnum::IntValue(iv) = loaded {
+                return Ok(self
+                    .builder
+                    .build_int_s_extend(iv, i64_ty, "opt_i32_sext")
+                    .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                    .into());
+            }
+        }
+        Ok(loaded)
     }
 
     fn compile_ident_expr(
@@ -396,6 +761,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 obj_type
+            }
+            // PA-H3: `x?.field` has type Option<field_ty>; track as Option<…>
+            // so nested optional chains and match can resolve payload types.
+            Expr::OptionalChain(inner, field_name) => {
+                let obj_type = self.infer_object_type(inner, vars);
+                let base = Self::strip_option_or_result_ok(&obj_type);
+                let base_key = if let Some(lt) = base.find('<') {
+                    &base[..lt]
+                } else {
+                    base.as_str()
+                };
+                let field_ty = if let Some(td) = self.type_defs.get(base_key) {
+                    if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                        fields
+                            .iter()
+                            .find(|f| f.name == *field_name)
+                            .map(|f| crate::core::fmt_type(&f.ty))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                match field_ty {
+                    Some(ft) => format!("Option<{}>", ft),
+                    None => "Option".to_string(),
+                }
             }
             Expr::Index(obj, _) => {
                 // Index into a List<T> returns T. Infer the list's element type.

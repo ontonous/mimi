@@ -1217,10 +1217,10 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// PA-H3 (audit): evaluate `inner?.field`. If `inner` evaluates to
-    /// `Some(v)`, return `Some(v.field)`; if `None`, return `None`. If the
-    /// inner is a `Result::Ok(v)`, return `Ok(v.field)`. Other shapes are a
-    /// runtime error.
+    /// PA-H3 (audit): evaluate `inner?.field`.
+    /// Type is always `Option<field_ty>` (see infer_expr):
+    /// - `Some(v)` / `Ok(v)` → `Some(v.field)`
+    /// - `None` / `Err(_)` → `None`
     pub(in crate::interp) fn eval_optional_chain(
         &mut self,
         inner: &Expr,
@@ -1228,21 +1228,19 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, InterpError> {
         let v = self.eval_expr(inner)?;
         match v {
-            Value::Variant(ref name, ref vals) if name == "Some" && vals.len() == 1 => {
+            Value::Variant(ref name, ref vals)
+                if (name == "Some" || name == "Ok") && vals.len() == 1 =>
+            {
                 let inner_v = vals[0].clone();
-                // Walk common record-shaped values to extract the field.
-                self.eval_optional_field(&inner_v, field)
+                let field_v = self.eval_optional_field(&inner_v, field)?;
+                // Propagate field-access errors as Value::Error (not as Some(Error)).
+                if matches!(field_v, Value::Error(_)) {
+                    return Ok(field_v);
+                }
+                Ok(Value::Variant("Some".to_string(), vec![field_v]))
             }
-            Value::Variant(ref name, ref vals) if name == "Ok" && vals.len() == 1 => {
-                let inner_v = vals[0].clone();
-                let result = self.eval_optional_field(&inner_v, field)?;
-                Ok(Value::Variant("Ok".to_string(), vec![result]))
-            }
-            Value::Variant(ref name, _) if name == "None" => {
+            Value::Variant(ref name, _) if name == "None" || name == "Err" => {
                 Ok(Value::Variant("None".to_string(), vec![]))
-            }
-            Value::Variant(ref name, ref vals) if name == "Err" => {
-                Ok(Value::Variant("Err".to_string(), vals.clone()))
             }
             other => Ok(Value::Error(format!(
                 "?. operator requires Option or Result, found {}",

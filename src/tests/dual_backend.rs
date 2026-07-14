@@ -4490,6 +4490,76 @@ fn dual_option_none_and_match() {
     );
 }
 
+/// PA-H3: `x?.field` optional chain — Some/None dual-backend.
+#[test]
+fn dual_optional_chain_record_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p: Option<Point> = Some(Point { x: 42, y: 7 })
+            let o = p?.x
+            let v = match o {
+                Some(n) => n,
+                None => -1,
+            }
+            println(v)
+            0
+        }
+        "#,
+        "42"
+    );
+}
+
+/// PA-H3: optional chain on None propagates None.
+#[test]
+fn dual_optional_chain_none() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p: Option<Point> = None
+            let o = p?.x
+            let v = match o {
+                Some(n) => n,
+                None => -1,
+            }
+            println(v)
+            0
+        }
+        "#,
+        "-1"
+    );
+}
+
+/// PA-H3: Result Ok/Err also support `?.` → Option.
+#[test]
+fn dual_optional_chain_result_ok_err() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let ok: Result<Point, string> = Ok(Point { x: 99, y: 1 })
+            let err: Result<Point, string> = Err("nope")
+            let a = match ok?.x { Some(n) => n, None => -1 }
+            let b = match err?.x { Some(n) => n, None => -2 }
+            println(a + b)
+            0
+        }
+        "#,
+        "97"
+    );
+}
+
 #[test]
 fn dual_option_ok_or() {
     if !can_link() {

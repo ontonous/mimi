@@ -459,6 +459,39 @@ fn ck_c4_pinned_timeout_must_be_literal() {
     );
 }
 
+/// PA-H3: optional chain typechecks and evaluates on Option/Result records.
+#[test]
+fn pa_h3_optional_chain_typecheck_and_interp() {
+    let src = r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p: Option<Point> = Some(Point { x: 42, y: 7 })
+            let o = p?.x
+            match o {
+                Some(n) => n,
+                None => -1,
+            }
+        }
+    "#;
+    assert!(check_source(src).is_ok(), "optional chain should typecheck");
+    let v = super::run_source(src);
+    assert_eq!(v, crate::interp::Value::Int(42));
+
+    let none_src = r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p: Option<Point> = None
+            match p?.x {
+                Some(n) => n,
+                None => -1,
+            }
+        }
+    "#;
+    assert!(check_source(none_src).is_ok());
+    let v = super::run_source(none_src);
+    assert_eq!(v, crate::interp::Value::Int(-1));
+}
+
 #[test]
 fn ck_c1_duplicate_impl_method_key() {
     // CK-C1: two impls registering the same Type_method key should error.
