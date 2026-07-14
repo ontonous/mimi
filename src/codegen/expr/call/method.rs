@@ -1161,6 +1161,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Typed `from_json::<T>(s)` deserialization.
+    /// Decode a JSON C string pointer into an internal value of `ty`.
+    /// Used by turbofish `from_json::<T>` and by export-wrapper JSON ABI.
+    pub(in crate::codegen) fn compile_from_json_raw(
+        &mut self,
+        ty: &Type,
+        raw_ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.compile_from_json_turbofish_with_ptr(std::slice::from_ref(ty), raw_ptr)
+    }
+
     fn compile_from_json_turbofish(
         &mut self,
         type_args: &[Type],
@@ -1182,6 +1192,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_pointer_value(),
             _ => return Err("from_json argument must be a string".into()),
         };
+        self.compile_from_json_turbofish_with_ptr(type_args, raw_ptr)
+    }
+
+    fn compile_from_json_turbofish_with_ptr(
+        &mut self,
+        type_args: &[Type],
+        raw_ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Body continues with existing match on type_args[0] using raw_ptr.
 
         match &type_args[0] {
             Type::Name(n, _) if n == "i32" || n == "i64" => {

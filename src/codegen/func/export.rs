@@ -204,11 +204,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if self.repr_c_record_names.contains(name.as_str()) {
                         self.convert_c_reprc_record_to_internal(c_val, name)
                     } else if self.record_type_names.contains(name.as_str()) || name == "List" {
-                        // JSON-serialized types: not yet supported in export wrapper.
-                        Err(CompileError::LlvmError(format!(
-                            "export wrapper: JSON boundary for '{}' not implemented",
-                            name
-                        )))
+                        // C ABI passes a JSON C string pointer for non-repr(C)
+                        // records and List; decode via the same from_json path.
+                        let pv = c_val.into_pointer_value();
+                        self.compile_from_json_raw(ty, pv)
                     } else {
                         Err(CompileError::LlvmError(format!(
                             "export wrapper: unsupported argument type '{}'",
@@ -286,6 +285,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {
                     if self.repr_c_record_names.contains(name.as_str()) {
                         self.convert_internal_reprc_record_to_c(internal_val, name)
+                    } else if self.record_type_names.contains(name.as_str()) || name == "List" {
+                        // Return as heap JSON C string (caller frees).
+                        self.export_value_as_json_cstr(internal_val, ty)
                     } else {
                         Err(CompileError::LlvmError(format!(
                             "export wrapper: unsupported return type '{}'",
@@ -298,6 +300,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "export wrapper: unsupported return type '{}'",
                 crate::core::fmt_type(ty)
             ))),
+        }
+    }
+
+    /// Serialize an internal List/Record value to a heap JSON C string for export.
+    fn export_value_as_json_cstr(
+        &mut self,
+        internal_val: BasicValueEnum<'ctx>,
+        ty: &Type,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        match ty {
+            Type::Name(n, args) if n == "List" => {
+                let list_struct_ty = self.list_struct_type();
+                let alloca = self.build_alloca(BasicTypeEnum::StructType(list_struct_ty), "exp_list")?;
+                match internal_val {
+                    BasicValueEnum::StructValue(sv) => self.build_store(alloca, sv)?,
+                    BasicValueEnum::PointerValue(pv) => {
+                        let loaded = self
+                            .builder
+                            .build_load(BasicTypeEnum::StructType(list_struct_ty), pv, "exp_list_ld")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_struct_value();
+                        self.build_store(alloca, loaded)?;
+                    }
+                    _ => {
+                        return Err(CompileError::LlvmError(
+                            "export List return: unexpected value kind".into(),
+                        ))
+                    }
+                }
+                let elem = args.first().and_then(|t| match t {
+                    Type::Name(en, _) => Some(en.as_str()),
+                    _ => None,
+                });
+                let rt_fn = match elem {
+                    Some("string") => "mimi_list_str_to_json",
+                    Some("f64") | Some("f32") => "mimi_list_f64_to_json",
+                    Some("bool") => "mimi_list_bool_to_json",
+                    _ => "mimi_list_i64_to_json",
+                };
+                let func = self.get_runtime_fn(rt_fn)?;
+                let raw = self
+                    .build_call(
+                        func,
+                        &[BasicMetadataValueEnum::PointerValue(alloca)],
+                        "export_list_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list to_json void")?
+                    .into_pointer_value();
+                // Do not free on export return — C caller owns the buffer.
+                Ok(BasicValueEnum::PointerValue(raw))
+            }
+            Type::Name(n, _) if self.record_type_names.contains(n.as_str()) => {
+                // Reuse to_json specialized path via temporary call-site shape:
+                // build snprintf record path by calling compile_call is heavy;
+                // fall back to error for nested records until specialized.
+                Err(CompileError::LlvmError(format!(
+                    "export wrapper: returning non-repr(C) record '{}' as JSON not yet wired; use List or scalars",
+                    n
+                )))
+            }
+            _ => Err(CompileError::LlvmError(
+                "export_value_as_json_cstr: unsupported type".into(),
+            )),
         }
     }
 
