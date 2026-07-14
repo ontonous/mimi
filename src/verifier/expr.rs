@@ -687,15 +687,37 @@ fn float_to_z3_real(f: f64) -> Option<Z3Real> {
         Z3Real::from_rational_str(&num_str, &den_str)
     } else if s.contains('e') || s.contains('E') {
         // Scientific notation without decimal point (e.g. "1e20").
-        // Parse and convert to decimal fraction.
-        // f is finite and not NaN (checked above), so this is safe.
-        let abs_f = f.abs();
-        // Multiply by 10^18 to get an integer numerator, then divide.
-        // This loses precision for very large/small values, but Z3
-        // real encoding is approximate anyway.
-        let scaled = (abs_f * 1e18).round() as i64;
-        let num = if f < 0.0 { -scaled } else { scaled };
-        Z3Real::from_rational_str(&num.to_string(), "1000000000000000000")
+        // AU-C1: avoid `f64 * 1e18 as i64` overflow (debug panic / wrong constraint).
+        // Encode via string split on 'e'/'E' into mantissa/exponent rationals.
+        let (mant, exp) = if let Some(idx) = s.find(['e', 'E']) {
+            let mant = &s[..idx];
+            let exp: i32 = s[idx + 1..].parse().unwrap_or(0);
+            (mant.to_string(), exp)
+        } else {
+            (s.clone(), 0)
+        };
+        // Strip sign from mantissa for digit handling.
+        let (sign, mant_digits) = if let Some(rest) = mant.strip_prefix('-') {
+            ("-", rest)
+        } else if let Some(rest) = mant.strip_prefix('+') {
+            ("", rest)
+        } else {
+            ("", mant.as_str())
+        };
+        let mant_digits = if mant_digits.is_empty() {
+            "0"
+        } else {
+            mant_digits
+        };
+        if exp >= 0 {
+            let zeros = "0".repeat(exp as usize);
+            let num = format!("{}{}{}", sign, mant_digits, zeros);
+            Z3Real::from_rational_str(&num, "1")
+        } else {
+            let den = format!("1{}", "0".repeat((-exp) as usize));
+            let num = format!("{}{}", sign, mant_digits);
+            Z3Real::from_rational_str(&num, &den)
+        }
     } else {
         // Integer-valued float: use integer directly (no overflow from precise ints).
         Z3Real::from_rational_str(&s, "1")

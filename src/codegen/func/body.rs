@@ -513,19 +513,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         Before: FnOnce(&mut Self, &mut HashMap<String, VarEntry<'ctx>>) -> MimiResult<()>,
         After: FnOnce(&mut Self, &mut HashMap<String, VarEntry<'ctx>>) -> MimiResult<()>,
     {
+        // CG-H4: save outer break/continue targets and always restore them,
+        // even when body compilation returns Err (nested-loop target leak).
         let old_break = self.loop_break.take();
         let old_continue = self.loop_continue.take();
         self.loop_break = Some(merge_bb);
         self.loop_continue = Some(loop_header);
-        before_body(self, vars)?;
-        self.compile_block(body, vars)?;
-        if !self.block_has_terminator() {
-            after_body(self, vars)?;
-            self.build_br(loop_header)?;
-        }
+        let result = (|| {
+            before_body(self, vars)?;
+            self.compile_block(body, vars)?;
+            if !self.block_has_terminator() {
+                after_body(self, vars)?;
+                self.build_br(loop_header)?;
+            }
+            Ok(())
+        })();
         self.loop_break = old_break;
         self.loop_continue = old_continue;
-        Ok(())
+        result
     }
 
     /// Coerce an iterable expression value into a list pointer.

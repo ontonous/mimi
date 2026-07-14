@@ -40,7 +40,8 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let default = self.infer_expr(&args[0], scopes);
-                    if !same_type(&default, inner) {
+                    // IF-C3: unify (not same_type) so TypeVars resolve.
+                    if self.unification.unify(&default, inner).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -51,7 +52,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                (*inner).clone()
+                self.unification.resolve(inner)
             }
             "is_some" | "is_none" => Type::Name("bool".into(), vec![]),
             "ok_or" => {
@@ -59,7 +60,7 @@ impl<'a> Checker<'a> {
                     .first()
                     .map(|arg| self.infer_expr(arg, scopes))
                     .unwrap_or_else(|| Type::Name("unknown".into(), vec![]));
-                Type::Result(Box::new((*inner).clone()), Box::new(err_ty))
+                Type::Result(Box::new(self.unification.resolve(inner)), Box::new(err_ty))
             }
             "map" => {
                 if args.len() != 1 {
@@ -80,7 +81,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Some(first) = params.first() {
-                    if !same_type(first, inner) {
+                    // IF-C3: unify for TypeVar resolution.
+                    if self.unification.unify(first, inner).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -112,7 +114,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Some(first) = params.first() {
-                    if !same_type(first, inner) {
+                    // IF-C3: unify for TypeVar resolution.
+                    if self.unification.unify(first, inner).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -179,7 +182,8 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let default = self.infer_expr(&args[0], scopes);
-                    if !same_type(&default, ok_ty) {
+                    // IF-C3: unify (not same_type) so TypeVars resolve.
+                    if self.unification.unify(&default, ok_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -190,12 +194,12 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                (*ok_ty).clone()
+                self.unification.resolve(ok_ty)
             }
             "is_ok" | "is_err" => Type::Name("bool".into(), vec![]),
             "ok_or" => {
                 // Result::ok_or is not a standard combinator; treat it as producing Option<T>.
-                Type::Option(Box::new((*ok_ty).clone()))
+                Type::Option(Box::new(self.unification.resolve(ok_ty)))
             }
             "map" => {
                 if args.len() != 1 {
@@ -222,7 +226,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Some(first) = params.first() {
-                    if !same_type(first, ok_ty) {
+                    // IF-C3: unify for TypeVar resolution.
+                    if self.unification.unify(first, ok_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -254,7 +259,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Some(first) = params.first() {
-                    if !same_type(first, ok_ty) {
+                    // IF-C3: unify for TypeVar resolution.
+                    if self.unification.unify(first, ok_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -310,7 +316,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Some(first) = params.first() {
-                    if !same_type(first, err_ty) {
+                    // IF-C3: unify for TypeVar resolution.
+                    if self.unification.unify(first, err_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(

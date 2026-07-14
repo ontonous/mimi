@@ -741,17 +741,23 @@ impl VerifierCtx {
                     continue;
                 }
                 if let Some(val) = model.eval(z3_var, true) {
+                    // AU-C2: skip den==0 (would divide by zero).
                     if let Some((num, den)) = val.as_rational() {
-                        let f = (num as f64) / (den as f64);
-                        real_assignments.push((name.clone(), f));
+                        if den != 0 {
+                            let f = (num as f64) / (den as f64);
+                            real_assignments.push((name.clone(), f));
+                        }
                     }
                 }
             }
             if let Some(z3_var) = vars.real_vars.get("result") {
                 if let Some(val) = model.eval(z3_var, true) {
+                    // AU-C2: skip den==0.
                     if let Some((num, den)) = val.as_rational() {
-                        let f = (num as f64) / (den as f64);
-                        real_assignments.push(("result".to_string(), f));
+                        if den != 0 {
+                            let f = (num as f64) / (den as f64);
+                            real_assignments.push(("result".to_string(), f));
+                        }
                     }
                 }
             }
@@ -870,7 +876,14 @@ impl VerifierCtx {
                     model
                         .eval(z3_var, true)
                         .and_then(|v| v.as_rational())
-                        .map(|(num, den)| num as f64 / den as f64)
+                        // AU-C2: den==0 would produce infinity/SIGFPE.
+                        .and_then(|(num, den)| {
+                            if den == 0 {
+                                None
+                            } else {
+                                Some(num as f64 / den as f64)
+                            }
+                        })
                 })
                 .or_else(|| {
                     vars.get_int(name)
@@ -885,7 +898,14 @@ impl VerifierCtx {
                             model
                                 .eval(z3_var, true)
                                 .and_then(|v| v.as_rational())
-                                .map(|(num, den)| num as f64 / den as f64)
+                                // AU-C2: den==0 would produce infinity/SIGFPE.
+                                .and_then(|(num, den)| {
+                                    if den == 0 {
+                                        None
+                                    } else {
+                                        Some(num as f64 / den as f64)
+                                    }
+                                })
                         })
                         .or_else(|| {
                             vars.get_int(&old_name)
@@ -944,10 +964,11 @@ impl VerifierCtx {
                             None => false,
                         }
                     } else if let Some(z3_var) = vars.get_real(&old_name) {
+                        // AU-C2: den==0 is not a valid rational truth value.
                         model
                             .eval(z3_var, true)
                             .and_then(|v| v.as_rational())
-                            .map(|(num, _den)| num != 0)
+                            .map(|(num, den)| den != 0 && num != 0)
                             .unwrap_or(false)
                     } else {
                         false

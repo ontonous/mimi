@@ -2671,7 +2671,9 @@ pub extern "C" fn mimi_set_to_list(handle: SetHandle, out_len: *mut i64) -> *mut
         return std::ptr::null_mut();
     }
     let mut vec: Vec<SetValueHandle> = set.inner.iter().copied().collect();
+    // RT-C5: shrink so len == capacity, matching mimi_set_list_free reconstruction.
     vec.shrink_to_fit();
+    debug_assert_eq!(vec.len(), vec.capacity());
     let ptr = vec.as_mut_ptr();
     std::mem::forget(vec); // ownership transferred to caller
     ptr
@@ -2685,12 +2687,12 @@ pub extern "C" fn mimi_set_list_free(ptr: *mut SetValueHandle, len: i64) {
     if ptr.is_null() || len <= 0 {
         return;
     }
+    // RT-C5: mimi_set_to_list always shrink_to_fit, so capacity == len.
     // Reconstruct the Vec from the raw pointer and length, then drop it.
-    // SAFETY: `ptr` was obtained from `mimi_set_to_list` which allocates via
-    // `Vec::into_raw_parts()` on a `Vec<SetValueHandle>`. The `len` parameter
-    // matches the original length and capacity (both were `len` at allocation).
-    // `SetValueHandle` has no custom Drop, so dropping is safe. The pointer
-    // is non-null (checked above) and `len > 0` (checked above).
+    // SAFETY: `ptr` was obtained from `mimi_set_to_list` which forgets a
+    // `Vec<SetValueHandle>` after shrink_to_fit (len == capacity).
+    // `SetValueHandle` has no custom Drop. The pointer is non-null and
+    // `len > 0` (checked above).
     unsafe {
         drop(Vec::from_raw_parts(ptr, len as usize, len as usize));
     }

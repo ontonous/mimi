@@ -60,9 +60,13 @@ impl<'a> Interpreter<'a> {
         // SAFETY: rvalue must be a valid, writable buffer of sufficient
         // size for the struct return type. cif.as_raw_ptr() provides a
         // valid CIF descriptor for libffi.
-        // SAFETY: code_ptr was constructed from a valid non-null function pointer
-        // address, so as_safe_fun returns Some. We deref to obtain the concrete
-        // extern "C" fn pointer required by raw::ffi_call.
+        // IP-C6: reject null code pointers before calling into libffi.
+        // SAFETY: code_ptr must have been constructed from a function address;
+        // as_ptr exposes the raw pointer for the null check; as_safe_fun yields
+        // the concrete extern "C" fn pointer for ffi_call.
+        if code_ptr.as_ptr().is_null() {
+            return;
+        }
         let fn_ptr = unsafe { *code_ptr.as_safe_fun() };
         // SAFETY: ffi_call is called with a valid CIF, function pointer, return
         // buffer, and argument array; all lifetimes exceed this call.
@@ -430,10 +434,11 @@ impl<'a> Interpreter<'a> {
             n
         };
 
-        if nread <= 0 {
+        // IP-C4: i64::MIN is a legal C return value; do not treat it as an error
+        // sentinel. Crash/timeout/signal paths already return Err above; a full
+        // 8-byte read is the success criterion.
+        if nread < std::mem::size_of::<i64>() as isize {
             Err("FFI safety: C function exited without producing a result".to_string())
-        } else if result == i64::MIN {
-            Err("FFI safety: C function returned an error".to_string())
         } else {
             Ok(result)
         }
