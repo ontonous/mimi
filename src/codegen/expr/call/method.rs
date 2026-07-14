@@ -1737,6 +1737,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(len_gep, safe_len)?;
                 self.build_load(str_ty, str_alloca, "str_val")
             }
+            // Option<T> via Name form (common after resolve_type).
+            crate::ast::Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                self.compile_json_option_field(
+                    type_name,
+                    &args[0],
+                    raw_val,
+                    json_as_i64_fn,
+                    json_as_f64_fn,
+                    json_as_bool_fn,
+                )
+            }
+            crate::ast::Type::Option(inner) => self.compile_json_option_field(
+                type_name,
+                inner,
+                raw_val,
+                json_as_i64_fn,
+                json_as_f64_fn,
+                json_as_bool_fn,
+            ),
             // Nested Record: json_get_string returns the nested object as a
             // JSON substring; recurse into compile_from_json_record.
             crate::ast::Type::Name(nested_name, _) => {
@@ -1781,6 +1800,182 @@ impl<'ctx> CodeGenerator<'ctx> {
                 type_name, field.ty
             ))),
         }
+    }
+
+    /// Deserialize a JSON value into `Option<T>` (`{i1, i64}` canonical).
+    fn compile_json_option_field(
+        &mut self,
+        parent_type: &str,
+        inner: &crate::ast::Type,
+        raw_val: PointerValue<'ctx>,
+        json_as_i64_fn: Option<inkwell::values::FunctionValue<'ctx>>,
+        json_as_f64_fn: Option<inkwell::values::FunctionValue<'ctx>>,
+        json_as_bool_fn: Option<inkwell::values::FunctionValue<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let bool_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
+        let option_sty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no function for Option field".to_string())?;
+        let some_bb = self.context.append_basic_block(function, "json_opt_some");
+        let none_bb = self.context.append_basic_block(function, "json_opt_none");
+        let merge_bb = self.context.append_basic_block(function, "json_opt_merge");
+
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let is_null = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                raw_val,
+                i8_ptr.const_null(),
+                "json_opt_null",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+        // Also treat the literal "null" as None.
+        let null_lit = self
+            .builder
+            .build_global_string_ptr("null", "json_null_lit")
+            .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
+        let strcmp_fn = self.get_runtime_fn("strcmp")?;
+        let cmp_null = self
+            .build_call(
+                strcmp_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_val),
+                    BasicMetadataValueEnum::PointerValue(null_lit.as_pointer_value()),
+                ],
+                "strcmp_null",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("strcmp returned void")?
+            .into_int_value();
+        let is_null_lit = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                cmp_null,
+                self.context.i32_type().const_int(0, false),
+                "is_null_lit",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+        let is_none = self
+            .builder
+            .build_or(is_null, is_null_lit, "json_opt_is_none")
+            .map_err(|e| CompileError::LlvmError(format!("or: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_none, none_bb, some_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+
+        // Some path: parse inner as a temporary Field of type T.
+        self.builder.position_at_end(some_bb);
+        let fake_field = crate::ast::Field {
+            name: "opt_inner".into(),
+            ty: inner.clone(),
+        };
+        let inner_val = self.compile_json_scalar_field(
+            parent_type,
+            &fake_field,
+            raw_val,
+            json_as_i64_fn,
+            json_as_f64_fn,
+            json_as_bool_fn,
+        )?;
+        let pay_i64 = match inner_val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "opt_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                } else if bw > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "opt_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
+                } else {
+                    iv
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => {
+                let f64_ty = self.context.f64_type();
+                let as_f64 = if fv.get_type().get_bit_width() == 64 {
+                    fv
+                } else {
+                    self.builder
+                        .build_float_ext(fv, f64_ty, "opt_fpext")
+                        .map_err(|e| CompileError::LlvmError(format!("fpext: {}", e)))?
+                };
+                self.builder
+                    .build_bit_cast(as_f64, i64_ty, "opt_fbits")
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                    .into_int_value()
+            }
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "opt_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
+            BasicValueEnum::StructValue(sv) => {
+                let tmp = self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "opt_s")?;
+                self.build_store(tmp, sv)?;
+                self.builder
+                    .build_ptr_to_int(tmp, i64_ty, "opt_sptr")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+            }
+            other => {
+                return Err(CompileError::Generic(format!(
+                    "from_json Option: unsupported inner value {:?}",
+                    other.get_type()
+                )));
+            }
+        };
+        let some_slot = self.build_alloca(BasicTypeEnum::StructType(option_sty), "opt_some")?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 0, "d")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            bool_ty.const_int(1, false),
+        )?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 1, "p")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            pay_i64,
+        )?;
+        let some_val = self.build_load(BasicTypeEnum::StructType(option_sty), some_slot, "s")?;
+        self.build_br(merge_bb)?;
+        let some_end = self.builder.get_insert_block().unwrap_or(some_bb);
+
+        self.builder.position_at_end(none_bb);
+        let none_slot = self.build_alloca(BasicTypeEnum::StructType(option_sty), "opt_none")?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(BasicTypeEnum::StructType(option_sty), none_slot, 0, "nd")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            bool_ty.const_int(0, false),
+        )?;
+        self.build_store(
+            self.gep()
+                .build_struct_gep(BasicTypeEnum::StructType(option_sty), none_slot, 1, "np")
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+            i64_ty.const_int(0, false),
+        )?;
+        let none_val = self.build_load(BasicTypeEnum::StructType(option_sty), none_slot, "n")?;
+        self.build_br(merge_bb)?;
+        let none_end = self.builder.get_insert_block().unwrap_or(none_bb);
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(BasicTypeEnum::StructType(option_sty), "opt_phi")
+            .map_err(|e| CompileError::LlvmError(format!("phi: {}", e)))?;
+        phi.add_incoming(&[(&some_val, some_end), (&none_val, none_end)]);
+        Ok(phi.as_basic_value())
     }
 
     pub(in crate::codegen) fn compile_expr_or_func_ref(

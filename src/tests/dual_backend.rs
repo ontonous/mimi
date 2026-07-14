@@ -6502,6 +6502,28 @@ fn dual_from_json_nested_record() {
     );
 }
 
+/// CG-H2: Option fields in from_json::<T> (Some + null → None).
+#[test]
+fn dual_from_json_option_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Wrap { inner: Option<i32>, name: string }
+        func main() -> i32 {
+            let a = from_json::<Wrap>("{\"inner\":42,\"name\":\"x\"}")
+            let b = from_json::<Wrap>("{\"inner\":null,\"name\":\"y\"}")
+            let va = match a.inner { Some(n) => n, None => -1 }
+            let vb = match b.inner { Some(n) => n, None => -2 }
+            println(va + vb)
+            0
+        }
+        "#,
+        "40"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
