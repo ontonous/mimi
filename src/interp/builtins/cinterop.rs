@@ -37,21 +37,49 @@ impl<'a> Interpreter<'a> {
                 if *ptr == 0 {
                     return Ok(Value::String(String::new()));
                 }
-                // NOTE: catch_unwind only catches Rust panics, NOT SIGSEGV (signals).
-                // Reject clearly invalid pointer ranges. Valid heap pointers from
-                // the Mimi runtime are >= 64KB and well below the top of user space.
-                if !(0x10000usize..usize::MAX - 4096).contains(&(*ptr as usize)) {
+                // IP-H1: range check + mincore mapped-page probe + bounded NUL scan.
+                // Still TOCTOU vs concurrent munmap, but avoids SIGSEGV on
+                // clearly unmapped addresses (same strategy as runtime RT-H4).
+                let addr = *ptr as usize;
+                if !(0x10000usize..usize::MAX - 4096).contains(&addr) {
                     return Err(InterpError::new(format!(
                         "c_str_to_string: invalid pointer {:#x} (out of valid range)",
                         ptr
                     )));
                 }
-                // SAFETY: pointer is non-null and in a valid heap range.
-                // SIGSEGV is still possible if memory has been freed between the
-                // range check and dereference (TOCTOU), but this is the best
-                // we can do without signal handlers.
-                let c_str = unsafe { std::ffi::CStr::from_ptr(*ptr as *const i8) };
-                Ok(Value::String(c_str.to_string_lossy().into_owned()))
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+                let page_size = if page_size == 0 { 4096 } else { page_size };
+                let page_start = (addr / page_size) * page_size;
+                let mut mvec: u8 = 0;
+                let mapped = unsafe {
+                    libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec)
+                };
+                if mapped != 0 {
+                    return Err(InterpError::new(format!(
+                        "c_str_to_string: pointer {:#x} is not mapped",
+                        ptr
+                    )));
+                }
+                let page_offset = addr - page_start;
+                let max_scan = page_size.saturating_sub(page_offset).min(64 * 1024);
+                let base = *ptr as *const u8;
+                let mut len = 0usize;
+                // SAFETY: mincore confirmed page is mapped; scan stays in-page.
+                unsafe {
+                    while len < max_scan {
+                        if *base.add(len) == 0 {
+                            let slice = std::slice::from_raw_parts(base, len);
+                            return Ok(Value::String(
+                                String::from_utf8_lossy(slice).into_owned(),
+                            ));
+                        }
+                        len += 1;
+                    }
+                }
+                Err(InterpError::new(format!(
+                    "c_str_to_string: no NUL terminator within {} bytes at {:#x}",
+                    max_scan, ptr
+                )))
             }
             other => Err(InterpError::new(format!(
                 "c_str_to_string: argument must be a pointer (int), found {}",
