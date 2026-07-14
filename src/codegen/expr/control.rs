@@ -225,6 +225,50 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             end_idx
         };
+        // CG-H9 (deep audit): clamp start/end indices to [0, list_len] to prevent
+        // OOB pointer arithmetic when user-provided indices exceed list bounds.
+        let zero = i64_ty.const_int(0, false);
+        let start_neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, start_idx, zero, "start_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let start_idx = self
+            .builder
+            .build_select(start_neg, zero, start_idx, "start_clamp_low")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let start_exceeds = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                start_idx,
+                list_len,
+                "start_exceeds",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let start_idx = self
+            .builder
+            .build_select(start_exceeds, list_len, start_idx, "start_clamp_high")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let end_neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, end_idx, zero, "end_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let end_idx = self
+            .builder
+            .build_select(end_neg, zero, end_idx, "end_clamp_low")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let end_exceeds = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGT, end_idx, list_len, "end_exceeds")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let end_idx = self
+            .builder
+            .build_select(end_exceeds, list_len, end_idx, "end_clamp_high")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
         // Compute new length = end - start (clamped to 0 if start > end)
         let start_gt_end = self
             .builder
