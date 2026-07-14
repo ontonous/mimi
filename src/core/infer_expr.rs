@@ -102,10 +102,27 @@ impl<'a> Checker<'a> {
             // x?.non_existent_field).
             Expr::OptionalChain(inner, field) => {
                 let inner_ty = self.infer_expr(inner, scopes);
+                // Normalize both Type::Option/Result and Type::Name("Option"/"Result", …).
                 let base_ty = match &inner_ty {
                     Type::Option(t) => t.as_ref().clone(),
                     Type::Result(ok, _) => ok.as_ref().clone(),
-                    _ => inner_ty.clone(),
+                    Type::Name(n, args) if n == "Option" && args.len() == 1 => args[0].clone(),
+                    Type::Name(n, args) if n == "Result" && !args.is_empty() => args[0].clone(),
+                    _ => {
+                        // May still be a TypeVar unified to Option later — try resolve.
+                        let resolved = self.unification.resolve(&inner_ty);
+                        match &resolved {
+                            Type::Option(t) => t.as_ref().clone(),
+                            Type::Result(ok, _) => ok.as_ref().clone(),
+                            Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                                args[0].clone()
+                            }
+                            Type::Name(n, args) if n == "Result" && !args.is_empty() => {
+                                args[0].clone()
+                            }
+                            _ => inner_ty.clone(),
+                        }
+                    }
                 };
                 let field_ty = self.infer_field_access_on_type(&base_ty, field, scopes);
                 Type::Option(Box::new(field_ty))

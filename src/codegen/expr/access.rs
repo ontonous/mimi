@@ -365,7 +365,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn expect_struct_type(
+    pub(in crate::codegen) fn expect_struct_type(
         &self,
         obj_type: &str,
     ) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
