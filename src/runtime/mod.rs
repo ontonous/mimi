@@ -3245,6 +3245,68 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
     alloc_c_string(&parts.join(""))
 }
 
+/// Serialize a SetHandle of 0/1 bool values to a JSON array of true/false.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut vals: Vec<i64> = set.inner.iter().copied().collect();
+    vals.sort_unstable(); // false(0) before true(1)
+    let mut parts: Vec<String> = Vec::with_capacity(vals.len() * 2 + 2);
+    parts.push(String::from("["));
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(if *v != 0 {
+            String::from("true")
+        } else {
+            String::from("false")
+        });
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Serialize a SetHandle of f64-bit values to a JSON number array (serde-style).
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut vals: Vec<f64> = set
+        .inner
+        .iter()
+        .map(|v| f64::from_bits(*v as u64))
+        .collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut parts: Vec<String> = Vec::with_capacity(vals.len() * 2 + 2);
+    parts.push(String::from("["));
+    for (i, f) in vals.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        if f.fract() == 0.0 && f.is_finite() {
+            parts.push(format!("{}.0", *f as i64));
+        } else {
+            parts.push(format!("{}", f));
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Serialize a SetHandle of C-string ValueHandles to a JSON string array.
 #[no_mangle]
 pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
