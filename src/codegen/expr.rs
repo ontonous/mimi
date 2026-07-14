@@ -716,6 +716,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(stripped) = name.strip_suffix("_new") {
                         return stripped.to_string();
                     }
+                    // Built-in Option/Result constructors.
+                    if name == "Some" {
+                        let inner = args
+                            .first()
+                            .map(|a| self.infer_object_type(a, vars))
+                            .unwrap_or_default();
+                        return if inner.is_empty() {
+                            "Option".to_string()
+                        } else {
+                            format!("Option<{}>", inner)
+                        };
+                    }
+                    if name == "None" {
+                        return "Option".to_string();
+                    }
+                    if name == "Ok" {
+                        let inner = args
+                            .first()
+                            .map(|a| self.infer_object_type(a, vars))
+                            .unwrap_or_default();
+                        return if inner.is_empty() {
+                            "Result".to_string()
+                        } else {
+                            format!("Result<{},i32>", inner)
+                        };
+                    }
+                    if name == "Err" {
+                        return "Result".to_string();
+                    }
                     // Enum variant constructors → owning enum type name.
                     if let Some((owner, _)) = self.find_variant_owner(name) {
                         return owner;

@@ -6699,6 +6699,42 @@ fn dual_option_float_println() {
     );
 }
 
+/// Nested Option println Some(Some(1)).
+#[test]
+fn dual_nested_option_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(Some(1))
+            println(a)
+            0
+        }
+        "#,
+        "Some(Some(1))"
+    );
+}
+
+/// List of Option println.
+#[test]
+fn dual_list_option_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [Some(1), None, Some(3)]
+            println(xs)
+            0
+        }
+        "#,
+        "[Some(1), None(), Some(3)]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
