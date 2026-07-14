@@ -897,8 +897,26 @@ impl Parser {
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
                 Err(e) => {
+                    // PR-H1: sync to block terminator / statement boundary instead
+                    // of single-token skip (which causes cascade errors).
                     self.errors.push(e);
-                    self.advance();
+                    let sync = [
+                        TokenKind::Semi,
+                        TokenKind::Newline,
+                        terminator.clone(),
+                        TokenKind::RBrace,
+                        TokenKind::Dedent,
+                        TokenKind::Func,
+                        TokenKind::Eof,
+                    ];
+                    if !self.recover_to_sync(&sync) {
+                        break;
+                    }
+                    // Consume the sync token when it is ';' or newline so the
+                    // next iteration starts at the following statement.
+                    if self.at(&TokenKind::Semi) || self.at(&TokenKind::Newline) {
+                        self.advance();
+                    }
                 }
             }
         }
