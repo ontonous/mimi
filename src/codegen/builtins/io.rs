@@ -1674,6 +1674,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
+    /// Strip first type argument from `Prefix<A, …>` / `Prefix<A>` → `A`.
+    /// Handles nested brackets (e.g. `Result<Option<Map<string, i32>>, i32>`).
+    fn strip_first_type_arg(type_name: &str, prefix: &str) -> Option<String> {
+        let rest = type_name.strip_prefix(prefix)?.strip_prefix('<')?;
+        let mut depth = 0i32;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return Some(rest[..i].trim().to_string());
+                    }
+                }
+                ',' if depth == 0 => return Some(rest[..i].trim().to_string()),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Format Result {i1, ok, err} as `Ok(...)` / `Err(...)` (int, string, or record Ok).
     fn emit_result_to_string(
         &self,
@@ -2023,8 +2044,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                         )
                     {
-                        // Nested Option
-                        let nested = self.emit_option_to_string(sv, None, "Option")?;
+                        // Nested Option — pass full Option<…> type from Result Ok arm.
+                        let opt_ty = Self::strip_first_type_arg(arg_type, "Result")
+                            .unwrap_or_else(|| "Option".to_string());
+                        let nested = self.emit_option_to_string(sv, None, &opt_ty)?;
                         let fmt = self
                             .builder
                             .build_global_string_ptr(
@@ -2053,24 +2076,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     {
                         // Nested custom enum {i32, i64}
-                        let enum_ty = arg_type
-                            .strip_prefix("Result<")
-                            .and_then(|s| s.split(',').next())
-                            .map(|s| s.trim())
-                            .filter(|n| {
-                                self.type_defs.get(*n).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
-                                })
+                        let ok_inner = Self::strip_first_type_arg(arg_type, "Result")
+                            .unwrap_or_default();
+                        let enum_ty = if self.type_defs.get(&ok_inner).is_some_and(|td| {
+                            matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                        }) {
+                            Some(ok_inner.as_str())
+                        } else {
+                            self.type_defs.iter().find_map(|(n, td)| {
+                                if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
+                                    Some(n.as_str())
+                                } else {
+                                    None
+                                }
                             })
-                            .or_else(|| {
-                                self.type_defs.iter().find_map(|(n, td)| {
-                                    if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
-                                        Some(n.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                            });
+                        };
                         if let Some(et) = enum_ty {
                             let nested = self.emit_enum_display(et, sv)?;
                             let fmt = self

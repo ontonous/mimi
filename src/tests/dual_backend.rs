@@ -7042,6 +7042,25 @@ fn dual_list_set_println() {
     );
 }
 
+/// Result of Option of Map println (nested type-arg strip).
+#[test]
+fn dual_result_option_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"x\":9}")
+            let a: Result<Option<Map<string, i32>>, i32> = Ok(Some(m))
+            println(a)
+            0
+        }
+        "#,
+        "Ok(Some({\"x\":9}))"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
