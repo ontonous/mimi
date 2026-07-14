@@ -309,6 +309,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     } else if inner.starts_with("Set") {
                         "mimi_list_set_to_json"
+                    } else if inner.starts_with("Option") {
+                        "mimi_list_option_i64_to_json"
                     } else {
                         match inner {
                             "string" => "mimi_list_str_to_json",

@@ -1404,6 +1404,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_int_value();
                         val
                     }
+                    Type::Name(n, args) if n == "List" => {
+                        // Nested List: recursive from_json on element JSON fragment.
+                        let nested_ty = Type::Name("List".into(), args.clone());
+                        let nested =
+                            self.compile_from_json_turbofish_with_ptr(&[nested_ty], elem_json)?;
+                        match nested {
+                            BasicValueEnum::StructValue(sv) => {
+                                let list_ty = self.list_struct_type();
+                                let size =
+                                    self.llvm_type_size_bytes(BasicTypeEnum::StructType(list_ty));
+                                let heap = self.malloc_or_abort(
+                                    i64_ty.const_int(size, false),
+                                    "list_list_heap",
+                                )?;
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let typed = self
+                                    .build_bit_cast(
+                                        heap.into(),
+                                        BasicTypeEnum::PointerType(i8_ptr),
+                                        "list_list_ptr",
+                                    )?
+                                    .into_pointer_value();
+                                self.build_store(typed, sv)?;
+                                self.build_ptr_to_int(typed, i64_ty, "list_list_as_i64")?
+                            }
+                            BasicValueEnum::PointerValue(pv) => {
+                                self.build_ptr_to_int(pv, i64_ty, "list_list_ptr_i64")?
+                            }
+                            BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "from_json List List: unexpected {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        }
+                    }
                     Type::Name(n, args) if n == "Map" => {
                         let val_is_string = args
                             .get(1)

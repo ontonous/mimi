@@ -1457,6 +1457,46 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
     alloc_c_string(&parts.join(""))
 }
 
+/// Render `List<Option<i32>>` (ptrtoint of Option structs) as JSON array of
+/// `{"Some":[n]}` / `"None"` tags matching interp to_json.
+#[no_mangle]
+pub extern "C" fn mimi_list_option_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let ptr = unsafe { *(lst.data as *const i64).offset(i) } as *const (u8, i64);
+        // Layout is {i1 disc, i64 payload} but packed as struct; load carefully.
+        // We stored Option as LLVM {i1, i64} — use byte-level: first byte/bit as disc.
+        if ptr.is_null() {
+            parts.push(String::from("\"None\""));
+            continue;
+        }
+        // SAFETY: ptr is heap Option from from_json List Option path.
+        let disc = unsafe { *(ptr as *const u8) };
+        let payload = unsafe { *((ptr as *const u8).add(8) as *const i64) };
+        if disc != 0 {
+            parts.push(format!("{{\"Some\":[{}]}}", payload));
+        } else {
+            parts.push(String::from("\"None\""));
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Render `List<Map>` (i64 map handles in data slots) as `[{"a":1}, ...]`.
 #[no_mangle]
 pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
