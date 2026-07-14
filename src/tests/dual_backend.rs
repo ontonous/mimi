@@ -6640,6 +6640,27 @@ fn dual_option_println() {
     );
 }
 
+/// Option of record println formats Some(Point { ... }) / None().
+#[test]
+fn dual_option_record_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let a = Some(Point { x: 1, y: 2 })
+            let b: Option<Point> = None
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(Point { x: 1, y: 2 })\nNone()"
+    );
+}
+
 /// Result println formats Ok(n) / Err(n) on both backends.
 #[test]
 fn dual_result_println() {
