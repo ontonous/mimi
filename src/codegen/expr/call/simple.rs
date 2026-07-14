@@ -600,6 +600,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         err
                     };
+                    if obj_type.contains("Map<") {
+                        let mode = if obj_type.contains("Map<string, string>") {
+                            1i64
+                        } else if obj_type.contains("Map<string, bool>") {
+                            2
+                        } else if obj_type.contains("Map<string, f64>")
+                            || obj_type.contains("Map<string, f32>")
+                        {
+                            3
+                        } else {
+                            0
+                        };
+                        let func = self.get_runtime_fn("mimi_result_map_to_json")?;
+                        let raw = self
+                            .build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(disc_i64),
+                                    BasicMetadataValueEnum::IntValue(ok_i64),
+                                    BasicMetadataValueEnum::IntValue(err_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "to_json_res_map",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_result_map_to_json void")?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     let func = self.get_runtime_fn("mimi_result_i64_to_json")?;
                     let raw = self
                         .build_call(

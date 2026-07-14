@@ -1404,6 +1404,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_int_value();
                         val
                     }
+                    Type::Name(n, args) if n == "Map" => {
+                        let val_is_string = args
+                            .get(1)
+                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                            .unwrap_or(false);
+                        let val_is_float = args
+                            .get(1)
+                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                            .unwrap_or(false);
+                        let fn_name = if val_is_string {
+                            "mimi_map_from_json_string"
+                        } else if val_is_float {
+                            "mimi_map_from_json_f64"
+                        } else {
+                            "mimi_map_from_json_i64"
+                        };
+                        let func = self.get_runtime_fn(fn_name)?;
+                        let r = self.build_call(
+                            func,
+                            &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                            "list_map_from_json",
+                        )?;
+                        self.expect_basic_value(&r, fn_name)?.into_int_value()
+                    }
+                    Type::Name(n, args) if n == "Set" => {
+                        let elem_is_string = args
+                            .first()
+                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                            .unwrap_or(false);
+                        let elem_is_float = args
+                            .first()
+                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                            .unwrap_or(false);
+                        let fn_name = if elem_is_string {
+                            "mimi_set_from_json_string"
+                        } else if elem_is_float {
+                            "mimi_set_from_json_f64"
+                        } else {
+                            "mimi_set_from_json_i64"
+                        };
+                        let func = self.get_runtime_fn(fn_name)?;
+                        let r = self.build_call(
+                            func,
+                            &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                            "list_set_from_json",
+                        )?;
+                        self.expect_basic_value(&r, fn_name)?.into_int_value()
+                    }
                     Type::Name(inner_n, _) => {
                         // Record type: deserialize each JSON element into a heap-allocated struct
                         let fields_opt =
