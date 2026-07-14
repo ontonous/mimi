@@ -201,7 +201,8 @@ unsafe extern "C" fn mimi_callback_trampoline_fn(
     }));
     if outcome.is_err() {
         eprintln!("[mimi] FFI safety: Rust panic caught in C callback trampoline");
-        *result = i64::MIN;
+        // IP-C4: i64::MIN is a legal integer return; use 0 as error sentinel.
+        *result = 0;
     }
 }
 
@@ -328,7 +329,7 @@ unsafe fn callback_trampoline_inner(
     if interp_ptr.is_null() {
         // Cross-thread / async callback: the TLS interpreter context has been
         // cleared. Try to evaluate using a temporary Interpreter from the
-        // globally stored program file. If that also fails, return i64::MIN.
+        // globally stored program file. If that also fails, return 0 (IP-C4).
         let xt_result = evaluate_cross_thread_callback(&closure, mimi_args, ret_is_float);
         match xt_result {
             Ok(val) => {
@@ -337,10 +338,10 @@ unsafe fn callback_trampoline_inner(
             Err(msg) => {
                 eprintln!(
                     "[mimi] WARNING: cross-thread callback {} evaluation failed: {}. \
-                     Returning i64::MIN.",
+                     Returning 0 (IP-C4: i64::MIN is a legal C return).",
                     callback_id, msg,
                 );
-                *result = i64::MIN;
+                *result = 0;
             }
         }
         // SAFETY: arg_free_mask marks args that were transferred from C as
@@ -372,18 +373,14 @@ unsafe fn callback_trampoline_inner(
     });
     match closure_result {
         Ok(val) => {
-            // FFI-DESIGN-3: ret_is_float is a hint from the C signature; if the
-            // actual return type differs (e.g., Bool returned where f64 expected),
-            // we return i64::MIN as a type-error sentinel rather than silently
-            // returning garbage (Bool bits reinterpreted as f64 representation).
+            // FFI-DESIGN-3 / IP-C4: on type mismatch use NaN bits for float slots
+            // and 0 for integer slots — never i64::MIN (legal C return).
             if ret_is_float {
                 match val {
                     Value::Float(f) => *result = f.to_bits() as i64,
                     Value::Int(n) => *result = (n as f64).to_bits() as i64,
-                    // FFI-DESIGN-3: Bool/Unit/other — wrong type for float slot
                     _ => {
-                        *result = i64::MIN;
-                        // active_guard dropped here — decrements count
+                        *result = f64::NAN.to_bits() as i64;
                         return;
                     }
                 }
@@ -393,16 +390,16 @@ unsafe fn callback_trampoline_inner(
                     Value::Bool(b) => b as i64,
                     Value::Float(f) => f.to_bits() as i64,
                     Value::Unit => 0,
-                    _ => {
-                        *result = i64::MIN;
-                        // active_guard dropped here — decrements count
-                        return;
-                    }
+                    _ => 0,
                 };
             }
         }
         Err(_) => {
-            *result = i64::MIN;
+            *result = if ret_is_float {
+                f64::NAN.to_bits() as i64
+            } else {
+                0
+            };
         }
     }
     // active_guard dropped here — decrements count
