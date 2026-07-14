@@ -18,7 +18,8 @@ pub func parse(csv_str: string) -> List<List<string>> {
     rows
 }
 
-func serialize_field(field: string) -> string {
+// serialize_field: Escapes a single CSV field (quotes commas, quotes, newlines).
+pub func serialize_field(field: string) -> string {
     if str_contains(field, ",") || str_contains(field, "\"") || str_contains(field, "\n") {
         "\"" + str_replace(field, "\"", "\"\"") + "\""
     } else {
