@@ -11,7 +11,11 @@ func main() -> i32 {
 }
 "#;
     let file = parse(src);
-    if let Item::Func(f) = &file.items[0] {
+    if let Some(Item::Func(f)) = file
+        .items
+        .iter()
+        .find(|item| matches!(item, Item::Func(function) if function.name == "helper"))
+    {
         assert!(f.pub_, "func should be marked as pub");
     } else {
         panic!("expected Func item");
@@ -33,7 +37,11 @@ func main() -> i32 {
 }
 "#;
     let file = parse(src);
-    if let Item::Type(t) = &file.items[0] {
+    if let Some(Item::Type(t)) = file
+        .items
+        .iter()
+        .find(|item| matches!(item, Item::Type(type_def) if type_def.name == "Point"))
+    {
         assert!(t.pub_, "type should be marked as pub");
     } else {
         panic!("expected Type item");
@@ -50,7 +58,11 @@ func main() -> i32 {
 }
 "#;
     let file = parse(src);
-    if let Item::Func(f) = &file.items[0] {
+    if let Some(Item::Func(f)) = file
+        .items
+        .iter()
+        .find(|item| matches!(item, Item::Func(function) if function.name == "helper"))
+    {
         assert!(!f.pub_, "func without pub should not be marked as pub");
     } else {
         panic!("expected Func item");

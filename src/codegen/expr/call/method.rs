@@ -410,6 +410,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// - Bare `i8*` / `i64` actor handle → `mimi_actor_fault`
     /// - Record/state struct → GEP each field; recurse on nested records;
     ///   fault fields whose type name is a registered actor
+    ///
     /// Depth is capped at 8 (same as nested payload defaults).
     fn emit_fault_actors_in_payload(
         &mut self,

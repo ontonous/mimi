@@ -200,7 +200,7 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let kind = self.peek().kind.clone();
-        let mut expr = match kind {
+        let expr = match kind {
             TokenKind::Int(s) => {
                 let (line, col) = (self.peek().line, self.peek().col);
                 self.advance();

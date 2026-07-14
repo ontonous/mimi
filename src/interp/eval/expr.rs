@@ -491,6 +491,38 @@ impl<'a> Interpreter<'a> {
         self.eval_call_dispatch(callee, &vals, args)
     }
 
+    /// Apply interpreter-side write-back for `mutate` parameters.
+    ///
+    /// Keep this outside `eval_call_dispatch`: that function is on every
+    /// recursive-call stack. Large argument-reordering temporaries here used to
+    /// inflate each recursion frame enough to overflow Rust's 2 MiB test stack.
+    fn apply_mutate_writebacks(&mut self, function_name: &str, args: &[Expr]) {
+        let mutate_writebacks = std::mem::take(&mut self.last_mutate_writebacks);
+        for (param_index, value) in mutate_writebacks {
+            let named_param = self
+                .find_function(function_name)
+                .and_then(|function| function.params.get(param_index).map(|p| p.name.clone()));
+            let target = args
+                .iter()
+                .find_map(|arg| match arg {
+                    Expr::NamedArg(param_name, value_expr)
+                        if named_param.as_deref() == Some(param_name) =>
+                    {
+                        Some(value_expr.as_ref())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    args.iter()
+                        .filter(|arg| !matches!(arg, Expr::NamedArg(_, _)))
+                        .nth(param_index)
+                });
+            if let Some(Expr::Ident(var_name)) = target {
+                self.force_update(var_name, value);
+            }
+        }
+    }
+
     /// Dispatch an evaluated function call — shared by both positional and named-arg paths.
     fn eval_call_dispatch(
         &mut self,
@@ -502,6 +534,10 @@ impl<'a> Interpreter<'a> {
         match callee {
             Expr::Ident(name) => {
                 let result = self.call_named(name, vals)?;
+                // `mutate` parameters use a reference ABI in codegen. The
+                // interpreter evaluates arguments by value, so copy the final
+                // callee binding back to the original caller variable.
+                self.apply_mutate_writebacks(name, args);
                 // push(list, elem) mutates the list in place and returns Unit.
                 // Returning Unit prevents push from leaking as a block value.
                 if name == "push" && !args.is_empty() {

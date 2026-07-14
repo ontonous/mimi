@@ -178,10 +178,11 @@ impl<'a> Interpreter<'a> {
                         .collect();
                     Ok(Value::List(entries))
                 }
-                Err(e) => Err(InterpError::new(format!(
-                    "listdir failed for '{}': {}",
-                    path, e
-                ))),
+                // Match the codegen/runtime API: unreadable, missing, or
+                // non-directory paths are represented as an empty listing.
+                // This keeps listdir convenient for discovery loops; callers
+                // that need to distinguish errors can pair it with exists/is_dir.
+                Err(_) => Ok(Value::List(Vec::new())),
             },
             _ => Err(InterpError::new("listdir expects a string path")),
         }

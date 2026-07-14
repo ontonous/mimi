@@ -195,16 +195,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Pop the current shared variable scope and emit release calls for all
     /// shared and weak variables declared in it.
     pub(super) fn pop_shared_scope(&mut self) -> MimiResult<()> {
-        // CG-H12 (deep audit): deduplicate pointers within a scope before
-        // releasing — a value registered more than once (e.g. captured into a
-        // closure and also used directly) must not be released twice.
+        // Each entry represents one owned strong/weak count, not one unique
+        // address. The same pointer may legitimately appear more than once
+        // after clone/upgrade; every successful retain must have a matching
+        // release. Deduplicating by PointerValue leaks those extra counts.
         if let Some(scope) = self.shared_release_vars.pop() {
             if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
-                let mut seen = std::collections::HashSet::new();
                 for heap_ptr in scope {
-                    if !seen.insert(heap_ptr) {
-                        continue;
-                    }
                     self.build_call(
                         release_fn,
                         &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
@@ -215,11 +212,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if let Some(scope) = self.weak_release_vars.pop() {
             if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
-                let mut seen = std::collections::HashSet::new();
                 for heap_ptr in scope {
-                    if !seen.insert(heap_ptr) {
-                        continue;
-                    }
                     self.build_call(
                         release_fn,
                         &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
@@ -231,19 +224,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Emit releases for every ownership count active on the current return
+    /// path without mutating the compiler's scope stacks. Branch codegen is
+    /// path-insensitive: clearing outer scopes for a returning `if` arm would
+    /// make the fallthrough arm leak those same values.
+    pub(super) fn emit_all_shared_releases(&mut self) -> MimiResult<()> {
+        let strong: Vec<_> = self
+            .shared_release_vars
+            .iter()
+            .flat_map(|scope| scope.iter().copied())
+            .collect();
+        if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
+            for heap_ptr in strong {
+                self.build_call(
+                    release_fn,
+                    &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
+                    "shared_return_release",
+                )?;
+            }
+        }
+
+        let weak: Vec<_> = self
+            .weak_release_vars
+            .iter()
+            .flat_map(|scope| scope.iter().copied())
+            .collect();
+        if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
+            for heap_ptr in weak {
+                self.build_call(
+                    release_fn,
+                    &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
+                    "weak_return_release",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Balance compiler bookkeeping for a block whose runtime path has already
+    /// emitted full return cleanup.
+    pub(super) fn discard_shared_scope(&mut self) {
+        self.shared_release_vars.pop();
+        self.weak_release_vars.pop();
+    }
+
     /// Release all remaining shared and weak variables at function exit
     pub(super) fn release_all_shared(&mut self) -> MimiResult<()> {
-        // CG-H12 (deep audit): collect every registered pointer across all
-        // scopes but release each *unique* pointer exactly once. Without
-        // deduplication, a heap pointer that was registered in more than one
-        // nested scope would be released multiple times (double free / UAF).
-        let mut seen = std::collections::HashSet::new();
+        // Entries are ownership counts, so preserve duplicates across scopes.
         let all_release: Vec<inkwell::values::PointerValue<'ctx>> = self
             .shared_release_vars
             .iter()
             .flat_map(|scope| scope.iter())
             .copied()
-            .filter(|p| seen.insert(*p))
             .collect();
         if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
             for heap_ptr in all_release {
@@ -254,13 +286,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
             }
         }
-        let mut seen_weak = std::collections::HashSet::new();
         let all_weak: Vec<inkwell::values::PointerValue<'ctx>> = self
             .weak_release_vars
             .iter()
             .flat_map(|scope| scope.iter())
             .copied()
-            .filter(|p| seen_weak.insert(*p))
             .collect();
         if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
             for heap_ptr in all_weak {

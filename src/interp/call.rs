@@ -7,6 +7,7 @@ impl<'a> Interpreter<'a> {
         func: &FuncDef,
         args: Vec<Value>,
     ) -> Result<Value, InterpError> {
+        self.last_mutate_writebacks.clear();
         if args.len() > func.params.len() {
             let expected_types: Vec<String> = func
                 .params
@@ -155,6 +156,17 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
+
+        // Capture `mutate` parameter values before destroying the callee scope.
+        // The caller owns the source binding, so the actual write-back happens
+        // in eval_call_dispatch where the original argument expressions exist.
+        self.last_mutate_writebacks = func
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p.borrow, Some(ParamBorrow::Mutate)))
+            .filter_map(|(index, p)| self.lookup(&p.name).map(|value| (index, value)))
+            .collect();
 
         self.pop_scope();
         self.pop_call();
@@ -1018,7 +1030,9 @@ impl<'a> Interpreter<'a> {
                                 args.len()
                             )));
                         }
-                        Ok(args.into_iter().next().unwrap())
+                        args.into_iter()
+                            .next()
+                            .ok_or_else(|| InterpError::new("unwrap_or requires a default value"))
                     }
 
                     ("Some", "is_some")

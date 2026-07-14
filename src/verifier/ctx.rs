@@ -287,7 +287,7 @@ impl SolverSession {
     /// solver starts at Z3 depth 0; pending old-solver pops are irrelevant).
     pub fn pop(&mut self) {
         if !self.replaced {
-            let _ = self.solver.pop(1);
+            self.solver.pop(1);
         }
     }
 
@@ -372,6 +372,7 @@ impl SolverSession {
 
 /// Context for verification lookups (func_defs, let_subst).
 /// Owned by VerifierState in the Flow path — contains no Z3 solver state.
+#[derive(Default)]
 pub struct VerifierCtx {
     pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
     /// Mapping from let-variable names to their init expressions.
@@ -434,15 +435,6 @@ impl VerifierCtx {
                 Item::Module(m) => self.collect_func_defs(&m.items),
                 _ => {}
             }
-        }
-    }
-}
-
-impl Default for VerifierCtx {
-    fn default() -> Self {
-        Self {
-            func_defs: HashMap::new(),
-            let_subst: HashMap::new(),
         }
     }
 }

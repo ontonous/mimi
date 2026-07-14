@@ -465,7 +465,7 @@ impl<'a> super::Lexer<'a> {
                 } else {
                     first_after_e
                 };
-                if first_digit.map_or(false, |d| d.is_ascii_digit()) {
+                if first_digit.is_some_and(|d| d.is_ascii_digit()) {
                     s.push(ch);
                     self.advance();
                     // Optional sign

@@ -9,8 +9,6 @@
 //! - Surrogate pairs (e.g. 😀 = 4 bytes, 2 UTF-16 units)
 //! - CRLF line endings (counted as 1 character in LSP line numbering)
 
-use std::str::Chars;
-
 /// Pre-computed line offset table for a source document.
 ///
 /// Constructed once per document text change.  All position conversions
@@ -36,6 +34,7 @@ impl<'a> PositionMap<'a> {
     }
 
     /// Number of lines in the document.
+    #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
     }
@@ -46,14 +45,14 @@ impl<'a> PositionMap<'a> {
             .line_starts
             .get(line)
             .copied()
-            .unwrap_or_else(|| self.source.len());
+            .unwrap_or(self.source.len());
 
         // Get the line text
         let line_end = self
             .line_starts
             .get(line + 1)
             .copied()
-            .unwrap_or_else(|| self.source.len());
+            .unwrap_or(self.source.len());
         let line_text =
             &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
 
@@ -81,7 +80,7 @@ impl<'a> PositionMap<'a> {
             .line_starts
             .get(line + 1)
             .copied()
-            .unwrap_or_else(|| self.source.len());
+            .unwrap_or(self.source.len());
         let line_text =
             &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
         let line_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
@@ -94,6 +93,7 @@ impl<'a> PositionMap<'a> {
     }
 
     /// Convert Mimi span (1-indexed line, 1-indexed byte column) to LSP range.
+    #[allow(dead_code)]
     pub fn span_to_lsp(
         &self,
         start_line: usize,
@@ -105,9 +105,6 @@ impl<'a> PositionMap<'a> {
         // Mimi columns are byte offsets; LSP characters are UTF-16 units.
         let sl = start_line.saturating_sub(1);
         let el = end_line.saturating_sub(1);
-
-        let sl_start = self.line_starts.get(sl).copied().unwrap_or(0);
-        let el_start = self.line_starts.get(el).copied().unwrap_or(0);
 
         let sl_text = self.line_text(sl);
         let el_text = self.line_text(el);
@@ -122,13 +119,14 @@ impl<'a> PositionMap<'a> {
     }
 
     /// Get the text of a specific line (without newline).
+    #[allow(dead_code)]
     fn line_text(&self, line: usize) -> String {
         let start = self.line_starts.get(line).copied().unwrap_or(0);
         let end = self
             .line_starts
             .get(line + 1)
             .copied()
-            .unwrap_or_else(|| self.source.len());
+            .unwrap_or(self.source.len());
         let text = &self.source[start.min(self.source.len())..end.min(self.source.len())];
         text.trim_end_matches('\n')
             .trim_end_matches('\r')

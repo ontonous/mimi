@@ -1186,7 +1186,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_extract_value(struct_val, ei as u32, &format!("tuple_elem_{}_{}", i, ei))
                 .map_err(|e| CompileError::LlvmError(format!("extract: {}", e)))?;
-            let elem_i64 = self.tuple_elem_to_i64(elem_raw, i, ei)?;
+            let elem_i64 = self.tuple_elem_to_i64(elem_raw, elem_ty, i, ei)?;
 
             let val_gep = self
                 .gep()
@@ -1256,12 +1256,34 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn tuple_elem_to_i64(
         &self,
         elem_raw: BasicValueEnum<'ctx>,
+        elem_ty: &crate::ast::Type,
         i: usize,
         ei: usize,
     ) -> MimiResult<inkwell::values::IntValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         match elem_raw {
-            BasicValueEnum::IntValue(iv) => Ok(iv),
+            BasicValueEnum::IntValue(iv) => {
+                let width = iv.get_type().get_bit_width();
+                if width < 64 {
+                    let is_bool =
+                        matches!(elem_ty, crate::ast::Type::Name(name, _) if name == "bool");
+                    if is_bool {
+                        self.builder
+                            .build_int_z_extend(iv, i64_ty, &format!("i_zext_{}_{}", i, ei))
+                            .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))
+                    } else {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, &format!("i_sext_{}_{}", i, ei))
+                            .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))
+                    }
+                } else if width > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, &format!("i_trunc_{}_{}", i, ei))
+                        .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))
+                } else {
+                    Ok(iv)
+                }
+            }
             BasicValueEnum::FloatValue(fv) => {
                 let f_alloca = self.build_alloca(
                     BasicTypeEnum::FloatType(self.context.f64_type()),
@@ -1281,16 +1303,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_int_value())
             }
             BasicValueEnum::PointerValue(pv) => {
-                let i64_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let cast = self
-                    .builder
-                    .build_pointer_cast(pv, i64_ptr_ty, &format!("p_cast_{}_{}", i, ei))
-                    .map_err(|e| CompileError::LlvmError(format!("cast: {}", e)))?;
+                // DAT-C3: the generic tuple ABI carries pointer values as their
+                // address bits. Loading i64 through `pv` reads the first eight
+                // bytes of the pointee (and may read out of bounds) instead of
+                // serializing the pointer itself.
                 Ok(self
-                    .build_load(i64_ty, cast, &format!("p_val_{}_{}", i, ei))?
-                    .into_int_value())
+                    .builder
+                    .build_ptr_to_int(pv, i64_ty, &format!("p_addr_{}_{}", i, ei))
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?)
             }
             BasicValueEnum::StructValue(sv) => {
+                // Mimi strings are represented as `{ ptr, i64 }`. Extract the
+                // data pointer explicitly; reinterpreting the first eight bytes
+                // of the whole struct loses pointer provenance and couples the
+                // ABI to layout accidents.
+                if matches!(elem_ty, crate::ast::Type::Name(name, _) if name == "string") {
+                    let data_ptr = self
+                        .builder
+                        .build_extract_value(sv, 0, &format!("s_ptr_{}_{}", i, ei))
+                        .map_err(|e| CompileError::LlvmError(format!("extract string ptr: {}", e)))?
+                        .into_pointer_value();
+                    return self
+                        .builder
+                        .build_ptr_to_int(data_ptr, i64_ty, &format!("p_addr_{}_{}", i, ei))
+                        .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)));
+                }
                 let s_ty = sv.get_type();
                 let s_alloca = self
                     .build_alloca(BasicTypeEnum::StructType(s_ty), &format!("ts_{}_{}", i, ei))?;

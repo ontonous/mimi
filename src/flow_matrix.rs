@@ -661,11 +661,8 @@ fn default_field_value(
         }
         "trace" => {
             // Structured SystemTrace record (v0.29.12).
-            if matches!(ty, Type::Name(n, _) if n == "SystemTrace" || n == "string" || n == "String")
-            {
-                if matches!(ty, Type::Name(n, _) if n == "SystemTrace") {
-                    return system_trace_expr(from_state, event, snapshot);
-                }
+            if matches!(ty, Type::Name(n, _) if n == "SystemTrace") {
+                return system_trace_expr(from_state, event, snapshot);
             }
             // User-defined Fault { trace: string } — encode a compact reason.
             return Expr::Literal(Lit::String(snapshot.to_string()));

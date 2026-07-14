@@ -14,7 +14,7 @@ impl<'a> Interpreter<'a> {
                         .unwrap_or(0);
                     if count >= *n {
                         return Err(InterpError::new(
-                            &format!(
+                            format!(
                                 "QuotaExceeded: spawn would exceed @max_children({}) for actor '{}' (current {})",
                                 n, actor_name, count
                             ),

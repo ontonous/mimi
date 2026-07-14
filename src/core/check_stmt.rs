@@ -723,13 +723,9 @@ impl<'a> Checker<'a> {
                 if let Type::Cap(cap_name) = &final_ty {
                     if let Pattern::Variable(name) = pat {
                         if let Some(s) = self.cap_vars.last_mut() {
-                            let bit_index = s.len() as u32;
                             s.insert(
                                 name.clone(),
-                                crate::core::checker::CapVarInfo {
-                                    consumed: false,
-                                    bit_index,
-                                },
+                                crate::core::checker::CapVarInfo { consumed: false },
                             );
                         }
                         // Introduce the cap as an effect
@@ -782,11 +778,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if !ok {
-                        let types_str: Vec<String> = self
-                            .flow_return_targets
-                            .iter()
-                            .map(|t| fmt_type(t))
-                            .collect();
+                        let types_str: Vec<String> =
+                            self.flow_return_targets.iter().map(fmt_type).collect();
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0207,

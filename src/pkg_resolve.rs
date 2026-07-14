@@ -36,7 +36,6 @@ fn resolve_git_dep(
 
     // B1: use unified path safety validation.
     crate::path_safety::validate_git_url(git_url)?;
-    let git_url = git_url;
 
     // Validate tag to prevent option injection
     if tag_arg.starts_with('-') {

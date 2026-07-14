@@ -34,7 +34,12 @@ func main() -> i32 {
         result.err()
     );
     let loaded = result.expect("src/tests/loader.rs:27 unwrap failed");
-    assert_eq!(loaded.file.items.len(), 1);
+    assert!(
+        loaded.file.items.iter().any(
+            |item| matches!(item, crate::ast::Item::Func(function) if function.name == "main")
+        ),
+        "loaded file should retain main alongside the progressive Main flow"
+    );
     cleanup(&dir);
 }
 

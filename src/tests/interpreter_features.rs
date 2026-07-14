@@ -408,15 +408,25 @@ func main() -> i32 {
 
 #[test]
 fn stress_deep_recursion() {
-    // Deep recursion — tests stack depth limits
-    let v = run_source(
-        r#"
+    // Rust's test harness uses a 2 MiB worker stack, while normal Mimi CLI
+    // execution runs on the platform main-thread stack. Use an explicit stack
+    // so this test measures Mimi's recursion guard rather than the harness.
+    let v = std::thread::Builder::new()
+        .name("mimi-deep-recursion".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            run_source(
+                r#"
 func countdown(n: i32) -> i32 {
     if n <= 0 { 0 } else { 1 + countdown(n - 1) }
 }
 func main() -> i32 { countdown(20) }
 "#,
-    );
+            )
+        })
+        .expect("spawn deep-recursion test")
+        .join()
+        .expect("deep-recursion interpreter thread panicked");
     assert_eq!(v, interp::Value::Int(20));
 }
 

@@ -272,10 +272,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///
     /// Parameters: `self` (from-state payload) + event params.
     /// Return type: first declared to-state as nominal LLVM layout (M6).
-    /// Multi-target `-> A | B` still uses the first target for the function
-    /// signature; callers must `match` exhaustively (E0420, v0.29.49). When
-    /// a return constructs a different to-state, layouts must be compatible
-    /// or the transition body only returns the first target's shape.
+    /// Multi-target `-> A | B` uses the first target for the function
+    /// signature. The checker requires layout-compatible targets (E0419) and
+    /// callers must `match` exhaustively before field access (E0420).
     /// Body: the transition body with outer `do { }` unwrapped (if present).
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let mut params = Vec::new();

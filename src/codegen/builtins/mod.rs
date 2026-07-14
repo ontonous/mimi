@@ -1712,13 +1712,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_spawn_count" => self.compile_actor_spawn_count(),
             "actor_max_children" => self.compile_actor_max_children(),
             "broadcast" => self.compile_broadcast(args),
-            // v0.29.37: spawn_detached — returns actor handle (i64).
-            // NOTE: The primary path for spawn_detached is via the method call
-            // `Type.spawn_detached()` which is handled in expr/call/method.rs
-            // and generates a real actor spawn. This builtin path is only reached
-            // if someone calls `spawn_detached()` as a bare function, which is not
-            // valid Mimi syntax for actors. Return 0 as a safe fallback.
-            "spawn_detached" => Ok(self.context.i64_type().const_int(0, false).into()),
+            // Dynamic actor names cannot be lowered to a concrete spawn function.
+            // Never manufacture a null handle: the typed method syntax is the
+            // portable API and produces a real actor spawn on both backends.
+            "spawn_detached" => Err(CompileError::Generic(
+                "bare spawn_detached(name) is unsupported; use ActorType.spawn_detached()"
+                    .to_string(),
+            )),
             // v0.29.38: assert_state — test utility. In codegen, we extract the
             // expected state name string and call mimi_assert_state. The actual
             // state is passed as null because LLVM struct type names are not

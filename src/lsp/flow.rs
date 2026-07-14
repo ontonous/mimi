@@ -258,8 +258,7 @@ fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) 
     server.cache_put(uri.to_string(), text.clone());
     *server.parse_cache_text.borrow_mut() = (String::new(), None);
     let mut diagnostics = server.compute_diagnostics(&text, Some(uri));
-    let verif_diags =
-        server.compute_verification_diagnostics(&text, server.last_cursor_line, uri);
+    let verif_diags = server.compute_verification_diagnostics(&text, server.last_cursor_line, uri);
     diagnostics.extend(verif_diags);
     (
         server,

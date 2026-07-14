@@ -327,7 +327,7 @@ impl LspServer {
                 let backup_docs = self.documents.clone();
                 let backup_workspace = self.workspace_root.clone();
                 let backup_should_exit = self.should_exit;
-                let saved = std::mem::replace(self, LspServer::new());
+                let saved = std::mem::take(self);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     flow::transition(saved, &msg)
                 }));
@@ -370,7 +370,7 @@ impl LspServer {
     /// `flow::transition` which takes ownership and returns the updated server.
     #[allow(dead_code)]
     pub(crate) fn handle_message(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
-        let server = std::mem::replace(self, LspServer::new());
+        let server = std::mem::take(self);
         let (updated, response) = flow::transition(server, msg);
         *self = updated;
         response

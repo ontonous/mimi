@@ -77,11 +77,8 @@ impl<'a> LexerPos<'a> {
 
     fn skip_whitespace_inline(self) -> Self {
         let mut pos = self;
-        loop {
-            match pos.peek() {
-                Some(' ') | Some('\t') | Some('\r') => pos = next!(pos),
-                _ => break,
-            }
+        while let Some(' ') | Some('\t') | Some('\r') = pos.peek() {
+            pos = next!(pos);
         }
         pos
     }
@@ -484,7 +481,7 @@ impl<'a> LexerPos<'a> {
                 } else {
                     first_after_e
                 };
-                if first_digit.map_or(false, |d| d.is_ascii_digit()) {
+                if first_digit.is_some_and(|d| d.is_ascii_digit()) {
                     s.push(ch);
                     pos = next!(pos);
                     if let Some(sign) = pos.peek() {
@@ -680,7 +677,7 @@ impl<'a> LexerState<'a> {
                         continue;
                     }
                     if mode == LexerMode::Sketch {
-                        if !spaces.is_multiple_of(4) {
+                        if spaces % 4 != 0 {
                             return Err(indent_not_multiple_of_four(pos.line, pos.col));
                         }
                         // SAFETY: FlowAcc::new seeds indent_stack with [0], and

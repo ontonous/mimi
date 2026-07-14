@@ -433,6 +433,43 @@ fn ir_extern_void_func() {
     assert!(ir.contains("declare"), "void extern should have declare");
 }
 
+#[test]
+fn ir_extern_tuple_string_passes_pointer_address() {
+    let ir = compile_to_ir(
+        r#"
+        extern "C" { func consume_pair(pair: (i64, string)); }
+        func main() { consume_pair((7, "mimi")) }
+    "#,
+    );
+    assert!(
+        ir.contains("ptrtoint ptr"),
+        "tuple string serialization must pass the pointer address; IR:\n{}",
+        ir
+    );
+    assert!(
+        !ir.contains("p_val_0_1 = load i64"),
+        "tuple string serialization must not dereference the string as i64"
+    );
+    assert!(
+        !ir.contains("s_val_0_1 = load i64"),
+        "tuple string serialization must not type-pun the string struct as i64"
+    );
+}
+
+#[test]
+fn ir_extern_tuple_i32_widens_to_i64_payload() {
+    let ir = compile_to_ir(
+        r#"
+        extern "C" { func consume_pair(pair: (i32, i64)); }
+        func main() { consume_pair((7, 9)) }
+    "#,
+    );
+    assert!(
+        ir.contains("i_sext_0_0 = sext i32"),
+        "tuple i32 payload must be widened before storing in the generic i64 ABI"
+    );
+}
+
 // ===================== Generic/Turbofish IR =====================
 
 #[test]

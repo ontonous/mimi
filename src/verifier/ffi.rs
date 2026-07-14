@@ -166,7 +166,7 @@ impl VerifierCtx {
         }
     }
 
-    fn setup_ffi_func_vars(&mut self, session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
+    fn setup_ffi_func_vars(&mut self, _session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
         let mut vars = Z3VarMap::new();
         for p in &func.params {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {

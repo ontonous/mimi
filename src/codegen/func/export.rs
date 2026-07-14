@@ -377,7 +377,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "crecord_load",
             )?;
             let mut field_vals = Vec::new();
-            for (fi, f) in fields.iter().enumerate() {
+            for (fi, _f) in fields.iter().enumerate() {
                 let raw = self
                     .builder
                     .build_extract_value(
@@ -470,18 +470,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             let i64_ty = self.context.i64_type();
             let size_val = i64_ty.const_int(struct_size as u64, false);
 
-            // Declare or get malloc function
-            let malloc_fn = self.get_or_declare_malloc()?;
-
-            let c_ptr = self
-                .build_call(
-                    malloc_fn,
-                    &[BasicMetadataValueEnum::IntValue(size_val)],
-                    &format!("malloc_cret_{}", name),
-                )?
-                .try_as_basic_value_opt()
-                .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
-                .into_pointer_value();
+            // B4: NULL-checked malloc.
+            let c_ptr = self.malloc_or_abort(size_val, &format!("malloc_cret_{}", name))?;
 
             let c_typed_ptr = self.build_pointer_cast(
                 c_ptr,
@@ -546,20 +536,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Get or declare the `malloc` function in the LLVM module.
-    fn get_or_declare_malloc(&self) -> MimiResult<inkwell::values::FunctionValue<'ctx>> {
-        if let Some(f) = self.module.get_function("malloc") {
-            return Ok(f);
-        }
-        let i64_ty = self.context.i64_type();
-        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
-        let f = self
-            .module
-            .add_function("malloc", fn_ty, Some(inkwell::module::Linkage::External));
-        Ok(f)
-    }
-
     /// Convert a Mimi internal field value to its C ABI representation.
     /// This is the reverse of `convert_c_field_to_internal`.
     fn convert_internal_field_to_c(
@@ -611,6 +587,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Convert a single C-layout record field to its internal representation.
+    #[allow(dead_code)]
     pub(crate) fn convert_c_field_to_internal(
         &mut self,
         c_val: BasicValueEnum<'ctx>,

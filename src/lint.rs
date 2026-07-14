@@ -1111,6 +1111,7 @@ fn collect_names_in_expr(expr: &Expr, names: &mut std::collections::HashSet<Stri
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -319,7 +319,7 @@ impl VerifierCtx {
                 // solver does not produce unconstrained values that could
                 // satisfy vacuously true postconditions.
                 let zero = Z3Int::from_i64(0);
-                session.solver.assert(&len_var.ge(&zero));
+                session.solver.assert(len_var.ge(&zero));
                 vars.insert_list_len(p.name.as_str(), len_var);
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
@@ -351,7 +351,7 @@ impl VerifierCtx {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
                 let old_len_var = Z3Int::new_const(format!("{}_len", old_name));
                 let zero = Z3Int::from_i64(0);
-                session.solver.assert(&old_len_var.ge(&zero));
+                session.solver.assert(old_len_var.ge(&zero));
                 vars.insert_list_len(old_name, old_len_var);
             } else {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
@@ -592,24 +592,21 @@ impl VerifierCtx {
                     let mut found_unknown = false;
                     let mut viol_model: Option<z3::Model> = None;
                     for e in ensures_exprs.iter() {
-                        match expr::expr_to_z3_bool(e, &mut vars) {
-                            Some(b) => {
-                                let (result, model) = session.check_scope(b.not());
-                                match result {
-                                    SatResult::Sat => {
-                                        found_violation = true;
-                                        viol_model = model;
-                                        break;
-                                    }
-                                    SatResult::Unknown => {
-                                        found_unknown = true;
-                                    }
-                                    SatResult::Unsat => {
-                                        // This ensures holds; continue checking.
-                                    }
+                        if let Some(b) = expr::expr_to_z3_bool(e, &mut vars) {
+                            let (result, model) = session.check_scope(b.not());
+                            match result {
+                                SatResult::Sat => {
+                                    found_violation = true;
+                                    viol_model = model;
+                                    break;
+                                }
+                                SatResult::Unknown => {
+                                    found_unknown = true;
+                                }
+                                SatResult::Unsat => {
+                                    // This ensures holds; continue checking.
                                 }
                             }
-                            None => {}
                         }
                     }
                     if found_violation {
