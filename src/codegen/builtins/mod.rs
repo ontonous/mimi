@@ -907,6 +907,11 @@ fn register_set_fns<'ctx>(
         i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    module.add_function(
+        "mimi_set_to_json_i64",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_set_destroy(handle: i64)
     module.add_function(
         "mimi_set_destroy",

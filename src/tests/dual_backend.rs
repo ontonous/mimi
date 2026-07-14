@@ -6637,6 +6637,24 @@ fn dual_to_json_map_i64() {
     );
 }
 
+/// to_json(Set<i32>) sorted array for dual stability.
+#[test]
+fn dual_to_json_set_i64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[3,1,2]")
+            println(to_json(s))
+            0
+        }
+        "#,
+        "[1,2,3]"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
