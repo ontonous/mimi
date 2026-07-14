@@ -6619,6 +6619,24 @@ fn dual_from_json_set_i64() {
     );
 }
 
+/// to_json(Map<string,i32>) single-key object (order-stable).
+#[test]
+fn dual_to_json_map_i64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":42}")
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":42}"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {

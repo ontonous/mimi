@@ -399,6 +399,12 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             if n == "List" && !args.is_empty() {
                 return is_json_serializable(&args[0]);
             }
+            // Map<string, i32|i64> via mimi_map_to_json_i64.
+            if n == "Map" && args.len() == 2 {
+                let key_ok = matches!(&args[0], Type::Name(k, _) if k == "string");
+                let val_ok = matches!(&args[1], Type::Name(v, _) if v == "i32" || v == "i64");
+                return key_ok && val_ok;
+            }
             // Records are supported by the codegen record-to-json sprintf path.
             // We can't distinguish Records from other Name types here, so we
             // allow any Name with args (e.g. "Point", "User") — the codegen will
