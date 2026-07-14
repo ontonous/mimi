@@ -7246,6 +7246,24 @@ fn dual_from_json_map_f64() {
     );
 }
 
+/// from_json Set of f64 + println dual.
+#[test]
+fn dual_from_json_set_f64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<f64>>("[1.5, 2.0, 1.5]")
+            println(s)
+            0
+        }
+        "#,
+        "Set{1.5, 2}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

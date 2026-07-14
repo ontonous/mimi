@@ -3199,6 +3199,70 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
     alloc_c_string(&parts.join(""))
 }
 
+/// Build a SetHandle from a JSON array of f64 values (stored as bit patterns).
+#[no_mangle]
+pub extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -> SetHandle {
+    let handle = mimi_set_new();
+    if handle == 0 || json.is_null() {
+        return handle;
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let len = json_array_length(json);
+    if len <= 0 {
+        return handle;
+    }
+    const MAX: i64 = 1_000_000;
+    let n = len.min(MAX);
+    for i in 0..n {
+        let elem = json_get_element(json, i);
+        if elem.is_null() {
+            continue;
+        }
+        // SAFETY: elem is a heap C string from json_get_element.
+        let es = unsafe { cstr_to_string(elem) };
+        let bits = es.trim().parse::<f64>().unwrap_or(0.0).to_bits() as i64;
+        unsafe {
+            libc::free(elem as *mut std::ffi::c_void);
+        }
+        mimi_set_insert(handle, bits as SetValueHandle);
+    }
+    let _ = s;
+    handle
+}
+
+/// Display form `Set{1.5, 2}` for f64-bit sets (sorted by bit pattern / float value).
+#[no_mangle]
+pub extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("Set{}");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("Set{...}");
+    }
+    let mut vals: Vec<f64> = set
+        .inner
+        .iter()
+        .map(|v| f64::from_bits(*v as u64))
+        .collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut s = String::from("Set{");
+    for (i, f) in vals.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        if f.fract() == 0.0 && f.is_finite() {
+            s.push_str(&format!("{}", *f as i64));
+        } else {
+            s.push_str(&format!("{}", f));
+        }
+    }
+    s.push('}');
+    alloc_c_string(&s)
+}
+
 /// Build a SetHandle from a JSON array of strings.
 /// Elements are stored as heap-cloned C-string ValueHandles.
 #[no_mangle]

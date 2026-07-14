@@ -1009,16 +1009,19 @@ impl std::fmt::Display for Value {
                 write!(f, "Set{{")?;
                 let mut ints: Vec<i64> = Vec::new();
                 let mut bools: Vec<bool> = Vec::new();
+                let mut floats: Vec<f64> = Vec::new();
                 let mut other: Vec<&Value> = Vec::new();
                 for v in vs {
                     match v {
                         Value::Int(n) => ints.push(*n),
                         Value::Bool(b) => bools.push(*b),
+                        Value::Float(f) => floats.push(*f),
                         o => other.push(o),
                     }
                 }
                 ints.sort_unstable();
                 bools.sort_unstable(); // false < true
+                floats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let mut first = true;
                 for n in ints {
                     if !first {
@@ -1033,6 +1036,17 @@ impl std::fmt::Display for Value {
                     }
                     first = false;
                     write!(f, "{}", b)?;
+                }
+                for fv in floats {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    if fv.fract() == 0.0 && fv.is_finite() {
+                        write!(f, "{}", fv as i64)?;
+                    } else {
+                        write!(f, "{}", fv)?;
+                    }
                 }
                 for v in other {
                     if !first {

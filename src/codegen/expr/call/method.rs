@@ -1587,8 +1587,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
             Type::Name(n, args) if n == "Set" => {
-                let elem_is_int = args
-                    .first()
+                let elem_ty = args.first();
+                let elem_is_int = elem_ty
                     .map(|t| {
                         matches!(
                             t,
@@ -1596,19 +1596,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })
                     .unwrap_or(true);
-                let elem_is_string = args
-                    .first()
+                let elem_is_float = elem_ty
+                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .unwrap_or(false);
+                let elem_is_string = elem_ty
                     .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
-                if !elem_is_int && !elem_is_string {
+                if !elem_is_int && !elem_is_float && !elem_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Set>: only Set<i32|i64|bool|string> is supported in codegen"
+                        "from_json::<Set>: only Set<i32|i64|bool|f32|f64|string> is supported in codegen"
                             .into(),
                     ));
                 }
                 // bool elements use i64 path (true→1, false→0) via mimi_json_as_i64.
                 let fn_name = if elem_is_string {
                     "mimi_set_from_json_string"
+                } else if elem_is_float {
+                    "mimi_set_from_json_f64"
                 } else {
                     "mimi_set_from_json_i64"
                 };
