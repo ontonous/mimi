@@ -107,6 +107,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::IntValue(iv) => iv,
             _ => return Err("range end must be i64".into()),
         };
+        // A1: widen i32 to i64 — range struct stores {i64, i64}.
+        let i64_ty = self.context.i64_type();
+        let start_iv = if start_iv.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(start_iv, i64_ty, "range_start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            start_iv
+        };
+        let end_iv = if end_iv.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(end_iv, i64_ty, "range_end_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            end_iv
+        };
         // Create a range struct { start: i64, end: i64 }
         let range_ty = self.context.struct_type(
             &[
@@ -184,14 +200,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
             .into_pointer_value();
         // Compute start index (default 0)
+        let i64_ty = self.context.i64_type();
         let start_idx = match start {
             Some(e) => self.compile_expr(e, vars)?.into_int_value(),
-            None => self.context.i64_type().const_int(0, false),
+            None => i64_ty.const_int(0, false),
         };
         // Compute end index (default: list length)
         let end_idx = match end {
             Some(e) => self.compile_expr(e, vars)?.into_int_value(),
             None => list_len,
+        };
+        // A1: widen i32 indices to i64 — slice arithmetic uses i64 throughout.
+        let start_idx = if start_idx.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(start_idx, i64_ty, "start_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            start_idx
+        };
+        let end_idx = if end_idx.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(end_idx, i64_ty, "end_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            end_idx
         };
         // Compute new length = end - start (clamped to 0 if start > end)
         let start_gt_end = self
@@ -213,7 +245,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_sub(safe_end, start_idx, "slice_len")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
         // Compute new data pointer: data + start * sizeof(i64)
-        let i64_ty = self.context.i64_type();
         let elem_size = i64_ty.const_int(8, false);
         let byte_offset = self
             .builder

@@ -15,10 +15,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let s_ptr = self.extract_string_arg(&args[0], "str_repeat")?;
-        let n = require_int_arg(&args[1], "str_repeat: second arg must be integer count")?;
+        let n_raw = require_int_arg(&args[1], "str_repeat: second arg must be integer count")?;
 
         let i8_ty = self.context.i8_type();
         let i64_ty = self.context.i64_type();
+        // A1: widen i32 to i64 — trait impl methods may pass i32 params.
+        let n = if n_raw.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(n_raw, i64_ty, "n_sext")
+                .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
+        } else {
+            n_raw
+        };
         let s_len = self.string_len(s_ptr)?;
         let total = self
             .builder
