@@ -877,7 +877,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Adjust an integer value's bit width to match a target LLVM type.
     /// Used when storing i64 expressions into i32 fields/variables.
-    fn adjust_int_value_width(
+    pub(in crate::codegen) fn adjust_int_value_width(
         &self,
         val: BasicValueEnum<'ctx>,
         target_ty: BasicTypeEnum<'ctx>,

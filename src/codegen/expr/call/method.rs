@@ -648,8 +648,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         let obj_val = self.ensure_self_pointer(obj_val, obj, vars)?;
         let mut compiled_args = Vec::new();
         compiled_args.push(obj_val);
-        for arg in args {
-            compiled_args.push(self.compile_expr(arg, vars)?);
+        for (i, arg) in args.iter().enumerate() {
+            let val = self.compile_expr(arg, vars)?;
+            // A1: adjust integer arg width to match the function's declared param type.
+            // Param 0 is self; user args start at index 1.
+            let param_idx = i + 1;
+            let val = if param_idx < function.count_params() as usize {
+                let param_ty = function.get_nth_param(param_idx as u32)
+                    .map(|p| p.get_type())
+                    .unwrap_or(val.get_type());
+                self.adjust_int_value_width(val, param_ty, call_name)?
+            } else {
+                val
+            };
+            compiled_args.push(val);
         }
         let metadata_args = self.values_to_metadata(&compiled_args);
         let call = self.build_call(function, &metadata_args, call_name)?;
@@ -658,6 +670,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Ensure a `self` argument is passed as a pointer when it is a struct value.
+    /// For string ({ptr, i64}) structs, extract the data pointer instead of
+    /// passing the struct address — string builtins expect char*, not {ptr,i64}*.
     fn ensure_self_pointer(
         &mut self,
         obj_val: BasicValueEnum<'ctx>,
@@ -667,6 +681,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         match obj_val {
             BasicValueEnum::StructValue(sv) => {
                 let struct_ty = sv.get_type();
+                // String struct is {ptr, i64} — extract data pointer for builtins.
+                if self.is_string_struct_type(struct_ty) {
+                    let data_ptr = self
+                        .builder
+                        .build_extract_value(sv, 0, "self_str_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("extract self str: {}", e)))?;
+                    return Ok(data_ptr);
+                }
                 if let Expr::Ident(name) = obj {
                     if let Some(&(alloca, _)) = vars.get(name.as_str()) {
                         Ok(alloca.into())
@@ -1503,6 +1525,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(len_gep, len)?;
         self.build_load(struct_ty, alloca, "string_ret_val")
+    }
+
+    /// Check if a struct type is the Mimi string struct {ptr, i64}.
+    fn is_string_struct_type(&self, ty: inkwell::types::StructType<'ctx>) -> bool {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let expected = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        ty == expected
     }
 
     /// Deserialize a JSON object into a Record type's fields.
