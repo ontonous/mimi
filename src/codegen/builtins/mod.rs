@@ -1422,7 +1422,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "input" | "file_exists" | "read_file" | "write_file" | "char_code" | "chr" | "str_char_at"
         | "listdir" | "is_dir" | "is_file" | "path_join" | "path_ext" | "path_basename" | "path_dirname"
         | "walk_dir" | "mkdir_p" | "remove_file"
-        | "exec" | "file_stat" | "append_file" | "set_env"
+        | "exec" | "exec_safe" | "file_stat" | "append_file" | "set_env"
         | "exec_pipe"
         | "read_file_partial" | "read_file_bytes" | "write_file_bytes" | "read_lines_json"
         | "read_lines_json_builtin"

@@ -4560,6 +4560,42 @@ fn dual_optional_chain_result_ok_err() {
     );
 }
 
+/// exec_safe multi-arg argv packing (codegen + interp).
+#[test]
+fn dual_exec_safe_multi_arg() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = exec_safe("printf", "hi%s", "!")
+            print(r.stdout)
+            0
+        }
+        "#,
+        "hi!"
+    );
+}
+
+/// exec_safe single-program path (null argv list).
+#[test]
+fn dual_exec_safe_no_args() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = exec_safe("true")
+            println(r.exit_code)
+            0
+        }
+        "#,
+        "0"
+    );
+}
+
 #[test]
 fn dual_option_ok_or() {
     if !can_link() {

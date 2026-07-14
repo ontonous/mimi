@@ -532,7 +532,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     ),
                                                 );
                                             }
-                                            "exec" => {
+                                            "exec" | "exec_safe" => {
                                                 self.var_type_names
                                                     .insert(name.clone(), "ExecResult".to_string());
                                             }
@@ -1368,7 +1368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ),
                                     );
                                 }
-                                "exec" => {
+                                "exec" | "exec_safe" => {
                                     self.var_type_names
                                         .insert(name.clone(), "ExecResult".to_string());
                                 }

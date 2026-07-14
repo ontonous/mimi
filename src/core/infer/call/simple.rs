@@ -991,6 +991,19 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("ExecResult".into(), vec![]);
             }
+            "exec_safe" => {
+                if args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "exec_safe expects at least 1 argument (program)",
+                    );
+                } else {
+                    for a in args {
+                        self.infer_expr(a, scopes);
+                    }
+                }
+                return Type::Name("ExecResult".into(), vec![]);
+            }
             "exec_pipe" => {
                 if args.len() != 1 {
                     self.emit_code(
