@@ -364,10 +364,13 @@ impl<'a> Checker<'a> {
                     self.func_generics
                         .insert(qualified_name.clone(), f.generics.clone());
                 }
-                // Store where clause if present
-                for wc in &f.where_clause {
-                    self.where_clauses
-                        .insert(f.name.clone(), (wc.type_param.clone(), wc.bounds.clone()));
+                // Store where clause if present.
+                // CK-H6: accumulate ALL type-param bounds (do not overwrite).
+                if !f.where_clause.is_empty() {
+                    let entry = self.where_clauses.entry(f.name.clone()).or_default();
+                    for wc in &f.where_clause {
+                        entry.push((wc.type_param.clone(), wc.bounds.clone()));
+                    }
                 }
                 // Store effects if present and validate against declared caps
                 if !f.effects.is_empty() {
@@ -1062,8 +1065,26 @@ impl<'a> Checker<'a> {
                 self.generic_scope
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
-            Item::ExternBlock(_) => {
-                // Extern blocks are collected but not type-checked in v1.1
+            Item::ExternBlock(block) => {
+                // CK-H4: validate return types in the check pass (params already
+                // validated during collect). Skip body (extern has no body).
+                if !block.unsafe_ {
+                    for func in &block.funcs {
+                        if let Some(ret_ty) = &func.ret {
+                            let resolved = self.resolve_type(ret_ty);
+                            if !self.is_valid_extern_type(&resolved, false) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0231,
+                                    format!(
+                                        "extern function '{}' return type '{}' is not allowed across the C ABI boundary",
+                                        func.name,
+                                        fmt_type(&resolved)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Item::Const {
                 name, ty, value, ..
