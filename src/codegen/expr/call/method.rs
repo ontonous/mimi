@@ -1505,6 +1505,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let list_ty = self.list_struct_type();
                 self.build_load(BasicTypeEnum::StructType(list_ty), list_alloca, "list")
             }
+            Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                self.compile_json_option_field(
+                    "Option",
+                    &args[0],
+                    raw_ptr,
+                    json_as_i64_fn,
+                    json_as_f64_fn,
+                    json_as_bool_fn,
+                )
+            }
+            Type::Option(inner) => {
+                let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                self.compile_json_option_field(
+                    "Option",
+                    inner,
+                    raw_ptr,
+                    json_as_i64_fn,
+                    json_as_f64_fn,
+                    json_as_bool_fn,
+                )
+            }
             Type::Name(type_name, _) => {
                 // Record type: deserialize JSON object into struct fields
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {
