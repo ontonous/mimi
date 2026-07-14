@@ -1011,6 +1011,18 @@ fn register_set_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_option_set_to_json",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_list_map_to_json_string",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),

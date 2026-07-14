@@ -7587,6 +7587,63 @@ fn dual_from_json_option_map() {
     );
 }
 
+/// from_json Option of Set dual.
+#[test]
+fn dual_from_json_option_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<Set<i32>>>("[1,2]")
+            let b = from_json::<Option<Set<i32>>>("null")
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(Set{1, 2})\nNone()"
+    );
+}
+
+/// to_json Option of Set dual.
+#[test]
+fn dual_to_json_option_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[1,3]")
+            let a = Some(s)
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Some\":[[1,3]]}"
+    );
+}
+
+/// from_json Result of Map dual.
+#[test]
+fn dual_from_json_result_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<Map<string, i32>, i32>>("{\"a\":1}")
+            println(a)
+            0
+        }
+        "#,
+        "Ok({\"a\":1})"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
