@@ -6735,6 +6735,24 @@ fn dual_list_option_println() {
     );
 }
 
+/// List of Result println.
+#[test]
+fn dual_list_result_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [Ok(1), Err(2), Ok(3)]
+            println(xs)
+            0
+        }
+        "#,
+        "[Ok(1), Err(2), Ok(3)]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
