@@ -649,6 +649,19 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
                         // not hold the pointer across further calls to this function.
                         PENDING_C_STRINGS.with(|pending| {
                             let mut pending = pending.borrow_mut();
+                            // M3(HOS): cap unbounded growth if callers leak
+                            // without mimi_string_as_c_str_free.
+                            const MAX_PENDING: usize = 4096;
+                            if pending.len() >= MAX_PENDING {
+                                // Drop oldest half so in-flight recent pointers
+                                // remain valid when possible.
+                                let drop_n = pending.len() / 2;
+                                pending.drain(0..drop_n);
+                                eprintln!(
+                                    "[mimi] WARNING: PENDING_C_STRINGS exceeded {}; dropped {} oldest entries",
+                                    MAX_PENDING, drop_n
+                                );
+                            }
                             pending.push(c_str);
                             // L8: just pushed, so last is always Some.
                             pending

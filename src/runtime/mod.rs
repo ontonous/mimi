@@ -1740,7 +1740,10 @@ pub extern "C" fn mimi_now_ms() -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_sleep(ms: i64) {
     if ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+        // Cap absurd durations (i64::MAX ms) to 24h — same policy as interp.
+        const MAX_SLEEP_MS: u64 = 24 * 60 * 60 * 1000;
+        let ms_u = (ms as u64).min(MAX_SLEEP_MS);
+        std::thread::sleep(std::time::Duration::from_millis(ms_u));
     }
 }
 
