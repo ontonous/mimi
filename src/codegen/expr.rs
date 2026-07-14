@@ -707,6 +707,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return ty_name;
                     }
                 }
+                // Unit enum variant as bare Ident (e.g. `Red` in `[Red, Green]`).
+                if let Some((owner, _)) = self.find_variant_owner(name) {
+                    return owner;
+                }
                 name.clone()
             }
             Expr::Record { ty: Some(name), .. } => name.clone(),
@@ -719,6 +723,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // User enum variants first (may shadow built-in Some/None/Ok/Err names).
                     if let Some((owner, _)) = self.find_variant_owner(name) {
                         return owner;
+                    }
+                    // Mangled enum constructors: `Color_Red` → owner `Color`.
+                    if let Some((enum_name, variant)) = name.rsplit_once('_') {
+                        if self.type_defs.get(enum_name).is_some_and(|td| {
+                            matches!(&td.kind, crate::ast::TypeDefKind::Enum(vs)
+                                if vs.iter().any(|v| v.name == variant))
+                        }) {
+                            return enum_name.to_string();
+                        }
                     }
                     // Built-in Option/Result constructors.
                     if name == "Some" {
