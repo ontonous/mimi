@@ -155,6 +155,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         Ok(BasicTypeEnum::PointerType(
                             self.context.ptr_type(AddressSpace::default()),
                         ))
+                    } else if name == "Map" || name == "Set" {
+                        // Opaque runtime handles (i64).
+                        Ok(BasicTypeEnum::IntType(self.context.i64_type()))
                     } else {
                         Err(CompileError::LlvmError(format!(
                             "type '{}' has no C ABI representation",
@@ -200,6 +203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 "i64" | "f64" | "unit" => Ok(c_val),
                 "string" => self.wrap_c_string(c_val.into_pointer_value()),
+                "Map" | "Set" => Ok(c_val), // opaque i64 handles
                 _ => {
                     if self.repr_c_record_names.contains(name.as_str()) {
                         self.convert_c_reprc_record_to_internal(c_val, name)
@@ -273,7 +277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
                         .into())
                 }
-                "i64" | "f64" | "unit" => Ok(internal_val),
+                "i64" | "f64" | "unit" | "Map" | "Set" => Ok(internal_val),
                 "string" => {
                     let sv = internal_val.into_struct_value();
                     let ptr = self
