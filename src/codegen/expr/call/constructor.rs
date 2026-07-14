@@ -170,7 +170,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         let payload: BasicValueEnum = match val {
             BasicValueEnum::IntValue(iv) => {
                 let bw = iv.get_type().get_bit_width();
-                if bw < 64 {
+                if bw == 1 {
+                    // Bool: zero-extend so true is 1 not -1.
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "some_zext")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("some zero extend error: {}", e))
+                        })?
+                        .into()
+                } else if bw < 64 {
                     self.builder
                         .build_int_s_extend(iv, i64_ty, "some_sext")
                         .map_err(|e| {

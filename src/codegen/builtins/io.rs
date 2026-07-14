@@ -199,7 +199,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         });
                     // Also when arg_type is bare "Option" but payload is a record
                     // pointer — cannot recover name; fall back to Some(%p).
-                    let str_ptr = self.emit_option_to_string(*sv, inner_rec)?;
+                    let str_ptr = self.emit_option_to_string(*sv, inner_rec, arg_type)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -241,7 +241,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                                 })
                             });
-                        let str_ptr = self.emit_option_to_string(*sv, inner_rec)?;
+                        let str_ptr = self.emit_option_to_string(*sv, inner_rec, arg_type)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -640,23 +640,74 @@ impl<'ctx> CodeGenerator<'ctx> {
             let v = &sorted[i];
             let has_payload = v.payload.is_some();
             if has_payload {
-                let fmt = self
-                    .builder
-                    .build_global_string_ptr(
-                        &format!("{}(%ld)", v.name),
-                        &format!("enum_fmt_{}", v.name),
-                    )
-                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                self.build_call(
-                    snprintf_fn,
-                    &[
-                        BasicMetadataValueEnum::PointerValue(buf),
-                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
-                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                        BasicMetadataValueEnum::IntValue(payload_i64),
-                    ],
-                    &format!("enum_sn_{}", v.name),
-                )?;
+                // String payloads are ptrtoint of {ptr,len}; decode when heapish.
+                let is_str_payload = matches!(
+                    &v.payload,
+                    Some(crate::ast::VariantPayload::Tuple(ts))
+                        if ts.len() == 1
+                            && matches!(&ts[0], crate::ast::Type::Name(n, _) if n == "string")
+                );
+                if is_str_payload {
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let str_sty = self.context.struct_type(
+                        &[
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    );
+                    let as_ptr = self
+                        .builder
+                        .build_int_to_ptr(payload_i64, i8_ptr, &format!("enum_str_{}", v.name))
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(str_sty),
+                            as_ptr,
+                            &format!("enum_str_ld_{}", v.name),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    let data_ptr = self
+                        .build_extract_value(loaded.into(), 0, &format!("enum_data_{}", v.name))?
+                        .into_pointer_value();
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr(
+                            &format!("{}(%s)", v.name),
+                            &format!("enum_sfmt_{}", v.name),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(data_ptr),
+                        ],
+                        &format!("enum_sn_s_{}", v.name),
+                    )?;
+                } else {
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr(
+                            &format!("{}(%ld)", v.name),
+                            &format!("enum_fmt_{}", v.name),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::IntValue(payload_i64),
+                        ],
+                        &format!("enum_sn_{}", v.name),
+                    )?;
+                }
             } else {
                 let fmt = self
                     .builder
@@ -1191,6 +1242,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         sv: inkwell::values::StructValue<'ctx>,
         inner_record: Option<&str>,
+        arg_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let disc = self
@@ -1206,22 +1258,78 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let pay_kind = match payload_bv {
             BasicValueEnum::IntValue(iv) => {
-                let as_i64 = if iv.get_type().get_bit_width() < 64 {
-                    self.builder
-                        .build_int_s_extend(iv, i64_ty, "opt_pay_i64")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                } else {
-                    iv
-                };
-                if inner_record.is_some() {
-                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let p = self
+                let bw = iv.get_type().get_bit_width();
+                if bw == 1 && inner_record.is_none() {
+                    // Bool payload: print true/false via string path.
+                    let true_g = self
                         .builder
-                        .build_int_to_ptr(as_i64, i8_ptr, "opt_rec_from_i64")
+                        .build_global_string_ptr("true", "opt_bool_t")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    OptPay::RecPtr(p)
+                    let false_g = self
+                        .builder
+                        .build_global_string_ptr("false", "opt_bool_f")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let zero = iv.get_type().const_int(0, false);
+                    let is_t = self
+                        .builder
+                        .build_int_compare(IntPredicate::NE, iv, zero, "opt_bool")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let sel = self
+                        .builder
+                        .build_select(
+                            is_t,
+                            true_g.as_pointer_value(),
+                            false_g.as_pointer_value(),
+                            "opt_bool_s",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    OptPay::StrPtr(sel.into_pointer_value())
                 } else {
-                    OptPay::Int(as_i64)
+                    let as_i64 = if bw < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, "opt_pay_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    };
+                    if inner_record.is_some() {
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let p = self
+                            .builder
+                            .build_int_to_ptr(as_i64, i8_ptr, "opt_rec_from_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        OptPay::RecPtr(p)
+                    } else if arg_type == "Option<bool>"
+                        || arg_type.ends_with("<bool>")
+                        || arg_type.contains("bool>")
+                    {
+                        // Bool stored as i64 0/1: print true/false.
+                        let true_g = self
+                            .builder
+                            .build_global_string_ptr("true", "opt_bool_t2")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let false_g = self
+                            .builder
+                            .build_global_string_ptr("false", "opt_bool_f2")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let zero = i64_ty.const_int(0, false);
+                        let is_t = self
+                            .builder
+                            .build_int_compare(IntPredicate::NE, as_i64, zero, "opt_bool2")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let sel = self
+                            .builder
+                            .build_select(
+                                is_t,
+                                true_g.as_pointer_value(),
+                                false_g.as_pointer_value(),
+                                "opt_bool_s2",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        OptPay::StrPtr(sel.into_pointer_value())
+                    } else {
+                        OptPay::Int(as_i64)
+                    }
                 }
             }
             BasicValueEnum::FloatValue(fv) => OptPay::Float(fv),

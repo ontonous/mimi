@@ -6699,6 +6699,45 @@ fn dual_option_float_println() {
     );
 }
 
+/// Option of bool println Some(true)/Some(false).
+#[test]
+fn dual_option_bool_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(true)
+            let b = Some(false)
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(true)\nSome(false)"
+    );
+}
+
+/// Custom enum with string payload println.
+#[test]
+fn dual_enum_string_payload_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Msg { Text(string) Empty }
+        func main() -> i32 {
+            println(Text("hi"))
+            println(Empty)
+            0
+        }
+        "#,
+        "Text(hi)\nEmpty()"
+    );
+}
+
 /// Custom enum println unit and payload variants.
 #[test]
 fn dual_custom_enum_println() {
