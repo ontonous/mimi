@@ -1005,17 +1005,20 @@ impl std::fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Set(vs) => {
-                // Sorted ints for dual with codegen set_to_json / Display.
+                // Sorted for dual with codegen set Display.
                 write!(f, "Set{{")?;
                 let mut ints: Vec<i64> = Vec::new();
+                let mut bools: Vec<bool> = Vec::new();
                 let mut other: Vec<&Value> = Vec::new();
                 for v in vs {
                     match v {
                         Value::Int(n) => ints.push(*n),
+                        Value::Bool(b) => bools.push(*b),
                         o => other.push(o),
                     }
                 }
                 ints.sort_unstable();
+                bools.sort_unstable(); // false < true
                 let mut first = true;
                 for n in ints {
                     if !first {
@@ -1023,6 +1026,13 @@ impl std::fmt::Display for Value {
                     }
                     first = false;
                     write!(f, "{}", n)?;
+                }
+                for b in bools {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{}", b)?;
                 }
                 for v in other {
                     if !first {

@@ -7191,6 +7191,43 @@ fn dual_from_json_map_bool() {
     );
 }
 
+/// from_json Set of bool + println dual (sorted false, true).
+#[test]
+fn dual_from_json_set_bool() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<bool>>("[true, false, true]")
+            println(s)
+            0
+        }
+        "#,
+        "Set{false, true}"
+    );
+}
+
+/// Nested List of List of Map println.
+#[test]
+fn dual_list_list_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Map<string, i32>>("{\"a\":1}")
+            let xs = [[a]]
+            println(xs)
+            0
+        }
+        "#,
+        "[[{\"a\":1}]]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

@@ -152,14 +152,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let str_ptr =
                         if arg_type == "List<string>" || arg_type.starts_with("List<string>") {
                             self.emit_list_string_to_string(*sv)?
-                        } else if let Some(inner) = arg_type
-                            .strip_prefix("List<List<")
-                            .and_then(|s| s.strip_suffix(">>"))
+                        } else if arg_type.starts_with("List<List<")
+                            || arg_type
+                                .strip_prefix("List<")
+                                .is_some_and(|s| s.starts_with("List<"))
                         {
-                            let inner_fn = match inner {
-                                "string" => "mimi_list_to_string",
-                                "i32" | "i64" => "mimi_list_i32_to_string",
-                                _ => "mimi_list_i32_to_string",
+                            // Nested list: pick inner-list formatter from element type.
+                            let mid = Self::strip_first_type_arg(arg_type, "List")
+                                .unwrap_or_else(|| "List".to_string());
+                            let elem = Self::strip_first_type_arg(&mid, "List")
+                                .unwrap_or_default();
+                            let inner_fn = if elem == "string" {
+                                "mimi_list_to_string"
+                            } else if elem.starts_with("Map") {
+                                "mimi_list_map_to_string"
+                            } else if elem.starts_with("Set") {
+                                "mimi_list_set_to_string"
+                            } else {
+                                "mimi_list_i32_to_string"
                             };
                             self.emit_list_list_to_string(*sv, inner_fn)?
                         } else if let Some(inner) = arg_type
@@ -386,6 +396,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
                     let fn_name = if arg_type.contains("Set<string>") {
                         "mimi_set_to_display_string"
+                    } else if arg_type.contains("Set<bool>") {
+                        "mimi_set_to_display_bool"
                     } else {
                         "mimi_set_to_display"
                     };
