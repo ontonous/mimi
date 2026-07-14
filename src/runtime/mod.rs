@@ -2614,16 +2614,28 @@ pub extern "C" fn json_get_element(
 /// Keys are JSON-escaped; values are printed as decimal integers.
 #[no_mangle]
 pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
-    map_to_json_values(handle, false)
+    map_to_json_values(handle, MapJsonMode::Int)
 }
 
 /// Serialize a MapHandle of 0/1 bool ValueHandles as JSON true/false.
 #[no_mangle]
 pub extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
-    map_to_json_values(handle, true)
+    map_to_json_values(handle, MapJsonMode::Bool)
 }
 
-fn map_to_json_values(handle: MapHandle, as_bool: bool) -> *mut std::ffi::c_char {
+/// Serialize a MapHandle of f64-bit ValueHandles as JSON numbers.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
+    map_to_json_values(handle, MapJsonMode::Float)
+}
+
+enum MapJsonMode {
+    Int,
+    Bool,
+    Float,
+}
+
+fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("{}");
     }
@@ -2642,18 +2654,121 @@ fn map_to_json_values(handle: MapHandle, as_bool: bool) -> *mut std::ffi::c_char
         }
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
-        if as_bool {
-            parts.push(if **v != 0 {
+        match mode {
+            MapJsonMode::Bool => parts.push(if **v != 0 {
                 String::from("true")
             } else {
                 String::from("false")
-            });
-        } else {
-            parts.push(v.to_string());
+            }),
+            MapJsonMode::Float => {
+                let f = f64::from_bits(**v as u64);
+                // Prefer compact display matching interp (1.5 not 1.500000).
+                let s = if f.fract() == 0.0 && f.is_finite() {
+                    format!("{}", f as i64)
+                } else {
+                    // Trim trailing zeros from default Debug-ish format.
+                    let raw = format!("{}", f);
+                    raw
+                };
+                parts.push(s);
+            }
+            MapJsonMode::Int => parts.push(v.to_string()),
         }
     }
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
+}
+
+/// Build a MapHandle from a JSON object with string keys and f64 values.
+/// Values are stored as f64 bit patterns in i64 ValueHandles.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_f64(json: *const std::ffi::c_char) -> MapHandle {
+    if json.is_null() {
+        return mimi_map_new();
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    if pos >= bytes.len() || bytes[pos] != b'{' {
+        return handle;
+    }
+    pos += 1;
+    const MAX_ENTRIES: usize = 1_000_000;
+    let mut count = 0usize;
+    loop {
+        if count >= MAX_ENTRIES {
+            break;
+        }
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] == b'}' {
+            break;
+        }
+        if bytes[pos] != b'"' {
+            break;
+        }
+        pos += 1;
+        let mut esc = false;
+        let mut key = String::new();
+        loop {
+            if pos >= bytes.len() {
+                return handle;
+            }
+            let c = bytes[pos];
+            if esc {
+                key.push(c as char);
+                esc = false;
+                pos += 1;
+                continue;
+            }
+            if c == b'\\' {
+                esc = true;
+                pos += 1;
+                continue;
+            }
+            if c == b'"' {
+                pos += 1;
+                break;
+            }
+            key.push(c as char);
+            pos += 1;
+        }
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b':' {
+            break;
+        }
+        pos += 1;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        let val_start = pos;
+        let mut dummy = JsonParser::new(&s[val_start..]);
+        let parsed = dummy.parse_value();
+        pos = val_start + dummy.pos;
+        let bits = match parsed {
+            Some(ref tok) => tok.parse::<f64>().unwrap_or(0.0).to_bits() as i64,
+            None => 0,
+        };
+        // SAFETY: handle is a valid map from mimi_map_new.
+        unsafe {
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, bits as ValueHandle);
+        }
+        count += 1;
+    }
+    handle
 }
 
 /// Build a MapHandle from a JSON object with string keys and string values.

@@ -7228,6 +7228,24 @@ fn dual_list_list_map_println() {
     );
 }
 
+/// from_json Map of f64 values + println dual.
+#[test]
+fn dual_from_json_map_f64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, f64>>("{\"a\":1.5,\"b\":2.0}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":1.5,\"b\":2}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

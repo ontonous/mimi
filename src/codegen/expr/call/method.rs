@@ -1549,9 +1549,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
-                // Map<string, i32|i64|string|bool> from JSON object.
-                let val_is_int = args
-                    .get(1)
+                // Map<string, i32|i64|bool|f32|f64|string> from JSON object.
+                let val_ty = args.get(1);
+                let val_is_int = val_ty
                     .map(|t| {
                         matches!(
                             t,
@@ -1559,19 +1559,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })
                     .unwrap_or(true);
-                let val_is_string = args
-                    .get(1)
+                let val_is_float = val_ty
+                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .unwrap_or(false);
+                let val_is_string = val_ty
                     .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
-                if !val_is_int && !val_is_string {
+                if !val_is_int && !val_is_float && !val_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Map>: only Map<string, i32|i64|bool|string> is supported in codegen"
+                        "from_json::<Map>: only Map<string, i32|i64|bool|f32|f64|string> is supported in codegen"
                             .into(),
                     ));
                 }
-                // bool values parse as 0/1 via mimi_map_from_json_i64 (JsonParser true/false).
                 let fn_name = if val_is_string {
                     "mimi_map_from_json_string"
+                } else if val_is_float {
+                    "mimi_map_from_json_f64"
                 } else {
                     "mimi_map_from_json_i64"
                 };
