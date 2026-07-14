@@ -6581,6 +6581,26 @@ fn dual_named_args_function() {
     );
 }
 
+/// from_json::<Result<T,E>> wraps a JSON value as Ok(T).
+#[test]
+fn dual_from_json_result_ok() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = from_json::<Result<i32, string>>("42")
+            match r {
+                Ok(n) => { println(n); 0 }
+                Err(_) => 1
+            }
+        }
+        "#,
+        "42"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {

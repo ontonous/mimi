@@ -1553,6 +1553,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .expect_basic_value(&result, "mimi_map_from_json_i64")?
                     .into())
             }
+            Type::Name(n, args) if n == "Result" && !args.is_empty() => {
+                let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_ptr)?;
+                self.compile_constructor("Ok", vec![ok_val])
+            }
+            Type::Result(ok, _) => {
+                let ok_val = self.compile_from_json_scalar_ok(ok, raw_ptr)?;
+                self.compile_constructor("Ok", vec![ok_val])
+            }
             Type::Name(type_name, _) => {
                 // Record type: deserialize JSON object into struct fields
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {
@@ -1573,6 +1581,81 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => Err(CompileError::Generic(format!(
                 "from_json::<{:?}> codegen not yet implemented",
                 type_args[0]
+            ))),
+        }
+    }
+
+    /// Parse JSON into a scalar Ok payload for `from_json::<Result<T,_>>`.
+    fn compile_from_json_scalar_ok(
+        &mut self,
+        ok_ty: &Type,
+        raw_ptr: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match ok_ty {
+            Type::Name(tn, _) if tn == "i32" || tn == "i64" => {
+                let func = self.get_runtime_fn("mimi_json_as_i64")?;
+                let r = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                    "json_as_i64",
+                )?;
+                Ok(BasicValueEnum::IntValue(
+                    self.expect_basic_value(&r, "json_as_i64")?.into_int_value(),
+                ))
+            }
+            Type::Name(tn, _) if tn == "f64" || tn == "f32" => {
+                let func = self.get_runtime_fn("mimi_json_as_f64")?;
+                let r = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                    "json_as_f64",
+                )?;
+                Ok(BasicValueEnum::FloatValue(
+                    self.expect_basic_value(&r, "json_as_f64")?.into_float_value(),
+                ))
+            }
+            Type::Name(tn, _) if tn == "bool" => {
+                let func = self.get_runtime_fn("mimi_json_as_bool")?;
+                let r = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                    "json_as_bool",
+                )?;
+                let iv = self
+                    .expect_basic_value(&r, "json_as_bool")?
+                    .into_int_value();
+                let one = self.context.i64_type().const_int(1, false);
+                Ok(BasicValueEnum::IntValue(
+                    self.builder
+                        .build_int_compare(IntPredicate::EQ, iv, one, "to_bool")
+                        .map_err(|e| CompileError::LlvmError(format!("to_bool: {}", e)))?,
+                ))
+            }
+            Type::Name(tn, _) if tn == "string" => {
+                let func = self.get_runtime_fn("mimi_from_json")?;
+                let r = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                    "from_json_str",
+                )?;
+                let pv = self
+                    .expect_basic_value(&r, "from_json_str")?
+                    .into_pointer_value();
+                let strlen_fn = self.get_runtime_fn("strlen")?;
+                let len = self
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(pv)],
+                        "strlen",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("strlen returned void")?
+                    .into_int_value();
+                self.build_string_struct(pv, len)
+            }
+            _ => Err(CompileError::Generic(format!(
+                "from_json::<Result<{:?},_>>: unsupported Ok type",
+                ok_ty
             ))),
         }
     }
