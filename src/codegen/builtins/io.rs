@@ -1744,6 +1744,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
+    /// Pick map JSON runtime helper from a type string containing `Map<…>`.
+    fn map_json_fn_for_type(type_name: &str) -> &'static str {
+        if type_name.contains("Map<string, string>") {
+            "mimi_map_to_json_string"
+        } else if type_name.contains("Map<string, bool>") {
+            "mimi_map_to_json_bool"
+        } else if type_name.contains("Map<string, f64>")
+            || type_name.contains("Map<string, f32>")
+        {
+            "mimi_map_to_json_f64"
+        } else {
+            "mimi_map_to_json_i64"
+        }
+    }
+
+    /// Pick set Display runtime helper from a type string containing `Set<…>`.
+    fn set_display_fn_for_type(type_name: &str) -> &'static str {
+        if type_name.contains("Set<string>") {
+            "mimi_set_to_display_string"
+        } else if type_name.contains("Set<bool>") {
+            "mimi_set_to_display_bool"
+        } else if type_name.contains("Set<f64>") || type_name.contains("Set<f32>") {
+            "mimi_set_to_display_f64"
+        } else {
+            "mimi_set_to_display"
+        }
+    }
+
     /// Strip first type argument from `Prefix<A, …>` / `Prefix<A>` → `A`.
     /// Handles nested brackets (e.g. `Result<Option<Map<string, i32>>, i32>`).
     fn strip_first_type_arg(type_name: &str, prefix: &str) -> Option<String> {
@@ -1911,7 +1939,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         && (arg_type.contains("Map<") || arg_type.contains("Set<"))
                     {
                         let disp = if arg_type.contains("Map<") {
-                            let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            let fn_name = Self::map_json_fn_for_type(arg_type);
+                            let func = self.get_runtime_fn(fn_name)?;
                             self.build_call(
                                 func,
                                 &[BasicMetadataValueEnum::IntValue(as_i64)],
@@ -1921,7 +1950,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("map to_json void")?
                             .into_pointer_value()
                         } else {
-                            let func = self.get_runtime_fn("mimi_set_to_display")?;
+                            let fn_name = Self::set_display_fn_for_type(arg_type);
+                            let func = self.get_runtime_fn(fn_name)?;
                             self.build_call(
                                 func,
                                 &[BasicMetadataValueEnum::IntValue(as_i64)],
@@ -2330,7 +2360,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         OptPay::StrPtr(sel.into_pointer_value())
                     } else if arg_type.contains("Map<") || arg_type == "Option<Map>" {
-                        let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                        let fn_name = Self::map_json_fn_for_type(arg_type);
+                        let func = self.get_runtime_fn(fn_name)?;
                         let raw = self
                             .build_call(
                                 func,
@@ -2338,11 +2369,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "opt_map_json",
                             )?
                             .try_as_basic_value_opt()
-                            .ok_or("mimi_map_to_json_i64 void")?
+                            .ok_or("map to_json void")?
                             .into_pointer_value();
                         OptPay::StrPtr(raw)
                     } else if arg_type.contains("Set<") || arg_type == "Option<Set>" {
-                        let func = self.get_runtime_fn("mimi_set_to_display")?;
+                        let fn_name = Self::set_display_fn_for_type(arg_type);
+                        let func = self.get_runtime_fn(fn_name)?;
                         let raw = self
                             .build_call(
                                 func,
@@ -2350,7 +2382,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "opt_set_disp",
                             )?
                             .try_as_basic_value_opt()
-                            .ok_or("mimi_set_to_display void")?
+                            .ok_or("set display void")?
                             .into_pointer_value();
                         OptPay::StrPtr(raw)
                     } else {
