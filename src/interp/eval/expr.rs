@@ -1587,7 +1587,11 @@ impl<'a> Interpreter<'a> {
                             .collect::<Result<Vec<_>, _>>()?;
                         Ok(Value::Variant("Err".to_string(), converted))
                     }
-                    _ => Err(InterpError::new(format!("expected Result, got {}", val))),
+                    // Bare JSON value → Ok(T) for from_json::<Result<T,E>>.
+                    other => {
+                        let ok_val = self.coerce_value_to_type(other, &type_args[0])?;
+                        Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                    }
                 },
                 _ => {
                     if let Some(type_def) = self.type_defs.get(name) {
