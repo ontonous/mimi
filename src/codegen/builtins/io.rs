@@ -272,7 +272,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                                     })
                             });
-                        let str_ptr = self.emit_result_to_string(*sv, ok_rec)?;
+                        let str_ptr =
+                            self.emit_result_to_string_typed(*sv, ok_rec, arg_type)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -1393,6 +1394,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         sv: inkwell::values::StructValue<'ctx>,
         ok_record: Option<&str>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        self.emit_result_to_string_typed(sv, ok_record, "")
+    }
+
+    fn emit_result_to_string_typed(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        ok_record: Option<&str>,
+        arg_type: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let fields = sv.get_type().get_field_types();
         let disc = self
@@ -1519,6 +1529,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         iv
                     };
+                    // Result of Map/Set: Ok payload is opaque handle (i64).
+                    if label == "ok"
+                        && (arg_type.contains("Map<") || arg_type.contains("Set<"))
+                    {
+                        let disp = if arg_type.contains("Map<") {
+                            let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                            self.build_call(
+                                func,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "res_ok_map",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("map to_json void")?
+                            .into_pointer_value()
+                        } else {
+                            let func = self.get_runtime_fn("mimi_set_to_display")?;
+                            self.build_call(
+                                func,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "res_ok_set",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("set display void")?
+                            .into_pointer_value()
+                        };
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("Ok(%s)", "res_ok_ms_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(disp),
+                            ],
+                            "res_ok_ms_snprintf",
+                        )?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        return Ok(());
+                    }
                     // Result<T,string> stores Err as ptrtoint of heap {ptr,len} string.
                     // Only decode as string when value looks like a heap pointer
                     // (>= 1MB, 8-byte aligned); small integers stay numeric.
