@@ -6681,6 +6681,45 @@ fn dual_option_string_println() {
     );
 }
 
+/// Multi-arg println with record and scalar.
+#[test]
+fn dual_println_record_mixed() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p = Point { x: 1, y: 2 }
+            println("pt", p, 3)
+            0
+        }
+        "#,
+        "pt Point { x: 1, y: 2 } 3"
+    );
+}
+
+/// Result Ok(string) / Err(int) println.
+#[test]
+fn dual_result_ok_string_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<string, i32> = Ok("ok")
+            let b: Result<string, i32> = Err(3)
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Ok(ok)\nErr(3)"
+    );
+}
+
 /// Result println formats Ok(n) / Err(n) on both backends.
 #[test]
 fn dual_result_println() {
