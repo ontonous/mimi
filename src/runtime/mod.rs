@@ -1082,14 +1082,26 @@ fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
     let page_offset = handle - page_start;
     let max_scan = page_size.saturating_sub(page_offset).min(MAX_BOUNDED_SCAN);
     let ptr = handle as *const u8;
-    // SAFETY: mincore confirmed mapped page; scan bounded to that page.
+    // RT-H2 soft harden: copy bytes into a local buffer while scanning so a
+    // concurrent munmap after mincore cannot corrupt the String we build from
+    // a live slice. Residual race remains on the individual byte loads
+    // themselves (cannot close fully without process_vm_readv / userfaultfd).
+    let mut local = [0u8; MAX_BOUNDED_SCAN];
     let mut len = 0usize;
+    // SAFETY: mincore confirmed mapped page; scan/copy bounded to that page.
     unsafe {
         while len < max_scan {
-            if *ptr.add(len) == 0 {
-                let slice = std::slice::from_raw_parts(ptr, len);
-                return Some(String::from_utf8_lossy(slice).into_owned());
+            let b = *ptr.add(len);
+            if b == 0 {
+                // Re-check mapping before trusting the snapshot.
+                let mut mvec2: u8 = 0;
+                if libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec2) != 0
+                {
+                    return None;
+                }
+                return Some(String::from_utf8_lossy(&local[..len]).into_owned());
             }
+            local[len] = b;
             len += 1;
         }
     }
