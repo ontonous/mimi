@@ -1,4 +1,3 @@
-use crate::codegen::CallSiteValueExt;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
@@ -202,21 +201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(total_len, sizeof_i64, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let new_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let new_data = self.malloc_or_abort(alloc_size, "malloc_call")?;
         let new_data_i64 = self
             .builder
             .build_bit_cast(
@@ -387,21 +372,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(list_len, sizeof_pair, "enum_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let result_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "enum_malloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let result_data = self.malloc_or_abort(alloc_size, "enum_malloc")?;
         let result_data_i64 = self
             .builder
             .build_bit_cast(
@@ -532,21 +503,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(min_len, sizeof_pair, "zip_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let result_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "zip_malloc",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let result_data = self.malloc_or_abort(alloc_size, "zip_malloc")?;
         let result_data_i64 = self
             .builder
             .build_bit_cast(

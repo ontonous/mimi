@@ -455,20 +455,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         fmt.push('}');
-                        let malloc_fn = self
-                            .module
-                            .get_function("malloc")
-                            .ok_or_else(|| CompileError::LlvmError("malloc not declared".into()))?;
                         let buf_size = i64_ty.const_int(4096, false);
-                        let buf = self
-                            .build_call(
-                                malloc_fn,
-                                &[BasicMetadataValueEnum::IntValue(buf_size)],
-                                "record_json_malloc",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("malloc returned void")?
-                            .into_pointer_value();
+                        // B4: OOM-safe buffer for record to_json.
+                        let buf = self.malloc_or_abort(buf_size, "record_json_malloc")?;
                         let fmt_ptr = self
                             .builder
                             .build_global_string_ptr(&fmt, "record_json_fmt")
@@ -1447,9 +1436,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("load: {}", e)))?
                 .into_struct_value();
 
-            // Get runtime functions
-            let malloc_fn = self.get_runtime_fn("malloc")?;
-
             // Sort fields alphabetically
             let mut idx_map: Vec<(usize, &crate::ast::Field)> = fields.iter().enumerate().collect();
             idx_map.sort_by(|a, b| a.1.name.cmp(&b.1.name));
@@ -1558,15 +1544,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             // Allocate buffer and sprintf
             let buf_size = i64_ty.const_int(4096, false);
-            let buf = self
-                .build_call(
-                    malloc_fn,
-                    &[BasicMetadataValueEnum::IntValue(buf_size)],
-                    "elem_json_malloc",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or("malloc returned void")?
-                .into_pointer_value();
+            // B4: OOM-safe buffer for element to_json.
+            let buf = self.malloc_or_abort(buf_size, "elem_json_malloc")?;
             let fmt_ptr = self
                 .builder
                 .build_global_string_ptr(&fmt, "elem_json_fmt")

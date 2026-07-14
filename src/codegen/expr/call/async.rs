@@ -201,16 +201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let env_byte_size = env_struct_type
                 .size_of()
                 .ok_or_else(|| "size_of error".to_string())?;
-            let malloc_fn = self.get_runtime_fn("malloc")?;
-            let env_heap_ptr = self
-                .build_call(
-                    malloc_fn,
-                    &[BasicMetadataValueEnum::IntValue(env_byte_size)],
-                    "spawn_env_heap",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or_else(|| CompileError::LlvmError("malloc returned void".to_string()))?
-                .into_pointer_value();
+            let env_heap_ptr = self.malloc_or_abort(env_byte_size, "spawn_env_heap")?;
 
             for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
                 let val = self.build_load(ty, var_alloca, &format!("spawn_cap_val_{}", name))?;

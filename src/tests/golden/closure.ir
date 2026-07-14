@@ -388,13 +388,13 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 
 define i32 @main() {
 entry:
+  %add = alloca { ptr, ptr }, align 8
   %closure = alloca { ptr, ptr }, align 8
   %fn_gep = getelementptr inbounds { ptr, ptr }, ptr %closure, i32 0, i32 0
   store ptr @__lambda_0_1, ptr %fn_gep, align 8
   %env_gep = getelementptr inbounds { ptr, ptr }, ptr %closure, i32 0, i32 1
   store ptr null, ptr %env_gep, align 8
   %closure_val = load { ptr, ptr }, ptr %closure, align 8
-  %add = alloca { ptr, ptr }, align 8
   store { ptr, ptr } %closure_val, ptr %add, align 8
   %add_closure = load { ptr, ptr }, ptr %add, align 8
   %fn_ptr = extractvalue { ptr, ptr } %add_closure, 0
@@ -406,41 +406,41 @@ entry:
 
 define {} @Main__run__from_Single({} %0) {
 entry:
+  %Single = alloca {}, align 8
   %self = alloca {}, align 8
   store {} %0, ptr %self, align 1
-  %Single = alloca {}, align 8
   %ret_load = load {}, ptr %Single, align 1
   ret {} %ret_load
 }
 
 define { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__run__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
+  %tmp13 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp9 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp5 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %tmp = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
+  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
-  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %self1 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  %tmp = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self1, ptr %tmp, align 8
   %last_state = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp, i32 0, i32 0
   %last_state2 = load { ptr, i64 }, ptr %last_state, align 8
   %last_state3 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
   store { ptr, i64 } %last_state2, ptr %last_state3, align 8
   %self4 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  %tmp5 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self4, ptr %tmp5, align 8
   %unexpected_event = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp5, i32 0, i32 1
   %unexpected_event6 = load { ptr, i64 }, ptr %unexpected_event, align 8
   %unexpected_event7 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
   store { ptr, i64 } %unexpected_event6, ptr %unexpected_event7, align 8
   %self8 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  %tmp9 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self8, ptr %tmp9, align 8
   %snapshot = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp9, i32 0, i32 2
   %snapshot10 = load { ptr, i64 }, ptr %snapshot, align 8
   %snapshot11 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
   store { ptr, i64 } %snapshot10, ptr %snapshot11, align 8
   %self12 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %self, align 8
-  %tmp13 = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %self12, ptr %tmp13, align 8
   %trace = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %tmp13, i32 0, i32 3
   %trace14 = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %trace, align 8
@@ -452,41 +452,42 @@ entry:
 
 define {} @Main__reset__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
+  %Single = alloca {}, align 8
   %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
-  %Single = alloca {}, align 8
   %ret_load = load {}, ptr %Single, align 1
   ret {} %ret_load
 }
 
 define {} @Main__recover__from_Fault({ { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
+  %Single = alloca {}, align 8
   %self = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   store { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0, ptr %self, align 8
-  %Single = alloca {}, align 8
   %ret_load = load {}, ptr %Single, align 1
   ret {} %ret_load
 }
 
 define { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Single({} %0) {
 entry:
+  %PanicPayload = alloca { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, align 8
+  %MemoryDump = alloca { { ptr, i64 }, i32 }, align 8
+  %SystemTrace = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, align 8
+  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %self = alloca {}, align 8
   store {} %0, ptr %self, align 1
-  %Fault = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %last_state = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 0
   store ptr @str, ptr %last_state, align 8
   %unexpected_event = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 1
   store ptr @str.1, ptr %unexpected_event, align 8
   %snapshot = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, i32 0, i32 2
   store ptr @str.2, ptr %snapshot, align 8
-  %SystemTrace = alloca { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, align 8
   %last_state_name = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 0
   store ptr @str.3, ptr %last_state_name, align 8
   %unexpected_event1 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 1
   store ptr @str.4, ptr %unexpected_event1, align 8
   %snapshot2 = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 2
   store ptr @str.5, ptr %snapshot2, align 8
-  %MemoryDump = alloca { { ptr, i64 }, i32 }, align 8
   %fields = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 0
   store ptr @str.6, ptr %fields, align 8
   %count = getelementptr inbounds { { ptr, i64 }, i32 }, ptr %MemoryDump, i32 0, i32 1
@@ -494,7 +495,6 @@ entry:
   %memory_dump = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } }, ptr %SystemTrace, i32 0, i32 3
   %load_memory_dump = load { { ptr, i64 }, i32 }, ptr %MemoryDump, align 8
   store { { ptr, i64 }, i32 } %load_memory_dump, ptr %memory_dump, align 8
-  %PanicPayload = alloca { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, align 8
   %error_type = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 0
   store ptr @str.7, ptr %error_type, align 8
   %file = getelementptr inbounds { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } }, ptr %PanicPayload, i32 0, i32 1
@@ -515,9 +515,9 @@ entry:
 
 define i32 @__lambda_0_1(ptr %0, i32 %1, i32 %2) {
 entry:
+  %b = alloca i32, align 4
   %a = alloca i32, align 4
   store i32 %1, ptr %a, align 4
-  %b = alloca i32, align 4
   store i32 %2, ptr %b, align 4
   %a1 = load i32, ptr %a, align 4
   %b2 = load i32, ptr %b, align 4

@@ -263,17 +263,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         false,
                     );
                     let heap_ty = BasicTypeEnum::StructType(string_struct_ty);
-                    let malloc_fn = self.get_runtime_fn("malloc")?;
                     let alloc_size = i64_ty.const_int(16, false);
-                    let heap_ptr = call_try_basic_value(&self.build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                        "err_str_malloc",
-                    )?)
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("malloc for err string returned void".into())
-                    })?
-                    .into_pointer_value();
+                    // B4: OOM-safe heap copy for Err(string) payload.
+                    let heap_ptr = self.malloc_or_abort(alloc_size, "err_str_malloc")?;
                     let str_ptr_gep = self
                         .gep()
                         .build_struct_gep(heap_ty, heap_ptr, 0, "err_str_ptr_gep")
@@ -658,11 +650,39 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("unwrap_or requires a default value".into());
         }
         let default_val = self.compile_expr(&args[0], vars)?;
-        // Use the default value's type for the alloca — this is the authoritative
-        // type (enforced by the type checker). For Ok(payload) payload has the
-        // same type; for Err/None with narrow structs, the payload type may be i64
-        // while default is {ptr,i64}, but we only store the default in that branch.
-        let alloca_ty = default_val.get_type();
+        let default_val = self.normalize_string_value(default_val, &args[0])?;
+        // Slot type must match both branches. String literals may still be a raw
+        // `i8*` while Ok payload is the Mimi string struct `{ptr,i64}` — wrap the
+        // default and prefer the payload type so we never store a 16-byte struct
+        // into an 8-byte ptr alloca (stack smash → SIGSEGV).
+        let payload_ty = ctx.payload.get_type();
+        let default_ty = default_val.get_type();
+        let (alloca_ty, default_val) = match (default_ty, payload_ty) {
+            (BasicTypeEnum::PointerType(_), BasicTypeEnum::StructType(_)) => {
+                let wrapped = if let BasicValueEnum::PointerValue(pv) = default_val {
+                    self.wrap_c_string(pv)?
+                } else {
+                    default_val
+                };
+                (payload_ty, wrapped)
+            }
+            (BasicTypeEnum::StructType(_), BasicTypeEnum::PointerType(_)) => {
+                // Default already a string struct; rare path — keep default type
+                // and hope payload was raw (should not happen after normalize).
+                (default_ty, default_val)
+            }
+            _ => {
+                // Prefer default type (type-checker authority) when both agree
+                // in kind; if payload is wider struct, prefer payload.
+                if matches!(payload_ty, BasicTypeEnum::StructType(_))
+                    && !matches!(default_ty, BasicTypeEnum::StructType(_))
+                {
+                    (payload_ty, default_val)
+                } else {
+                    (default_ty, default_val)
+                }
+            }
+        };
         let ok_bb = self
             .context
             .append_basic_block(ctx.function, "unwrap_or_ok");

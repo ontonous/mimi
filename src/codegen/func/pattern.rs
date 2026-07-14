@@ -20,10 +20,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Pattern::Wildcard => Ok(()),
             Pattern::Variable(name) => {
                 let llvm_ty = val.get_type();
-                let alloca = self
-                    .builder
-                    .build_alloca(llvm_ty, name)
-                    .map_err(|e| CompileError::LlvmError(format!("alloca error: {}", e)))?;
+                // Entry-block alloca so register_heap_slot's entry null-init
+                // and free paths dominate even after malloc_or_abort BB splits.
+                let alloca = self.build_alloca(llvm_ty, name)?;
                 self.builder
                     .build_store(alloca, val)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

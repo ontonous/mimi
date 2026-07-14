@@ -386,14 +386,19 @@ impl<'ctx> CodeGenerator<'ctx> {
     // -------------------------------------------------------------------------
 
     /// Build an `alloca` instruction, returning a typed error on failure.
+    /// Build an `alloca` in the function entry block so it dominates every use.
+    ///
+    /// Always using the entry block is required once helpers like
+    /// `malloc_or_abort` split the current insert block: a mid-function
+    /// alloca would not dominate `register_heap_slot`'s entry-block null
+    /// init (and free paths in other blocks), producing invalid IR such as
+    /// GEP of `%s` before `%s = alloca`.
     pub(super) fn build_alloca<T: inkwell::types::BasicType<'ctx>>(
         &self,
         ty: T,
         name: &str,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
-        self.builder
-            .build_alloca(ty, name)
-            .map_err(|e| CompileError::LlvmError(format!("alloca error ({}): {}", name, e)))
+        self.build_entry_alloca(ty, name)
     }
 
     /// Build an `alloca` in the function's entry block so it dominates all uses.
@@ -411,6 +416,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_first_basic_block()
             .ok_or_else(|| CompileError::LlvmError("function has no entry block".to_string()))?;
         let saved = self.builder.get_insert_block();
+        // Place new allocas at the *start* of the entry block so they dominate
+        // any early null-init / free that may already have been emitted later
+        // in entry (e.g. heap_slot_null_init after a previous register).
         if let Some(first_inst) = entry_bb.get_first_instruction() {
             self.builder.position_before(&first_inst);
         } else {
@@ -993,10 +1001,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .context
                     .ptr_type(inkwell::AddressSpace::default())
                     .const_null();
-                // Position right after the first instruction to place the null
-                // store early in the entry block, right after the alloca(s).
-                if let Some(first_inst) = entry_bb.get_first_instruction() {
-                    self.builder.position_before(&first_inst);
+                // Insert IMMEDIATELY AFTER the base alloca when possible so the
+                // GEP/store never precedes the alloca definition (use-before-def).
+                // Falling back to "after first entry instruction" is unsafe if
+                // `base` is a later alloca — prefer base's own instruction.
+                if let Some(base_inst) = base.as_instruction() {
+                    if let Some(next) = base_inst.get_next_instruction() {
+                        self.builder.position_before(&next);
+                    } else {
+                        // Alloca is last in its block; append after it.
+                        self.builder.position_at_end(base_inst.get_parent().unwrap_or(entry_bb));
+                    }
+                } else if let Some(first_inst) = entry_bb.get_first_instruction() {
+                    // Non-instruction base (e.g. argument): after first entry inst.
                     if let Some(next) = first_inst.get_next_instruction() {
                         self.builder.position_before(&next);
                     } else {

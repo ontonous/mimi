@@ -15,11 +15,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let i64_ty = self.context.i64_type();
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
         // B3: Use snprintf instead of sprintf for buffer safety.
+        // B4: allocations go through malloc_or_abort.
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             let ty = i8_ptr.fn_type(
@@ -58,17 +55,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => i64_ty.const_int(512, false), // B3: was 64, %f can produce 317+ chars
         };
-        let buf = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "json_malloc",
-            )
-            .map_err(|e| format!("malloc error: {}", e))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let buf = self.malloc_or_abort(alloc_size, "json_malloc")?;
         // NOTE: not registered — returned value owns the allocation
         match args[0] {
             BasicMetadataValueEnum::FloatValue(fv) => {
