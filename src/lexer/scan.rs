@@ -371,12 +371,24 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     let digit_start = s.len();
                     while let Some(c) = self.peek() {
-                        if c.is_ascii_hexdigit() || c == '_' {
+                        if c.is_ascii_hexdigit() {
                             s.push(c);
                             self.advance();
+                        } else if c == '_' {
+                            let mut tmp = self.chars.clone();
+                            match tmp.next() {
+                                Some(n) if n.is_ascii_hexdigit() || n == '_' => {
+                                    s.push(c);
+                                    self.advance();
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     // HIGH fix: reject "0x" with no hex digits.
                     // Keep the prefix so the parser can produce a clear error.
@@ -393,12 +405,24 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     let digit_start = s.len();
                     while let Some(c) = self.peek() {
-                        if c == '0' || c == '1' || c == '_' {
+                        if c == '0' || c == '1' {
                             s.push(c);
                             self.advance();
+                        } else if c == '_' {
+                            let mut tmp = self.chars.clone();
+                            match tmp.next() {
+                                Some(n) if n == '0' || n == '1' || n == '_' => {
+                                    s.push(c);
+                                    self.advance();
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     // HIGH fix: reject "0b" with no binary digits.
                     if s.len() == digit_start {
@@ -413,12 +437,26 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     let digit_start = s.len();
                     while let Some(c) = self.peek() {
-                        if c.is_ascii_digit() && c != '8' && c != '9' || c == '_' {
+                        if c.is_ascii_digit() && c != '8' && c != '9' {
                             s.push(c);
                             self.advance();
+                        } else if c == '_' {
+                            let mut tmp = self.chars.clone();
+                            match tmp.next() {
+                                Some(n)
+                                    if (n.is_ascii_digit() && n != '8' && n != '9') || n == '_' =>
+                                {
+                                    s.push(c);
+                                    self.advance();
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     // HIGH fix: reject "0o" with no octal digits.
                     if s.len() == digit_start {
@@ -447,11 +485,21 @@ impl<'a> super::Lexer<'a> {
                     break;
                 }
             } else if c == '_' {
-                s.push(c);
-                self.advance();
+                // LX-C3: digit separators must be between digits.
+                let mut tmp = self.chars.clone();
+                match tmp.next() {
+                    Some(n) if n.is_ascii_digit() || n == '_' => {
+                        s.push(c);
+                        self.advance();
+                    }
+                    _ => break,
+                }
             } else {
                 break;
             }
+        }
+        while s.ends_with('_') {
+            s.pop();
         }
         // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
         if let Some(ch) = self.peek() {
@@ -523,6 +571,10 @@ impl<'a> super::Lexer<'a> {
             if self.peek() == Some('\t') {
                 return Err(tabs_not_allowed(self.line, self.col));
             }
+            // LX-C2: skip lone CR before newline (Windows endings).
+            if self.peek() == Some('\r') {
+                self.advance();
+            }
             if self.peek().is_none() {
                 return Ok(());
             }
@@ -535,13 +587,20 @@ impl<'a> super::Lexer<'a> {
                 } else if next == Some('*') {
                     self.skip_block_comment()?;
                     self.skip_whitespace_inline();
+                    if self.peek() == Some('\r') {
+                        self.advance();
+                    }
                     if self.peek() == Some('\n') || self.peek().is_none() {
                         is_comment_line = true;
                     }
                 }
             }
-            let is_blank = self.peek() == Some('\n');
+            // LX-H1: blank is newline, CR, or EOF.
+            let is_blank = matches!(self.peek(), Some('\n') | Some('\r') | None);
             if is_comment_line || is_blank {
+                if self.peek() == Some('\r') {
+                    self.advance();
+                }
                 if self.peek() == Some('\n') {
                     self.advance();
                 }
