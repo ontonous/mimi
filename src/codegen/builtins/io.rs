@@ -417,6 +417,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                         field_val.into_float_value(),
                     ));
                 }
+                crate::ast::Type::Name(n, _)
+                    if self.type_defs.get(n).is_some_and(|td| {
+                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                    }) =>
+                {
+                    // Nested named record: recursive Display string.
+                    fmt.push_str(&format!("{}: %s", field.name));
+                    let nested_ptr = match field_val {
+                        BasicValueEnum::PointerValue(pv) => pv,
+                        BasicValueEnum::StructValue(sv) => {
+                            let nested_ty = *self.type_llvm.get(n).ok_or_else(|| {
+                                CompileError::LlvmError(format!("no LLVM type for {}", n))
+                            })?;
+                            let BasicTypeEnum::StructType(nsty) = nested_ty else {
+                                return Err(CompileError::LlvmError(format!(
+                                    "{} is not a struct",
+                                    n
+                                )));
+                            };
+                            let alloca = self.build_alloca(
+                                BasicTypeEnum::StructType(nsty),
+                                &format!("nest_{}", field.name),
+                            )?;
+                            self.build_store(alloca, sv)?;
+                            alloca
+                        }
+                        _ => {
+                            return Err(CompileError::LlvmError(format!(
+                                "nested record field '{}' unexpected kind",
+                                field.name
+                            )))
+                        }
+                    };
+                    let nested_str = self.emit_record_display(n, nested_ptr)?;
+                    sprintf_args.push(BasicMetadataValueEnum::PointerValue(nested_str));
+                }
                 _ => {
                     fmt.push_str(&format!("{}: ?", field.name));
                 }
