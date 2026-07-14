@@ -723,25 +723,22 @@ func main() -> i32 {
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
-fn while_let_array_pattern_rejected_with_clear_message() {
-    // Array pattern in while-let should be rejected with a message
-    // mentioning "codegen" (not a generic "does not support").
+fn while_let_array_pattern_accepted() {
+    // Fixed-length array pattern in while-let is now supported in codegen.
     let src = r#"
 func main() -> i32 {
-    let xs: List<i32> = [1, 2, 3]
+    let xs: List<i32> = [1, 2]
     let mut i = 0
     while let [a, b] = xs {
-        i = i + 1
-        if i > 10 { break }
+        i = a + b
+        break
     }
     return i
 }
 "#;
-    let errs = check_source(src).unwrap_err();
     assert!(
-        errs.iter().any(|d| d.message.contains("codegen")),
-        "while-let array pattern rejection should mention codegen: {:?}",
-        errs
+        check_source(src).is_ok(),
+        "fixed-length while-let list pattern should typecheck"
     );
 }
 
