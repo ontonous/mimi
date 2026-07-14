@@ -6681,6 +6681,24 @@ fn dual_option_string_println() {
     );
 }
 
+/// Option of float println Some(3.5).
+#[test]
+fn dual_option_float_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(3.5)
+            println(a)
+            0
+        }
+        "#,
+        "Some(3.5)"
+    );
+}
+
 /// Multi-arg println with record and scalar.
 #[test]
 fn dual_println_record_mixed() {

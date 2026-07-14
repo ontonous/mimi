@@ -1021,6 +1021,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Classify payload for Some(...) formatting.
         enum OptPay<'a> {
             Int(inkwell::values::IntValue<'a>),
+            Float(inkwell::values::FloatValue<'a>),
             StrPtr(inkwell::values::PointerValue<'a>),
             RecPtr(inkwell::values::PointerValue<'a>),
         }
@@ -1044,6 +1045,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     OptPay::Int(as_i64)
                 }
             }
+            BasicValueEnum::FloatValue(fv) => OptPay::Float(fv),
             BasicValueEnum::PointerValue(pv) => {
                 if inner_record.is_some() {
                     OptPay::RecPtr(pv)
@@ -1154,6 +1156,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(payload_i64),
                     ],
                     "opt_some_snprintf",
+                )?;
+            }
+            OptPay::Float(fv) => {
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%g)", "opt_some_ffmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::FloatValue(fv),
+                    ],
+                    "opt_some_snprintf_f",
                 )?;
             }
         }
