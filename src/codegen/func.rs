@@ -228,47 +228,58 @@ fn collect_idents_in_old(expr: &crate::ast::Expr, out: &mut Vec<String>) {
 }
 
 /// Fallback: collect ALL identifiers from any expression tree.
+/// CG-H8: depth-limited to avoid stack overflow on pathological ASTs.
 fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
+    collect_all_idents_depth(expr, out, 0);
+}
+
+const COLLECT_IDENTS_MAX_DEPTH: u32 = 256;
+
+fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, depth: u32) {
+    if depth > COLLECT_IDENTS_MAX_DEPTH {
+        return;
+    }
     use crate::ast::Expr;
+    let d = depth + 1;
     match expr {
         Expr::Ident(name) => out.push(name.clone()),
         Expr::Binary(_, l, r) => {
-            collect_all_idents(l, out);
-            collect_all_idents(r, out);
+            collect_all_idents_depth(l, out, d);
+            collect_all_idents_depth(r, out, d);
         }
-        Expr::Unary(_, e) => collect_all_idents(e, out),
+        Expr::Unary(_, e) => collect_all_idents_depth(e, out, d),
         Expr::Field(e, _) | Expr::Index(e, _) | Expr::TupleIndex(e, _) => {
-            collect_all_idents(e, out)
+            collect_all_idents_depth(e, out, d)
         }
-        Expr::OptionalChain(e, _) => collect_all_idents(e, out),
+        Expr::OptionalChain(e, _) => collect_all_idents_depth(e, out, d),
         Expr::Call(callee, args) => {
-            collect_all_idents(callee, out);
+            collect_all_idents_depth(callee, out, d);
             for a in args {
-                collect_all_idents(a, out);
+                collect_all_idents_depth(a, out, d);
             }
         }
         Expr::Tuple(es) | Expr::List(es) | Expr::SetLiteral(es) => {
             for e in es {
-                collect_all_idents(e, out);
+                collect_all_idents_depth(e, out, d);
             }
         }
         Expr::If { cond, then_, else_ } => {
-            collect_all_idents(cond, out);
+            collect_all_idents_depth(cond, out, d);
             for s in then_ {
-                collect_all_idents_in_stmt(s, out);
+                collect_all_idents_in_stmt_depth(s, out, d);
             }
             if let Some(e) = else_ {
                 for s in e {
-                    collect_all_idents_in_stmt(s, out);
+                    collect_all_idents_in_stmt_depth(s, out, d);
                 }
             }
         }
         Expr::Match(scrut, arms) => {
-            collect_all_idents(scrut, out);
+            collect_all_idents_depth(scrut, out, d);
             for arm in arms {
-                collect_all_idents(&arm.body, out);
+                collect_all_idents_depth(&arm.body, out, d);
                 if let Some(g) = &arm.guard {
-                    collect_all_idents(g, out);
+                    collect_all_idents_depth(g, out, d);
                 }
             }
         }
@@ -279,34 +290,34 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
         | Expr::TypeOf(e)
         | Expr::Old(e)
         | Expr::QuoteInterpolate(e)
-        | Expr::NamedArg(_, e) => collect_all_idents(e, out),
+        | Expr::NamedArg(_, e) => collect_all_idents_depth(e, out, d),
         Expr::Range { start, end } => {
-            collect_all_idents(start, out);
-            collect_all_idents(end, out);
+            collect_all_idents_depth(start, out, d);
+            collect_all_idents_depth(end, out, d);
         }
         Expr::SliceExpr { target, start, end } => {
-            collect_all_idents(target, out);
+            collect_all_idents_depth(target, out, d);
             if let Some(s) = start {
-                collect_all_idents(s, out);
+                collect_all_idents_depth(s, out, d);
             }
             if let Some(e) = end {
-                collect_all_idents(e, out);
+                collect_all_idents_depth(e, out, d);
             }
         }
         Expr::Record { ty: _, fields } => {
             for f in fields {
-                collect_all_idents(&f.value, out);
+                collect_all_idents_depth(&f.value, out, d);
             }
         }
         Expr::MapLiteral { entries } => {
             for (k, v) in entries {
-                collect_all_idents(k, out);
-                collect_all_idents(v, out);
+                collect_all_idents_depth(k, out, d);
+                collect_all_idents_depth(v, out, d);
             }
         }
         Expr::Turbofish(_, _, args) => {
             for a in args {
-                collect_all_idents(a, out);
+                collect_all_idents_depth(a, out, d);
             }
         }
         Expr::Block(stmts)
@@ -319,7 +330,7 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             body: stmts,
         } => {
             for s in stmts {
-                collect_all_idents_in_stmt(s, out);
+                collect_all_idents_in_stmt_depth(s, out, d);
             }
         }
         Expr::Comprehension {
@@ -328,10 +339,10 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             iter,
             guard,
         } => {
-            collect_all_idents(expr, out);
-            collect_all_idents(iter, out);
+            collect_all_idents_depth(expr, out, d);
+            collect_all_idents_depth(iter, out, d);
             if let Some(g) = guard {
-                collect_all_idents(g, out);
+                collect_all_idents_depth(g, out, d);
             }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) => {}
@@ -350,12 +361,12 @@ fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     }
 }
 
-fn collect_all_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
+fn collect_all_idents_in_stmt_depth(stmt: &crate::ast::Stmt, out: &mut Vec<String>, depth: u32) {
     use crate::ast::Stmt;
     match stmt {
-        Stmt::Expr(e) => collect_all_idents(e, out),
-        Stmt::Let { init: Some(e), .. } => collect_all_idents(e, out),
-        Stmt::Return(Some(e)) => collect_all_idents(e, out),
+        Stmt::Expr(e) => collect_all_idents_depth(e, out, depth),
+        Stmt::Let { init: Some(e), .. } => collect_all_idents_depth(e, out, depth),
+        Stmt::Return(Some(e)) => collect_all_idents_depth(e, out, depth),
         _ => {}
     }
 }

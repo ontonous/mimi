@@ -419,7 +419,7 @@ impl<'a> Checker<'a> {
                     {
                         let at = self.infer_expr(arg, scopes);
                         // IF-C5 residual: unify so TypeVars resolve.
-                        if self.unification.unify(&at, param).is_err() {
+                        if self.unification.unify_strict(&at, param).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0211,
                                 format!(
@@ -657,8 +657,8 @@ impl<'a> Checker<'a> {
                 } else {
                     param.clone()
                 };
-                // IF residual: unify so TypeVars / generic params resolve.
-                if self.unification.unify(&at, &subst_param).is_err() {
+                // IF residual: strict unify at call sites.
+                if self.unification.unify_strict(&at, &subst_param).is_err() {
                     self.emit_code(
                         crate::diagnostic::codes::E0211,
                         format!(
