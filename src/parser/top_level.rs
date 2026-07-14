@@ -891,13 +891,23 @@ impl Parser {
                                 ));
                             }
                         }
+                        "transactional" => {
+                            // PR-H3: @transactional(...) with parens is invalid —
+                            // only bare `@transactional` before state/fields is supported.
+                            let tok = self.peek();
+                            return Err(ParseError::new(
+                                "`@transactional(...)` takes no arguments; write bare `@transactional` before a state or fields",
+                                tok.line,
+                                tok.col,
+                            ));
+                        }
                         _ => {
                             // PR-H2: unknown @annotations must surface as parse errors
                             // (not eprintln!) so LSP/check can report them with span.
                             let tok = self.peek();
                             return Err(ParseError::new(
                                 format!(
-                                    "unknown flow annotation '@{}' — expected @mailbox(...) or @max_children(...)",
+                                    "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or bare @transactional",
                                     ann_name
                                 ),
                                 tok.line,
