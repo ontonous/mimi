@@ -1492,7 +1492,8 @@ impl<'a> Interpreter<'a> {
                     _ => Err(InterpError::new(format!("expected list, got {}", val))),
                 },
                 "Option" if type_args.len() == 1 => match val {
-                    Value::Unit => Ok(Value::Unit),
+                    // JSON null and missing values become Unit in json_to_value.
+                    Value::Unit => Ok(Value::Variant("None".into(), vec![])),
                     val => {
                         let inner_val = self.coerce_value_to_type(val, &type_args[0])?;
                         Ok(Value::Variant("Some".into(), vec![inner_val]))
