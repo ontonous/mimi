@@ -1026,6 +1026,74 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                    // CK-H5: verify impl method signatures match the trait.
+                    for method in &impl_def.methods {
+                        if let Some((trait_params, trait_ret)) = self
+                            .trait_method_sigs
+                            .get(&(impl_def.trait_name.clone(), method.name.clone()))
+                            .cloned()
+                        {
+                            let impl_params: Vec<Type> = method
+                                .params
+                                .iter()
+                                .map(|p| self.resolve_type(&p.ty))
+                                .collect();
+                            let impl_ret = method
+                                .ret
+                                .as_ref()
+                                .map(|t| self.resolve_type(t))
+                                .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                            // Trait params usually exclude `self`; compare trailing params.
+                            let trait_user = if trait_params.len() == impl_params.len() + 1 {
+                                &trait_params[1..]
+                            } else {
+                                trait_params.as_slice()
+                            };
+                            if trait_user.len() != impl_params.len() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0252,
+                                    format!(
+                                        "method '{}' in impl of '{}' for '{}' has {} parameters, trait requires {}",
+                                        method.name,
+                                        impl_def.trait_name,
+                                        impl_def.type_name,
+                                        impl_params.len(),
+                                        trait_user.len()
+                                    ),
+                                );
+                            } else {
+                                for (i, (tp, ip)) in
+                                    trait_user.iter().zip(impl_params.iter()).enumerate()
+                                {
+                                    if self.unification.unify(tp, ip).is_err() {
+                                        self.emit_code(
+                                            crate::diagnostic::codes::E0252,
+                                            format!(
+                                                "method '{}' param {} type {} does not match trait {} (expected {})",
+                                                method.name,
+                                                i + 1,
+                                                fmt_type(ip),
+                                                impl_def.trait_name,
+                                                fmt_type(tp)
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            if self.unification.unify(&trait_ret, &impl_ret).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0252,
+                                    format!(
+                                        "method '{}' return type {} does not match trait {} (expected {})",
+                                        method.name,
+                                        fmt_type(&impl_ret),
+                                        impl_def.trait_name,
+                                        fmt_type(&trait_ret)
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
                 // Check impl method bodies with self bound to the implementing type
                 let impl_generic_names: Vec<String> =
