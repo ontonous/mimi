@@ -534,6 +534,159 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )));
                         }
                     };
+                    if obj_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .is_some_and(|inner| inner.starts_with("Option"))
+                    {
+                        // Nested Option: payload is ptrtoint of heap Option {i1,i64}.
+                        // mimi_option_i64_to_json only handles int payloads — rebuild.
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_nest_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb =
+                            self.context.append_basic_block(function, "toj_opt_nest_some");
+                        let none_bb =
+                            self.context.append_basic_block(function, "toj_opt_nest_none");
+                        let merge_bb =
+                            self.context.append_basic_block(function, "toj_opt_nest_merge");
+                        let i8_ptr_ty =
+                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_nest_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let nested_ptr = self
+                            .builder
+                            .build_int_to_ptr(payload_i64, i8_ptr_ty, "opt_nest_ptr")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let opt_sty = self.context.struct_type(
+                            &[
+                                self.context.bool_type().into(),
+                                self.context.i64_type().into(),
+                            ],
+                            false,
+                        );
+                        let nested_sv = self
+                            .builder
+                            .build_load(
+                                BasicTypeEnum::StructType(opt_sty),
+                                nested_ptr,
+                                "opt_nest_ld",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_struct_value();
+                        let n_disc = self
+                            .build_extract_value(nested_sv.into(), 0, "n_disc")?
+                            .into_int_value();
+                        let n_disc_i64 = self
+                            .builder
+                            .build_int_z_extend(
+                                n_disc,
+                                self.context.i64_type(),
+                                "n_disc_i64",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let n_pay = self
+                            .build_extract_value(nested_sv.into(), 1, "n_pay")?
+                            .into_int_value();
+                        let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(
+                                    n_pay,
+                                    self.context.i64_type(),
+                                    "n_pay_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            n_pay
+                        };
+                        let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                        let inner_json = self
+                            .build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(n_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(n_pay_i64),
+                                ],
+                                "opt_nest_inner_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("option to_json void")?
+                            .into_pointer_value();
+                        let buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(512, false),
+                            "opt_nest_buf",
+                        )?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr(
+                                "{\"Some\":[%s]}",
+                                "opt_nest_fmt",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(512, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(inner_json),
+                            ],
+                            "opt_nest_sn",
+                        )?;
+                        self.build_store(out_alloca, buf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        // Heap-copy "None" so wrap_c_string free is always valid.
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_nest_none_heap",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_nest_none")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_nest_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_nest_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     if obj_type.contains("List<") {
                         // Option of List: payload is pointer to list struct.
                         let disc_is_some = self
@@ -591,10 +744,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .try_as_basic_value_opt()
                             .ok_or("list to_json void")?
                             .into_pointer_value();
-                        // Build {"Some":[...]} via snprintf — note list_json already includes [].
-                        // Interp tags as {"Some":[[1,2,3]]} so wrap the array once more? 
-                        // value_to_json for Option wraps payload: {"Some":[payload_json]}
-                        // For List payload, payload_json is [1,2,3], so {"Some":[[1,2,3]]}.
                         let buf = self.malloc_or_abort(
                             self.context.i64_type().const_int(4096, false),
                             "opt_list_buf",
@@ -624,11 +773,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_unconditional_branch(merge_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         self.builder.position_at_end(none_bb);
-                        let none_s = self
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_list_none_heap",
+                        )?;
+                        let none_lit = self
                             .builder
                             .build_global_string_ptr("\"None\"", "opt_list_none")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_store(out_alloca, none_s.as_pointer_value())?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_list_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
                         self.builder
                             .build_unconditional_branch(merge_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;

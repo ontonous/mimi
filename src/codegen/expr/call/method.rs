@@ -1932,6 +1932,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let nested_ty = Type::Name("List".into(), args.clone());
                 self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_ptr)
             }
+            Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                self.compile_json_option_field(
+                    "ResultOk",
+                    &args[0],
+                    raw_ptr,
+                    json_as_i64_fn,
+                    json_as_f64_fn,
+                    json_as_bool_fn,
+                )
+            }
+            Type::Option(inner) => {
+                let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                self.compile_json_option_field(
+                    "ResultOk",
+                    inner,
+                    raw_ptr,
+                    json_as_i64_fn,
+                    json_as_f64_fn,
+                    json_as_bool_fn,
+                )
+            }
             Type::Name(n, args) if n == "Map" => {
                 let val_is_string = args
                     .get(1)

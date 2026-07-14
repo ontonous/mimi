@@ -7938,6 +7938,44 @@ fn dual_from_json_nested_option() {
     );
 }
 
+/// to_json nested Option dual.
+#[test]
+fn dual_to_json_nested_option() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<Option<i32>>>("1")
+            let b = from_json::<Option<Option<i32>>>("null")
+            println(to_json(a))
+            println(to_json(b))
+            0
+        }
+        "#,
+        "{\"Some\":[{\"Some\":[1]}]}\n\"None\""
+    );
+}
+
+/// from_json Result of Option dual.
+#[test]
+fn dual_from_json_result_option() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<Option<i32>, i32>>("1")
+            println(a)
+            0
+        }
+        "#,
+        "Ok(Some(1))"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
