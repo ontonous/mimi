@@ -173,7 +173,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if inner.starts_with("Option") {
                                 self.emit_list_option_to_string(*sv, inner)?
                             } else if inner.starts_with("Result") {
-                                self.emit_list_result_to_string(*sv)?
+                                self.emit_list_result_to_string(*sv, inner)?
                             } else if self.type_defs.get(inner).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
                             }) {
@@ -873,10 +873,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Format `List<Result<i32,i32>>` as `[Ok(1), Err(2), ...]`.
+    /// Format `List<Result<…>>` as `[Ok(…), Err(…), ...]`.
+    /// `elem_res_type` is the full Result type (e.g. `Result<Map<string, i32>, i32>`).
     fn emit_list_result_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        elem_res_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -989,7 +991,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(BasicTypeEnum::StructType(res_sty), res_ptr, "list_res_ld")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_struct_value();
-        let res_str = self.emit_result_to_string(loaded, None)?;
+        let res_str = self.emit_result_to_string_typed(loaded, None, elem_res_type)?;
         self.build_call(
             strcat_fn,
             &[
