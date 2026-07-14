@@ -23,11 +23,37 @@ impl<'a> Checker<'a> {
                     self.infer_expr(expr, scopes)
                 }
             }
-            // Empty list literal in List<T> context → infer List<T>
-            Expr::List(elems) if elems.is_empty() => {
-                if let Type::Name(name, _inner) = expected {
+            // List literal in List / List<T> context:
+            // empty → expected; non-empty List<T> → check each elem against T.
+            Expr::List(elems) => {
+                if let Type::Name(name, inner) = expected {
                     if name == "List" {
-                        return expected.clone();
+                        if elems.is_empty() {
+                            return expected.clone();
+                        }
+                        if !inner.is_empty() {
+                            let elem_expected = &inner[0];
+                            for (i, e) in elems.iter().enumerate() {
+                                let actual = self.check_expr(elem_expected, e, scopes);
+                                let ok = self.unification.unify(&actual, elem_expected).is_ok()
+                                    || crate::core::helpers::is_numeric_coercion(
+                                        elem_expected,
+                                        &actual,
+                                    );
+                                if !ok {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0242,
+                                        format!(
+                                            "list element {} type {} does not match expected {}",
+                                            i + 1,
+                                            crate::core::helpers::fmt_type(&actual),
+                                            crate::core::helpers::fmt_type(elem_expected)
+                                        ),
+                                    );
+                                }
+                            }
+                            return expected.clone();
+                        }
                     }
                 }
                 self.infer_expr(expr, scopes)
