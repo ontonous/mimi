@@ -1460,6 +1460,20 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
 /// Render `List<Map>` (i64 map handles in data slots) as `[{"a":1}, ...]`.
 #[no_mangle]
 pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
+    list_map_to_string_impl(list, MapJsonMode::Int, ", ")
+}
+
+/// List of Map for to_json with string values (no space after comma).
+#[no_mangle]
+pub extern "C" fn mimi_list_map_to_json_string(list: *const MimiList) -> *mut std::ffi::c_char {
+    list_map_to_string_impl(list, MapJsonMode::String, ",")
+}
+
+fn list_map_to_string_impl(
+    list: *const MimiList,
+    mode: MapJsonMode,
+    sep: &str,
+) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
@@ -1474,10 +1488,15 @@ pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ff
     parts.push(String::from("["));
     for i in 0..lst.len as isize {
         if i > 0 {
-            parts.push(String::from(", "));
+            parts.push(String::from(sep));
         }
         let handle = unsafe { *(lst.data as *const i64).offset(i) } as MapHandle;
-        let json_ptr = mimi_map_to_json_i64(handle);
+        let json_ptr = match mode {
+            MapJsonMode::String => mimi_map_to_json_string(handle),
+            MapJsonMode::Bool => mimi_map_to_json_bool(handle),
+            MapJsonMode::Float | MapJsonMode::FloatJson => mimi_map_to_json_f64_serde(handle),
+            MapJsonMode::Int => mimi_map_to_json_i64(handle),
+        };
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
@@ -1486,6 +1505,25 @@ pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ff
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))
+}
+
+/// Option of Map handle → `{"Some":[{…}]}` / `"None"`.
+#[no_mangle]
+pub extern "C" fn mimi_option_map_to_json(disc: i64, handle: MapHandle, mode: i64) -> *mut std::ffi::c_char {
+    if disc == 0 {
+        return alloc_c_string("\"None\"");
+    }
+    let json_ptr = match mode {
+        1 => mimi_map_to_json_string(handle),
+        2 => mimi_map_to_json_bool(handle),
+        3 => mimi_map_to_json_f64_serde(handle),
+        _ => mimi_map_to_json_i64(handle),
+    };
+    let s = unsafe { cstr_to_string(json_ptr) };
+    if !json_ptr.is_null() {
+        unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+    }
+    alloc_c_string(&format!("{{\"Some\":[{}]}}", s))
 }
 
 /// Render `List<Set>` as a JSON array of JSON arrays `[[1,2],[3]]`.
@@ -2671,6 +2709,7 @@ enum MapJsonMode {
     Bool,
     Float,
     FloatJson,
+    String,
 }
 
 fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
@@ -2717,6 +2756,10 @@ fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_
                     format!("{}", f)
                 };
                 parts.push(s);
+            }
+            MapJsonMode::String => {
+                // Should use mimi_map_to_json_string path, not this helper.
+                parts.push(String::from("null"));
             }
             MapJsonMode::Int => parts.push(v.to_string()),
         }

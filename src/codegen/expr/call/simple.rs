@@ -301,8 +301,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     let rt_fn_name = if inner.starts_with("Map") {
-                        // mimi_list_map_to_string emits valid JSON array of objects.
-                        "mimi_list_map_to_string"
+                        if inner.contains("Map<string, string>") {
+                            "mimi_list_map_to_json_string"
+                        } else {
+                            // i32/i64/bool/f64 maps share int-style JSON objects.
+                            "mimi_list_map_to_string"
+                        }
                     } else if inner.starts_with("Set") {
                         "mimi_list_set_to_json"
                     } else {
@@ -413,7 +417,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
-                // Option / Option<T> with integer payload: {i1,i64}
+                // Option / Option<T> with integer/handle payload: {i1,i64}
                 if obj_type == "Option" || obj_type.starts_with("Option<") {
                     let sv = match &metadata_args[0] {
                         BasicMetadataValueEnum::StructValue(s) => *s,
@@ -461,6 +465,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         payload
                     };
+                    if obj_type.contains("Map<") {
+                        let mode = if obj_type.contains("Map<string, string>") {
+                            1i64
+                        } else if obj_type.contains("Map<string, bool>") {
+                            2
+                        } else if obj_type.contains("Map<string, f64>")
+                            || obj_type.contains("Map<string, f32>")
+                        {
+                            3
+                        } else {
+                            0
+                        };
+                        let func = self.get_runtime_fn("mimi_option_map_to_json")?;
+                        let raw = self
+                            .build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(disc_i64),
+                                    BasicMetadataValueEnum::IntValue(payload_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "to_json_opt_map",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_option_map_to_json void")?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
                     let raw = self
                         .build_call(
