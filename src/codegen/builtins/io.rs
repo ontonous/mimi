@@ -178,6 +178,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
                             }) {
                                 self.emit_list_enum_to_string(*sv, inner)?
+                            } else if inner.starts_with("Map") {
+                                self.emit_list_map_to_string(*sv)?
+                            } else if inner.starts_with("Set") || inner == "set" {
+                                self.emit_list_set_to_string(*sv)?
                             } else {
                                 self.emit_list_i32_to_string(*sv)?
                             }
@@ -420,6 +424,288 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Ok((*arg, "%p".to_string())),
         }
+    }
+
+    /// Format `List<Map>` as `[{"a":1}, {"b":2}]` via mimi_map_to_json_i64.
+    fn emit_list_map_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_map_print")?;
+        self.build_store(alloca, sv)?;
+        let len = self.load_list_len(alloca)?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_map_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "list_map_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "list_map_open_cpy",
+        )?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_map_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self.context.append_basic_block(parent, "list_map_loop");
+        let body_bb = self.context.append_basic_block(parent, "list_map_body");
+        let done_bb = self.context.append_basic_block(parent, "list_map_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_alloca, "list_map_idx")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_map_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(body_bb);
+        let zero = i64_ty.const_int(0, false);
+        let need_comma = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_map_comma")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self.context.append_basic_block(parent, "list_map_comma_bb");
+        let elem_bb = self.context.append_basic_block(parent, "list_map_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        let comma = self
+            .builder
+            .build_global_string_ptr(", ", "list_map_comma_s")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+            ],
+            "list_map_strcat_comma",
+        )?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(elem_bb);
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, alloca, 1, "list_map_data_gep")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_load(i8_ptr, data_gep, "list_map_data")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data_ptr, &[idx], "list_map_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let handle = self
+            .builder
+            .build_load(i64_ty, elem_slot, "list_map_handle")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+        let map_str = self
+            .build_call(
+                map_fn,
+                &[BasicMetadataValueEnum::IntValue(handle)],
+                "list_map_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_map_to_json_i64 void")?
+            .into_pointer_value();
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(map_str),
+            ],
+            "list_map_strcat_elem",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "list_map_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(done_bb);
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "list_map_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "list_map_close",
+        )?;
+        Ok(buf)
+    }
+
+    /// Format `List<Set>` as `[Set{1, 2}, ...]` via mimi_set_to_display.
+    fn emit_list_set_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_set_print")?;
+        self.build_store(alloca, sv)?;
+        let len = self.load_list_len(alloca)?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "list_set_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "list_set_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "list_set_open_cpy",
+        )?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_set_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self.context.append_basic_block(parent, "list_set_loop");
+        let body_bb = self.context.append_basic_block(parent, "list_set_body");
+        let done_bb = self.context.append_basic_block(parent, "list_set_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_alloca, "list_set_idx")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_set_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(body_bb);
+        let zero = i64_ty.const_int(0, false);
+        let need_comma = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_set_comma")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self.context.append_basic_block(parent, "list_set_comma_bb");
+        let elem_bb = self.context.append_basic_block(parent, "list_set_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        let comma = self
+            .builder
+            .build_global_string_ptr(", ", "list_set_comma_s")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+            ],
+            "list_set_strcat_comma",
+        )?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(elem_bb);
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, alloca, 1, "list_set_data_gep")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_load(i8_ptr, data_gep, "list_set_data")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data_ptr, &[idx], "list_set_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let handle = self
+            .builder
+            .build_load(i64_ty, elem_slot, "list_set_handle")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+        let set_str = self
+            .build_call(
+                set_fn,
+                &[BasicMetadataValueEnum::IntValue(handle)],
+                "list_set_disp",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_set_to_display void")?
+            .into_pointer_value();
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(set_str),
+            ],
+            "list_set_strcat_elem",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "list_set_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(done_bb);
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "list_set_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "list_set_close",
+        )?;
+        Ok(buf)
     }
 
     /// Format `List<Enum>` as `[Red(), Blue(7), ...]`.
