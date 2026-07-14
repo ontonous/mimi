@@ -6563,6 +6563,24 @@ fn dual_from_json_map_i64() {
     );
 }
 
+/// Named arguments reordered on both backends.
+#[test]
+fn dual_named_args_function() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func add(x: i32, y: i32) -> i32 { x + y }
+        func main() -> i32 {
+            println(add(y = 3, x = 2))
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
