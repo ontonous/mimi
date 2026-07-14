@@ -201,14 +201,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     );
                     Ok(buf.into())
                 } else {
-                    // CG-H2 (audit): pointer values in `to_json` are List/Record/Map/Set,
-                    // not C strings. Return a compile-time error rather than silently
-                    // treating them as raw C strings (which would read garbage).
-                    // TODO(#v0.31-codegen): implement recursive JSON serialization for
-                    // List<T>, Record, Map<K,V> via heap traversal.
+                    // Untyped pointer path: List/Record are handled in compile_call
+                    // (simple.rs) before reaching here. Remaining pointers are
+                    // Map/Set/opaque handles — refuse silent C-string cast.
+                    // TODO(#v0.31-codegen): Map/Set recursive JSON serialization.
                     Err(CompileError::Generic(
-                        "to_json: complex types (List/Record/Map/Set) not yet supported \
-                         in codegen; cast to string first or use std::json::get_* helpers"
+                        "to_json: Map/Set and untyped pointer values are not yet supported \
+                         in codegen; List and named Record are handled via specialized paths"
                             .into(),
                     ))
                 }
