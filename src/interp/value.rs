@@ -1091,7 +1091,21 @@ impl std::fmt::Display for Value {
                         write!(f, "\"{}\":", k)?;
                         match &fields[*k] {
                             Value::Int(n) => write!(f, "{}", n)?,
-                            Value::String(s) => write!(f, "\"{}\"", s)?,
+                            Value::String(s) => {
+                                // Escape for dual with codegen Map JSON Display.
+                                write!(f, "\"")?;
+                                for ch in s.chars() {
+                                    match ch {
+                                        '"' => write!(f, "\\\"")?,
+                                        '\\' => write!(f, "\\\\")?,
+                                        '\n' => write!(f, "\\n")?,
+                                        '\r' => write!(f, "\\r")?,
+                                        '\t' => write!(f, "\\t")?,
+                                        c => write!(f, "{}", c)?,
+                                    }
+                                }
+                                write!(f, "\"")?
+                            }
                             Value::Bool(b) => write!(f, "{}", b)?,
                             Value::Float(x) => write!(f, "{}", x)?,
                             other => write!(f, "{}", other)?,

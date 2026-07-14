@@ -2269,6 +2269,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     other => Ok(other),
                 }
             }
+            // Nested Result (e.g. Option<Result<i32,i32>>): bare JSON → Ok(T).
+            crate::ast::Type::Name(n, args) if n == "Result" && !args.is_empty() => {
+                let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_val)?;
+                self.compile_constructor("Ok", vec![ok_val])
+            }
             // Nested Map (e.g. Option<Map<string,i32>>).
             crate::ast::Type::Name(n, args) if n == "Map" => {
                 let val_is_string = args

@@ -7976,6 +7976,62 @@ fn dual_from_json_result_option() {
     );
 }
 
+/// to_json Result of Option dual.
+#[test]
+fn dual_to_json_result_option() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<Option<i32>, i32> = Ok(Some(5))
+            let b: Result<Option<i32>, i32> = Ok(None)
+            println(to_json(a))
+            println(to_json(b))
+            0
+        }
+        "#,
+        "{\"Ok\":[{\"Some\":[5]}]}\n{\"Ok\":[\"None\"]}"
+    );
+}
+
+/// from_json Option of Result dual.
+#[test]
+fn dual_from_json_option_result() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<Result<i32, i32>>>("1")
+            println(a)
+            0
+        }
+        "#,
+        "Some(Ok(1))"
+    );
+}
+
+/// Map string Display escapes quotes dual.
+#[test]
+fn dual_map_string_escape_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, string>>("{\"a\":\"hi\\\"there\"}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":\"hi\\\"there\"}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
