@@ -109,15 +109,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     && fields
                         .iter()
                         .all(|f| matches!(f, BasicTypeEnum::IntType(_)))
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                    )
                 {
-                    // Tuple / map_get result: format as "(v0, v1, ...)" like interp.
+                    // Bool-headed int tuple: `(true, 1)` / map_get — not enum
+                    // (enum disc is typically i32/i64, not i1).
                     let str_ptr = self.emit_int_tuple_to_string(*sv)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
                     ))
                 } else if num_fields >= 2 {
-                    // Option/Result-like: print payload field (field 1).
+                    // Option/Result/enum-like: print payload field (field 1).
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
