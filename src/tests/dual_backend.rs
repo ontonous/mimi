@@ -6697,6 +6697,25 @@ fn dual_to_json_option_result() {
     );
 }
 
+/// to_json(Record) via shared compile_record_to_json_cstr.
+#[test]
+fn dual_to_json_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p = Point { x: 1, y: 2 }
+            println(to_json(p))
+            0
+        }
+        "#,
+        "{\"x\":1,\"y\":2}"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
