@@ -1062,6 +1062,40 @@ pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_cha
 }
 
 #[no_mangle]
+/// RT-H4 helper: treat a ValueHandle as a C string only if mincore says the
+/// page is mapped and a NUL terminator appears within a bounded scan.
+fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
+    const MIN_HEAP: usize = 1_048_576;
+    const MAX_BOUNDED_SCAN: usize = 256;
+    if handle < MIN_HEAP || handle % 8 != 0 {
+        return None;
+    }
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let page_size = if page_size == 0 { 4096 } else { page_size };
+    let page_start = (handle / page_size) * page_size;
+    let mut mvec: u8 = 0;
+    let mapped =
+        unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
+    if mapped != 0 {
+        return None;
+    }
+    let page_offset = handle - page_start;
+    let max_scan = page_size.saturating_sub(page_offset).min(MAX_BOUNDED_SCAN);
+    let ptr = handle as *const u8;
+    // SAFETY: mincore confirmed mapped page; scan bounded to that page.
+    let mut len = 0usize;
+    unsafe {
+        while len < max_scan {
+            if *ptr.add(len) == 0 {
+                let slice = std::slice::from_raw_parts(ptr, len);
+                return Some(String::from_utf8_lossy(slice).into_owned());
+            }
+            len += 1;
+        }
+    }
+    None
+}
+
 pub extern "C" fn mimi_map_from_list(
     keys: *mut ValueHandle,
     values: *mut ValueHandle,
@@ -1090,18 +1124,13 @@ pub extern "C" fn mimi_map_from_list(
         // valid heap pointer (>= 1MB, 8-byte aligned). This is still
         // heuristic but prevents ValueHandle integers from being
         // interpreted as pointers.
+        // RT-H4: require heap-aligned + mincore-mapped + NUL within first page
+        // before treating key_handle as a C string pointer.
         if key_handle >= 1_048_576 && key_handle % 8 == 0 {
-            let key_str = key_handle as *const std::ffi::c_char;
-            if !key_str.is_null() {
-                // SAFETY: key_str passed the heap-aligned check above;
-                // CStr::from_ptr reads up to the first NUL byte. The
-                // resulting &str lives only within this expression.
-                let s = unsafe { CStr::from_ptr(key_str) }.to_str().unwrap_or("");
-                // SAFETY: map_ptr is the just-allocated map (handle != 0);
-                // we are the only writer at this point and the lifetime
-                // of the insert is independent of the source key_str.
+            if let Some(s) = safe_c_string_from_handle(key_handle) {
+                // SAFETY: map_ptr is the just-allocated map (handle != 0).
                 unsafe {
-                    (*map_ptr).inner.insert(s.to_string(), val_handle);
+                    (*map_ptr).inner.insert(s, val_handle);
                 }
             }
         }
