@@ -7529,6 +7529,64 @@ fn dual_to_json_set_f64() {
     );
 }
 
+/// to_json List of Map string dual.
+#[test]
+fn dual_to_json_list_map_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Map<string, string>>("{\"a\":\"hi\"}")
+            let xs = [a]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"a\":\"hi\"}]"
+    );
+}
+
+/// to_json Option of Map dual.
+#[test]
+fn dual_to_json_option_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let a = Some(m)
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Some\":[{\"a\":1}]}"
+    );
+}
+
+/// from_json Option of Map dual.
+#[test]
+fn dual_from_json_option_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<Map<string, i32>>>("{\"a\":1}")
+            let b = from_json::<Option<Map<string, i32>>>("null")
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some({\"a\":1})\nNone()"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

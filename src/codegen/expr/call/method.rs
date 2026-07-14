@@ -1960,6 +1960,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                 json_as_f64_fn,
                 json_as_bool_fn,
             ),
+            // Nested Map (e.g. Option<Map<string,i32>>).
+            crate::ast::Type::Name(n, args) if n == "Map" => {
+                let val_is_string = args
+                    .get(1)
+                    .map(|t| matches!(t, crate::ast::Type::Name(tn, _) if tn == "string"))
+                    .unwrap_or(false);
+                let val_is_float = args.get(1).map(|t| {
+                    matches!(t, crate::ast::Type::Name(tn, _) if tn == "f32" || tn == "f64")
+                }).unwrap_or(false);
+                let fn_name = if val_is_string {
+                    "mimi_map_from_json_string"
+                } else if val_is_float {
+                    "mimi_map_from_json_f64"
+                } else {
+                    "mimi_map_from_json_i64"
+                };
+                let func = self.get_runtime_fn(fn_name)?;
+                let result = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                    "map_from_json_field",
+                )?;
+                Ok(self.expect_basic_value(&result, fn_name)?.into())
+            }
+            // Nested Set.
+            crate::ast::Type::Name(n, args) if n == "Set" => {
+                let elem_is_string = args
+                    .first()
+                    .map(|t| matches!(t, crate::ast::Type::Name(tn, _) if tn == "string"))
+                    .unwrap_or(false);
+                let elem_is_float = args.first().map(|t| {
+                    matches!(t, crate::ast::Type::Name(tn, _) if tn == "f32" || tn == "f64")
+                }).unwrap_or(false);
+                let fn_name = if elem_is_string {
+                    "mimi_set_from_json_string"
+                } else if elem_is_float {
+                    "mimi_set_from_json_f64"
+                } else {
+                    "mimi_set_from_json_i64"
+                };
+                let func = self.get_runtime_fn(fn_name)?;
+                let result = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_val)],
+                    "set_from_json_field",
+                )?;
+                Ok(self.expect_basic_value(&result, fn_name)?.into())
+            }
             // Nested Record: json_get_string returns the nested object as a
             // JSON substring; recurse into compile_from_json_record.
             crate::ast::Type::Name(nested_name, _) => {
