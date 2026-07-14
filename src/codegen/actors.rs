@@ -986,16 +986,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let cond_bool = cond_val.into_int_value();
                 self.build_cond_br(cond_bool, body_bb, merge_bb)?;
                 self.builder.position_at_end(body_bb);
+                // CG-H4: always restore outer break/continue targets.
                 let old_break = self.loop_break.take();
                 let old_continue = self.loop_continue.take();
                 self.loop_break = Some(merge_bb);
                 self.loop_continue = Some(loop_bb);
-                self.compile_block(body, vars)?;
-                if !self.block_has_terminator() {
-                    self.build_br(loop_bb)?;
-                }
+                let body_result = self.compile_block(body, vars);
+                let br_result = if body_result.is_ok() && !self.block_has_terminator() {
+                    self.build_br(loop_bb)
+                } else {
+                    Ok(())
+                };
                 self.loop_break = old_break;
                 self.loop_continue = old_continue;
+                body_result?;
+                br_result?;
                 self.builder.position_at_end(merge_bb);
             }
             Stmt::WhileLet { pat, init, body } => {
@@ -1015,16 +1020,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let true_val = self.context.bool_type().const_int(1, false);
                 self.build_cond_br(true_val, body_bb, merge_bb)?;
                 self.builder.position_at_end(body_bb);
+                // CG-H4: always restore outer break/continue targets.
                 let old_break = self.loop_break.take();
                 let old_continue = self.loop_continue.take();
                 self.loop_break = Some(merge_bb);
                 self.loop_continue = Some(loop_bb);
-                self.compile_block(body, vars)?;
-                if !self.block_has_terminator() {
-                    self.build_br(loop_bb)?;
-                }
+                let body_result = self.compile_block(body, vars);
+                let br_result = if body_result.is_ok() && !self.block_has_terminator() {
+                    self.build_br(loop_bb)
+                } else {
+                    Ok(())
+                };
                 self.loop_break = old_break;
                 self.loop_continue = old_continue;
+                body_result?;
+                br_result?;
                 self.builder.position_at_end(merge_bb);
             }
             Stmt::MmsBlock { .. } => {}

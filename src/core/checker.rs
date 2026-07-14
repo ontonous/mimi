@@ -509,7 +509,10 @@ impl<'a> Checker<'a> {
                         substitutions.insert(i as u32, id);
                     }
                 }
-                self.substitute_type_vars(body, &substitutions)
+                let substituted = self.substitute_type_vars(body, &substitutions);
+                // CK-C3: peel nested ForAll after substitution so polymorphic
+                // let bindings do not leave residual quantifiers in the type.
+                self.instantiate(&substituted)
             }
             _ => ty.clone(),
         }

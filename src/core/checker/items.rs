@@ -641,8 +641,19 @@ impl<'a> Checker<'a> {
                     );
                     self.generic_scope
                         .truncate(self.generic_scope.len() - generic_names.len());
+                    // CK-C1: reject silent overwrite when two impls register the same method key.
                     let key = format!("{}_{}", impl_def.type_name, method.name);
-                    self.funcs.insert(key, (params, ret));
+                    if self.funcs.contains_key(&key) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!(
+                                "duplicate method '{}' for type '{}' (conflicting impl registrations)",
+                                method.name, impl_def.type_name
+                            ),
+                        );
+                    } else {
+                        self.funcs.insert(key, (params, ret));
+                    }
                 }
                 self.generic_scope
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
@@ -733,9 +744,23 @@ impl<'a> Checker<'a> {
                             attributes: vec![],
                         }
                     });
-                    // Also register with unqualified name for use in transition bodies
-                    if !self.types.contains_key(&state.name) && !Self::is_builtin_type(&state.name)
-                    {
+                    // Also register with unqualified name for use in transition bodies.
+                    // CK-C2: never overwrite a user-declared type of the same name.
+                    if Self::is_builtin_type(&state.name) {
+                        // skip
+                    } else if let Some(existing) = self.types.get(&state.name) {
+                        // Only warn when the existing entry is not already this flow state record.
+                        let is_flow_state = matches!(&existing.kind, TypeDefKind::Record(_));
+                        if !is_flow_state {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0402,
+                                format!(
+                                    "flow state '{}' conflicts with existing type definition",
+                                    state.name
+                                ),
+                            );
+                        }
+                    } else {
                         let fields2 = state.payload.clone().unwrap_or_default();
                         let td2 = TypeDef {
                             name: state.name.clone(),
@@ -746,6 +771,35 @@ impl<'a> Checker<'a> {
                             attributes: vec![],
                         };
                         self.types.insert(state.name.clone(), td2);
+                    }
+                    // CK-C5: system Fault sink requires a fixed payload shape
+                    // (last_state/unexpected_event/snapshot/trace). Reject user-declared
+                    // Fault that omits those fields (ensure_fault_state keeps user Fault
+                    // as-is, which is incompatible with matrix recovery).
+                    // System-injected Fault always has the required fields — no false positive.
+                    if state.name == "Fault" {
+                        let names: Vec<&str> = state
+                            .payload
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|fld| fld.name.as_str())
+                            .collect();
+                        let required = [
+                            "last_state",
+                            "unexpected_event",
+                            "snapshot",
+                            "trace",
+                        ];
+                        if !required.iter().all(|r| names.contains(r)) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0402,
+                                format!(
+                                    "user-declared state 'Fault' in flow '{}' is incompatible with the system Fault sink (required fields: last_state, unexpected_event, snapshot, trace)",
+                                    f.name
+                                ),
+                            );
+                        }
                     }
                 }
                 // Register transition functions.
