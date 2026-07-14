@@ -103,9 +103,32 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_sub(s_len, i64_ty.const_int(1, false), "last_valid")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
+        // MEM-C6 (deep audit): for an empty string `s_len == 0`, `last_valid`
+        // would be -1 and `safe_idx` would become -1, reading one byte *before*
+        // the buffer. Clamp `last_valid` to >= 0 so an out-of-range (or empty)
+        // index resolves to index 0 (the NUL terminator, char code 0).
+        let last_valid_neg = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                last_valid,
+                i64_ty.const_int(0, false),
+                "last_valid_neg",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let last_valid_safe = self
+            .builder
+            .build_select(
+                last_valid_neg,
+                i64_ty.const_int(0, false),
+                last_valid,
+                "last_valid_safe",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
         let safe_idx = self
             .builder
-            .build_select(oob, last_valid, clamped_lo, "safe_idx")
+            .build_select(oob, last_valid_safe, clamped_lo, "safe_idx")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
         // char = data_ptr[safe_idx]
@@ -214,13 +237,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // char = data_ptr[index]
+        // MEM-C6 (deep audit): bounds-check the index before indexing. An
+        // out-of-range or negative `index` would read arbitrary memory via
+        // `data_ptr[index]`. Clamp to [0, s_len-1]; for an empty string or an
+        // out-of-range index this yields index 0, which safely reads the
+        // string's NUL terminator (returns char code 0).
+        let i64_ty = self.context.i64_type();
+        let s_len = match &args[0] {
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 1, "str_len")
+                .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?
+                .into_int_value(),
+            _ => self.string_len(data_ptr)?,
+        };
+        let zero = i64_ty.const_int(0, false);
+        let neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, index, zero, "idx_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let lo_clamped = self
+            .builder
+            .build_select(neg, zero, index, "idx_lo")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let over = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SGE, lo_clamped, s_len, "idx_over")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let safe_idx = self
+            .builder
+            .build_select(over, zero, lo_clamped, "idx_safe")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // char = data_ptr[safe_idx]
         let char_ptr = self
             .gep()
             .build_in_bounds_gep(
                 BasicTypeEnum::IntType(self.context.i8_type()),
                 data_ptr,
-                &[index],
+                &[safe_idx],
                 "char_ptr",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;

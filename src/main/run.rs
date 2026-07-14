@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::{is_production, is_sketch, resolve_path};
@@ -191,6 +192,14 @@ fn run_watch(
     extra_args: &[String],
 ) -> Result<(), String> {
     println!("Watching {} for changes...", path.display());
+    // CL-H16 (deep audit): the watch loop had no termination condition and
+    // could only be killed with SIGKILL. Install a SIGINT (Ctrl-C) handler
+    // that flips a flag so the loop exits cleanly and the process can be
+    // stopped normally.
+    WATCH_RUNNING.store(true, Ordering::SeqCst);
+    unsafe {
+        libc::signal(libc::SIGINT, watch_sigint_handler as libc::sighandler_t);
+    }
     let mut last_modified = get_mtime(path)?;
     // Run once first
     if let Err(e) = run_once(
@@ -203,7 +212,7 @@ fn run_watch(
     ) {
         eprintln!("{}", e);
     }
-    loop {
+    while WATCH_RUNNING.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
         match get_mtime(path) {
             Ok(mtime) if mtime != last_modified => {
@@ -229,10 +238,19 @@ fn run_watch(
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn get_mtime(path: &Path) -> Result<SystemTime, String> {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .map_err(|e| format!("failed to get file modification time: {}", e))
+}
+
+/// CL-H16: shared flag toggled by the SIGINT handler so `run_watch`'s loop
+/// can terminate on Ctrl-C instead of running forever.
+static WATCH_RUNNING: AtomicBool = AtomicBool::new(true);
+
+extern "C" fn watch_sigint_handler(_sig: libc::c_int) {
+    WATCH_RUNNING.store(false, Ordering::SeqCst);
 }

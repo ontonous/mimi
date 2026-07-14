@@ -107,7 +107,10 @@ fn scan_dir(
             if show_hash {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let hash = simple_hash(&content);
-                    line = format!("{}  sha256:{}", line, hash);
+                    // CL-H11 (deep audit): this is an FNV-1a hash, NOT SHA-256.
+                    // Label it accurately so users are not misled into treating
+                    // it as a cryptographic integrity value.
+                    line = format!("{}  fnv1a:{}", line, hash);
                 }
             }
             println!("{}", line);

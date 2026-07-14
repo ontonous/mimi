@@ -178,7 +178,10 @@ impl<'a> Interpreter<'a> {
                         .collect();
                     Ok(Value::List(entries))
                 }
-                Err(_) => Ok(Value::List(vec![])),
+                Err(e) => Err(InterpError::new(format!(
+                    "listdir failed for '{}': {}",
+                    path, e
+                ))),
             },
             _ => Err(InterpError::new("listdir expects a string path")),
         }

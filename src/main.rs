@@ -283,7 +283,7 @@ enum Command {
         /// Recursive scan depth (default: 1)
         #[arg(short, long, default_value_t = 1)]
         depth: u32,
-        /// Show SHA-256 hashes of files
+        /// Show content hashes (FNV-1a, non-cryptographic) of files
         #[arg(long)]
         hash: bool,
     },

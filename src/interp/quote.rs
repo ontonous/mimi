@@ -358,7 +358,22 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Depth-guarded entry point for quoted-AST evaluation (IN-H2): a diverging
+    /// or self-referential quoted AST now aborts cleanly instead of overflowing
+    /// the stack. Internal recursion re-enters this guard via `eval_quoted_ast`.
     pub(crate) fn eval_quoted_ast(&mut self, qa: &QuotedAst) -> Result<Value, InterpError> {
+        if self.recursion_depth >= Self::MAX_RECURSION_DEPTH {
+            return Err(InterpError::new(
+                "quoted AST recursion limit exceeded (possible infinite recursion)",
+            ));
+        }
+        self.recursion_depth += 1;
+        let res = self.eval_quoted_ast_body(qa);
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
+        res
+    }
+
+    pub(crate) fn eval_quoted_ast_body(&mut self, qa: &QuotedAst) -> Result<Value, InterpError> {
         match qa {
             QuotedAst::Literal(l) => Ok(match l {
                 Lit::Int(v) => Value::Int(*v),

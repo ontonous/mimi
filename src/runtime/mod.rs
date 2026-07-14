@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)]
 // Mimi language runtime — pure Rust implementation.
 //
 // This module provides all runtime symbols needed by LLVM-codegened Mimi programs,
@@ -32,6 +31,10 @@ mod libc {
     use std::ffi::c_void;
 
     // --- types ---
+    pub type c_int = i32;
+    pub type c_long = i64;
+    pub type c_char = i8;
+    pub type size_t = usize;
     pub type socklen_t = u32;
     pub type sa_family_t = u16;
 
@@ -82,6 +85,7 @@ mod libc {
     pub const SIGFPE: i32 = 8;
     pub const SIG_DFL: usize = 0;
     pub const SIG_ERR: usize = usize::MAX;
+    pub const _SC_PAGESIZE: c_int = 30;
 
     // --- functions ---
     extern "C" {
@@ -114,6 +118,8 @@ mod libc {
         pub fn atexit(func: extern "C" fn()) -> i32;
         pub fn sprintf(buf: *mut i8, fmt: *const i8, ...) -> i32;
         pub fn strlen(s: *const i8) -> usize;
+        pub fn sysconf(name: c_int) -> c_long;
+        pub fn mincore(addr: *mut c_void, len: usize, vec: *mut u8) -> c_int;
     }
 }
 
@@ -391,7 +397,13 @@ pub extern "C" fn mimi_list_push_grow(
     let len = lst.len;
     let old_data = lst.data;
     let cap = list_cap(lst);
-    let needed = len + additional;
+    // MEM-C10/C11 (deep audit): overflow guard on `len + additional`. A corrupt
+    // or adversarial `len`/`additional` could wrap to a non-positive value and
+    // skip growth, leaving the caller to write out of bounds.
+    let needed = match len.checked_add(additional) {
+        Some(n) => n,
+        None => return std::ptr::null_mut(),
+    };
     if needed > cap {
         let new_cap = if cap <= 0 {
             if needed < 4 {
@@ -421,7 +433,10 @@ pub extern "C" fn mimi_list_push_grow(
         }
         // Copy existing elements from old buffer (which may lack a header)
         if !old_data.is_null() && len > 0 {
-            let copy_size = (len as usize) * std::mem::size_of::<*mut std::ffi::c_char>();
+            let copy_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
+                Some(s) => s,
+                None => return std::ptr::null_mut(),
+            };
             // SAFETY: existing elements are copied byte-for-byte from the old buffer to the new buffer.
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -484,11 +499,31 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     // need before dropping the list itself.
     unsafe {
         let lst = &*list;
+        // MEM-C10 (deep audit): bound iteration against a corrupt/negative `len`
+        // so a hostile or buggy `len` cannot drive an out-of-bounds read or an
+        // unbounded `libc::free` loop. When a capacity header is present we also
+        // clamp to `cap` (no valid element can live beyond it).
+        let safe_count = {
+            let l = lst.len;
+            if l < 0 {
+                0usize
+            } else {
+                let cap = list_cap(lst);
+                let mut n = l as usize;
+                if cap > 0 && n > cap as usize {
+                    n = cap as usize;
+                }
+                if n > 1_000_000_000 {
+                    n = 1_000_000_000;
+                }
+                n
+            }
+        };
         if lst.owns_data && !lst.data.is_null() {
             let cap = list_cap(lst);
             if cap > 0 {
                 if free_elements {
-                    for i in 0..lst.len as usize {
+                    for i in 0..safe_count {
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
@@ -499,7 +534,7 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
                 libc::free(base);
             } else {
                 if free_elements {
-                    for i in 0..lst.len as usize {
+                    for i in 0..safe_count {
                         let e = *lst.data.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
@@ -536,7 +571,20 @@ pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
         // lists (owns_data=false) have elements allocated by the C allocator
         // and must not be freed via libc::free (wrong allocator or double-free).
         if lst.owns_data && !lst.data.is_null() {
-            for i in 0..lst.len as usize {
+            // MEM-C10 (deep audit): bound iteration against a corrupt/negative len.
+            let safe_count = {
+                let l = lst.len;
+                if l < 0 {
+                    0usize
+                } else {
+                    let mut n = l as usize;
+                    if n > 1_000_000_000 {
+                        n = 1_000_000_000;
+                    }
+                    n
+                }
+            };
+            for i in 0..safe_count {
                 let e = *lst.data.add(i);
                 if !e.is_null() {
                     libc::free(e as *mut std::ffi::c_void);
@@ -941,28 +989,42 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
 
     if value >= MIN_HEAP && value < MAX_ADDR && value % 8 == 0 {
         let ptr = value as *const u8;
-        // Short bounded scan for null terminator.
-        let mut len: usize = 0;
-        // SAFETY: ptr comes from the range check above (heap-aligned, in
-        // user space). The bounded scan reads at most MAX_BOUNDED_SCAN
-        // bytes — if a page fault occurs the OS will deliver SIGSEGV, but
-        // the range check makes that extremely unlikely for valid heap.
-        unsafe {
-            while len < MAX_BOUNDED_SCAN {
-                let byte = *ptr.add(len);
-                if byte == 0 {
-                    // Found null terminator within 256 bytes — likely a real C string.
-                    let buf = libc::malloc(len + 1) as *mut u8;
-                    if buf.is_null() {
-                        return std::ptr::null_mut();
+        // C12 (deep audit): a large *untagged* integer (e.g. `0x7FFF_FFFF_F000`)
+        // satisfies the heuristic above but points at unmapped memory, so the
+        // first read below would SIGSEGV. Probe whether the address is actually
+        // mapped (mincore) and only scan within that mapped page, so we never
+        // dereference memory we don't own.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let page_start = (value / page_size) * page_size;
+        let mut mvec: u8 = 0;
+        let mapped = unsafe {
+            libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec)
+        };
+        if mapped == 0 {
+            let page_offset = value - page_start;
+            let max_in_page = page_size.saturating_sub(page_offset);
+            let max_scan = max_in_page.min(MAX_BOUNDED_SCAN);
+            let mut len: usize = 0;
+            // SAFETY: mincore confirmed the first page is mapped; the scan is
+            // bounded to that page so it cannot cross into an unmapped page.
+            unsafe {
+                while len < max_scan {
+                    let byte = *ptr.add(len);
+                    if byte == 0 {
+                        // Found null terminator within the mapped page — likely a real C string.
+                        let buf = libc::malloc(len + 1) as *mut u8;
+                        if buf.is_null() {
+                            return std::ptr::null_mut();
+                        }
+                        if len > 0 {
+                            std::ptr::copy_nonoverlapping(ptr, buf, len);
+                        }
+                        *buf.add(len) = 0;
+                        return buf as *mut std::ffi::c_char;
                     }
-                    if len > 0 {
-                        std::ptr::copy_nonoverlapping(ptr, buf, len);
-                    }
-                    *buf.add(len) = 0;
-                    return buf as *mut std::ffi::c_char;
+                    len += 1;
                 }
-                len += 1;
             }
         }
         // C12: no null within 256 bytes — treat as large integer (≥1MB) and
@@ -1784,11 +1846,18 @@ pub extern "C" fn mimi_args_get(i: i64) -> *mut std::ffi::c_char {
         return std::ptr::null_mut();
     }
     let idx = (i + 1) as usize; // +1 to skip program name
-    args.argv
-        .get(idx)
-        .copied()
-        .map(|p| p as *mut std::ffi::c_char)
-        .unwrap_or(std::ptr::null_mut())
+    // C8 (deep audit): return an *owned* copy of the argument string rather than
+    // a raw pointer into CLI_ARGS storage. On a later `mimi_args_init` the stored
+    // strings are freed, which would otherwise leave the caller holding a dangling
+    // pointer (UAF). The returned buffer is independently allocated and must be
+    // freed by the caller with `mimi_string_free`.
+    match args.argv.get(idx) {
+        Some(&p) if p != 0 => {
+            let s = unsafe { cstr_to_string(p as *const std::ffi::c_char) };
+            alloc_c_string(&s)
+        }
+        _ => std::ptr::null_mut(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4816,15 +4885,17 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         return;
     }
     use std::sync::atomic::Ordering;
-    // C13: check for freed sentinel (-1) before writing.
-    // If the future was freed concurrently, skip to avoid UAF.
+    // C13 (deep audit): the previous check-then-act (`load == 0` then `store 1`)
+    // had a race window — a concurrent `mimi_future_free` could store -1 and
+    // deallocate between the load and the store, so the store would land in
+    // freed memory (UAF write). Use a single atomic compare_exchange: it only
+    // transitions 0 -> 1, and fails (no write) if the future was concurrently
+    // freed (completed == -1) or already completed (== 1).
     unsafe {
         let rep = &*(fut as *const MimiFutureRepr);
-        let prev = rep.completed.load(Ordering::Acquire);
-        if prev == -1 {
-            return; // future was freed — do not write to freed memory
-        }
-        rep.completed.store(1, Ordering::Release);
+        let _ = rep
+            .completed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -8235,7 +8306,6 @@ pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
     }
 }
 
-#[no_mangle]
 #[no_mangle]
 pub extern "C" fn mimi_channel_drop(handle: i64) {
     // CRITICAL #15: TOCTOU race analysis:

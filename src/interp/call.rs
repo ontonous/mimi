@@ -997,13 +997,29 @@ impl<'a> Interpreter<'a> {
                     ("Some", "unwrap_or")
                     | ("Ok", "unwrap_or")
                     | ("Some", "value_or")
-                    | ("Ok", "value_or") => Ok(vals[0].clone()),
+                    | ("Ok", "value_or") => {
+                        // `Some(v).unwrap_or(default)` ignores the default (standard
+                        // semantics) but must still reject wrong arity (IN-H9 / #9).
+                        if args.len() != 1 {
+                            return Err(InterpError::new(format!(
+                                "unwrap_or expects 1 argument (default), got {}",
+                                args.len()
+                            )));
+                        }
+                        Ok(vals[0].clone())
+                    }
                     ("None", "unwrap_or")
                     | ("Err", "unwrap_or")
                     | ("None", "value_or")
-                    | ("Err", "value_or") => args.into_iter().next().ok_or_else(|| {
-                        InterpError::new("unwrap_or requires a default value".to_string())
-                    }),
+                    | ("Err", "value_or") => {
+                        if args.len() != 1 {
+                            return Err(InterpError::new(format!(
+                                "unwrap_or expects 1 argument (default), got {}",
+                                args.len()
+                            )));
+                        }
+                        Ok(args.into_iter().next().unwrap())
+                    }
 
                     ("Some", "is_some")
                     | ("Ok", "is_some")

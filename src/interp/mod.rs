@@ -257,21 +257,6 @@ impl<'a> Interpreter<'a> {
     // 768 frames × 2KB = 1.5MB, leaving ~0.5MB headroom.
     const MAX_RECURSION_DEPTH: usize = 768;
 
-    fn with_depth_check<F, T>(&mut self, f: F) -> Result<T, InterpError>
-    where
-        F: FnOnce(&mut Self) -> Result<T, InterpError>,
-    {
-        if self.recursion_depth >= Self::MAX_RECURSION_DEPTH {
-            return Err(InterpError::new(
-                "recursion limit exceeded (possible infinite recursion)",
-            ));
-        }
-        self.recursion_depth += 1;
-        let result = f(self);
-        self.recursion_depth = self.recursion_depth.saturating_sub(1);
-        result
-    }
-
     /// Apply a closure value: push scope, bind captured vars and params,
     /// eval body, handle early return, pop scope.
     fn apply_closure_inner(

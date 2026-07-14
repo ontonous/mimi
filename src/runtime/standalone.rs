@@ -8,8 +8,15 @@
 //!       -o libmimi_runtime.a src/runtime/standalone.rs
 //! ```
 
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::unwrap_used)]
 
 // The implementation is shared with the main crate's `src/runtime/mod.rs`.
 // This avoids code duplication while allowing both in-crate and standalone builds.
-include!("mod.rs");
+//
+// `mod.rs` begins with a crate/module-level inner attribute (`#![allow(...)]`)
+// which is only valid at the start of a file/module. When `include!`d directly
+// into this crate root it would appear mid-file and fail to compile, so we wrap
+// it in a submodule. `#[no_mangle]` symbols stay globally visible.
+mod runtime {
+    include!("mod.rs");
+}

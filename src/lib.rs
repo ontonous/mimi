@@ -74,7 +74,7 @@ pub mod doc_core;
 pub mod path_safety;
 pub mod pkg_registry;
 pub mod pkg_resolve;
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::unwrap_used)]
 pub mod runtime;
 pub mod source_scan;
 
