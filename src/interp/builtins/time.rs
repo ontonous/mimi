@@ -36,7 +36,10 @@ impl<'a> Interpreter<'a> {
                         "sleep expects a non-negative integer (milliseconds)",
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
+                // Cap absurd durations (e.g. i64::MAX ms) to 24h to avoid DoS.
+                const MAX_SLEEP_MS: u64 = 24 * 60 * 60 * 1000;
+                let ms_u = (*ms as u64).min(MAX_SLEEP_MS);
+                std::thread::sleep(std::time::Duration::from_millis(ms_u));
                 Ok(Value::Unit)
             }
             _ => Err(InterpError::new("sleep expects an integer (milliseconds)")),
