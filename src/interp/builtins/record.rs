@@ -49,7 +49,8 @@ impl<'a> Interpreter<'a> {
         match (&args[0], &args[1]) {
             (Value::Record(_, fields), Value::String(key)) => match fields.get(key.as_str()) {
                 Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
-                None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Unit])),
+                // Match codegen: missing key → (false, 0) ValueHandle, not Unit.
+                None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0)])),
             },
             _ => Err(InterpError::new("map_get expects (record, string)")),
         }
