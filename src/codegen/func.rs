@@ -1760,7 +1760,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
                                     }
-                                    "Ok" | "Err" => {
+                                    "Ok" => {
+                                        let full = match call_args.first() {
+                                            Some(arg) => {
+                                                let inner = self.infer_object_type(arg, vars);
+                                                if !inner.is_empty()
+                                                    && self.type_defs.contains_key(&inner)
+                                                {
+                                                    format!("Result<{},i32>", inner)
+                                                } else if !inner.is_empty() {
+                                                    format!("Result<{},i32>", inner)
+                                                } else {
+                                                    "Result".to_string()
+                                                }
+                                            }
+                                            None => "Result".to_string(),
+                                        };
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                    "Err" => {
                                         self.var_type_names
                                             .insert(name.clone(), "Result".to_string());
                                     }
