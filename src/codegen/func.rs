@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use crate::ast::*;
 use crate::codegen::types;
 use std::collections::HashMap;
@@ -93,9 +94,13 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
         }
         Expr::If { cond, then_, else_ } => {
             collect_old_idents_walker(cond, out);
-            for s in then_ { collect_old_idents_in_stmt(s, out); }
+            for s in then_ {
+                collect_old_idents_in_stmt(s, out);
+            }
             if let Some(e) = else_ {
-                for s in e { collect_old_idents_in_stmt(s, out); }
+                for s in e {
+                    collect_old_idents_in_stmt(s, out);
+                }
             }
         }
         Expr::Match(scrut, arms) => {
@@ -118,13 +123,24 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
         }
         Expr::SliceExpr { target, start, end } => {
             collect_old_idents_walker(target, out);
-            if let Some(s) = start { collect_old_idents_walker(s, out); }
-            if let Some(e) = end { collect_old_idents_walker(e, out); }
+            if let Some(s) = start {
+                collect_old_idents_walker(s, out);
+            }
+            if let Some(e) = end {
+                collect_old_idents_walker(e, out);
+            }
         }
-        Expr::Comprehension { expr, var: _, iter, guard } => {
+        Expr::Comprehension {
+            expr,
+            var: _,
+            iter,
+            guard,
+        } => {
             collect_old_idents_walker(expr, out);
             collect_old_idents_walker(iter, out);
-            if let Some(g) = guard { collect_old_idents_walker(g, out); }
+            if let Some(g) = guard {
+                collect_old_idents_walker(g, out);
+            }
         }
         Expr::Record { ty: _, fields } => {
             for f in fields {
@@ -156,7 +172,11 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             }
         }
         Expr::QuoteInterpolate(e) => collect_old_idents_walker(e, out),
-        Expr::Lambda { params: _, ret: _, body } => {
+        Expr::Lambda {
+            params: _,
+            ret: _,
+            body,
+        } => {
             for s in body {
                 collect_old_idents_in_stmt(s, out);
             }
@@ -217,7 +237,9 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             collect_all_idents(r, out);
         }
         Expr::Unary(_, e) => collect_all_idents(e, out),
-        Expr::Field(e, _) | Expr::Index(e, _) | Expr::TupleIndex(e, _) => collect_all_idents(e, out),
+        Expr::Field(e, _) | Expr::Index(e, _) | Expr::TupleIndex(e, _) => {
+            collect_all_idents(e, out)
+        }
         Expr::OptionalChain(e, _) => collect_all_idents(e, out),
         Expr::Call(callee, args) => {
             collect_all_idents(callee, out);
@@ -226,13 +248,19 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             }
         }
         Expr::Tuple(es) | Expr::List(es) | Expr::SetLiteral(es) => {
-            for e in es { collect_all_idents(e, out); }
+            for e in es {
+                collect_all_idents(e, out);
+            }
         }
         Expr::If { cond, then_, else_ } => {
             collect_all_idents(cond, out);
-            for s in then_ { collect_all_idents_in_stmt(s, out); }
+            for s in then_ {
+                collect_all_idents_in_stmt(s, out);
+            }
             if let Some(e) = else_ {
-                for s in e { collect_all_idents_in_stmt(s, out); }
+                for s in e {
+                    collect_all_idents_in_stmt(s, out);
+                }
             }
         }
         Expr::Match(scrut, arms) => {
@@ -244,8 +272,13 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
                 }
             }
         }
-        Expr::Cast(e, _) | Expr::Try(e) | Expr::Spawn(e) | Expr::Await(e)
-        | Expr::TypeOf(e) | Expr::Old(e) | Expr::QuoteInterpolate(e)
+        Expr::Cast(e, _)
+        | Expr::Try(e)
+        | Expr::Spawn(e)
+        | Expr::Await(e)
+        | Expr::TypeOf(e)
+        | Expr::Old(e)
+        | Expr::QuoteInterpolate(e)
         | Expr::NamedArg(_, e) => collect_all_idents(e, out),
         Expr::Range { start, end } => {
             collect_all_idents(start, out);
@@ -253,11 +286,17 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
         }
         Expr::SliceExpr { target, start, end } => {
             collect_all_idents(target, out);
-            if let Some(s) = start { collect_all_idents(s, out); }
-            if let Some(e) = end { collect_all_idents(e, out); }
+            if let Some(s) = start {
+                collect_all_idents(s, out);
+            }
+            if let Some(e) = end {
+                collect_all_idents(e, out);
+            }
         }
         Expr::Record { ty: _, fields } => {
-            for f in fields { collect_all_idents(&f.value, out); }
+            for f in fields {
+                collect_all_idents(&f.value, out);
+            }
         }
         Expr::MapLiteral { entries } => {
             for (k, v) in entries {
@@ -266,16 +305,34 @@ fn collect_all_idents(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             }
         }
         Expr::Turbofish(_, _, args) => {
-            for a in args { collect_all_idents(a, out); }
+            for a in args {
+                collect_all_idents(a, out);
+            }
         }
-        Expr::Block(stmts) | Expr::Arena(stmts) | Expr::Comptime(stmts) | Expr::Quote(stmts)
-        | Expr::Lambda { params: _, ret: _, body: stmts } => {
-            for s in stmts { collect_all_idents_in_stmt(s, out); }
+        Expr::Block(stmts)
+        | Expr::Arena(stmts)
+        | Expr::Comptime(stmts)
+        | Expr::Quote(stmts)
+        | Expr::Lambda {
+            params: _,
+            ret: _,
+            body: stmts,
+        } => {
+            for s in stmts {
+                collect_all_idents_in_stmt(s, out);
+            }
         }
-        Expr::Comprehension { expr, var: _, iter, guard } => {
+        Expr::Comprehension {
+            expr,
+            var: _,
+            iter,
+            guard,
+        } => {
             collect_all_idents(expr, out);
             collect_all_idents(iter, out);
-            if let Some(g) = guard { collect_all_idents(g, out); }
+            if let Some(g) = guard {
+                collect_all_idents(g, out);
+            }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) => {}
     }
@@ -288,7 +345,9 @@ fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     match stmt {
         Stmt::Expr(e) => collect_old_idents_walker(e, out),
         Stmt::Let { init, .. } => {
-            if let Some(e) = init { collect_old_idents_walker(e, out); }
+            if let Some(e) = init {
+                collect_old_idents_walker(e, out);
+            }
         }
         Stmt::Return(Some(e)) => collect_old_idents_walker(e, out),
         _ => {}
@@ -300,7 +359,9 @@ fn collect_all_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     match stmt {
         Stmt::Expr(e) => collect_all_idents(e, out),
         Stmt::Let { init, .. } => {
-            if let Some(e) = init { collect_all_idents(e, out); }
+            if let Some(e) = init {
+                collect_all_idents(e, out);
+            }
         }
         Stmt::Return(Some(e)) => collect_all_idents(e, out),
         _ => {}
@@ -1588,6 +1649,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type.starts_with("Set") || obj_type == "set" {
                                         self.var_type_names.insert(name.clone(), obj_type);
+                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                        // Flow::transition — insert/remove may be flow
+                                        // transition names, not Set operations.
+                                        if let Some(flow) = self.flow_defs.get(flow_name) {
+                                            let from_type = call_args
+                                                .first()
+                                                .map(|a| self.infer_object_type(a, vars))
+                                                .unwrap_or_default();
+                                            let t = flow
+                                                .transitions
+                                                .iter()
+                                                .find(|t| {
+                                                    t.name == *method_name
+                                                        && t.from_state == from_type
+                                                })
+                                                .or_else(|| {
+                                                    flow.transitions
+                                                        .iter()
+                                                        .find(|t| t.name == *method_name)
+                                                });
+                                            if let Some(t) = t {
+                                                if let Some(to) = t.to_states.first() {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), to.clone());
+                                                }
+                                            }
+                                        }
                                     }
                                 } else if method_name == "upgrade" {
                                     self.track_weak_upgrade_type(name, obj);
@@ -1926,29 +2014,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // i64 from a literal) and else_val (e.g. i32 from an expression)
                     // may have different widths. Extend the narrower one in its
                     // predecessor block before the terminator.
-                    let then_bw = match &then_val { BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(), _ => 0 };
-                    let else_bw = match &else_val { BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(), _ => 0 };
+                    let then_bw = match &then_val {
+                        BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(),
+                        _ => 0,
+                    };
+                    let else_bw = match &else_val {
+                        BasicValueEnum::IntValue(iv) => iv.get_type().get_bit_width(),
+                        _ => 0,
+                    };
                     let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
                         // Extend the NARROWER value to match the WIDER value's width.
-                        let target_ty = if then_bw > else_bw { self.context.i64_type() } else { self.context.i64_type() };
+                        let target_ty = if then_bw > else_bw {
+                            self.context.i64_type()
+                        } else {
+                            self.context.i64_type()
+                        };
                         // Use the wider of the two types
-                        let target_ty = if then_bw >= 64 || else_bw >= 64 { self.context.i64_type() } else { self.context.i32_type() };
+                        let target_ty = if then_bw >= 64 || else_bw >= 64 {
+                            self.context.i64_type()
+                        } else {
+                            self.context.i32_type()
+                        };
                         let then_val = if then_bw < else_bw && then_reaches {
                             self.builder.position_at_end(then_bb_end.unwrap());
                             if let Some(term) = then_bb_end.and_then(|b| b.get_terminator()) {
                                 self.builder.position_before(&term);
                             }
-                            BasicValueEnum::IntValue(self.builder.build_int_s_extend(then_val.into_int_value(), target_ty, "func_if_then_sext")
-                                .map_err(|e| CompileError::LlvmError(format!("s_ext: {}", e)))?)
-                        } else { then_val };
+                            BasicValueEnum::IntValue(
+                                self.builder
+                                    .build_int_s_extend(
+                                        then_val.into_int_value(),
+                                        target_ty,
+                                        "func_if_then_sext",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("s_ext: {}", e))
+                                    })?,
+                            )
+                        } else {
+                            then_val
+                        };
                         let else_val = if else_bw < then_bw && else_reaches {
                             self.builder.position_at_end(else_bb_end.unwrap());
                             if let Some(term) = else_bb_end.and_then(|b| b.get_terminator()) {
                                 self.builder.position_before(&term);
                             }
-                            BasicValueEnum::IntValue(self.builder.build_int_s_extend(else_val.into_int_value(), target_ty, "func_if_else_sext")
-                                .map_err(|e| CompileError::LlvmError(format!("s_ext: {}", e)))?)
-                        } else { else_val };
+                            BasicValueEnum::IntValue(
+                                self.builder
+                                    .build_int_s_extend(
+                                        else_val.into_int_value(),
+                                        target_ty,
+                                        "func_if_else_sext",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("s_ext: {}", e))
+                                    })?,
+                            )
+                        } else {
+                            else_val
+                        };
                         self.builder.position_at_end(merge_bb);
                         (then_val, else_val)
                     } else {
@@ -2170,7 +2294,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     body,
                 } => {
                     // v0.29.32: cooperative wall-clock timeout watchdog.
-                    let _pinned_to_i64: Option<inkwell::values::IntValue> = if let Some(to_expr) = timeout {
+                    let _pinned_to_i64: Option<inkwell::values::IntValue> = if let Some(to_expr) =
+                        timeout
+                    {
                         let to_val = self.compile_expr(to_expr, vars)?;
                         let to_iv = match to_val {
                             inkwell::values::BasicValueEnum::IntValue(iv) => iv,
@@ -2254,7 +2380,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.32: record wall-clock start before body.
                     let _pinned_start = if _pinned_to_i64.is_some() {
                         let wc_fn = self.get_or_declare_wall_clock_fn();
-                        let start = self.builder
+                        let start = self
+                            .builder
                             .build_call(wc_fn, &[], "pin_start_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
                         Some(
@@ -2281,7 +2408,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.32: cooperative wall-clock expiry check after body.
                     if let (Some(to_i64), Some(start_ms)) = (_pinned_to_i64, _pinned_start) {
                         let wc_fn = self.get_or_declare_wall_clock_fn();
-                        let now_call = self.builder
+                        let now_call = self
+                            .builder
                             .build_call(wc_fn, &[], "pin_now_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
                         let now_ms = now_call
@@ -2292,10 +2420,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 )
                             })?
                             .into_int_value();
-                        let elapsed = self.builder
+                        let elapsed = self
+                            .builder
                             .build_int_sub(now_ms, start_ms, "pin_elapsed")
                             .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;
-                        let exceeded = self.builder
+                        let exceeded = self
+                            .builder
                             .build_int_compare(
                                 inkwell::IntPredicate::SGT,
                                 elapsed,
@@ -2543,11 +2673,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(max) = self.max_children {
                 if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_max_children") {
                     let n = self.context.i64_type().const_int(max as u64, false);
-                    let _ = self.build_call(
-                        set_fn,
-                        &[n.into()],
-                        "set_max_children",
-                    );
+                    let _ = self.build_call(set_fn, &[n.into()], "set_max_children");
                 }
             }
         }

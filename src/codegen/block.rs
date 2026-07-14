@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use crate::ast::*;
 use crate::codegen::call_try_basic_value;
 use crate::codegen::types;
@@ -318,6 +319,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type.starts_with("Set") || obj_type == "set" {
                                         self.var_type_names.insert(name.clone(), obj_type);
+                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                        // Flow::transition(from, ...) — insert/remove may be
+                                        // flow transition names, not Set operations.
+                                        if let Some(flow) = self.flow_defs.get(flow_name) {
+                                            let from_type = call_args
+                                                .first()
+                                                .map(|a| self.infer_object_type(a, vars))
+                                                .unwrap_or_default();
+                                            let t = flow
+                                                .transitions
+                                                .iter()
+                                                .find(|t| {
+                                                    t.name == *method_name
+                                                        && t.from_state == from_type
+                                                })
+                                                .or_else(|| {
+                                                    flow.transitions
+                                                        .iter()
+                                                        .find(|t| t.name == *method_name)
+                                                });
+                                            if let Some(t) = t {
+                                                if let Some(to) = t.to_states.first() {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), to.clone());
+                                                }
+                                            }
+                                        }
                                     }
                                 } else if method_name == "upgrade" {
                                     self.track_weak_upgrade_type(name, obj);
@@ -749,7 +777,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.32: cooperative wall-clock timeout watchdog.
                     // timeout <= 0 → mimi_runtime_abort (immediate).
                     // timeout > 0 → record start ms, run body, check elapsed.
-                    let _pinned_to_i64: Option<inkwell::values::IntValue> = if let Some(to_expr) = timeout {
+                    let _pinned_to_i64: Option<inkwell::values::IntValue> = if let Some(to_expr) =
+                        timeout
+                    {
                         let to_val = self.compile_expr(to_expr, vars)?;
                         let to_iv = match to_val {
                             inkwell::values::BasicValueEnum::IntValue(iv) => iv,
@@ -836,7 +866,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.32: record wall-clock start before body.
                     let _pinned_start = if _pinned_to_i64.is_some() {
                         let wc_fn = self.get_or_declare_wall_clock_fn();
-                        let start = self.builder
+                        let start = self
+                            .builder
                             .build_call(wc_fn, &[], "pin_start_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
                         Some(
@@ -864,7 +895,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.32: cooperative wall-clock expiry check after body.
                     if let (Some(to_i64), Some(start_ms)) = (_pinned_to_i64, _pinned_start) {
                         let wc_fn = self.get_or_declare_wall_clock_fn();
-                        let now_call = self.builder
+                        let now_call = self
+                            .builder
                             .build_call(wc_fn, &[], "pin_now_ms")
                             .map_err(|e| CompileError::LlvmError(format!("wc: {}", e)))?;
                         let now_ms = call_try_basic_value(&now_call)
@@ -874,10 +906,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 )
                             })?
                             .into_int_value();
-                        let elapsed = self.builder
+                        let elapsed = self
+                            .builder
                             .build_int_sub(now_ms, start_ms, "pin_elapsed")
                             .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;
-                        let exceeded = self.builder
+                        let exceeded = self
+                            .builder
                             .build_int_compare(
                                 inkwell::IntPredicate::SGT,
                                 elapsed,
@@ -1085,8 +1119,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // may produce different-width integers (e.g. i64 literal vs i32 expr).
         // Extend the narrower value IN ITS PREDECESSOR BLOCK (before the br)
         // so the phi has a consistent type without SSA dominance violations.
-        let then_bw = match &then_val { Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(), _ => 0 };
-        let else_bw = match &else_val { Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(), _ => 0 };
+        let then_bw = match &then_val {
+            Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(),
+            _ => 0,
+        };
+        let else_bw = match &else_val {
+            Some(BasicValueEnum::IntValue(iv)) => iv.get_type().get_bit_width(),
+            _ => 0,
+        };
         let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
             let target_ty = if then_bw > else_bw {
                 self.context.i64_type()
@@ -1099,9 +1139,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(term) = then_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
-                BasicValueEnum::IntValue(self.builder.build_int_s_extend(
-                    then_val.unwrap().into_int_value(), target_ty, "if_then_sext"
-                ).map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?)
+                BasicValueEnum::IntValue(
+                    self.builder
+                        .build_int_s_extend(
+                            then_val.unwrap().into_int_value(),
+                            target_ty,
+                            "if_then_sext",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?,
+                )
             } else {
                 then_val.unwrap()
             };
@@ -1111,16 +1157,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(term) = else_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
-                BasicValueEnum::IntValue(self.builder.build_int_s_extend(
-                    else_val.unwrap().into_int_value(), target_ty, "if_else_sext"
-                ).map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?)
+                BasicValueEnum::IntValue(
+                    self.builder
+                        .build_int_s_extend(
+                            else_val.unwrap().into_int_value(),
+                            target_ty,
+                            "if_else_sext",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?,
+                )
             } else {
                 else_val.unwrap()
             };
             (then_val, else_val)
         } else {
-            (then_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
-             else_val.unwrap_or(self.context.i64_type().const_int(0, false).into()))
+            (
+                then_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
+                else_val.unwrap_or(self.context.i64_type().const_int(0, false).into()),
+            )
         };
         self.builder.position_at_end(merge_bb);
         // Determine the authoritative phi type from the unified values.
@@ -1516,14 +1570,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let obj_type = self.infer_object_type(container, vars);
                     if let Some(td) = self.type_defs.get(&obj_type) {
                         if let TypeDefKind::Record(fields) = &td.kind {
-                            if let Some((idx, _)) =
-                                fields.iter().enumerate().find(|(_, f)| &f.name == field_name)
+                            if let Some((idx, _)) = fields
+                                .iter()
+                                .enumerate()
+                                .find(|(_, f)| &f.name == field_name)
                             {
-                                if let Some(sty) = self
-                                    .type_llvm
-                                    .get(&obj_type)
-                                    .and_then(|t| if let BasicTypeEnum::StructType(s) = *t { Some(s) } else { None })
-                                {
+                                if let Some(sty) = self.type_llvm.get(&obj_type).and_then(|t| {
+                                    if let BasicTypeEnum::StructType(s) = *t {
+                                        Some(s)
+                                    } else {
+                                        None
+                                    }
+                                }) {
                                     let gep = self
                                         .gep()
                                         .build_struct_gep(
