@@ -147,10 +147,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_map_has_key returned void".to_string())?
             .into_int_value();
         let i64_ty = self.context.i64_type();
-        let i32_ty = self.context.i32_type();
+        let bool_ty = self.context.bool_type();
+        // Match interp: (bool found, i64 value)
         let tuple_ty = self.context.struct_type(
             &[
-                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(bool_ty),
                 BasicTypeEnum::IntType(i64_ty),
             ],
             false,
@@ -163,8 +164,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(tuple_ty, tuple_alloca, 0, "found_field")
             .map_err(|e| format!("gep error: {}", e))?;
+        let zero = found_int.get_type().const_int(0, false);
+        let found_bool = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, found_int, zero, "found_bool")
+            .map_err(|e| format!("found_bool: {}", e))?;
         self.builder
-            .build_store(found_gep, found_int)
+            .build_store(found_gep, found_bool)
             .map_err(|e| format!("store error: {}", e))?;
         let value_gep = self
             .gep()
@@ -174,7 +180,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_store(value_gep, value_handle)
             .map_err(|e| format!("store error: {}", e))?;
         self.tuple_type_stack.push(tuple_ty);
-        Ok(tuple_alloca.into())
+        // Return the tuple by value (not the alloca pointer) so println/match
+        // see a struct, matching interp `Value::Tuple`.
+        let loaded = self
+            .builder
+            .build_load(tuple_ty, tuple_alloca, "map_get_tuple")
+            .map_err(|e| format!("load map_get tuple: {}", e))?;
+        Ok(loaded)
     }
 
     pub(super) fn compile_map_set(

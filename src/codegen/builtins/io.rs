@@ -105,11 +105,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
                     ))
+                } else if num_fields >= 2
+                    && fields
+                        .iter()
+                        .all(|f| matches!(f, BasicTypeEnum::IntType(_)))
+                {
+                    // Tuple / map_get result: format as "(v0, v1, ...)" like interp.
+                    let str_ptr = self.emit_int_tuple_to_string(*sv)?;
+                    Ok((
+                        BasicMetadataValueEnum::PointerValue(str_ptr),
+                        "%s".to_string(),
+                    ))
                 } else if num_fields >= 2 {
+                    // Option/Result-like: print payload field (field 1).
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
-                            // A1: sign-extend for signed integers, zero-extend for bool.
                             let ext = if iv.get_type().get_bit_width() < 64 {
                                 if iv.get_type().get_bit_width() == 1 {
                                     self.builder
@@ -180,6 +191,101 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Ok((*arg, "%p".to_string())),
         }
+    }
+
+    /// Format an all-integer struct (tuple / map_get) as `(v0, v1, ...)`.
+    fn emit_int_tuple_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let fields = sv.get_type().get_field_types();
+        let i64_ty = self.context.i64_type();
+        let mut fmt = String::from("(");
+        let mut sprintf_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (i, ft) in fields.iter().enumerate() {
+            if i > 0 {
+                fmt.push_str(", ");
+            }
+            let field_val = self.build_extract_value(sv.into(), i as u32, &format!("tup_{}", i))?;
+            let iv = field_val.into_int_value();
+            let bw = iv.get_type().get_bit_width();
+            // Bool (i1/i8 disc-like small ints used as flags): print true/false
+            // only when bit-width is 1; i32/i64 stay numeric.
+            if bw == 1 {
+                fmt.push_str("%s");
+                let true_g = self
+                    .builder
+                    .build_global_string_ptr("true", "tup_true")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let false_g = self
+                    .builder
+                    .build_global_string_ptr("false", "tup_false")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let zero = iv.get_type().const_int(0, false);
+                let is_true = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, iv, zero, "tup_bool")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let selected = self
+                    .builder
+                    .build_select(
+                        is_true,
+                        true_g.as_pointer_value(),
+                        false_g.as_pointer_value(),
+                        "tup_bool_str",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                sprintf_args.push(BasicMetadataValueEnum::PointerValue(
+                    selected.into_pointer_value(),
+                ));
+            } else {
+                fmt.push_str("%ld");
+                let ext = if bw < 64 {
+                    // i32 found flags from map_has_key: treat 0/1 as bool-like for display
+                    // when field is i32 and value is 0 or 1? Keep numeric for generality.
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "tup_sext")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    iv
+                };
+                sprintf_args.push(BasicMetadataValueEnum::IntValue(ext));
+            }
+            let _ = ft;
+        }
+        fmt.push(')');
+        let est = (fmt.len() + fields.len() * 24 + 64) as u64;
+        let buf_size = i64_ty.const_int(est, false);
+        let buf = self.malloc_or_abort(buf_size, "tup_print_buf")?;
+        let fmt_ptr = self
+            .builder
+            .build_global_string_ptr(&fmt, "tup_print_fmt")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let mut all_args = vec![
+            BasicMetadataValueEnum::PointerValue(buf),
+            BasicMetadataValueEnum::IntValue(buf_size),
+            BasicMetadataValueEnum::PointerValue(fmt_ptr.as_pointer_value()),
+        ];
+        all_args.extend(sprintf_args);
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let i32_ty = self.context.i32_type();
+            let ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        self.build_call(snprintf_fn, &all_args, "tup_snprintf")?;
+        Ok(buf)
     }
 
     /// Materialize a list struct value into an alloca and call the runtime
