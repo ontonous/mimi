@@ -385,7 +385,7 @@ impl<'a> Checker<'a> {
                             format!(
                                 "to_json: cannot serialize type `{}`; \
                                  only i32/i64/f64/bool/string, List<T>, Map<string,i32|i64>, \
-                                 and Record types with serializable fields are supported",
+                                 Set<i32|i64>, and Record types with serializable fields are supported",
                                 crate::core::helpers::fmt_type(&arg_ty)
                             ),
                         );

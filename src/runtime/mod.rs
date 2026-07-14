@@ -2728,6 +2728,31 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
     Box::into_raw(set) as SetHandle
 }
 
+/// Serialize a SetHandle of integer values to a JSON array string.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: non-zero SetHandle from mimi_set_new / from_json.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut vals: Vec<i64> = set.inner.iter().copied().collect();
+    vals.sort_unstable(); // order-stable for dual-backend
+    let mut parts: Vec<String> = Vec::with_capacity(vals.len() * 2 + 2);
+    parts.push(String::from("["));
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(v.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Build a SetHandle from a JSON array of integers.
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHandle {

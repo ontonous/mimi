@@ -507,8 +507,22 @@ impl<'a> Interpreter<'a> {
                 Ok(serde_json::Value::Array(arr?))
             }
             Value::Set(items) => {
-                let arr: Result<Vec<_>, _> = items.iter().map(|i| self.value_to_json(i)).collect();
-                Ok(serde_json::Value::Array(arr?))
+                // Sort integer elements for dual-backend stable to_json.
+                let mut ints: Vec<i64> = Vec::new();
+                let mut other: Vec<serde_json::Value> = Vec::new();
+                for i in items {
+                    match i {
+                        Value::Int(n) => ints.push(*n),
+                        other_v => other.push(self.value_to_json(other_v)?),
+                    }
+                }
+                ints.sort_unstable();
+                let mut arr: Vec<serde_json::Value> = ints
+                    .into_iter()
+                    .map(|n| serde_json::Value::Number(n.into()))
+                    .collect();
+                arr.extend(other);
+                Ok(serde_json::Value::Array(arr))
             }
             Value::Record(_, fields) => {
                 let mut map = serde_json::Map::new();
