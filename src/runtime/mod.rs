@@ -2507,6 +2507,104 @@ pub extern "C" fn json_get_element(
 
 // ─── from_json::<T> typed parsing helpers ────────────────────────
 
+/// Build a MapHandle from a JSON object with string keys and integer values.
+/// Values are stored as raw i64 ValueHandles (same as map_set of integers).
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -> MapHandle {
+    if json.is_null() {
+        return mimi_map_new();
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    // Parse object via json_get_inner-style walk using serde-free JsonParser:
+    // reuse keys from a lightweight scan of top-level object entries.
+    let bytes = s.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    if pos >= bytes.len() || bytes[pos] != b'{' {
+        return handle;
+    }
+    pos += 1;
+    const MAX_ENTRIES: usize = 1_000_000;
+    let mut count = 0usize;
+    loop {
+        if count >= MAX_ENTRIES {
+            break;
+        }
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] == b'}' {
+            break;
+        }
+        if bytes[pos] != b'"' {
+            break;
+        }
+        // Parse key
+        pos += 1;
+        let key_start = pos;
+        let mut esc = false;
+        let mut key = String::new();
+        loop {
+            if pos >= bytes.len() {
+                return handle;
+            }
+            let c = bytes[pos];
+            if esc {
+                key.push(c as char);
+                esc = false;
+                pos += 1;
+                continue;
+            }
+            if c == b'\\' {
+                esc = true;
+                pos += 1;
+                continue;
+            }
+            if c == b'"' {
+                pos += 1;
+                break;
+            }
+            key.push(c as char);
+            pos += 1;
+        }
+        let _ = key_start;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b':' {
+            break;
+        }
+        pos += 1;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        // Parse number value as i64 (optional leading -)
+        let val_start = pos;
+        let mut dummy = JsonParser::new(&s[val_start..]);
+        let parsed = dummy.parse_value();
+        pos = val_start + dummy.pos;
+        let v_i64 = match parsed {
+            Some(ref num) => num.parse::<i64>().unwrap_or(0),
+            None => 0,
+        };
+        // SAFETY: handle is a valid map from mimi_map_new.
+        unsafe {
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, v_i64 as ValueHandle);
+        }
+        count += 1;
+    }
+    handle
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
     if json.is_null() {

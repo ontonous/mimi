@@ -6545,6 +6545,24 @@ fn dual_from_json_option_top() {
     );
 }
 
+/// from_json::<Map<string, i32>> object with integer values.
+#[test]
+fn dual_from_json_map_i64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1,\"b\":2}")
+            println(map_size(m))
+            0
+        }
+        "#,
+        "2"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
