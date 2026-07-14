@@ -4640,8 +4640,13 @@ pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
         PINNED_FAULT_PENDING.with(|cell| {
             if let Some(ref info) = *cell.borrow() {
                 *cstr = Some(
-                    std::ffi::CString::new(info.state_name.as_str())
-                        .unwrap_or_else(|_| std::ffi::CString::new("FFI_Pinned").unwrap()),
+                    std::ffi::CString::new(info.state_name.as_str()).unwrap_or_else(
+                        |_| {
+                            // Fallback never fails: no interior NULs.
+                            std::ffi::CString::new("FFI_Pinned")
+                                .unwrap_or_else(|_| std::ffi::CString::default())
+                        },
+                    ),
                 );
             }
         });
@@ -4846,7 +4851,7 @@ pub extern "C" fn mimi_shadow_dump() -> *const std::ffi::c_char {
             }
         });
         *cstr_cell.borrow_mut() = Some(
-            std::ffi::CString::new(buf).unwrap_or_else(|_| std::ffi::CString::new("").unwrap()),
+            std::ffi::CString::new(buf).unwrap_or_else(|_| std::ffi::CString::default()),
         );
         cstr_cell
             .borrow()
