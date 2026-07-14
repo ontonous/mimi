@@ -2548,14 +2548,14 @@ pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_ch
     if map.inner.len() > 1_000_000 {
         return alloc_c_string("{...}");
     }
-    let mut parts: Vec<String> = Vec::with_capacity(map.inner.len() * 2 + 2);
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
     parts.push(String::from("{"));
-    let mut first = true;
-    for (k, v) in &map.inner {
-        if !first {
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
             parts.push(String::from(","));
         }
-        first = false;
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         parts.push(v.to_string());

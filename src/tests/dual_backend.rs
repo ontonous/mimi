@@ -6699,6 +6699,24 @@ fn dual_record_println() {
     );
 }
 
+/// Map println via JSON object (sorted keys).
+#[test]
+fn dual_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m: Map<string, i32> = from_json::<Map<string, i32>>("{\"a\":1}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":1}"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
