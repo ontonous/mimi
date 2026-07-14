@@ -399,15 +399,29 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             if n == "List" && !args.is_empty() {
                 return is_json_serializable(&args[0]);
             }
-            // Map<string, i32|i64> via mimi_map_to_json_i64.
+            // Map<string, i32|i64|bool|f32|f64|string> via typed map JSON helpers.
             if n == "Map" && args.len() == 2 {
                 let key_ok = matches!(&args[0], Type::Name(k, _) if k == "string");
-                let val_ok = matches!(&args[1], Type::Name(v, _) if v == "i32" || v == "i64");
+                let val_ok = matches!(
+                    &args[1],
+                    Type::Name(v, _)
+                        if matches!(
+                            v.as_str(),
+                            "i32" | "i64" | "bool" | "f32" | "f64" | "string"
+                        )
+                );
                 return key_ok && val_ok;
             }
-            // Set<i32|i64> via mimi_set_to_json_i64.
+            // Set<i32|i64|bool|f32|f64|string> via typed set JSON/display helpers.
             if n == "Set" && args.len() == 1 {
-                return matches!(&args[0], Type::Name(v, _) if v == "i32" || v == "i64");
+                return matches!(
+                    &args[0],
+                    Type::Name(v, _)
+                        if matches!(
+                            v.as_str(),
+                            "i32" | "i64" | "bool" | "f32" | "f64" | "string"
+                        )
+                );
             }
             // Option<T> / Result<T,E> when payload types are serializable.
             if n == "Option" && args.len() == 1 {

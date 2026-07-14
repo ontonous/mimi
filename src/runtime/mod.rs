@@ -1488,6 +1488,37 @@ pub extern "C" fn mimi_list_map_to_string(list: *const MimiList) -> *mut std::ff
     alloc_c_string(&parts.join(""))
 }
 
+/// Render `List<Set>` as a JSON array of JSON arrays `[[1,2],[3]]`.
+#[no_mangle]
+pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let handle = unsafe { *(lst.data as *const i64).offset(i) } as SetHandle;
+        let json_ptr = mimi_set_to_json_i64(handle);
+        let s = unsafe { cstr_to_string(json_ptr) };
+        if !json_ptr.is_null() {
+            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Render `List<Set>` (i64 set handles) as `[Set{1, 2}, ...]`.
 #[no_mangle]
 pub extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut std::ffi::c_char {

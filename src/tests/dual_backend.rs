@@ -7420,6 +7420,43 @@ fn dual_to_json_list_map() {
     );
 }
 
+/// to_json List of Set dual.
+#[test]
+fn dual_to_json_list_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[1,3,2]")
+            let xs = [s]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[[1,2,3]]"
+    );
+}
+
+/// to_json Map of string dual.
+#[test]
+fn dual_to_json_map_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, string>>("{\"b\":\"yo\",\"a\":\"hi\"}")
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":\"hi\",\"b\":\"yo\"}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
