@@ -501,11 +501,18 @@ fn attach_persistent_shadows(flow: &mut FlowDef) {
         let ty = types
             .get(name)
             .cloned()
-            // M2-fix: when the persistent field type cannot be resolved from
-            // any state payload, default to a unit type instead of i32.
-            // Previously defaulted to i32, which silently created a type mismatch
-            // if the field was actually a different type.
-            .unwrap_or_else(|| Type::Name("unit".to_string(), vec![]));
+            // M2: when the persistent field type cannot be resolved from
+            // any state payload, emit a diagnostic warning and default to
+            // unit type. Previously defaulted to i32 which silently created
+            // a type mismatch.
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "[mimi] warning: persistent field '{}' not found in any state payload; \
+                     defaulting to 'unit' type. Add the field to a state payload to fix this.",
+                    name
+                );
+                Type::Name("unit".to_string(), vec![])
+            });
         payload.push(Field {
             name: name.clone(),
             ty,

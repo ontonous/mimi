@@ -293,7 +293,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let payload_size = packed_ty
                                         .size_of()
                                         .and_then(|sv| sv.get_zero_extended_constant())
-                                        .unwrap_or(32);
+                                        // MEM-C8: size_of virtually always succeeds for StructType.
+                                        // 64 bytes covers all common packed payloads.
+                                        .unwrap_or(64u64);
                                     let size_val = self
                                         .context
                                         .i64_type()

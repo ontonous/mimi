@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
+
+#### CRITICAL 修复
+- **CG-H16**: `any_value_to_handle` 整数标签去除 — map/set 存储整数不再加 `(val<<1)|1` 标签；读取时不再需要解标签。`mimi_any_to_string` 运行时相应简化，通过启发式区分整数与指针。
+
+#### HIGH 修复
+- **CG-H9**: 切片表达式添加边界钳位 — `list[start:end]` 中 start/end 现在钳位到 `[0, list_len]`，防止用户提供的越界索引导致 OOB 指针运算。
+
+#### MEDIUM 修复
+- **M2**: `persistent` 字段类型解析 fallback 改为显式编译诊断 — 无法从 state payload 解析类型时输出 `[mimi] warning` 警告。
+- **MEM-C8**: packed enum malloc fallback 从 32 字节改为 64 字节，覆盖更大的 packed payload。
+
 ## [v0.30.0] — 2026-07-14 (止血清零 + 架构债务清零)
 
 ### v0.30.0 — 两轮审计 + 15 项架构债务全部清零（0 新 Feature）

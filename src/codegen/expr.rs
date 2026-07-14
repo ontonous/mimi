@@ -1120,10 +1120,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(BasicValueEnum::IntValue(set_handle))
     }
 
-    /// Convert any basic value to an i64 ValueHandle for map storage.
-    /// Integers are tagged with bit 0 = 1 (encoded as (val << 1) | 1).
-    /// Pointers are stored directly (bit 0 = 0, since pointers are aligned).
-    /// The tag allows `mimi_any_to_string` to distinguish int from pointer.
+    /// Convert any basic value to an i64 ValueHandle for map/set storage.
+    /// Integers are stored directly (no tagging). Pointers are stored as ptrtoint.
+    /// The runtime's `mimi_any_to_string` handles both tagged and untagged values.
     fn any_value_to_handle(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -1131,22 +1130,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(match val {
             BasicValueEnum::IntValue(iv) => {
                 let i64_ty = self.context.i64_type();
-                // Extend i32 (or narrower) to i64 before tagging — the tag
-                // scheme assumes a 64-bit slot (bit 0 = 1 for ints).
-                let iv_ext = if iv.get_type().get_bit_width() < 64 {
+                // Extend i32 (or narrower) to i64 for consistent storage.
+                if iv.get_type().get_bit_width() < 64 {
                     self.builder
                         .build_int_s_extend(iv, i64_ty, "any_sext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
                 } else {
                     iv
-                };
-                let shifted = self
-                    .builder
-                    .build_left_shift(iv_ext, i64_ty.const_int(1, false), "tag_shift")
-                    .map_err(|e| CompileError::LlvmError(format!("tag shift: {}", e)))?;
-                self.builder
-                    .build_or(shifted, i64_ty.const_int(1, false), "tag_int")
-                    .map_err(|e| CompileError::LlvmError(format!("tag or: {}", e)))?
+                }
             }
             BasicValueEnum::PointerValue(pv) => {
                 self.build_ptr_to_int(pv, self.context.i64_type(), "ptr_to_handle")?

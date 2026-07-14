@@ -954,42 +954,25 @@ pub extern "C" fn mimi_map_set(
 /// Format an `Any` value (a raw usize handle) to a heap-allocated C string.
 ///
 /// Uses a two-tier approach:
-/// 1. Bit-0 tag: codegen stores integers as `(val << 1) | 1` (bit 0 = 1),
-///    pointers are stored directly (bit 0 = 0 due to alignment).
-/// 2. If bit 0 is clear and the value looks like a plausible heap pointer
-///    (>= 1MB, 8-byte aligned), performs a *bounded* scan (max 1MB) for
-///    a null terminator to confirm it's a valid C string.
-/// 3. Falls back to integer formatting for everything else.
+/// 1. If bit-0 is clear and the value looks like a plausible heap pointer
+///    (>= 1MB, 8-byte aligned), performs a *bounded* scan (max 256 bytes)
+///    for a null terminator to confirm it's a valid C string.
+/// 2. Falls back to raw integer formatting for everything else.
 ///
-/// This eliminates the unbounded `libc::strlen` on arbitrary memory
-/// (C2 audit fix). Still heuristic — callers that can provide a type
-/// tag should use `mimi_any_to_string_tagged` instead.
+/// Integers are stored directly (no (val<<1)|1 tag) since CG-H16 fix.
+/// Pointers are stored with bit-0 = 0 due to alignment; the heuristic
+/// distinguishes them from integers by size and alignment.
 ///
 /// The caller must `free` the returned pointer with `mimi_string_free`.
 #[no_mangle]
 pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
-    // Check bit-0 tag (codegen tags integers with bit 0 = 1).
-    if value & 1 == 1 {
-        // Negative i64 values also have bit-0 = 1 and would be misidentified
-        // as tagged integers with the wrong decoded value. Check the sign bit:
-        // if the high bit is set, treat as raw signed i64 rather than tagged.
-        // This handles untagged negative computation results correctly.
-        // Limitation: tagged integers >= 2^62 also have the high bit set and
-        // will be formatted as raw i64 instead of decoded. This is extremely
-        // rare in practice.
-        if (value as i64) < 0 {
-            return alloc_c_string(&(value as i64).to_string());
-        }
-        return alloc_c_string(&((value >> 1) as i64).to_string());
-    }
-
-    // Bit 0 is clear — could be a heap pointer (aligned, so bit 0 = 0)
-    // or an untagged integer. Validate before treating as pointer.
     const MIN_HEAP: usize = 1_048_576; // 1MB — below this is definitely not a heap ptr
     const MAX_ADDR: usize = usize::MAX - 4096;
     const MAX_BOUNDED_SCAN: usize = 256; // C12: limit scan to 256 bytes to avoid 1MB arbitrary read
 
-    if (MIN_HEAP..MAX_ADDR).contains(&value) && value % 8 == 0 {
+    // Bit-0 = 0: could be an aligned heap pointer (string), or an even integer.
+    // Validate before treating as pointer.
+    if value & 1 == 0 && (MIN_HEAP..MAX_ADDR).contains(&value) && value % 8 == 0 {
         let ptr = value as *const u8;
         // C12 (deep audit): a large *untagged* integer (e.g. `0x7FFF_FFFF_F000`)
         // satisfies the heuristic above but points at unmapped memory, so the
@@ -1044,7 +1027,7 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         return buf;
     }
 
-    // Fallback: format as decimal integer (value < 1MB, bit 0 = 0, not tagged).
+    // Fallback: format as raw decimal integer.
     let buf = unsafe { libc::malloc(24) as *mut std::ffi::c_char };
     if buf.is_null() {
         return std::ptr::null_mut();
