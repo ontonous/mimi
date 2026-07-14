@@ -1247,6 +1247,19 @@ fn register_process_advanced_file_operations<'ctx>(
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_exec_safe(prog: i8*, args: MimiList*) -> MimiExecResult*
+    // args may be null for zero extra argv entries.
+    module.add_function(
+        "mimi_exec_safe",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_file_stat_free(res: i8*)
     module.add_function(
         "mimi_file_stat_free",

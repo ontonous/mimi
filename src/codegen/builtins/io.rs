@@ -2387,11 +2387,116 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(super) fn compile_exec_safe(
         &self,
-        _args: &[BasicMetadataValueEnum<'ctx>],
+        args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        Err(CompileError::Generic(
-            "exec_safe: codegen not yet implemented, use `mimi run` instead".to_string(),
-        ))
+        // Minimal codegen: program string + optional null args list.
+        // Multi-arg argv packing is left for a later pass; null args is the
+        // common case and matches the runtime's empty-args path.
+        if args.is_empty() {
+            return Err(CompileError::WrongArgCount(
+                "exec_safe expects at least 1 argument (program)".to_string(),
+            ));
+        }
+        let prog_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let args_list = i8_ptr.const_null();
+        if args.len() > 1 {
+            return Err(CompileError::Generic(
+                "exec_safe with argv list is not yet supported in codegen; pass only the program path or use `mimi run`".to_string(),
+            ));
+        }
+        let exec_fn = self.get_runtime_fn("mimi_exec_safe")?;
+        let res_ptr = self
+            .build_call(
+                exec_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(prog_ptr),
+                    BasicMetadataValueEnum::PointerValue(args_list),
+                ],
+                "exec_safe_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("exec_safe error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_exec_safe returned void")?
+            .into_pointer_value();
+
+        // Reuse the same MimiExecResult → ExecResult lowering as compile_exec.
+        let res_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        );
+        let exit_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 0, "exit_code_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let exit_code_raw = self
+            .build_load(self.context.i64_type(), exit_gep, "exit_code_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_int_value();
+        let exit_code = self
+            .builder
+            .build_int_truncate(exit_code_raw, self.context.i32_type(), "exit_code_i32")
+            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?;
+        let stdout_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 1, "stdout_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let stdout_raw = self
+            .build_load(i8_ptr, stdout_gep, "stdout_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_pointer_value();
+        let stdout_str = self.wrap_c_string(stdout_raw)?;
+        let stderr_gep = self
+            .gep()
+            .build_struct_gep(res_ty, res_ptr, 2, "stderr_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let stderr_raw = self
+            .build_load(i8_ptr, stderr_gep, "stderr_raw")
+            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?
+            .into_pointer_value();
+        let stderr_str = self.wrap_c_string(stderr_raw)?;
+        let free_struct_fn = self.get_runtime_fn("mimi_exec_free_struct")?;
+        self.build_call(
+            free_struct_fn,
+            &[BasicMetadataValueEnum::PointerValue(res_ptr)],
+            "exec_safe_free_struct",
+        )?;
+        let string_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::PointerType(i8_ptr),
+                inkwell::types::BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        let exec_result_ty = self.context.struct_type(
+            &[
+                inkwell::types::BasicTypeEnum::IntType(self.context.i32_type()),
+                inkwell::types::BasicTypeEnum::StructType(string_ty),
+                inkwell::types::BasicTypeEnum::StructType(string_ty),
+            ],
+            false,
+        );
+        let alloca = self.build_alloca(exec_result_ty, "exec_safe_result")?;
+        let f0 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 0, "es_f0")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(f0, exit_code)?;
+        let f1 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 1, "es_f1")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(f1, stdout_str)?;
+        let f2 = self
+            .gep()
+            .build_struct_gep(exec_result_ty, alloca, 2, "es_f2")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(f2, stderr_str)?;
+        self.build_load(exec_result_ty, alloca, "exec_safe_val")
     }
 
     pub(super) fn compile_exec_pipe(
