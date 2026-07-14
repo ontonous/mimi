@@ -2552,6 +2552,16 @@ pub extern "C" fn json_get_element(
 /// Keys are JSON-escaped; values are printed as decimal integers.
 #[no_mangle]
 pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
+    map_to_json_values(handle, false)
+}
+
+/// Serialize a MapHandle of 0/1 bool ValueHandles as JSON true/false.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
+    map_to_json_values(handle, true)
+}
+
+fn map_to_json_values(handle: MapHandle, as_bool: bool) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("{}");
     }
@@ -2570,7 +2580,15 @@ pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_ch
         }
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
-        parts.push(v.to_string());
+        if as_bool {
+            parts.push(if **v != 0 {
+                String::from("true")
+            } else {
+                String::from("false")
+            });
+        } else {
+            parts.push(v.to_string());
+        }
     }
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
@@ -2801,12 +2819,14 @@ pub extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -> MapHa
         while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
             pos += 1;
         }
-        // Parse number value as i64 (optional leading -)
+        // Parse number / bool value as i64 (true→1, false→0).
         let val_start = pos;
         let mut dummy = JsonParser::new(&s[val_start..]);
         let parsed = dummy.parse_value();
         pos = val_start + dummy.pos;
         let v_i64 = match parsed {
+            Some(ref tok) if tok == "true" => 1,
+            Some(ref tok) if tok == "false" => 0,
             Some(ref num) => num.parse::<i64>().unwrap_or(0),
             None => 0,
         };
