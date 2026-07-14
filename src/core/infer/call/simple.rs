@@ -1716,7 +1716,9 @@ impl<'a> Checker<'a> {
                     }
                     return self.unification.resolve(&ret_ty);
                 }
-                // Try built-in Option/Result constructors as fallback
+                // Try built-in Option/Result constructors as fallback.
+                // IF-C2: never use Type::Name("_") / Infer as payload — those are escape
+                // hatches that unify with anything. Fresh TypeVars freeze after first use.
                 match name {
                     "Some" => {
                         if args.len() != 1 {
@@ -1724,11 +1726,11 @@ impl<'a> Checker<'a> {
                                 crate::diagnostic::codes::E0242,
                                 "Some expects 1 argument",
                             );
+                            return Type::Option(Box::new(self.fresh_var()));
                         } else {
                             let inner = self.infer_expr(&args[0], scopes);
                             return Type::Option(Box::new(inner));
                         }
-                        return Type::Option(Box::new(Type::Name("_".into(), vec![])));
                     }
                     "None" => {
                         if !args.is_empty() {
@@ -1737,7 +1739,7 @@ impl<'a> Checker<'a> {
                                 "None expects 0 arguments",
                             );
                         }
-                        return Type::Option(Box::new(Type::Name("_".into(), vec![])));
+                        return Type::Option(Box::new(self.fresh_var()));
                     }
                     "Ok" => {
                         if args.len() != 1 {
@@ -1745,17 +1747,14 @@ impl<'a> Checker<'a> {
                                 crate::diagnostic::codes::E0242,
                                 "Ok expects 1 argument",
                             );
+                            return Type::Result(
+                                Box::new(self.fresh_var()),
+                                Box::new(self.fresh_var()),
+                            );
                         } else {
                             let inner = self.infer_expr(&args[0], scopes);
-                            return Type::Result(
-                                Box::new(inner),
-                                Box::new(Type::Name("_".into(), vec![])),
-                            );
+                            return Type::Result(Box::new(inner), Box::new(self.fresh_var()));
                         }
-                        return Type::Result(
-                            Box::new(Type::Name("_".into(), vec![])),
-                            Box::new(Type::Name("_".into(), vec![])),
-                        );
                     }
                     "Err" => {
                         if args.len() != 1 {
@@ -1763,17 +1762,14 @@ impl<'a> Checker<'a> {
                                 crate::diagnostic::codes::E0242,
                                 "Err expects 1 argument",
                             );
+                            return Type::Result(
+                                Box::new(self.fresh_var()),
+                                Box::new(self.fresh_var()),
+                            );
                         } else {
                             let inner = self.infer_expr(&args[0], scopes);
-                            return Type::Result(
-                                Box::new(Type::Name("_".into(), vec![])),
-                                Box::new(inner),
-                            );
+                            return Type::Result(Box::new(self.fresh_var()), Box::new(inner));
                         }
-                        return Type::Result(
-                            Box::new(Type::Name("_".into(), vec![])),
-                            Box::new(Type::Name("_".into(), vec![])),
-                        );
                     }
                     _ => {}
                 }

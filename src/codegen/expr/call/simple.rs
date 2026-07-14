@@ -468,12 +468,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             fmt_ptr.as_pointer_value(),
                         ));
                         all_args.extend(sprintf_args);
-                        // B3: Use snprintf instead of sprintf for buffer safety.
+                        // B3/CG-C3: snprintf returns i32, not i8*.
                         let snprintf_fn =
                             self.module.get_function("snprintf").unwrap_or_else(|| {
                                 let i8_ptr =
                                     self.context.ptr_type(inkwell::AddressSpace::default());
-                                let ty = i8_ptr.fn_type(
+                                let i32_ty = self.context.i32_type();
+                                let ty = i32_ty.fn_type(
                                     &[
                                         BasicMetadataTypeEnum::PointerType(i8_ptr),
                                         BasicMetadataTypeEnum::IntType(self.context.i64_type()),
@@ -1550,10 +1551,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_global_string_ptr(&fmt, "elem_json_fmt")
                 .map_err(|e| CompileError::LlvmError(format!("fmt: {}", e)))?;
-            // B3: Use snprintf instead of sprintf for buffer safety.
+            // B3/CG-C3: snprintf returns i32, not i8*.
             let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
                 let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let ty = i8_ptr.fn_type(
+                let i32_ty = self.context.i32_type();
+                let ty = i32_ty.fn_type(
                     &[
                         BasicMetadataTypeEnum::PointerType(i8_ptr),
                         BasicMetadataTypeEnum::IntType(self.context.i64_type()),

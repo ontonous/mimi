@@ -18,6 +18,8 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
     } else {
         let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
         if !parse_errors.is_empty() {
+            // Round6: never report "checked successfully" after parse errors.
+            // Recovery may yield a partial AST; surface parse errors and fail.
             let use_color = colors_enabled();
             let src_ref = Some(source.as_str());
             let filename = &path.display().to_string();
@@ -29,14 +31,7 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
                     eprint!("{}", strip_ansi(&formatted));
                 }
             }
-            if parse_errors
-                .iter()
-                .all(|e| e.span.as_ref().map_or(true, |s| s.start_line > 0))
-            {
-                // All errors have valid positions, continue to type checking
-            } else {
-                return Err(format!("{} parse error(s)", parse_errors.len()));
-            }
+            return Err(format!("{} parse error(s)", parse_errors.len()));
         }
         file
     };

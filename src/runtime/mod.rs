@@ -2101,8 +2101,12 @@ impl<'a> JsonParser<'a> {
                         if self.pos >= self.p.len() {
                             return None;
                         }
+                        // RT-C1 pattern: trailing `\` must not skip past EOF.
                         if self.p[self.pos] == b'\\' {
-                            self.pos += 2;
+                            self.pos += 1;
+                            if self.pos < self.p.len() {
+                                self.pos += 1;
+                            }
                             continue;
                         }
                         if self.p[self.pos] == b'"' {
@@ -2142,8 +2146,12 @@ impl<'a> JsonParser<'a> {
                         if self.pos >= self.p.len() {
                             return None;
                         }
+                        // RT-C1 pattern: trailing `\` must not skip past EOF.
                         if self.p[self.pos] == b'\\' {
-                            self.pos += 2;
+                            self.pos += 1;
+                            if self.pos < self.p.len() {
+                                self.pos += 1;
+                            }
                             continue;
                         }
                         if self.p[self.pos] == b'"' {
@@ -3691,8 +3699,12 @@ pub extern "C" fn mimi_json_deserialize(
                     if p >= bytes.len() {
                         break;
                     }
+                    // RT-C1: trailing `\` must not advance past EOF.
                     if bytes[p] == b'\\' {
-                        p += 2;
+                        p += 1;
+                        if p < bytes.len() {
+                            p += 1;
+                        }
                         continue;
                     }
                     if bytes[p] == b'"' {
@@ -3724,6 +3736,11 @@ pub extern "C" fn mimi_json_deserialize(
         }
     }
 
+    // RT-C4: cap allocation to prevent OOM from malicious JSON element counts.
+    const MAX_JSON_LIST_ELEMS: i64 = 10_000_000;
+    if count < 0 || count > MAX_JSON_LIST_ELEMS {
+        return std::ptr::null_mut();
+    }
     // Allocate output array
     let mut data: Vec<i64> = vec![0i64; count as usize];
     pos = 1; // skip initial [
@@ -3764,9 +3781,13 @@ pub extern "C" fn mimi_json_deserialize(
                 // M10: limit per-string length to prevent oversized allocation.
                 const MAX_JSON_STR_LEN: usize = 10 * 1024 * 1024; // 10MB
                 let mut str_len: usize = 0;
+                // RT-C1: trailing `\` must not advance past EOF (`pos += 2` OOB).
                 while pos < bytes.len() && bytes[pos] != b'"' {
                     if bytes[pos] == b'\\' {
-                        pos += 2;
+                        pos += 1;
+                        if pos < bytes.len() {
+                            pos += 1;
+                        }
                         str_len += 2;
                     } else {
                         pos += 1;
@@ -3781,7 +3802,8 @@ pub extern "C" fn mimi_json_deserialize(
                     }
                 }
                 // M19 fix: unescape JSON escape sequences (\n, \", \\, \uXXXX, etc.)
-                let raw_bytes = bytes[start..usize::min(pos, start + MAX_JSON_STR_LEN)].to_vec();
+                let end = usize::min(pos, bytes.len());
+                let raw_bytes = bytes[start..usize::min(end, start + MAX_JSON_STR_LEN)].to_vec();
                 let unescaped = json_unescape(&raw_bytes);
                 data[idx as usize] = alloc_c_string_from_bytes(&unescaped) as i64;
                 if pos < bytes.len() && bytes[pos] == b'"' {
@@ -4036,9 +4058,13 @@ pub extern "C" fn mimi_tuple_deserialize(
                     pos += 1;
                 }
                 let start = pos;
+                // RT-C2: trailing `\` must not advance past EOF (`pos += 2` OOB).
                 while pos < bytes.len() && bytes[pos] != b'"' {
                     if bytes[pos] == b'\\' {
-                        pos += 2;
+                        pos += 1;
+                        if pos < bytes.len() {
+                            pos += 1;
+                        }
                     } else {
                         pos += 1;
                     }
@@ -4478,15 +4504,22 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     const PREFIX: &[u8] = b"[FFI contract violation] ";
     const HINT: &[u8] = b"\nHint: use --skip-verify-ffi to disable contract checking.\n";
     const DETAIL: &[u8] = b"(no details)\n";
-    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
+    // RT-C3: must stay async-signal-safe — no allocation (no to_string_lossy).
+    // SAFETY: writing static / C-string byte buffers to stderr (fd 2) is
+    // async-signal-safe; we only use write(2) and strlen-style scan.
     unsafe {
         let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
         if !msg.is_null() {
-            // SAFETY: `msg` was checked non-null above.
-            let s = CStr::from_ptr(msg);
-            let loss = s.to_string_lossy();
-            let bytes = loss.as_bytes();
-            let _ = write(2, bytes.as_ptr() as *const std::ffi::c_void, bytes.len());
+            // SAFETY: `msg` non-null; scan for NUL without allocating.
+            let mut len = 0usize;
+            let base = msg as *const u8;
+            // Cap message length to avoid unbounded scan of non-NUL-terminated input.
+            const MAX_MSG: usize = 4096;
+            while len < MAX_MSG && *base.add(len) != 0 {
+                len += 1;
+            }
+            let _ = write(2, msg as *const std::ffi::c_void, len);
+            let _ = write(2, b"\n".as_ptr() as *const std::ffi::c_void, 1);
         } else {
             let _ = write(2, DETAIL.as_ptr() as *const std::ffi::c_void, DETAIL.len());
         }

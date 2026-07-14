@@ -56,13 +56,17 @@ impl<'a> Checker<'a> {
         if let Some(const_ty) = self.const_types.get(name) {
             return self.unification.resolve(const_ty);
         }
-        // Built-in bare None constructor (only if no user-defined None variant exists)
+        // Built-in bare None constructor (only if no user-defined None variant exists).
+        // IF-C2: use a fresh TypeVar (not Type::Infer). Infer is an escape hatch that
+        // unifies with anything, so `let a = None; let b: Option<string> = a` would
+        // accept mismatched Option payloads. TypeVar correctly freezes after first use.
         if name == "None" {
             let has_user_none = self.types.values().any(|t| {
                 matches!(&t.kind, TypeDefKind::Enum(variants) if variants.iter().any(|v| v.name == "None"))
             });
             if !has_user_none {
-                return Type::Option(Box::new(Type::Infer));
+                let inner = self.fresh_var();
+                return Type::Option(Box::new(inner));
             }
         }
         // Collect all known names for "did you mean?" suggestions

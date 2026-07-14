@@ -79,9 +79,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("strlen")
             .ok_or_else(|| "strlen not declared".to_string())?;
+        // CG-C3: snprintf returns i32, not i8*.
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = i8_ptr.fn_type(
+            let i32_ty = self.context.i32_type();
+            let ty = i32_ty.fn_type(
                 &[
                     BasicMetadataTypeEnum::PointerType(i8_ptr),
                     BasicMetadataTypeEnum::IntType(self.context.i64_type()),
