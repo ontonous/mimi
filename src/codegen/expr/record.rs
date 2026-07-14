@@ -261,7 +261,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
             self.build_store(gep, *val)?;
         }
-        Ok(alloca.into())
+        // Return by value so println/match see a struct (not a pointer mistaken for C string).
+        self.build_load(struct_ty, alloca, "tuple_val")
     }
 
     fn wrap_tuple_string_field(

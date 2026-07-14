@@ -6600,6 +6600,26 @@ fn dual_named_args_with_defaults() {
     );
 }
 
+/// Tuple / map_get println formats as (true, 1) on both backends.
+#[test]
+fn dual_tuple_and_map_get_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let t = (true, 1)
+            println(t)
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            println(map_get(m, "a"))
+            0
+        }
+        "#,
+        "(true, 1)\n(true, 1)"
+    );
+}
+
 /// from_json::<Result<T,E>> wraps a JSON value as Ok(T).
 #[test]
 fn dual_from_json_result_ok() {
