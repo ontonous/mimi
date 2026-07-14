@@ -1822,7 +1822,8 @@ pub extern "C" fn mimi_getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c
 #[no_mangle]
 pub extern "C" fn mimi_args_count() -> i64 {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");
+    // Prefer get_or_init so concurrent races never panic on missing OnceLock.
+    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     if args.argc <= 1 {
         return 0;
@@ -1833,7 +1834,7 @@ pub extern "C" fn mimi_args_count() -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_args_list() -> *mut MimiList {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");
+    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let count = if args.argc <= 1 {
         0
@@ -1873,7 +1874,7 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
 #[no_mangle]
 pub extern "C" fn mimi_args_get(i: i64) -> *mut std::ffi::c_char {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get().expect("CLI_ARGS not initialized");
+    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     if i < 0 || i >= (args.argc - 1) as i64 {
         return std::ptr::null_mut();
