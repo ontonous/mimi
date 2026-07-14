@@ -354,7 +354,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .find(|t| t.from_state == from_type)
             .or_else(|| candidates.first())
             .copied()
-            .expect("candidates is non-empty (checked above)");
+            .ok_or_else(|| {
+                CompileError::Generic(format!(
+                    "flow '{}' has no transition '{}'",
+                    flow_name, transition_name
+                ))
+            })?;
 
         let is_fallback = t.is_fallback;
         let enters_fault = is_fallback || t.to_states.iter().any(|s| s == "Fault");
