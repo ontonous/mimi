@@ -640,7 +640,10 @@ fn formatting(
         None => return (server, None),
     };
     let formatted = fmt::Formatter::new().format(&text);
-    let line_count = text.lines().count().saturating_sub(1);
+    // CL-H4: total_lines.saturating_sub(1) guards both empty doc (count=1, sub=0)
+    // and the single-line case. The result is the 0-based last-line index.
+    let total_lines = text.lines().count();
+    let end_line = total_lines.saturating_sub(1);
     let last_line_len = text.lines().last().map(|l| l.len()).unwrap_or(0);
     (
         server,
@@ -650,7 +653,7 @@ fn formatting(
             "result": [{
                 "range": {
                     "start": { "line": 0, "character": 0 },
-                    "end": { "line": (line_count - 1), "character": last_line_len }
+                    "end": { "line": end_line, "character": last_line_len }
                 },
                 "newText": formatted
             }]

@@ -124,55 +124,93 @@ impl UnificationTable {
     /// Arch-6 fix: cache resolved types in the binding table (path compression for
     /// type values) to avoid O(N²) repeated cloning when the same TypeVar is
     /// resolved multiple times.
+    /// CO-H1: depth limit prevents stack overflow on deeply-nested/cyclic types.
+    const MAX_RESOLVE_DEPTH: u32 = 256;
     pub fn resolve(&mut self, ty: &Type) -> Type {
+        self.resolve_with_depth(ty, 0)
+    }
+
+    fn resolve_with_depth(&mut self, ty: &Type, depth: u32) -> Type {
+        if depth >= Self::MAX_RESOLVE_DEPTH {
+            return ty.clone();
+        }
+        let next = depth + 1;
         match ty {
             Type::TypeVar(id) => {
                 let root = self.find(*id);
                 if let Some(bound) = self.binding.get(&root).cloned() {
                     // Recursively resolve, then cache the result (path compression for type values)
-                    let resolved = self.resolve(&bound);
+                    let resolved = self.resolve_with_depth(&bound, next);
                     self.binding.insert(root, resolved.clone());
                     resolved
                 } else {
                     Type::TypeVar(root)
                 }
             }
-            Type::Option(inner) => Type::Option(Box::new(self.resolve(inner))),
-            Type::Result(ok, err) => {
-                Type::Result(Box::new(self.resolve(ok)), Box::new(self.resolve(err)))
-            }
-            Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| self.resolve(e)).collect()),
+            Type::Option(inner) => Type::Option(Box::new(self.resolve_with_depth(inner, next))),
+            Type::Result(ok, err) => Type::Result(
+                Box::new(self.resolve_with_depth(ok, next)),
+                Box::new(self.resolve_with_depth(err, next)),
+            ),
+            Type::Tuple(elems) => Type::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.resolve_with_depth(e, next))
+                    .collect(),
+            ),
             Type::Func(args, ret) => Type::Func(
-                args.iter().map(|a| self.resolve(a)).collect(),
-                Box::new(self.resolve(ret)),
+                args.iter()
+                    .map(|a| self.resolve_with_depth(a, next))
+                    .collect(),
+                Box::new(self.resolve_with_depth(ret, next)),
             ),
             Type::ExternFunc(args, ret) => Type::ExternFunc(
-                args.iter().map(|a| self.resolve(a)).collect(),
-                Box::new(self.resolve(ret)),
+                args.iter()
+                    .map(|a| self.resolve_with_depth(a, next))
+                    .collect(),
+                Box::new(self.resolve_with_depth(ret, next)),
             ),
-            Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve(inner))),
-            Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(self.resolve(inner))),
-            Type::Shared(inner) => Type::Shared(Box::new(self.resolve(inner))),
-            Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve(inner))),
-            Type::Weak(inner) => Type::Weak(Box::new(self.resolve(inner))),
-            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.resolve(inner))),
-            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.resolve(inner))),
-            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(self.resolve(inner))),
-            Type::CShared(inner) => Type::CShared(Box::new(self.resolve(inner))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.resolve(inner))),
-            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(self.resolve(inner))),
-            Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve(inner))),
-            Type::Array(inner, n) => Type::Array(Box::new(self.resolve(inner)), *n),
-            Type::Slice(inner) => Type::Slice(Box::new(self.resolve(inner))),
+            Type::Ref(lt, inner) => {
+                Type::Ref(lt.clone(), Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::RefMut(lt, inner) => {
+                Type::RefMut(lt.clone(), Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::Shared(inner) => Type::Shared(Box::new(self.resolve_with_depth(inner, next))),
+            Type::LocalShared(inner) => {
+                Type::LocalShared(Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::Weak(inner) => Type::Weak(Box::new(self.resolve_with_depth(inner, next))),
+            Type::WeakLocal(inner) => {
+                Type::WeakLocal(Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.resolve_with_depth(inner, next))),
+            Type::RawPtrMut(inner) => {
+                Type::RawPtrMut(Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::CShared(inner) => Type::CShared(Box::new(self.resolve_with_depth(inner, next))),
+            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.resolve_with_depth(inner, next))),
+            Type::CBorrowMut(inner) => {
+                Type::CBorrowMut(Box::new(self.resolve_with_depth(inner, next)))
+            }
+            Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve_with_depth(inner, next))),
+            Type::Array(inner, n) => {
+                Type::Array(Box::new(self.resolve_with_depth(inner, next)), *n)
+            }
+            Type::Slice(inner) => Type::Slice(Box::new(self.resolve_with_depth(inner, next))),
             Type::Newtype(name, inner) => {
-                Type::Newtype(name.clone(), Box::new(self.resolve(inner)))
+                Type::Newtype(name.clone(), Box::new(self.resolve_with_depth(inner, next)))
             }
-            Type::Name(name, args) => {
-                Type::Name(name.clone(), args.iter().map(|a| self.resolve(a)).collect())
-            }
-            Type::ForAll(params, body) => {
-                Type::ForAll(params.clone(), Box::new(self.resolve(body)))
-            }
+            Type::Name(name, args) => Type::Name(
+                name.clone(),
+                args.iter()
+                    .map(|a| self.resolve_with_depth(a, next))
+                    .collect(),
+            ),
+            Type::ForAll(params, body) => Type::ForAll(
+                params.clone(),
+                Box::new(self.resolve_with_depth(body, next)),
+            ),
             // Leaf types — no TypeVars inside
             Type::Infer
             | Type::Nothing
