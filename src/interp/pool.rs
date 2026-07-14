@@ -29,7 +29,7 @@ impl ThreadPool {
             let worker = thread::spawn(move || loop {
                 let task = receiver
                     .lock()
-                    .expect("interp pool receiver lock poisoned")
+                    .unwrap_or_else(|e| e.into_inner())
                     .recv();
                 match task {
                     Ok(task) => task(),

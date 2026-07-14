@@ -54,8 +54,7 @@ impl CapTable {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut entries = self
             .entries
-            .lock()
-            .expect("CAP_TABLE entries lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         entries.insert(
             id,
             CapEntry {
@@ -71,8 +70,7 @@ impl CapTable {
     pub fn check(&self, id: i64, name: &str) -> bool {
         let entries = self
             .entries
-            .lock()
-            .expect("CAP_TABLE entries lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         match entries.get(&id) {
             Some(entry) => !entry.consumed && entry.name == name,
             None => false,
@@ -85,8 +83,7 @@ impl CapTable {
     pub fn consume(&self, id: i64, name: &str) -> bool {
         let mut entries = self
             .entries
-            .lock()
-            .expect("CAP_TABLE entries lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         match entries.get_mut(&id) {
             Some(entry) if !entry.consumed && entry.name == name => {
                 entry.consumed = true;
@@ -100,8 +97,7 @@ impl CapTable {
     pub fn remove(&self, id: i64) -> bool {
         let mut entries = self
             .entries
-            .lock()
-            .expect("CAP_TABLE entries lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         entries.remove(&id).is_some()
     }
 }
@@ -154,8 +150,7 @@ impl SharedHandle {
     pub fn with_value<R>(&self, f: impl FnOnce(&Value) -> R) -> R {
         let guard = self
             .inner
-            .read()
-            .expect("SharedHandle inner read lock poisoned");
+            .read().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
 
@@ -164,23 +159,20 @@ impl SharedHandle {
     pub fn with_value_mut<R>(&self, f: impl FnOnce(&mut Value) -> R) -> R {
         let mut guard = self
             .inner
-            .write()
-            .expect("SharedHandle inner write lock poisoned");
+            .write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     }
 
     /// Get a read guard for the inner value.
     pub fn borrow(&self) -> RwLockReadGuard<'_, Value> {
         self.inner
-            .read()
-            .expect("SharedHandle inner read lock poisoned")
+            .read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a write guard for the inner value.
     pub fn borrow_mut(&self) -> RwLockWriteGuard<'_, Value> {
         self.inner
-            .write()
-            .expect("SharedHandle inner write lock poisoned")
+            .write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Retain: increment the C-side strong reference count.
@@ -251,8 +243,7 @@ impl SharedHandleTable {
         let handle = Arc::new(SharedHandle::new(id, inner));
         let mut handles = self
             .handles
-            .lock()
-            .expect("SHARED_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.insert(id, handle);
         id
     }
@@ -271,7 +262,7 @@ impl SharedHandleTable {
     pub fn create_dedup(&self, inner: Arc<RwLock<Value>>, ptr: *const ()) -> i64 {
         // Check dedup table first (lock dedup, then release before locking handles)
         {
-            let dedup = self.dedup.lock().expect("SHARED_TABLE dedup lock poisoned");
+            let dedup = self.dedup.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(&existing_id) = dedup.get(&ptr) {
                 // Found existing handle — retain and return existing ID.
                 // Don't hold dedup lock while touching handles to avoid deadlock.
@@ -294,12 +285,11 @@ impl SharedHandleTable {
         {
             let mut handles = self
                 .handles
-                .lock()
-                .expect("SHARED_TABLE handles lock poisoned");
+                .lock().unwrap_or_else(|e| e.into_inner());
             handles.insert(id, handle);
         }
         {
-            let mut dedup = self.dedup.lock().expect("SHARED_TABLE dedup lock poisoned");
+            let mut dedup = self.dedup.lock().unwrap_or_else(|e| e.into_inner());
             dedup.insert(ptr, id);
         }
         id
@@ -309,8 +299,7 @@ impl SharedHandleTable {
     pub fn get(&self, id: i64) -> Option<Arc<SharedHandle>> {
         let handles = self
             .handles
-            .lock()
-            .expect("SHARED_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.get(&id).cloned()
     }
 
@@ -330,8 +319,7 @@ impl SharedHandleTable {
         let handle = {
             let handles = self
                 .handles
-                .lock()
-                .expect("SHARED_TABLE handles lock poisoned");
+                .lock().unwrap_or_else(|e| e.into_inner());
             handles.get(&id).cloned()
         };
         if let Some(handle) = handle {
@@ -339,8 +327,7 @@ impl SharedHandleTable {
                 let removed = {
                     let mut handles = self
                         .handles
-                        .lock()
-                        .expect("SHARED_TABLE handles lock poisoned");
+                        .lock().unwrap_or_else(|e| e.into_inner());
                     handles.remove(&id).is_some()
                 };
                 if removed {
@@ -363,8 +350,7 @@ impl SharedHandleTable {
         let removed = {
             let mut handles = self
                 .handles
-                .lock()
-                .expect("SHARED_TABLE handles lock poisoned");
+                .lock().unwrap_or_else(|e| e.into_inner());
             handles.remove(&id).is_some()
         };
         if removed {
@@ -380,8 +366,7 @@ impl SharedHandleTable {
     pub fn len(&self) -> usize {
         let handles = self
             .handles
-            .lock()
-            .expect("SHARED_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.len()
     }
 
@@ -668,8 +653,8 @@ pub unsafe extern "C" fn mimi_string_as_c_str(
                             // L8: just pushed, so last is always Some.
                             pending
                                 .last()
-                                .expect("PENDING_C_STRINGS non-empty after push")
-                                .as_ptr()
+                                .map(|c| c.as_ptr())
+                                .unwrap_or(c"".as_ptr())
                         })
                     }
                     Err(_) => {
@@ -840,8 +825,7 @@ impl MimiThreadPool {
             let receiver = std::sync::Arc::clone(&receiver);
             let worker = thread::spawn(move || loop {
                 let task = receiver
-                    .lock()
-                    .expect("MIMI_POOL receiver lock poisoned")
+                    .lock().unwrap_or_else(|e| e.into_inner())
                     .recv();
                 match task {
                     Ok(task) => {
@@ -849,8 +833,7 @@ impl MimiThreadPool {
                         // Decrement pending count and notify waiters
                         let mut count = task
                             .pending
-                            .lock()
-                            .expect("MIMI_POOL pending counter lock poisoned");
+                            .lock().unwrap_or_else(|e| e.into_inner());
                         *count -= 1;
                         if *count == 0 {
                             task.completion.notify_all();
@@ -873,8 +856,7 @@ impl MimiThreadPool {
     pub fn submit_raw(&self, func: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
         let mut count = self
             .pending
-            .lock()
-            .expect("MIMI_POOL pending counter lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         if let Some(ref sender) = self.sender {
             if let Err(e) = sender.send(RawTask {
@@ -926,8 +908,7 @@ impl MimiThreadPool {
         }
         let mut count = self
             .pending
-            .lock()
-            .expect("MIMI_POOL pending counter lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         if let Some(ref sender) = self.sender {
             if let Err(e) = sender.send(RawTask {
@@ -946,12 +927,12 @@ impl MimiThreadPool {
         let mut count = self
             .pending
             .lock()
-            .expect("MIMI_POOL pending counter lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         while *count > 0 {
             count = self
                 .completion
                 .wait(count)
-                .expect("MIMI_POOL completion condvar lock poisoned");
+                .unwrap_or_else(|e| e.into_inner());
         }
     }
 }

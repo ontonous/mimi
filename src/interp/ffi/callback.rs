@@ -148,7 +148,7 @@ pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
     let active_count = {
         let mut store = global_callback_store()
             .lock()
-            .expect("CALLBACK_GLOBAL_STORE lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((_, _, _, count)) = store.get(&callback_id) {
             let cnt = Arc::clone(count);
             // Remove entry first so new calls won't find it and increment count
@@ -238,7 +238,7 @@ unsafe fn callback_trampoline_inner(
             let (closure, ret_is_float, arg_free_mask, cnt) = {
                 let store = global_callback_store()
                     .lock()
-                    .expect("CALLBACK_GLOBAL_STORE lock poisoned");
+                    .unwrap_or_else(|e| e.into_inner());
                 match store.get(&callback_id).cloned() {
                     Some((c, r, a, cnt)) => (c, r, a, cnt),
                     None => {

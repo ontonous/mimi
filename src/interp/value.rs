@@ -628,7 +628,7 @@ impl ActorHandle {
         let mailbox_tx_clone = mailbox_tx.clone();
         let worker_program = program.clone();
         let worker_bp = bp.clone();
-        std::thread::Builder::new()
+        let worker_spawn = std::thread::Builder::new()
             .name(format!("actor-{}", id))
             .spawn(move || {
                 CURRENT_ACTOR_ID.with(|a| a.set(id));
@@ -710,8 +710,13 @@ impl ActorHandle {
                     let _ = msg.response.send(result);
                 }
                 CURRENT_ACTOR_ID.with(|a| a.set(0));
-            })
-            .expect("failed to spawn actor worker");
+            });
+        if let Err(e) = worker_spawn {
+            // Spawn failure: mailbox_rx is dropped with the unspawned
+            // closure, so subsequent sends fail cleanly rather than
+            // panicking the whole process.
+            eprintln!("[mimi] failed to spawn actor worker: {}", e);
+        }
 
         let handle = ActorHandle {
             inner,
