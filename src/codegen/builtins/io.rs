@@ -189,9 +189,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }) {
                                 self.emit_list_enum_to_string(*sv, inner)?
                             } else if inner.starts_with("Map") {
-                                self.emit_list_map_to_string(*sv)?
+                                self.emit_list_map_to_string(*sv, inner)?
                             } else if inner.starts_with("Set") || inner == "set" {
-                                self.emit_list_set_to_string(*sv)?
+                                self.emit_list_set_to_string(*sv, inner)?
                             } else {
                                 self.emit_list_i32_to_string(*sv)?
                             }
@@ -472,10 +472,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Format `List<Map>` as `[{"a":1}, {"b":2}]` via mimi_map_to_json_i64.
+    /// Format `List<Map>` as `[{"a":1}, {"b":2}]` via map JSON helpers.
     fn emit_list_map_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        map_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -571,7 +572,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, elem_slot, "list_map_handle")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_int_value();
-        let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+        let map_fn_name = if map_type.contains("Map<string, string>") {
+            "mimi_map_to_json_string"
+        } else if map_type.contains("Map<string, bool>") {
+            "mimi_map_to_json_bool"
+        } else if map_type.contains("Map<string, f64>") || map_type.contains("Map<string, f32>") {
+            "mimi_map_to_json_f64"
+        } else {
+            "mimi_map_to_json_i64"
+        };
+        let map_fn = self.get_runtime_fn(map_fn_name)?;
         let map_str = self
             .build_call(
                 map_fn,
@@ -579,7 +589,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "list_map_json",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_map_to_json_i64 void")?
+            .ok_or("map to_json void")?
             .into_pointer_value();
         self.build_call(
             strcat_fn,
@@ -613,10 +623,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Format `List<Set>` as `[Set{1, 2}, ...]` via mimi_set_to_display.
+    /// Format `List<Set>` as `[Set{…}, ...]` via set display helpers.
     fn emit_list_set_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        set_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -712,7 +723,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, elem_slot, "list_set_handle")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_int_value();
-        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+        let set_fn_name = if set_type.contains("Set<string>") {
+            "mimi_set_to_display_string"
+        } else if set_type.contains("Set<bool>") {
+            "mimi_set_to_display_bool"
+        } else if set_type.contains("Set<f64>") || set_type.contains("Set<f32>") {
+            "mimi_set_to_display_f64"
+        } else {
+            "mimi_set_to_display"
+        };
+        let set_fn = self.get_runtime_fn(set_fn_name)?;
         let set_str = self
             .build_call(
                 set_fn,
@@ -720,7 +740,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "list_set_disp",
             )?
             .try_as_basic_value_opt()
-            .ok_or("mimi_set_to_display void")?
+            .ok_or("set display void")?
             .into_pointer_value();
         self.build_call(
             strcat_fn,
