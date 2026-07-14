@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
-    fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion, same_type,
+    fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion,
     subst_type_params, suggest_name,
 };
 use crate::diagnostic::Diagnostic;
@@ -222,22 +222,24 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0242,
                         format!("{} expects 2 arguments", name),
                     );
-                } else {
-                    let t1 = self.infer_expr(&args[0], scopes);
-                    let t2 = self.infer_expr(&args[1], scopes);
-                    if !same_type(&t1, &t2) {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!(
-                                "{} expects matching types, found {} and {}",
-                                name,
-                                fmt_type(&t1),
-                                fmt_type(&t2)
-                            ),
-                        );
-                    }
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("unknown".into(), vec![]);
+                let t1 = self.infer_expr(&args[0], scopes);
+                let t2 = self.infer_expr(&args[1], scopes);
+                // IF residual: unify so TypeVars resolve; return resolved type.
+                if self.unification.unify(&t1, &t2).is_err() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!(
+                            "{} expects matching types, found {} and {}",
+                            name,
+                            fmt_type(&t1),
+                            fmt_type(&t2)
+                        ),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                return self.unification.resolve(&t1);
             }
             "contains" => {
                 if args.len() != 2 {
@@ -260,7 +262,7 @@ impl<'a> Checker<'a> {
                 } else {
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);
-                    if !same_type(&t1, &t2) {
+                    if self.unification.unify(&t1, &t2).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -283,7 +285,7 @@ impl<'a> Checker<'a> {
                 } else {
                     let t1 = self.infer_expr(&args[0], scopes);
                     let t2 = self.infer_expr(&args[1], scopes);
-                    if !same_type(&t1, &t2) {
+                    if self.unification.unify(&t1, &t2).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -2096,9 +2098,7 @@ impl<'a> Checker<'a> {
                     if let Some(et) = expected_ty {
                         let actual = self.infer_expr(&args[1], scopes);
                         let et_r = self.resolve_type(&et);
-                        if self.unification.unify(&et_r, &actual).is_err()
-                            && !crate::core::helpers::same_type(&et_r, &actual)
-                        {
+                        if self.unification.unify(&et_r, &actual).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0414,
                                 format!(
@@ -2164,10 +2164,8 @@ impl<'a> Checker<'a> {
         // SessionChan<S> variable), session_recv returns i64 to match the
         // runtime mimi_channel_recv() which returns i64. Previously returned
         // i32 which caused checker/codegen divergence (H3-fix).
-        let arg_ty = self.infer_expr(&args[0], scopes);
-        if same_type(&arg_ty, &Type::Name("i64".into(), vec![])) {
-            return Type::Name("i64".into(), vec![]);
-        }
+        let _arg_ty = self.infer_expr(&args[0], scopes);
+        // Runtime mimi_channel_recv returns i64 regardless of residual typing.
         Type::Name("i64".into(), vec![])
     }
 

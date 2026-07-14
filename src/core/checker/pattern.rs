@@ -47,7 +47,8 @@ impl<'a> Checker<'a> {
                     Lit::FString(_) => Type::Name("string".into(), vec![]),
                     Lit::Unit => Type::Name("unit".into(), vec![]),
                 };
-                if !same_type(subject, &lit_ty) {
+                // Prefer unify so TypeVars in the subject resolve against the literal.
+                if self.unification.unify(subject, &lit_ty).is_err() {
                     self.errors.push(
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0225,
