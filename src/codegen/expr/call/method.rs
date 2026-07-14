@@ -1452,6 +1452,89 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )?;
                         self.expect_basic_value(&r, fn_name)?.into_int_value()
                     }
+                    Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                        // List of Option: store ptrtoint of Option {i1,i64} on heap.
+                        let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                        let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                        let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                        let opt_val = self.compile_json_option_field(
+                            "List",
+                            &args[0],
+                            elem_json,
+                            json_as_i64_fn,
+                            json_as_f64_fn,
+                            json_as_bool_fn,
+                        )?;
+                        match opt_val {
+                            BasicValueEnum::StructValue(sv) => {
+                                let sty = sv.get_type();
+                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let heap = self.malloc_or_abort(
+                                    i64_ty.const_int(size, false),
+                                    "list_opt_heap",
+                                )?;
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let typed = self
+                                    .build_bit_cast(
+                                        heap.into(),
+                                        BasicTypeEnum::PointerType(i8_ptr),
+                                        "list_opt_ptr",
+                                    )?
+                                    .into_pointer_value();
+                                self.build_store(typed, sv)?;
+                                self.build_ptr_to_int(typed, i64_ty, "list_opt_as_i64")?
+                            }
+                            BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "from_json List Option: unexpected {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        }
+                    }
+                    Type::Option(inner) => {
+                        let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
+                        let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
+                        let json_as_bool_fn = self.module.get_function("mimi_json_as_bool");
+                        let opt_val = self.compile_json_option_field(
+                            "List",
+                            inner,
+                            elem_json,
+                            json_as_i64_fn,
+                            json_as_f64_fn,
+                            json_as_bool_fn,
+                        )?;
+                        match opt_val {
+                            BasicValueEnum::StructValue(sv) => {
+                                let sty = sv.get_type();
+                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let heap = self.malloc_or_abort(
+                                    i64_ty.const_int(size, false),
+                                    "list_opt_heap2",
+                                )?;
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let typed = self
+                                    .build_bit_cast(
+                                        heap.into(),
+                                        BasicTypeEnum::PointerType(i8_ptr),
+                                        "list_opt_ptr2",
+                                    )?
+                                    .into_pointer_value();
+                                self.build_store(typed, sv)?;
+                                self.build_ptr_to_int(typed, i64_ty, "list_opt_as_i64_2")?
+                            }
+                            BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "from_json List Option: unexpected {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        }
+                    }
                     Type::Name(inner_n, _) => {
                         // Record type: deserialize each JSON element into a heap-allocated struct
                         let fields_opt =
