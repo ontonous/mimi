@@ -6979,6 +6979,29 @@ fn dual_option_enum_println() {
     );
 }
 
+/// Result of custom enum println.
+#[test]
+fn dual_result_enum_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Color { Red Blue(i32) }
+        func main() -> i32 {
+            let a: Result<Color, i32> = Ok(Red)
+            let b: Result<Color, i32> = Ok(Blue(9))
+            let c: Result<Color, i32> = Err(1)
+            println(a)
+            println(b)
+            println(c)
+            0
+        }
+        "#,
+        "Ok(Red())\nOk(Blue(9))\nErr(1)"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

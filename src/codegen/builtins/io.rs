@@ -1756,6 +1756,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ],
                             &format!("res_{}_snprintf_o", label),
                         )?;
+                    } else if fields_st.len() == 2
+                        && matches!(
+                            fields_st[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
+                        )
+                        && matches!(
+                            fields_st[1],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        )
+                    {
+                        // Nested custom enum {i32, i64}
+                        let enum_ty = arg_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| s.split(',').next())
+                            .map(|s| s.trim())
+                            .filter(|n| {
+                                self.type_defs.get(*n).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                                })
+                            })
+                            .or_else(|| {
+                                self.type_defs.iter().find_map(|(n, td)| {
+                                    if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
+                                        Some(n.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        if let Some(et) = enum_ty {
+                            let nested = self.emit_enum_display(et, sv)?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr(
+                                    &format!("{}(%s)", if label == "ok" { "Ok" } else { "Err" }),
+                                    &format!("res_{}_efmt", label),
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(buf_size),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(nested),
+                                ],
+                                &format!("res_{}_snprintf_e", label),
+                            )?;
+                        }
                     } else if fields_st.len() >= 1
                         && matches!(fields_st[0], BasicTypeEnum::PointerType(_))
                     {
