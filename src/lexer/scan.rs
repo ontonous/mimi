@@ -669,9 +669,10 @@ impl<'a> super::Lexer<'a> {
             }
             '0'..='9' => Ok(self.scan_number()),
             'a'..='z' | 'A'..='Z' | '_' => {
-                // SAFETY: dispatch matched `peek() == Some(first_char)`, so the
-                // stream cannot be empty here.
-                let first = self.advance().expect("dispatch on peek guaranteed Some");
+                // LX-C6: never panic on empty stream after peek race.
+                let Some(first) = self.advance() else {
+                    return Err(unexpected_character(c, self.line, self.col));
+                };
                 let name = self.scan_ident(first);
                 Ok(keyword_or_ident(&name))
             }

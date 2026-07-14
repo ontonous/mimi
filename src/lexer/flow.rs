@@ -887,9 +887,10 @@ fn lex_scan_token(
         '0'..='9' => Ok(pos.scan_number()),
         'a'..='z' | 'A'..='Z' | '_' => {
             let (pos, first_ch) = consume!(pos);
-            // SAFETY: dispatch matched `peek() == Some(first_char)`, so the
-            // position cannot be at end-of-stream.
-            let first_ch = first_ch.expect("dispatch on peek guaranteed Some");
+            // LX-C6: never panic — if consume returned None, fall through as unexpected.
+            let Some(first_ch) = first_ch else {
+                return Err(unexpected_character(c, line, col));
+            };
             let (pos, name) = pos.scan_ident(first_ch);
             Ok((pos, keyword_or_ident(&name)))
         }
