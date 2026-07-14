@@ -7360,6 +7360,47 @@ fn dual_option_set_string_println() {
     );
 }
 
+/// to_json List of Record dual.
+#[test]
+fn dual_to_json_list_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p = Point { x: 1, y: 2 }
+            let xs = [p]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"x\":1,\"y\":2}]"
+    );
+}
+
+/// Optional chain a?.x dual.
+#[test]
+fn dual_optional_chain_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let a = Some(Point { x: 1, y: 2 })
+            let b: Option<Point> = None
+            println(a?.x)
+            println(b?.x)
+            0
+        }
+        "#,
+        "Some(1)\nNone()"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
