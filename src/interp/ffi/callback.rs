@@ -76,7 +76,7 @@ fn callback_file() -> &'static Mutex<Option<SendFilePtr>> {
 /// Leak a clone of the program File into the global callback store.
 /// Called from value_to_ffi_callback to enable cross-thread evaluation.
 fn ensure_callback_file(file: &File) {
-    let mut store = callback_file().lock().expect("CALLBACK_FILE lock poisoned");
+    let mut store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
     if store.is_some() {
         return;
     }
@@ -93,7 +93,7 @@ fn evaluate_cross_thread_callback(
     ret_is_float: bool,
 ) -> Result<i64, String> {
     let file_ptr = {
-        let store = callback_file().lock().expect("CALLBACK_FILE lock poisoned");
+        let store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
         store.as_ref().map(|s| s.0).ok_or_else(|| {
             "no program file registered for cross-thread callback evaluation".to_string()
         })?
