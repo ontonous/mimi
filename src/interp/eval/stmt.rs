@@ -528,7 +528,7 @@ impl<'a> Interpreter<'a> {
                         })? = v;
                     }
                     Value::LocalShared(rc) => {
-                        *rc.lock().expect("local_shared lock not poisoned") = v;
+                        *rc.lock().unwrap_or_else(|e| e.into_inner()) = v;
                     }
                     Value::IndexRefMut { owner, index } => {
                         // Ensure the owner variable is mutable
@@ -652,7 +652,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     Value::LocalShared(rc) => {
-                        let mut inner = rc.lock().expect("local_shared lock not poisoned");
+                        let mut inner = rc.lock().unwrap_or_else(|e| e.into_inner());
                         match &mut *inner {
                             Value::Record(_, fields) => {
                                 if fields.contains_key(field.as_str()) {

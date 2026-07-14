@@ -223,7 +223,7 @@ impl<'a> Interpreter<'a> {
                     // Clone the inner value into an Arc<RwLock> for SharedHandle.
                     // The original local_shared retains its local refcount; the FFI
                     // side gets an independent shared copy via the handle table.
-                    let value = rc.0.lock().expect("local_shared lock not poisoned").clone();
+                    let value = rc.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let arc = Arc::new(RwLock::new(value));
                     let handle_id = shared_table_create(arc);
                     shared_guard.register(handle_id);

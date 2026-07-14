@@ -116,7 +116,7 @@ impl<'a> Interpreter<'a> {
                     })?
                     .clone()),
                 Value::LocalShared(rc) => {
-                    Ok(rc.lock().expect("local_shared lock not poisoned").clone())
+                    Ok(rc.lock().unwrap_or_else(|e| e.into_inner()).clone())
                 }
                 Value::IndexRef { owner, index } | Value::IndexRefMut { owner, index } => {
                     let owner_val = self.lookup(&owner).ok_or_else(|| {
@@ -916,7 +916,7 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::LocalShared(rc) => {
-                let inner = rc.lock().expect("local_shared lock not poisoned");
+                let inner = rc.lock().unwrap_or_else(|e| e.into_inner());
                 match &*inner {
                     Value::Record(_, fields) => fields.get(field).cloned().ok_or_else(|| {
                         InterpError::new(format!(

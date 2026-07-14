@@ -543,7 +543,7 @@ impl<'a> Interpreter<'a> {
             Value::LocalShared(rc) => match method {
                 "clone" => Ok(Value::LocalShared(LocalSharedInner::clone_rc(rc))),
                 "deref" | "inner" => {
-                    let inner = rc.lock().expect("local_shared lock not poisoned");
+                    let inner = rc.lock().unwrap_or_else(|e| e.into_inner());
                     Ok(inner.clone())
                 }
                 _ => Err(InterpError::new(format!(
