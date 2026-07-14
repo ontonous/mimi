@@ -7457,6 +7457,42 @@ fn dual_to_json_map_string() {
     );
 }
 
+/// to_json Set of string dual (sorted).
+#[test]
+fn dual_to_json_set_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<string>>("[\"b\",\"a\"]")
+            println(to_json(s))
+            0
+        }
+        "#,
+        "[\"a\",\"b\"]"
+    );
+}
+
+/// to_json Map of f64 dual (serde whole floats as 2.0).
+#[test]
+fn dual_to_json_map_f64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, f64>>("{\"a\":1.5,\"b\":2.0}")
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":1.5,\"b\":2.0}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

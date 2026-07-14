@@ -2654,16 +2654,23 @@ pub extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_c
     map_to_json_values(handle, MapJsonMode::Bool)
 }
 
-/// Serialize a MapHandle of f64-bit ValueHandles as JSON numbers.
+/// Serialize a MapHandle of f64-bit ValueHandles for println Display (compact).
 #[no_mangle]
 pub extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
     map_to_json_values(handle, MapJsonMode::Float)
+}
+
+/// Serialize Map f64 for `to_json` (serde-compatible, whole floats as `2.0`).
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_f64_serde(handle: MapHandle) -> *mut std::ffi::c_char {
+    map_to_json_values(handle, MapJsonMode::FloatJson)
 }
 
 enum MapJsonMode {
     Int,
     Bool,
     Float,
+    FloatJson,
 }
 
 fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
@@ -2692,14 +2699,22 @@ fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_
                 String::from("false")
             }),
             MapJsonMode::Float => {
+                // Display/println compact form (matches interp Map Display: 2 not 2.0).
                 let f = f64::from_bits(**v as u64);
-                // Prefer compact display matching interp (1.5 not 1.500000).
                 let s = if f.fract() == 0.0 && f.is_finite() {
                     format!("{}", f as i64)
                 } else {
-                    // Trim trailing zeros from default Debug-ish format.
-                    let raw = format!("{}", f);
-                    raw
+                    format!("{}", f)
+                };
+                parts.push(s);
+            }
+            MapJsonMode::FloatJson => {
+                // to_json form matching serde_json (2.0 for whole floats).
+                let f = f64::from_bits(**v as u64);
+                let s = if f.fract() == 0.0 && f.is_finite() {
+                    format!("{}.0", f as i64)
+                } else {
+                    format!("{}", f)
                 };
                 parts.push(s);
             }
@@ -3225,6 +3240,41 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
             parts.push(String::from(","));
         }
         parts.push(v.to_string());
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Serialize a SetHandle of C-string ValueHandles to a JSON string array.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("[]");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut vals: Vec<String> = set
+        .inner
+        .iter()
+        .map(|v| {
+            if *v >= 1_048_576 && *v % 8 == 0 {
+                safe_c_string_from_handle(*v as ValueHandle).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+    vals.sort();
+    let mut parts: Vec<String> = Vec::with_capacity(vals.len() * 2 + 2);
+    parts.push(String::from("["));
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(v));
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))

@@ -358,7 +358,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else if obj_type.contains("Map<string, f64>")
                         || obj_type.contains("Map<string, f32>")
                     {
-                        "mimi_map_to_json_f64"
+                        "mimi_map_to_json_f64_serde"
                     } else {
                         "mimi_map_to_json_i64"
                     };
@@ -375,7 +375,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
-                // Set / Set<i32|i64> → mimi_set_to_json_i64(handle)
+                // Set / Set<…> → typed set JSON helpers
                 if obj_type == "Set" || obj_type.starts_with("Set<") || obj_type == "set" {
                     let handle = match &metadata_args[0] {
                         BasicMetadataValueEnum::IntValue(iv) => *iv,
@@ -391,7 +391,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )))
                         }
                     };
-                    let func = self.get_runtime_fn("mimi_set_to_json_i64")?;
+                    let fn_name = if obj_type.contains("Set<string>") {
+                        "mimi_set_to_json_string"
+                    } else {
+                        "mimi_set_to_json_i64"
+                    };
+                    let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
                             func,
@@ -399,7 +404,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "to_json_set",
                         )?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_set_to_json_i64 returned void")?
+                        .ok_or("set to_json returned void")?
                         .into_pointer_value();
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
