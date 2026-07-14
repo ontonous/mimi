@@ -1594,12 +1594,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return self.compile_from_json_record(type_name, &fields, raw_ptr);
                 }
                 Err(CompileError::Generic(format!(
-                    "from_json::<{}>: unsupported type (only Record types with scalar/string fields are supported)",
+                    "from_json::<{}>: unsupported type (supported: Record, Map/Set of i32|i64, \
+                     Option/Result of scalars, nested Record fields)",
                     type_name
                 )))
             }
             _ => Err(CompileError::Generic(format!(
-                "from_json::<{:?}> codegen not yet implemented",
+                "from_json::<{:?}> codegen not yet implemented \
+                 (supported: scalars, Option, Result Ok-wrap, Map/Set i64, Record)",
                 type_args[0]
             ))),
         }
