@@ -2313,6 +2313,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             Float(inkwell::values::FloatValue<'a>),
             StrPtr(inkwell::values::PointerValue<'a>),
             RecPtr(inkwell::values::PointerValue<'a>),
+            /// Nested Option payload is ptrtoint of heap Option; load only in Some arm.
+            NestedOpt(inkwell::values::IntValue<'a>),
         }
         let pay_kind = match payload_bv {
             BasicValueEnum::IntValue(iv) => {
@@ -2446,6 +2448,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("list display void")?
                             .into_pointer_value();
                         OptPay::StrPtr(list_str)
+                    } else if arg_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .is_some_and(|inner| inner.starts_with("Option"))
+                    {
+                        // Defer load of nested Option until Some arm (None has null payload).
+                        OptPay::NestedOpt(as_i64)
                     } else {
                         OptPay::Int(as_i64)
                     }
@@ -2647,6 +2656,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::IntValue(payload_i64),
                     ],
                     "opt_some_snprintf",
+                )?;
+            }
+            OptPay::NestedOpt(as_i64) => {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let nested_ptr = self
+                    .builder
+                    .build_int_to_ptr(as_i64, i8_ptr, "opt_nested_from_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let opt_sty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let loaded = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(opt_sty),
+                        nested_ptr,
+                        "opt_nested_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                let inner_ty = Self::strip_first_type_arg(arg_type, "Option")
+                    .unwrap_or_else(|| "Option".to_string());
+                let nested = self.emit_option_to_string(loaded, None, &inner_ty)?;
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%s)", "opt_nested_sfmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(nested),
+                    ],
+                    "opt_nested_snprintf",
                 )?;
             }
             OptPay::Float(fv) => {
