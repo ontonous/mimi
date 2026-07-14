@@ -2456,10 +2456,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_ptr_to_int(pv, i64_ty, "opt_ptr")
                 .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
             BasicValueEnum::StructValue(sv) => {
-                let tmp = self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "opt_s")?;
-                self.build_store(tmp, sv)?;
+                // Nested Option/Result/List: heap-allocate so the outer Option
+                // payload pointer remains valid after this function returns.
+                let sty = sv.get_type();
+                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                let heap = self.malloc_or_abort(i64_ty.const_int(size, false), "opt_nested_heap")?;
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let typed = self
+                    .build_bit_cast(
+                        heap.into(),
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        "opt_nested_ptr",
+                    )?
+                    .into_pointer_value();
+                self.build_store(typed, sv)?;
                 self.builder
-                    .build_ptr_to_int(tmp, i64_ty, "opt_sptr")
+                    .build_ptr_to_int(typed, i64_ty, "opt_nested_i64")
                     .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
             }
             other => {
@@ -2476,6 +2488,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
             bool_ty.const_int(1, false),
         )?;
+        // Nested Option/Result payload is a pointer (i64); store as i64.
+        // When outer Option layout is {i1,i64} this is correct. When nested
+        // Option is stored as {i1,ptr} at the type level, still i64 bit pattern.
         self.build_store(
             self.gep()
                 .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 1, "p")
