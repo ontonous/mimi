@@ -1977,12 +1977,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .unwrap_or("Option");
                     let nested = self.emit_option_to_string(psv, None, inner_ty)?;
                     OptPay::StrPtr(nested)
-                } else {
+                } else if pfields.len() == 2
+                    && matches!(
+                        pfields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
+                    )
+                    && matches!(
+                        pfields[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                {
+                    // Nested custom enum {i32 tag, i64 payload}.
+                    let enum_ty = arg_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .filter(|n| {
+                            self.type_defs.get(*n).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                            })
+                        })
+                        .or_else(|| {
+                            // Try find any enum type that matches layout — use first matching.
+                            self.type_defs.iter().find_map(|(n, td)| {
+                                if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
+                                    Some(n.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                    if let Some(et) = enum_ty {
+                        let nested = self.emit_enum_display(et, psv)?;
+                        OptPay::StrPtr(nested)
+                    } else {
+                        OptPay::Int(i64_ty.const_int(0, false))
+                    }
+                } else if pfields.len() >= 1
+                    && matches!(pfields[0], BasicTypeEnum::PointerType(_))
+                {
                     // string {ptr,len}
                     let dp = self
                         .build_extract_value(psv.into(), 0, "opt_str_ptr")?
                         .into_pointer_value();
                     OptPay::StrPtr(dp)
+                } else {
+                    OptPay::Int(i64_ty.const_int(0, false))
                 }
             }
             other => {

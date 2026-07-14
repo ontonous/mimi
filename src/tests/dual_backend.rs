@@ -6958,6 +6958,27 @@ fn dual_result_set_println() {
     );
 }
 
+/// Option of custom enum println.
+#[test]
+fn dual_option_enum_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Color { Red Blue(i32) }
+        func main() -> i32 {
+            let a = Some(Red)
+            let b = Some(Blue(3))
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(Red())\nSome(Blue(3))"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
