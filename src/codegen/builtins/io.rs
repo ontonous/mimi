@@ -1847,6 +1847,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::PointerValue(pv) => {
                 if inner_record.is_some() {
                     OptPay::RecPtr(pv)
+                } else if arg_type.starts_with("Option<List")
+                    || arg_type.contains("List<")
+                {
+                    // Option of list: payload is pointer to {i64,ptr} list.
+                    let list_ty = self.list_struct_type();
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(list_ty),
+                            pv,
+                            "opt_list_ld",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    let list_str = if arg_type.contains("List<string>") {
+                        self.emit_list_string_to_string(loaded)?
+                    } else {
+                        self.emit_list_i32_to_string(loaded)?
+                    };
+                    OptPay::StrPtr(list_str)
                 } else {
                     OptPay::StrPtr(pv)
                 }
