@@ -459,6 +459,35 @@ fn ck_c4_pinned_timeout_must_be_literal() {
     );
 }
 
+/// H2: non-empty list literals respect declared List<T> element type.
+#[test]
+fn h2_list_literal_expected_type_context() {
+    assert!(check_source(
+        r#"
+        func main() -> i32 {
+            let xs: List<i64> = [1, 2, 3]
+            0
+        }
+        "#
+    )
+    .is_ok());
+    let errs = check_source(
+        r#"
+        func main() -> i32 {
+            let xs: List<i64> = [1, "x", 3]
+            0
+        }
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.message.contains("list element") && d.message.contains("string")),
+        "expected list element type error, got: {:?}",
+        errs
+    );
+}
+
 /// H3: actor method arguments must be type-checked (no silent skip).
 #[test]
 fn h3_actor_method_arg_typecheck() {
