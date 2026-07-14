@@ -215,9 +215,15 @@ fn apply_change(text: &mut String, change: &Value) {
     let map = crate::lsp::position_map::PositionMap::new(text);
     let start_byte = map.lsp_to_byte(sl, sc);
     let end_byte = map.lsp_to_byte(el, ec);
-    if start_byte <= end_byte && end_byte <= text.len() {
-        text.replace_range(start_byte..end_byte, new_text);
+    // Clamp invalid ranges instead of silently dropping the edit (document
+    // would otherwise drift from the client).
+    let len = text.len();
+    let mut s = start_byte.min(len);
+    let mut e = end_byte.min(len);
+    if s > e {
+        std::mem::swap(&mut s, &mut e);
     }
+    text.replace_range(s..e, new_text);
 }
 
 fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {

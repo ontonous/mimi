@@ -85,7 +85,24 @@ impl LspServer {
                 other => normalized.push(other.as_os_str()),
             }
         }
+        // Workspace sandbox: if a workspace root is configured, reject paths
+        // that resolve outside it (absolute path reads like /etc/passwd).
+        // Callers without workspace_root still get the normalized path.
         Some(normalized)
+    }
+
+    /// Like [`uri_to_path`] but rejects paths outside `workspace_root` when set.
+    fn uri_to_path_sandboxed(&self, uri: &str) -> Option<PathBuf> {
+        let path = Self::uri_to_path(uri)?;
+        if let Some(root) = &self.workspace_root {
+            let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let path_canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !path_canon.starts_with(&root_canon) {
+                return None;
+            }
+            return Some(path_canon);
+        }
+        Some(path)
     }
 
     /// Resolve imports if the file has any, using the workspace root.
@@ -126,9 +143,11 @@ impl LspServer {
             diagnostics.push(diagnostic::parse_error_to_lsp(e));
         }
 
-        // Resolve imports so `use std::xxx` functions are visible to type checking
+        // Resolve imports so `use std::xxx` functions are visible to type checking.
+        // Prefer sandboxed URI resolution so absolute paths outside the
+        // workspace cannot be opened via a crafted file:// URI.
         if let Some(uri_str) = uri {
-            if let Some(file_path) = Self::uri_to_path(uri_str) {
+            if let Some(file_path) = self.uri_to_path_sandboxed(uri_str) {
                 Self::resolve_imports(&mut file, file_path.as_path());
             }
         } else {

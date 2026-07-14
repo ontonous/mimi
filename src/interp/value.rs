@@ -868,7 +868,11 @@ impl ActorHandle {
         // When this target enters mute, producers will be push-muted.
         let caller_id = CURRENT_ACTOR_ID.with(|id| id.get());
         if caller_id != 0 && caller_id != self.id {
-            let mut inner = self.inner.write().unwrap();
+            // Recover from poison (worker panic) instead of crashing the sender.
+            let mut inner = self
+                .inner
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             if !inner.producers.contains(&caller_id) {
                 inner.producers.push(caller_id);
             }
@@ -902,7 +906,7 @@ impl ActorHandle {
     /// "生产者 Actor 整体被挂起").
     pub(crate) fn cascade_mute_to_producers(&self) {
         let producers: Vec<usize> = {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
             inner.producers.clone()
         };
         if producers.is_empty() {

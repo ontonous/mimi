@@ -598,27 +598,40 @@ pub extern "C" fn mimi_list_free_elements(list: *mut MimiList) {
     }
 }
 
-/// Allocate a C string from bytes that already include the null terminator.
+/// Allocate a C string from raw bytes. Always appends a trailing NUL so the
+/// result is safe for `cstr_to_string` / libc string APIs.
+///
+/// Callers may pass either already-NUL-terminated buffers (e.g. sprintf
+/// output including the terminator) or plain payload bytes (e.g.
+/// `json_unescape` output). When the input already ends in `0`, that
+/// terminator is kept and no extra byte is added.
 fn alloc_c_string_from_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
-    if bytes.is_empty() {
-        // SAFETY: allocating one byte and writing the null terminator.
-        let ptr = unsafe { libc::malloc(1) as *mut u8 };
-        if !ptr.is_null() {
-            unsafe {
-                // SAFETY: writing the null terminator within the single-byte allocation.
-                *ptr = 0;
-            }
+    let needs_nul = bytes.is_empty() || bytes.last() != Some(&0);
+    let payload_len = bytes.len();
+    let alloc_len = if needs_nul {
+        match payload_len.checked_add(1) {
+            Some(n) => n,
+            None => return std::ptr::null_mut(),
         }
-        return ptr as *mut std::ffi::c_char;
-    }
-    // SAFETY: `bytes.len()` is non-zero here; allocation size matches copy length.
-    let ptr = unsafe { libc::malloc(bytes.len()) as *mut u8 };
+    } else {
+        payload_len
+    };
+    // SAFETY: alloc_len is at least 1 when payload is empty (needs_nul).
+    let ptr = unsafe { libc::malloc(alloc_len) as *mut u8 };
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: source and destination are non-overlapping and `bytes.len()` fits in the allocation.
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    if payload_len > 0 {
+        // SAFETY: non-overlapping copy of payload_len bytes into alloc_len buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, payload_len);
+        }
+    }
+    if needs_nul {
+        // SAFETY: writing NUL at offset payload_len is within alloc_len.
+        unsafe {
+            *ptr.add(payload_len) = 0;
+        }
     }
     ptr as *mut std::ffi::c_char
 }
@@ -1285,13 +1298,42 @@ pub extern "C" fn mimi_str_split(
     };
 
     let len = parts.len() as i64;
-    let mut c_strings: Vec<*mut std::ffi::c_char> =
-        parts.into_iter().map(|p| alloc_c_string(&p)).collect();
-    let data_ptr = c_strings.as_mut_ptr();
-    // FFI-11: Use ManuallyDrop instead of mem::forget to avoid leaking Vec metadata.
-    let _ = std::mem::ManuallyDrop::new(c_strings);
+    // H1 (audit): allocate the element array with libc::malloc so
+    // `mimi_list_free` can free it with libc::free. A Rust Vec buffer
+    // (even after ManuallyDrop) is a different allocator and is UB to
+    // free via libc — and list_cap reading data[-8] on a Vec buffer is
+    // also OOB.
+    let data_ptr = if len <= 0 {
+        std::ptr::null_mut()
+    } else {
+        let data_size = match (len as usize)
+            .checked_mul(std::mem::size_of::<*mut std::ffi::c_char>())
+        {
+            Some(s) => s,
+            None => {
+                return Box::into_raw(Box::new(MimiList {
+                    len: 0,
+                    data: std::ptr::null_mut(),
+                    owns_data: true,
+                }));
+            }
+        };
+        // SAFETY: data_size > 0; result checked for null.
+        let ptr = unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char };
+        if ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        for (i, p) in parts.into_iter().enumerate() {
+            // SAFETY: i < len, ptr is valid for len elements.
+            unsafe {
+                *ptr.add(i) = alloc_c_string(&p);
+            }
+        }
+        ptr
+    };
 
-    // FFI-2: Strings are allocated via alloc_c_string (libc::malloc) — owns_data: true.
+    // FFI-2: data + string elements are libc-allocated — owns_data: true.
+    // No hidden capacity header (list_cap returns 0 → free data directly).
     let list = Box::new(MimiList {
         len,
         data: data_ptr,

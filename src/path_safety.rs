@@ -174,8 +174,11 @@ pub fn validate_path_dep(path: &str) -> Result<(), PathError> {
     if p.is_absolute() {
         return Err(PathError::AbsolutePath);
     }
-    if path.contains("..") {
-        return Err(PathError::TraversalEscape);
+    // Use component walk (not substring) so names like `foo..bar` are allowed.
+    for component in p.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(PathError::TraversalEscape);
+        }
     }
     Ok(())
 }

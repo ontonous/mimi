@@ -991,40 +991,119 @@ fn drop_fault_payload(val: &Value) {
 // ── v0.29.15: delegate helper functions ────────────────────────────────────
 
 /// Write-back a delegate result to the source field.
+///
+/// Supports nested field paths (`self.outer.inner`) by rebuilding the
+/// record chain from the inside out and assigning the root identifier.
 fn writeback_delegate_result(
     expr: &Expr,
     result: Value,
     interp: &mut Interpreter<'_>,
 ) -> Result<(), InterpError> {
-    if let Expr::Field(container, field_name) = expr {
-        let mut owner = interp.eval_expr(container)?;
-        if let Value::Record(_, fields) = &mut owner {
-            fields.insert(field_name.clone(), result);
-        }
-        if let Expr::Ident(name) = container.as_ref() {
-            if name == "self" {
-                // Flow-state `self` is implicitly mutable inside transition do-blocks;
-                // the direct scope update bypasses the normal mutability check only here.
-                for scope in interp.scope_env.env.iter_mut().rev() {
-                    if scope.contains_key(name) {
-                        scope.insert(name.clone(), owner);
-                        return Ok(());
+    // Collect field chain: a.b.c → (root Ident "a", ["b", "c"])
+    let mut fields: Vec<&str> = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur {
+            Expr::Field(container, field_name) => {
+                fields.push(field_name.as_str());
+                cur = container.as_ref();
+            }
+            Expr::Ident(name) => {
+                fields.reverse();
+                if fields.is_empty() {
+                    return Ok(());
+                }
+                // Load root value, walk intermediate fields, set leaf, write back.
+                let root = if name == "self" {
+                    // Prefer direct scope lookup for self (flow payload).
+                    let mut found = None;
+                    for scope in interp.scope_env.env.iter().rev() {
+                        if let Some(v) = scope.get(name) {
+                            found = Some(v.clone());
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| InterpError::new("self not in scope for delegate writeback"))?
+                } else {
+                    interp.eval_expr(cur)?
+                };
+                // Walk nested records, cloning intermediates so we can rebuild.
+                let mut path_values: Vec<Value> = Vec::with_capacity(fields.len());
+                path_values.push(root.clone());
+                for (i, field) in fields.iter().enumerate().take(fields.len().saturating_sub(1)) {
+                    let parent = &path_values[i];
+                    let child = match parent {
+                        Value::Record(_, fmap) => fmap
+                            .get(*field)
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(format!(
+                                    "delegate writeback: missing field '{}'",
+                                    field
+                                ))
+                            })?,
+                        _ => {
+                            return Err(InterpError::new(format!(
+                                "delegate writeback: '{}' is not a record",
+                                field
+                            )));
+                        }
+                    };
+                    path_values.push(child);
+                }
+                // Set leaf field on the deepest record.
+                let leaf_field = fields[fields.len() - 1];
+                let mut updated = path_values.pop().unwrap_or(root);
+                match &mut updated {
+                    Value::Record(_, fmap) => {
+                        fmap.insert(leaf_field.to_string(), result);
+                    }
+                    _ => {
+                        return Err(InterpError::new(
+                            "delegate writeback: leaf target is not a record",
+                        ));
                     }
                 }
-                interp.scope_env.assign(name, owner)?;
-            } else if interp.is_mutable(name) {
-                // Other targets must be explicitly mutable; `delegate mutate`
-                // must not silently rewrite an immutable variable (IN-H4).
-                interp.scope_env.assign(name, owner)?;
-            } else {
-                return Err(InterpError::new(format!(
-                    "cannot delegate mutate into immutable variable '{}'",
-                    name
-                )));
+                // Rebuild ancestors from inside out.
+                while let Some(mut parent) = path_values.pop() {
+                    let field = fields[path_values.len()];
+                    match &mut parent {
+                        Value::Record(_, fmap) => {
+                            fmap.insert(field.to_string(), updated);
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "delegate writeback: intermediate is not a record",
+                            ));
+                        }
+                    }
+                    updated = parent;
+                }
+                // Assign root.
+                if name == "self" {
+                    for scope in interp.scope_env.env.iter_mut().rev() {
+                        if scope.contains_key(name) {
+                            scope.insert(name.clone(), updated);
+                            return Ok(());
+                        }
+                    }
+                    interp.scope_env.assign(name, updated)?;
+                } else if interp.is_mutable(name) {
+                    interp.scope_env.assign(name, updated)?;
+                } else {
+                    return Err(InterpError::new(format!(
+                        "cannot delegate mutate into immutable variable '{}'",
+                        name
+                    )));
+                }
+                return Ok(());
+            }
+            _ => {
+                // Non-ident root (e.g. call result) — cannot write back.
+                return Ok(());
             }
         }
     }
-    Ok(())
 }
 
 impl<'a> Interpreter<'a> {
