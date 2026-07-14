@@ -7844,6 +7844,44 @@ fn dual_to_json_list_result() {
     );
 }
 
+/// from_json Option of List dual.
+#[test]
+fn dual_from_json_option_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<List<i32>>>("[1,2,3]")
+            let b = from_json::<Option<List<i32>>>("null")
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some([1, 2, 3])\nNone()"
+    );
+}
+
+/// to_json Option of List dual.
+#[test]
+fn dual_to_json_option_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some([1, 2, 3])
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Some\":[[1,2,3]]}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

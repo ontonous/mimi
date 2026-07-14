@@ -2210,6 +2210,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 json_as_f64_fn,
                 json_as_bool_fn,
             ),
+            // Nested List (e.g. Option<List<i32>>).
+            crate::ast::Type::Name(n, args) if n == "List" => {
+                let nested_ty = crate::ast::Type::Name("List".into(), args.clone());
+                let nested =
+                    self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_val)?;
+                match nested {
+                    BasicValueEnum::StructValue(sv) => {
+                        let list_ty = self.list_struct_type();
+                        let i64_ty = self.context.i64_type();
+                        let size =
+                            self.llvm_type_size_bytes(BasicTypeEnum::StructType(list_ty));
+                        let heap = self.malloc_or_abort(
+                            i64_ty.const_int(size, false),
+                            "opt_list_heap",
+                        )?;
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let typed = self
+                            .build_bit_cast(
+                                heap.into(),
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                "opt_list_ptr",
+                            )?
+                            .into_pointer_value();
+                        self.build_store(typed, sv)?;
+                        Ok(BasicValueEnum::PointerValue(typed))
+                    }
+                    other => Ok(other),
+                }
+            }
             // Nested Map (e.g. Option<Map<string,i32>>).
             crate::ast::Type::Name(n, args) if n == "Map" => {
                 let val_is_string = args
