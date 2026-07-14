@@ -6620,6 +6620,26 @@ fn dual_tuple_and_map_get_println() {
     );
 }
 
+/// Option println formats Some(n) / None() on both backends.
+#[test]
+fn dual_option_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(5)
+            let b: Option<i32> = None
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(5)\nNone()"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
