@@ -848,26 +848,7 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
             }
             Stmt::WhileLet { pat, init, body } => {
-                // CG-H3: fixed-length list Array patterns are supported in
-                // codegen (length check + element bind). Slice/`..rest` is
-                // still incomplete for rest rebinding — reject with E0251.
-                if matches!(pat, Pattern::Slice(_, _)) {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0251,
-                        "while-let slice patterns with `..rest` are not supported in codegen; \
-                         use a fixed-length list pattern `[a, b]`, a for loop, \
-                         or an index-based while loop"
-                            .to_string(),
-                    );
-                    let it = self.infer_expr(init, scopes);
-                    scopes.push(HashMap::new());
-                    self.check_pattern(pat, &it, scopes);
-                    self.loop_depth += 1;
-                    self.check_block(body, ret, scopes);
-                    self.loop_depth -= 1;
-                    scopes.pop();
-                    return;
-                }
+                // CG-H3: Array and Slice (with rest tail view) are supported in codegen.
                 let it = self.infer_expr(init, scopes);
                 scopes.push(HashMap::new());
                 self.check_pattern(pat, &it, scopes);

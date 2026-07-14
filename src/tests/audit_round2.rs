@@ -743,23 +743,23 @@ func main() -> i32 {
 }
 
 #[test]
-fn while_let_slice_pattern_rejected() {
+fn while_let_slice_pattern_accepted() {
     let src = r#"
 func main() -> i32 {
-    let xs: List<i32> = [1, 2, 3]
+    let mut xs: List<i32> = [1, 2, 3]
     let mut i = 0
     while let [a, ..rest] = xs {
-        i = i + 1
-        if i > 10 { break }
+        i = i + a
+        xs = rest
+        if i > 100 { break }
     }
     return i
 }
 "#;
-    let errs = check_source(src).unwrap_err();
     assert!(
-        errs.iter().any(|d| d.code.as_deref() == Some("E0251")),
-        "while-let slice pattern should be E0251: {:?}",
-        errs
+        check_source(src).is_ok(),
+        "while-let slice pattern on List should typecheck: {:?}",
+        check_source(src)
     );
 }
 

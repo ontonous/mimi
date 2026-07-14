@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
 use super::CodeGenerator;
@@ -262,7 +262,93 @@ impl<'ctx> CodeGenerator<'ctx> {
             Pattern::Slice(sub_patterns, rest) => {
                 self.compile_pattern_bind(&Pattern::Array(sub_patterns.clone()), val, vars)?;
                 if let Some(rest_pat) = rest {
-                    self.compile_pattern_bind(rest_pat, val, vars)?;
+                    // Bind rest to a freshly allocated copy of the tail so
+                    // reassignment of the original list cannot free shared data.
+                    let list_ptr = match val {
+                        BasicValueEnum::PointerValue(pv) => pv,
+                        _ => {
+                            return Err(CompileError::LlvmError(
+                                "slice rest pattern requires a list pointer".to_string(),
+                            ))
+                        }
+                    };
+                    let i64_ty = self.context.i64_type();
+                    let total_len = self.load_list_len(list_ptr)?;
+                    let prefix = i64_ty.const_int(sub_patterns.len() as u64, false);
+                    let rest_len = self
+                        .builder
+                        .build_int_sub(total_len, prefix, "rest_len")
+                        .map_err(|e| CompileError::LlvmError(format!("sub: {}", e)))?;
+                    let data_raw = self.load_list_data_i64(list_ptr)?;
+                    let src = self
+                        .gep()
+                        .build_in_bounds_gep(
+                            BasicTypeEnum::IntType(i64_ty),
+                            data_raw,
+                            &[prefix],
+                            "rest_src",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                    let bytes = self
+                        .builder
+                        .build_int_mul(rest_len, i64_ty.const_int(8, false), "rest_bytes")
+                        .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+                    // Avoid malloc(0) for empty rest.
+                    let zero = i64_ty.const_int(0, false);
+                    let is_empty = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            rest_len,
+                            zero,
+                            "rest_empty",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+                    let function = self.current_function().ok_or_else(|| {
+                        CompileError::LlvmError("no function for slice rest".into())
+                    })?;
+                    let empty_bb = self.context.append_basic_block(function, "rest_empty_bb");
+                    let copy_bb = self.context.append_basic_block(function, "rest_copy_bb");
+                    let merge_bb = self.context.append_basic_block(function, "rest_merge_bb");
+                    self.builder
+                        .build_conditional_branch(is_empty, empty_bb, copy_bb)
+                        .map_err(|e| CompileError::LlvmError(format!("br: {}", e)))?;
+
+                    self.builder.position_at_end(empty_bb);
+                    let null_data = self
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .const_null();
+                    let empty_list = self.build_list_struct(zero, null_data)?;
+                    self.build_br(merge_bb)?;
+                    let empty_end = self.builder.get_insert_block().unwrap_or(empty_bb);
+
+                    self.builder.position_at_end(copy_bb);
+                    let dest = self.malloc_or_abort(bytes, "rest_data")?;
+                    let memcpy_fn = self.get_runtime_fn("memcpy")?;
+                    self.builder
+                        .build_call(
+                            memcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(dest),
+                                BasicMetadataValueEnum::PointerValue(src),
+                                BasicMetadataValueEnum::IntValue(bytes),
+                            ],
+                            "rest_memcpy",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("memcpy: {}", e)))?;
+                    let copy_list = self.build_list_struct(rest_len, dest)?;
+                    self.build_br(merge_bb)?;
+                    let copy_end = self.builder.get_insert_block().unwrap_or(copy_bb);
+
+                    self.builder.position_at_end(merge_bb);
+                    let phi_ty = empty_list.get_type();
+                    let phi = self
+                        .builder
+                        .build_phi(phi_ty, "rest_list_phi")
+                        .map_err(|e| CompileError::LlvmError(format!("phi: {}", e)))?;
+                    phi.add_incoming(&[(&empty_list, empty_end), (&copy_list, copy_end)]);
+                    self.compile_pattern_bind(rest_pat, phi.as_basic_value(), vars)?;
                 }
                 Ok(())
             }

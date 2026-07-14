@@ -194,7 +194,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
 
-    fn build_list_struct(
+    pub(in crate::codegen) fn build_list_struct(
         &self,
         len_val: inkwell::values::IntValue<'ctx>,
         data_ptr: inkwell::values::PointerValue<'ctx>,

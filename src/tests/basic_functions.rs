@@ -507,26 +507,26 @@ func main() -> i32 {
 }
 
 #[test]
-fn typecheck_while_let_slice_pattern_rejected() {
-    // CG-H3: fixed-length `[a, b]` is allowed; `..rest` slice still rejected.
+fn dual_while_let_slice_rest() {
+    // Slice rest pattern: drain list via [a, ..rest].
     let src = r#"
 func main() -> i32 {
-    let xs: List<i32> = [1, 2, 3]
-    let mut i = 0
+    let mut xs = [1, 2, 3, 4]
+    let mut n = 0
     while let [a, ..rest] = xs {
-        i = i + 1
-        if i > 10 { break }
+        n = n + a
+        xs = rest
     }
-    return i
+    println(n)
+    0
 }
 "#;
-    let errs = check_source(src).unwrap_err();
-    assert!(
-        errs.iter()
-            .any(|d| d.message.contains("while-let slice") || d.message.contains("E0251") || d.message.contains("..rest")),
-        "expected rejection of slice pattern in while-let, got: {:?}",
-        errs
-    );
+    assert!(check_source(src).is_ok(), "slice rest should typecheck");
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(0));
+    if let Ok(out) = compile_and_run(src) {
+        assert_eq!(out.trim(), "10");
+    }
 }
 
 #[test]

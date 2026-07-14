@@ -311,6 +311,16 @@ impl<'a> Checker<'a> {
                             self.check_pattern(rest_pat, &list_ty, scopes);
                         }
                     }
+                    Type::Name(n, args) if n == "List" && args.len() == 1 => {
+                        let elem_ty = &args[0];
+                        for p in pats {
+                            self.check_pattern(p, elem_ty, scopes);
+                        }
+                        if let Some(rest_pat) = rest {
+                            let list_ty = Type::Name("List".into(), vec![elem_ty.clone()]);
+                            self.check_pattern(rest_pat, &list_ty, scopes);
+                        }
+                    }
                     _ => {
                         self.emit_code(
                             crate::diagnostic::codes::E0251,
