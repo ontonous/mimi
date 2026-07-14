@@ -2318,19 +2318,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicValueEnum::StructValue(psv) => {
                 let pfields = psv.get_type().get_field_types();
-                // Nested Option {i1, ...}: recursive Display via emit_option_to_string.
-                if pfields.len() == 2
+                // Nested Result {i1, ok, err} inside Option.
+                if pfields.len() >= 3
                     && matches!(
                         pfields[0],
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                     )
                 {
+                    let res_ty = Self::strip_first_type_arg(arg_type, "Option")
+                        .unwrap_or_else(|| "Result".to_string());
+                    let nested = self.emit_result_to_string_typed(psv, None, &res_ty)?;
+                    OptPay::StrPtr(nested)
+                } else if pfields.len() == 2
+                    && matches!(
+                        pfields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                    )
+                {
+                    // Nested Option {i1, ...}: recursive Display via emit_option_to_string.
                     // Strip one Option layer: Option<Option<List<i32>>> → Option<List<i32>>
-                    let inner_ty = arg_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                        .unwrap_or("Option");
-                    let nested = self.emit_option_to_string(psv, None, inner_ty)?;
+                    let inner_ty = Self::strip_first_type_arg(arg_type, "Option")
+                        .unwrap_or_else(|| "Option".to_string());
+                    let nested = self.emit_option_to_string(psv, None, &inner_ty)?;
                     OptPay::StrPtr(nested)
                 } else if pfields.len() == 2
                     && matches!(

@@ -7061,6 +7061,26 @@ fn dual_result_option_map_println() {
     );
 }
 
+/// Option of Result println.
+#[test]
+fn dual_option_result_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Option<Result<i32, i32>> = Some(Ok(5))
+            let b: Option<Result<i32, i32>> = Some(Err(2))
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(Ok(5))\nSome(Err(2))"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
