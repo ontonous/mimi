@@ -7264,6 +7264,26 @@ fn dual_from_json_set_f64() {
     );
 }
 
+/// List of Set of string println.
+#[test]
+fn dual_list_set_string_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Set<string>>("[\"x\"]")
+            let b = from_json::<Set<string>>("[\"y\",\"z\"]")
+            let xs = [a, b]
+            println(xs)
+            0
+        }
+        "#,
+        "[Set{x}, Set{y, z}]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
