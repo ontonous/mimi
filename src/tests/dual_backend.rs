@@ -7081,6 +7081,43 @@ fn dual_option_result_println() {
     );
 }
 
+/// List of Option of Map println.
+#[test]
+fn dual_list_option_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"k\":1}")
+            let xs = [Some(m), None]
+            println(xs)
+            0
+        }
+        "#,
+        "[Some({\"k\":1}), None()]"
+    );
+}
+
+/// Heterogeneous tuple println (int, bool, string).
+#[test]
+fn dual_hetero_tuple_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let t = (1, true, "hi")
+            println(t)
+            0
+        }
+        "#,
+        "(1, true, hi)"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
