@@ -7644,6 +7644,61 @@ fn dual_from_json_result_map() {
     );
 }
 
+/// to_json Result of Map dual.
+#[test]
+fn dual_to_json_result_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let a: Result<Map<string, i32>, i32> = Ok(m)
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[{\"a\":1}]}"
+    );
+}
+
+/// from_json List of Map dual.
+#[test]
+fn dual_from_json_list_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Map<string, i32>>>("[{\"a\":1},{\"b\":2}]")
+            println(xs)
+            0
+        }
+        "#,
+        "[{\"a\":1}, {\"b\":2}]"
+    );
+}
+
+/// from_json Result of Set dual.
+#[test]
+fn dual_from_json_result_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<Set<i32>, i32>>("[1,2]")
+            println(a)
+            0
+        }
+        "#,
+        "Ok(Set{1, 2})"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
