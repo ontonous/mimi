@@ -304,7 +304,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // mimi_list_map_to_string emits valid JSON array of objects.
                         "mimi_list_map_to_string"
                     } else if inner.starts_with("Set") {
-                        "mimi_list_set_to_string"
+                        "mimi_list_set_to_json"
                     } else {
                         match inner {
                             "string" => "mimi_list_str_to_json",
