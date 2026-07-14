@@ -43,14 +43,7 @@ impl<'a> Checker<'a> {
             // If param is a cap type, track it
             if matches!(&ty, Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
-                    let bit_index = s.len() as u32;
-                    s.insert(
-                        p.name.clone(),
-                        super::CapVarInfo {
-                            consumed: false,
-                            bit_index,
-                        },
-                    );
+                    s.insert(p.name.clone(), super::CapVarInfo { consumed: false });
                 }
             }
             // SessionChan<S> params: seed residual from declared session body.

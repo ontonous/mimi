@@ -914,7 +914,7 @@ fn flow_check_multi_return_type_mismatch() {
 flow BadFlow {
     state Ready { v: i32 }
     state Active { v: i32 }
-    state Done
+    state Done { v: i32 }
     transition go(Ready) -> Active | Done {
         do {
             let x = self.v
@@ -2740,7 +2740,7 @@ flow F {
     impl Sensor
     state Idle
     state Active { data: i32 }
-    state Extra
+    state Extra { data: i32 }
     transition start(Idle) -> Active | Extra {
         do { return Active { data: 7 } }
     }
@@ -3531,24 +3531,10 @@ func main() -> i32 {
     0
 }
 "#;
-    // empty list may need type annotation - try without
-    let src2 = r#"
-actor Sensor {
-    v: i32
-    func read() -> i32 { self.v }
-}
-func main() -> i32 {
-    let a = Sensor.spawn()
-    let targets = [a]
-    let results = broadcast(targets, "read")
-    println(len(results))
-    0
-}
-"#;
-    assert!(check_source(src2).is_ok(), "{:?}", check_source(src2));
-    assert_eq!(run_source_result(src2), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src2).expect("codegen");
-    assert_eq!(out.trim(), "1");
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "0");
 }
 
 #[test]
@@ -3829,7 +3815,7 @@ fn mutate_list_push_allowed() {
     let src = r#"
 use std::collections
 
-func bumplast(data: mutate List<i32>) {
+func bump_last(data: mutate List<i32>) {
     let n = len(data)
     push(data, n)
 }
@@ -3841,22 +3827,10 @@ func main() -> i32 {
     0
 }
 "#;
-    // check OK but run may need mut_ — let's simplify
-    let src2 = r#"
-func bump(x: mutate i32) -> i32 {
-    x
-}
-func main() -> i32 {
-    let v = 5
-    let r = bump(v)
-    println(r)
-    0
-}
-"#;
-    assert!(check_source(src2).is_ok(), "{:?}", check_source(src2));
-    assert_eq!(run_source_result(src2), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src2).expect("codegen");
-    assert_eq!(out.trim(), "5");
+    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = compile_and_run(src).expect("codegen");
+    assert_eq!(out.trim(), "2");
 }
 
 #[test]
@@ -4016,7 +3990,7 @@ func main() -> i32 {
 "#;
     let err = run_source_result(src);
     assert!(err.is_err(), "assert_state should fail on mismatch");
-    let msg = format!("{}", err.unwrap_err());
+    let msg = err.unwrap_err().to_string();
     assert!(msg.contains("assert_state failed"), "got: {}", msg);
 }
 
@@ -4066,6 +4040,24 @@ func main() -> i32 {
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "10");
     assert_eq!(lines[1], "99");
+}
+
+#[test]
+fn bare_spawn_detached_is_rejected_with_typed_migration() {
+    let src = r#"
+actor Worker {}
+func main() {
+    let worker = spawn_detached("Worker")
+}
+"#;
+    let diagnostics = check_source(src).expect_err("bare spawn_detached must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("ActorType.spawn_detached()")),
+        "diagnostic should point users to the portable typed method: {:?}",
+        diagnostics
+    );
 }
 
 // ── v0.29.36 Payload covariance + conservative projection ─────────────
@@ -4169,7 +4161,7 @@ func main() -> i32 {
 "#;
     let err = run_source_result(src);
     assert!(err.is_err(), "expected QuotaExceeded, got ok");
-    let msg = format!("{}", err.unwrap_err());
+    let msg = err.unwrap_err().to_string();
     assert!(
         msg.contains("QuotaExceeded") || msg.contains("max_children"),
         "got {}",
@@ -4852,31 +4844,36 @@ func main() -> i32 {
 }
 
 #[test]
-fn multi_target_match_accepted() {
-    // L2: match on multi-target transition result is accepted.
-    // Use if-else instead of match (match pattern syntax for states is limited).
+fn multi_target_incompatible_payload_layout_rejected() {
     let src = r#"
 flow C {
     state A { v: i32 }
-    state B { v: i32 }
+    state B { message: string }
     transition go(A) -> B | A {
         do {
-            if self.v > 0 { return B { v: self.v } }
+            if self.v > 0 { return B { message: "positive" } }
             return A { v: 0 }
         }
     }
 }
-func main() -> i32 {
-    let s = A { v: 5 }
-    let r = C::go(s)
-    // Use the value without direct field access — assign through match-like
-    let result = if r.v > 0 { r.v } else { 0 }
-    result
-}
+func main() -> i32 { 0 }
 "#;
-    // This test verifies that the multi-target tracking is working.
-    // The direct field access r.v will trigger E0420, so this should fail.
-    // Instead, let's verify that a non-field use is accepted:
+    let errors = check_source(src).expect_err("incompatible result layouts must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("E0419")
+                || diagnostic
+                    .message
+                    .contains("incompatible target payload layouts")),
+        "expected E0419, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn multi_target_match_accepted() {
+    // A multi-target value may be moved as a whole before it is matched.
     let src2 = r#"
 flow C {
     state A { v: i32 }

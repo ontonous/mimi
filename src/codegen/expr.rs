@@ -108,7 +108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "named argument '{}' in codegen: named arguments must be resolved before codegen (use positional args or evaluate at comptime)", name
             ))),
             Expr::Cast(inner, target_type) => self.compile_cast_expr(inner, target_type, vars),
-            Expr::OptionalChain(inner, field) => {
+            Expr::OptionalChain(_inner, field) => {
                 // PA-H3 (audit): `x?.field` optional chain. The interpreter
                 // supports this via eval_optional_chain, but codegen support
                 // is not yet implemented. Emit a clear error instead of

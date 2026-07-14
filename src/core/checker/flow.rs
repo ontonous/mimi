@@ -169,27 +169,6 @@ mod tests {
     use super::*;
     use crate::core::check;
 
-    /// Helper: count type errors in source (positive check).
-    fn count_errors(source: &str) -> usize {
-        parse_and_count(source, false)
-    }
-
-    /// Compile source and count errors from flow checker.
-    fn parse_and_count(source: &str, expected_ok: bool) -> usize {
-        let tokens = match crate::lexer::Lexer::new(source).tokenize() {
-            Ok(t) => t,
-            Err(_) => return if expected_ok { 1 } else { 0 },
-        };
-        let file = match crate::parser::Parser::new(tokens).parse_file() {
-            Ok(f) => f,
-            Err(_) => return if expected_ok { 1 } else { 0 },
-        };
-        match flow_check(&file) {
-            Ok(()) => 0,
-            Err(errors) => errors.len(),
-        }
-    }
-
     /// Assert that Flow checker produces equivalent results to legacy.
     fn assert_check_equivalent(source: &str) {
         let tokens = match crate::lexer::Lexer::new(source).tokenize() {

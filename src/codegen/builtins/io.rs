@@ -1917,7 +1917,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let zero_i64 = i64_ty.const_int(0, false);
         let neg_one_i64 = i64_ty.const_int((-1i64) as u64, false);
         let false_val = bool_ty.const_int(0, false);
-        let true_val = bool_ty.const_int(1, false);
 
         let function = self.current_function().ok_or(CompileError::LlvmError(
             "no current function for file_stat".into(),

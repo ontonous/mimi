@@ -197,3 +197,9 @@ impl ScopeEnv {
         InterpError::with_op(msg, op).with_call_stack(self.call_stack.clone())
     }
 }
+
+impl Default for ScopeEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}

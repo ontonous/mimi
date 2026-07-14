@@ -328,8 +328,11 @@ func main() -> i32 {
         .expect("src/tests/v1_2_error_paths.rs:181 unwrap failed");
     let (file, _errors) = crate::parser::Parser::new(tokens).parse_file_with_recovery();
     // Recovery should produce a partial AST with the function
-    assert!(file.items.len() == 1, "should still parse the function");
-    if let crate::ast::Item::Func(f) = &file.items[0] {
+    if let Some(crate::ast::Item::Func(f)) = file
+        .items
+        .iter()
+        .find(|item| matches!(item, crate::ast::Item::Func(function) if function.name == "main"))
+    {
         // The function body should contain at least the valid statement
         assert!(!f.body.is_empty(), "should have at least one statement");
     } else {

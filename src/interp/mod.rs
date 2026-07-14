@@ -109,6 +109,10 @@ pub struct Interpreter<'a> {
     loop_action: Option<LoopAction>,
     /// Early return signal for ? propagation (exception-like, preserves value)
     early_return: Option<Value>,
+    /// Values of `mutate` parameters captured when the most recent user
+    /// function returned. `eval_call_dispatch` writes them back to caller
+    /// argument bindings, matching the codegen reference ABI.
+    last_mutate_writebacks: Vec<(usize, Value)>,
     /// Exit code signal from builtin `exit()`; once set, execution stops.
     exited: Option<i32>,
     /// Recursion depth guard to prevent stack overflow
@@ -237,6 +241,7 @@ impl<'a> Interpreter<'a> {
             default_allocator: AllocatorKind::System,
             loop_action: None,
             early_return: None,
+            last_mutate_writebacks: Vec::new(),
             exited: None,
             recursion_depth: 0,
             func_index,

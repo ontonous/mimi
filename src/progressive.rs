@@ -106,7 +106,6 @@ pub fn main_local_names(file: &File) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::*;
 
     fn empty_file() -> File {
         File {

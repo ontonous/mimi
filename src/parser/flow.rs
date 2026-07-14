@@ -586,7 +586,7 @@ mod tests {
         let files = real_world_files();
         assert!(!files.is_empty(), "No real_world .mimi files found");
         for path in &files {
-            let src = std::fs::read_to_string(&path).unwrap();
+            let src = std::fs::read_to_string(path).unwrap();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let tokens = tokenize(&src);
             let old = Parser::new(tokens.clone()).legacy_parse_file();

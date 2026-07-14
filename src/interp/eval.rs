@@ -768,7 +768,7 @@ impl<'a> Interpreter<'a> {
                         Value::Set(items) => {
                             items.truncate(orig_len);
                         }
-                        Value::Record(_, m) => {
+                        Value::Record(_, _m) => {
                             // Can't easily restore field count for records;
                             // leave as-is (metadata shadow is primarily for Lists).
                         }

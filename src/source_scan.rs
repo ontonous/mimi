@@ -37,7 +37,6 @@ pub enum ScanEvent {
 /// Stateful character scanner for Mimi source code.
 pub struct SourceScanner<'a> {
     chars: Vec<char>,
-    pos: usize,
     _source: &'a str,
 }
 
@@ -45,7 +44,6 @@ impl<'a> SourceScanner<'a> {
     pub fn new(source: &'a str) -> Self {
         Self {
             chars: source.chars().collect(),
-            pos: 0,
             _source: source,
         }
     }

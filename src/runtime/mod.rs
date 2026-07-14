@@ -117,6 +117,7 @@ mod libc {
         pub fn free(ptr: *mut c_void);
         pub fn atexit(func: extern "C" fn()) -> i32;
         pub fn sprintf(buf: *mut i8, fmt: *const i8, ...) -> i32;
+        pub fn snprintf(buf: *mut i8, size: usize, fmt: *const i8, ...) -> i32;
         pub fn strlen(s: *const i8) -> usize;
         pub fn sysconf(name: c_int) -> c_long;
         pub fn mincore(addr: *mut c_void, len: usize, vec: *mut u8) -> c_int;
@@ -433,10 +434,11 @@ pub extern "C" fn mimi_list_push_grow(
         }
         // Copy existing elements from old buffer (which may lack a header)
         if !old_data.is_null() && len > 0 {
-            let copy_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
-                Some(s) => s,
-                None => return std::ptr::null_mut(),
-            };
+            let copy_size =
+                match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
+                    Some(s) => s,
+                    None => return std::ptr::null_mut(),
+                };
             // SAFETY: existing elements are copied byte-for-byte from the old buffer to the new buffer.
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -987,7 +989,7 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
     const MAX_ADDR: usize = usize::MAX - 4096;
     const MAX_BOUNDED_SCAN: usize = 256; // C12: limit scan to 256 bytes to avoid 1MB arbitrary read
 
-    if value >= MIN_HEAP && value < MAX_ADDR && value % 8 == 0 {
+    if (MIN_HEAP..MAX_ADDR).contains(&value) && value % 8 == 0 {
         let ptr = value as *const u8;
         // C12 (deep audit): a large *untagged* integer (e.g. `0x7FFF_FFFF_F000`)
         // satisfies the heuristic above but points at unmapped memory, so the
@@ -998,9 +1000,8 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         let page_size = if page_size == 0 { 4096 } else { page_size };
         let page_start = (value / page_size) * page_size;
         let mut mvec: u8 = 0;
-        let mapped = unsafe {
-            libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec)
-        };
+        let mapped =
+            unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
         if mapped == 0 {
             let page_offset = value - page_start;
             let max_in_page = page_size.saturating_sub(page_offset);
@@ -1036,9 +1037,9 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         if buf.is_null() {
             return std::ptr::null_mut();
         }
-        // SAFETY: buf is non-null and 24 bytes; the format spec is bounded.
+        // SAFETY: buf is non-null and 24 bytes; snprintf is bounded to size.
         unsafe {
-            libc::sprintf(buf, b"0x%lx\0".as_ptr() as *const _, value as u64);
+            libc::snprintf(buf, 24, b"0x%lx\0".as_ptr() as *const _, value as u64);
         }
         return buf;
     }
@@ -1049,7 +1050,7 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
         return std::ptr::null_mut();
     }
     unsafe {
-        libc::sprintf(buf, b"%ld\0".as_ptr() as *const _, value as i64);
+        libc::snprintf(buf, 24, b"%ld\0".as_ptr() as *const _, value as i64);
     }
     buf
 }
@@ -1846,11 +1847,11 @@ pub extern "C" fn mimi_args_get(i: i64) -> *mut std::ffi::c_char {
         return std::ptr::null_mut();
     }
     let idx = (i + 1) as usize; // +1 to skip program name
-    // C8 (deep audit): return an *owned* copy of the argument string rather than
-    // a raw pointer into CLI_ARGS storage. On a later `mimi_args_init` the stored
-    // strings are freed, which would otherwise leave the caller holding a dangling
-    // pointer (UAF). The returned buffer is independently allocated and must be
-    // freed by the caller with `mimi_string_free`.
+                                // C8 (deep audit): return an *owned* copy of the argument string rather than
+                                // a raw pointer into CLI_ARGS storage. On a later `mimi_args_init` the stored
+                                // strings are freed, which would otherwise leave the caller holding a dangling
+                                // pointer (UAF). The returned buffer is independently allocated and must be
+                                // freed by the caller with `mimi_string_free`.
     match args.argv.get(idx) {
         Some(&p) if p != 0 => {
             let s = unsafe { cstr_to_string(p as *const std::ffi::c_char) };
@@ -2532,12 +2533,7 @@ type SetValueHandle = i64;
 
 // Static assertion: pointer width must not exceed 64 bits.
 const _: () = {
-    const fn assert_ptr_fits_i64() {
-        let _ok = (std::mem::size_of::<usize>() <= 8) as bool;
-        // consteval panic if the condition is false (pointer > 64 bits).
-        let _ = [(); 1][!_ok as usize];
-    }
-    const _: () = assert_ptr_fits_i64();
+    assert!(std::mem::size_of::<usize>() <= 8);
 };
 
 struct MimiSet {
@@ -4082,10 +4078,7 @@ pub extern "C" fn mimi_tuple_deserialize(
                 }
                 if neg {
                     // M30: use checked_neg to avoid silent wrapping on i64::MIN.
-                    val = match val.checked_neg() {
-                        Some(v) => v,
-                        None => 0, // overflow — clamp to 0
-                    };
+                    val = val.checked_neg().unwrap_or_default();
                 }
                 // SAFETY: `out_values` was checked non-null above; `idx < count`.
                 unsafe {
@@ -4515,19 +4508,17 @@ pub extern "C" fn mimi_wall_clock_ms() -> i64 {
     }
 }
 
-/// v0.29.43: Thread-local flag for delayed Fault from pinned blocks.
-/// When set, the codegen pinned timeout path does NOT abort the process;
-/// instead it sets this flag and returns, allowing the C call stack to
-/// unwind safely. The caller then checks the flag and produces a Fault value.
+// v0.29.43: Thread-local flag for delayed Fault from pinned blocks.
+// When set, the codegen pinned timeout path does NOT abort the process;
+// instead it sets this flag and returns, allowing the C call stack to
+// unwind safely. The caller then checks the flag and produces a Fault value.
 thread_local! {
-    static PINNED_FAULT_PENDING: std::cell::RefCell<Option<PinnedFaultInfo>> = std::cell::RefCell::new(None);
+    static PINNED_FAULT_PENDING: std::cell::RefCell<Option<PinnedFaultInfo>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone)]
 struct PinnedFaultInfo {
     state_name: String,
-    event: String,
-    snapshot: String,
 }
 
 /// v0.29.43: Set a pending delayed Fault from a pinned block.
@@ -4546,8 +4537,6 @@ pub extern "C" fn mimi_pinned_fault(state_name: *const std::ffi::c_char) -> i64 
     PINNED_FAULT_PENDING.with(|cell| {
         *cell.borrow_mut() = Some(PinnedFaultInfo {
             state_name: state.clone(),
-            event: format!("pinned_timeout:{}", state),
-            snapshot: "pinned timeout expired: FFI anchor watchdog".to_string(),
         });
     });
     1 // non-zero = fault pending
@@ -4573,7 +4562,7 @@ pub extern "C" fn mimi_pinned_fault_take() -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
     thread_local! {
-        static FAULT_STATE_CSTR: std::cell::RefCell<Option<std::ffi::CString>> = std::cell::RefCell::new(None);
+        static FAULT_STATE_CSTR: std::cell::RefCell<Option<std::ffi::CString>> = const { std::cell::RefCell::new(None) };
     }
     FAULT_STATE_CSTR.with(|cstr_cell| {
         let mut cstr = cstr_cell.borrow_mut();
@@ -4769,7 +4758,7 @@ pub extern "C" fn mimi_shadow_free(ptr: *mut u8) {
 #[no_mangle]
 pub extern "C" fn mimi_shadow_dump() -> *const std::ffi::c_char {
     thread_local! {
-        static DUMP_CSTR: std::cell::RefCell<Option<std::ffi::CString>> = std::cell::RefCell::new(None);
+        static DUMP_CSTR: std::cell::RefCell<Option<std::ffi::CString>> = const { std::cell::RefCell::new(None) };
     }
     DUMP_CSTR.with(|cstr_cell| {
         let mut buf = String::new();
@@ -5396,7 +5385,6 @@ pub struct MimiExecResult {
 /// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
 /// `mimi_exec_safe` instead which runs a single program without shell.
 /// Caller must free with `mimi_exec_free`.
-#[no_mangle]
 /// Execute a shell command via `sh -c`. This is intentionally a shell
 /// execution function — callers are responsible for sanitizing input.
 /// For safe execution without shell injection, use `mimi_exec_safe`.
@@ -7836,7 +7824,7 @@ pub extern "C" fn mimi_broadcast_free(ptr: *mut i64, len: i64) {
         return;
     }
     unsafe {
-        let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len as usize));
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize));
     }
 }
 

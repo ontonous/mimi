@@ -12,7 +12,7 @@ pub(crate) fn percent_decode(s: &str) -> String {
     // flush them as a single UTF-8 string so multi-byte characters decode
     // correctly (e.g. `%C3%A9` → "é").
     let mut pending: Vec<u8> = Vec::new();
-    let mut flush = |pending: &mut Vec<u8>, result: &mut String| {
+    let flush = |pending: &mut Vec<u8>, result: &mut String| {
         if !pending.is_empty() {
             result.push_str(&String::from_utf8_lossy(pending));
             pending.clear();

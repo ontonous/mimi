@@ -117,6 +117,7 @@ pub const E0415: &str = "E0415"; // view/mutate borrow violation
 pub const E0416: &str = "E0416"; // transition under pinned (FFI anchor)
 pub const E0417: &str = "E0417"; // mutate parameter reassign (not individual element mutation)
 pub const E0418: &str = "E0418"; // conservative projection failure (subflow → flat protocol)
+pub const E0419: &str = "E0419"; // incompatible payload layouts in a multi-target transition
 pub const E0420: &str = "E0420"; // multi-target transition result must be exhaustively matched
 
 /// Contract/intention error codes (E05xx)
@@ -328,6 +329,9 @@ pub fn describe(code: &str) -> &'static str {
         E0415 => "view/mutate borrow violation",
         E0416 => "transition under pinned FFI anchor",
         E0417 => "mutate parameter reassign (realloc/swap banned)",
+        E0418 => "subflow cannot be conservatively projected to flat protocol",
+        E0419 => "multi-target transition states have incompatible payload layouts",
+        E0420 => "multi-target transition result must be exhaustively matched",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

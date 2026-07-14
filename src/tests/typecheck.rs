@@ -1718,13 +1718,13 @@ func main() -> i32 {
     42
 }
 "#;
-    check_source(src);
+    assert!(check_source(src).is_ok());
 }
 
 #[test]
 fn regr_co_h1_pop_element_type_inferred() {
     // CO-H1: pop() returns List<T>'s element type, not 'unknown'
-    check_source(
+    assert!(check_source(
         r#"
 func main() -> i32 {
     let v: List<i32> = [1, 2, 3]
@@ -1732,7 +1732,8 @@ func main() -> i32 {
     last
 }
 "#,
-    );
+    )
+    .is_ok());
 }
 
 #[test]
@@ -1753,11 +1754,12 @@ fn regr_le_h1_unterminated_string_position() {
 #[test]
 fn regr_le_h4_scientific_notation_typecheck() {
     // LE-H4: scientific notation produces a valid float type
-    check_source(
+    assert!(check_source(
         r#"
 func main() -> f64 {
     1.5e3
 }
 "#,
-    );
+    )
+    .is_ok());
 }

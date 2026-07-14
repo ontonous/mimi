@@ -198,7 +198,10 @@ fn run_watch(
     // stopped normally.
     WATCH_RUNNING.store(true, Ordering::SeqCst);
     unsafe {
-        libc::signal(libc::SIGINT, watch_sigint_handler as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            watch_sigint_handler as *const () as libc::sighandler_t,
+        );
     }
     let mut last_modified = get_mtime(path)?;
     // Run once first

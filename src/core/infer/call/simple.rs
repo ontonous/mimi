@@ -710,16 +710,18 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
-            // v0.29.37: spawn_detached(name) -> actor handle (i64)
+            // The dynamic string form cannot be compiled safely: codegen needs
+            // the actor type at compile time. Keep the typed method form as the
+            // single portable API instead of accepting an interpreter-only call.
             "spawn_detached" => {
-                if args.len() != 1 {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0242,
-                        "spawn_detached expects 1 argument (actor type name)".to_string(),
-                    );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                for arg in args {
+                    self.infer_expr(arg, scopes);
                 }
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    "bare spawn_detached(name) is not portable; use ActorType.spawn_detached()"
+                        .to_string(),
+                );
                 return Type::Name("i64".into(), vec![]);
             }
             // v0.29.38: assert_state(flow_instance, state_name) -> unit
@@ -1946,8 +1948,8 @@ impl<'a> Checker<'a> {
                 for (i, (at, param)) in arg_tys.iter().zip(params.iter()).enumerate() {
                     let subst_param = subst_type_params(param, &generics, &type_map);
                     // C2: use unification for generic argument type checking
-                    let coerced = is_numeric_coercion(&subst_param, &at);
-                    if !coerced && self.unification.unify(&subst_param, &at).is_err() {
+                    let coerced = is_numeric_coercion(&subst_param, at);
+                    if !coerced && self.unification.unify(&subst_param, at).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,
@@ -1956,14 +1958,14 @@ impl<'a> Checker<'a> {
                                     i + 1,
                                     name,
                                     fmt_type(&subst_param),
-                                    fmt_type(&at)
+                                    fmt_type(at)
                                 ),
                                 Span::single(self.current_line, self.current_col),
                             )
                             .with_help(format!(
                                 "argument {} has type '{}', but '{}' expects type '{}'",
                                 i + 1,
-                                fmt_type(&at),
+                                fmt_type(at),
                                 name,
                                 fmt_type(&subst_param)
                             )),

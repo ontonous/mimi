@@ -344,11 +344,7 @@ fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     use crate::ast::Stmt;
     match stmt {
         Stmt::Expr(e) => collect_old_idents_walker(e, out),
-        Stmt::Let { init, .. } => {
-            if let Some(e) = init {
-                collect_old_idents_walker(e, out);
-            }
-        }
+        Stmt::Let { init: Some(e), .. } => collect_old_idents_walker(e, out),
         Stmt::Return(Some(e)) => collect_old_idents_walker(e, out),
         _ => {}
     }
@@ -358,11 +354,7 @@ fn collect_all_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     use crate::ast::Stmt;
     match stmt {
         Stmt::Expr(e) => collect_all_idents(e, out),
-        Stmt::Let { init, .. } => {
-            if let Some(e) = init {
-                collect_all_idents(e, out);
-            }
-        }
+        Stmt::Let { init: Some(e), .. } => collect_all_idents(e, out),
         Stmt::Return(Some(e)) => collect_all_idents(e, out),
         _ => {}
     }
@@ -713,7 +705,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let needed: std::collections::HashSet<String> = self
             .ensures_stmts
             .iter()
-            .flat_map(|e| collect_old_idents(e))
+            .flat_map(collect_old_idents)
             .filter(|name| vars.contains_key(name))
             .collect();
         for name in needed {
@@ -1015,16 +1007,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "ret_str_align",
             )
             .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
-        let malloc_fn = self.get_runtime_fn("malloc")?;
-        let heap_ptr = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(aligned_len)],
-                "ret_str_malloc",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("malloc returned void".into()))?
-            .into_pointer_value();
+        // B4: NULL-checked malloc.
+        let heap_ptr = self.malloc_or_abort(aligned_len, "ret_str_malloc")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
         let _ = self.build_call(
             memcpy_fn,
@@ -1255,7 +1239,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, param) in func.params.iter().enumerate() {
             let resolved = self.resolve_type(&param.ty);
             if let Some(ty) = self.llvm_type_for(&resolved) {
-                let alloca = self.build_alloca(ty, &param.name)?;
                 let mut param_val = function.get_nth_param(i as u32).ok_or_else(|| {
                     CompileError::LlvmError(format!(
                         "param index {} out of range for function '{}' with {} params",
@@ -1264,28 +1247,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                         function.count_params()
                     ))
                 })?;
-                // String parameters may be passed as raw i8* pointers (e.g. string
-                // literals or list indexing). Wrap them in the canonical
-                // {i8*, i64} struct so the rest of the function body sees a
-                // well-formed Mimi string.
-                if let Type::Name(tn, _) = &resolved {
-                    if tn == "string" {
-                        if let BasicValueEnum::PointerValue(pv) = param_val {
-                            let strlen_fn = self.get_runtime_fn("strlen")?;
-                            let len = self
-                                .build_call(
-                                    strlen_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(pv)],
-                                    "param_strlen",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("strlen returned void")?
-                                .into_int_value();
-                            param_val = self.build_string_struct(pv, len)?;
+                // view/mutate parameters use the caller's storage directly.
+                // This is the reference ABI promised by ParamBorrow: mutations
+                // to a List header (len/data after realloc) become visible to
+                // the caller instead of modifying a callee-local copy.
+                let alloca = if param.borrow.is_some() {
+                    param_val.into_pointer_value()
+                } else {
+                    let slot = self.build_alloca(ty, &param.name)?;
+                    // String parameters may be passed as raw i8* pointers (e.g. string
+                    // literals or list indexing). Wrap them in the canonical
+                    // {i8*, i64} struct so the rest of the function body sees a
+                    // well-formed Mimi string.
+                    if let Type::Name(tn, _) = &resolved {
+                        if tn == "string" {
+                            if let BasicValueEnum::PointerValue(pv) = param_val {
+                                let strlen_fn = self.get_runtime_fn("strlen")?;
+                                let len = self
+                                    .build_call(
+                                        strlen_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(pv)],
+                                        "param_strlen",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("strlen returned void")?
+                                    .into_int_value();
+                                param_val = self.build_string_struct(pv, len)?;
+                            }
                         }
                     }
-                }
-                self.build_store(alloca, param_val)?;
+                    self.build_store(slot, param_val)?;
+                    slot
+                };
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
@@ -2024,11 +2017,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     };
                     let (then_val, else_val) = if then_bw > 0 && else_bw > 0 && then_bw != else_bw {
                         // Extend the NARROWER value to match the WIDER value's width.
-                        let target_ty = if then_bw > else_bw {
-                            self.context.i64_type()
-                        } else {
-                            self.context.i64_type()
-                        };
                         // Use the wider of the two types
                         let target_ty = if then_bw >= 64 || else_bw >= 64 {
                             self.context.i64_type()
@@ -2550,7 +2538,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
 
         // Pop scopes (discard compensations on normal exit)
-        self.release_all_shared()?;
+        // A function owns exactly one shared-release frame. Popping only that
+        // frame preserves the caller's registrations when codegen recursively
+        // monomorphizes a callee while the caller is still being emitted.
+        self.pop_shared_scope()?;
         self.free_heap_allocs()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
@@ -2604,7 +2595,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut param_types = Vec::new();
         for param in &func.params {
             if let Some(ty) = self.llvm_type_for(&param.ty) {
-                param_types.push(ty);
+                if param.borrow.is_some() {
+                    param_types.push(BasicTypeEnum::PointerType(
+                        self.context.ptr_type(AddressSpace::default()),
+                    ));
+                } else {
+                    param_types.push(ty);
+                }
             }
         }
 
@@ -2682,6 +2679,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_cap_scope();
         self.push_comp_scope();
         self.push_heap_scope();
+        self.push_shared_scope();
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         self.bind_func_params(func, function, &mut vars)?;
@@ -2794,6 +2792,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_cap_scope();
         self.push_comp_scope();
         self.push_heap_scope();
+        self.push_shared_scope();
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         self.bind_func_params(func, function, &mut vars)?;

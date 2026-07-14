@@ -495,7 +495,7 @@ impl<'a> Interpreter<'a> {
             }
         };
         if actual_state != expected_state {
-            return Err(InterpError::new(&format!(
+            return Err(InterpError::new(format!(
                 "assert_state failed: expected '{}', got '{}'",
                 expected_state, actual_state
             )));
@@ -616,7 +616,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                other => {
+                _other => {
                     // v0.29.35: non-actor target → PeerFault sentinel
                     results.push(Value::Int(-1));
                 }

@@ -3,7 +3,6 @@ use crate::codegen::types;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicType, BasicTypeEnum, StructType};
-use inkwell::values::BasicMetadataValueEnum;
 use inkwell::values::BasicValueEnum;
 
 /// P0-2: how a variant's payload maps onto the constructor function's
@@ -289,10 +288,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             "missing packed payload param".to_string(),
                                         )
                                     })?;
-                                    let malloc_fn = self
-                                        .module
-                                        .get_function("malloc")
-                                        .ok_or_else(|| "malloc not declared".to_string())?;
                                     // Use size_of() on the StructType directly (not through
                                     // BasicTypeEnum, which may not expose size_of for structs).
                                     let payload_size = packed_ty
@@ -303,20 +298,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .context
                                         .i64_type()
                                         .const_int(std::cmp::max(payload_size, 1), false);
-                                    let malloc_call = self
-                                        .builder
-                                        .build_call(
-                                            malloc_fn,
-                                            &[BasicMetadataValueEnum::IntValue(size_val)],
-                                            "payload_malloc",
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("malloc error: {}", e))
-                                        })?;
+                                    // B4: NULL-checked malloc.
                                     let malloc_result =
-                                        crate::codegen::call_try_basic_value(&malloc_call)
-                                            .ok_or("malloc returned void")?
-                                            .into_pointer_value();
+                                        self.malloc_or_abort(size_val, "payload_malloc")?;
                                     let typed_ptr = self
                                         .builder
                                         .build_pointer_cast(

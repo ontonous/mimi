@@ -722,32 +722,30 @@ impl<'a> Checker<'a> {
                     );
                     // Register state payload as a Record type (both qualified and unqualified)
                     let type_name = format!("{}::{}", qualified, state.name);
-                    if !self.types.contains_key(&type_name) {
+                    self.types.entry(type_name.clone()).or_insert_with(|| {
                         let fields = state.payload.clone().unwrap_or_default();
-                        let td = TypeDef {
+                        TypeDef {
                             name: type_name.clone(),
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
                             derives: vec![],
                             attributes: vec![],
-                        };
-                        self.types.insert(type_name, td);
-                        // Also register with unqualified name for use in transition bodies
-                        if !self.types.contains_key(&state.name)
-                            && !Self::is_builtin_type(&state.name)
-                        {
-                            let fields2 = state.payload.clone().unwrap_or_default();
-                            let td2 = TypeDef {
-                                name: state.name.clone(),
-                                pub_: false,
-                                kind: TypeDefKind::Record(fields2),
-                                generics: vec![],
-                                derives: vec![],
-                                attributes: vec![],
-                            };
-                            self.types.insert(state.name.clone(), td2);
                         }
+                    });
+                    // Also register with unqualified name for use in transition bodies
+                    if !self.types.contains_key(&state.name) && !Self::is_builtin_type(&state.name)
+                    {
+                        let fields2 = state.payload.clone().unwrap_or_default();
+                        let td2 = TypeDef {
+                            name: state.name.clone(),
+                            pub_: false,
+                            kind: TypeDefKind::Record(fields2),
+                            generics: vec![],
+                            derives: vec![],
+                            attributes: vec![],
+                        };
+                        self.types.insert(state.name.clone(), td2);
                     }
                 }
                 // Register transition functions.
@@ -798,7 +796,7 @@ impl<'a> Checker<'a> {
                         .insert(state_key, (Vec::new(), Type::Name("unit".into(), vec![])));
                     // Register every protocol state as a (possibly empty) record type.
                     let type_name = format!("{}::{}", qualified, state.name);
-                    if !self.types.contains_key(&type_name) {
+                    self.types.entry(type_name.clone()).or_insert_with(|| {
                         let fields = match &state.payload_type {
                             Some(payload_ty) => vec![Field {
                                 name: "value".to_string(),
@@ -806,16 +804,15 @@ impl<'a> Checker<'a> {
                             }],
                             None => vec![],
                         };
-                        let td = TypeDef {
+                        TypeDef {
                             name: type_name.clone(),
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
                             derives: vec![],
                             attributes: vec![],
-                        };
-                        self.types.insert(type_name, td);
-                    }
+                        }
+                    });
                 }
             }
             Item::Session(s) => {
@@ -1101,6 +1098,38 @@ impl<'a> Checker<'a> {
                                 format!("target state '{}' in transition '{}' is not defined in flow '{}'",
                                         to_state, t.name, f.name),
                             );
+                        }
+                    }
+                    // Codegen currently represents a multi-target result with one
+                    // nominal LLVM struct.  Permit this only when every target has
+                    // the same ordered field types; otherwise choosing the first
+                    // target would silently reinterpret a different layout (M6).
+                    if t.to_states.len() > 1 {
+                        let target_layouts = t.to_states.iter().filter_map(|target| {
+                            f.states
+                                .iter()
+                                .find(|state| state.name == *target)
+                                .map(|state| {
+                                    state
+                                        .payload
+                                        .as_deref()
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .map(|field| self.resolve_type(&field.ty))
+                                        .collect::<Vec<_>>()
+                                })
+                        });
+                        let mut target_layouts = target_layouts;
+                        if let Some(first_layout) = target_layouts.next() {
+                            if target_layouts.any(|layout| layout != first_layout) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0419,
+                                    format!(
+                                        "multi-target transition '{}({})' in flow '{}' has incompatible target payload layouts; use states with the same ordered field types or split the transition",
+                                        t.name, t.from_state, f.name
+                                    ),
+                                );
+                            }
                         }
                     }
                     // Type-check transition body with self in scope

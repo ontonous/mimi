@@ -646,6 +646,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.maybe_convert_list_args_to_values(name, &mut compiled_args)?;
         self.maybe_convert_record_args_to_values(name, &mut compiled_args)?;
         self.maybe_wrap_named_fn_args_to_closures(name, args, &mut compiled_args)?;
+        // Run after value-shape conversions: borrowed parameters must be the
+        // final authority and pass storage addresses, never copied structs.
+        self.prepare_borrowed_user_args(name, args, vars, &mut compiled_args)?;
 
         metadata_args = compiled_args
             .iter()
@@ -1064,7 +1067,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let arg_bw = arg_iv.get_type().get_bit_width();
                         let param_bw = param_iv.get_type().get_bit_width();
                         if arg_bw == param_bw {
-                            return Ok(*v);
+                            Ok(*v)
                         } else if arg_bw > param_bw {
                             // Truncate wider arg to param width (e.g. i64→i32)
                             Ok(self
@@ -1195,6 +1198,75 @@ impl<'ctx> CodeGenerator<'ctx> {
             .collect()
     }
 
+    /// Lower `view`/`mutate` user-function arguments to the reference ABI.
+    /// Scalar/struct locals pass their alloca; List literals already evaluate
+    /// to a pointer to the authoritative List header and pass that pointer.
+    fn prepare_borrowed_user_args(
+        &mut self,
+        name: &str,
+        arg_exprs: &[Expr],
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        args: &mut [BasicValueEnum<'ctx>],
+    ) -> Result<(), CompileError> {
+        let Some(fdef) = self.func_defs.get(name).cloned() else {
+            return Ok(());
+        };
+        for (index, param) in fdef.params.iter().enumerate() {
+            if param.borrow.is_none() || index >= args.len() || index >= arg_exprs.len() {
+                continue;
+            }
+            match &arg_exprs[index] {
+                Expr::Ident(var_name) => {
+                    let Some(&(slot, stored_ty)) = vars.get(var_name) else {
+                        return Err(CompileError::Generic(format!(
+                            "borrowed argument '{}' must refer to a local variable",
+                            var_name
+                        )));
+                    };
+                    let list_is_already_indirect = matches!(
+                        (&param.ty, stored_ty),
+                        (Type::Name(type_name, _), BasicTypeEnum::PointerType(_))
+                            if type_name == "List"
+                    );
+                    if list_is_already_indirect {
+                        args[index] =
+                            self.build_load(stored_ty, slot, &format!("{}_borrow_ptr", var_name))?;
+                    } else {
+                        args[index] = BasicValueEnum::PointerValue(slot);
+                    }
+                }
+                Expr::Field(object, field_name) => {
+                    let field_slot = self.compile_field_gep(object, field_name, vars)?;
+                    args[index] = BasicValueEnum::PointerValue(field_slot);
+                }
+                _ => {
+                    let target_ty = self.llvm_type_for(&param.ty).ok_or_else(|| {
+                        CompileError::Generic(format!(
+                            "no LLVM type for borrowed argument {}",
+                            index + 1
+                        ))
+                    })?;
+                    // Rvalues have no caller storage. Materialize a temporary
+                    // so `view 5` and `mutate 7` remain ergonomic; mutations to
+                    // a temporary are intentionally observable only through the
+                    // function's return value.
+                    if matches!(args[index], BasicValueEnum::PointerValue(_))
+                        && matches!(target_ty, BasicTypeEnum::StructType(_))
+                    {
+                        // Aggregate literals such as List already evaluate to
+                        // a pointer to their authoritative temporary storage.
+                    } else {
+                        let slot = self.build_alloca(target_ty, "borrowed_temp")?;
+                        let value = self.adjust_int_val(args[index], target_ty)?;
+                        self.build_store(slot, value)?;
+                        args[index] = BasicValueEnum::PointerValue(slot);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Convert compiled arguments to the declared parameter types of a user-defined
     /// function. This mirrors the interpreter's implicit numeric coercion, so
     /// calls like `power(2, 10)` (where `power` expects `f64`) pass `2.0` and
@@ -1212,6 +1284,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, param) in fdef.params.iter().enumerate() {
             if i >= args.len() {
                 break;
+            }
+            if param.borrow.is_some() {
+                continue;
             }
             if let Some(target) = self.llvm_type_for(&param.ty) {
                 args[i] = self.adjust_int_val(args[i], target)?;

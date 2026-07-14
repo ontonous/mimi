@@ -455,7 +455,7 @@ impl<'a> Interpreter<'a> {
             "::1",
             "metadata.google.internal",
         ];
-        if blocked_hosts.iter().any(|b| host == *b) {
+        if blocked_hosts.contains(&host) {
             return Err(InterpError::new(
                 "http_get/http_post: SSRF protection — loopback addresses are blocked",
             ));

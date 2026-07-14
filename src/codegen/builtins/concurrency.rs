@@ -805,26 +805,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len = self.load_list_len(list_ptr)?;
         let data_i64 = self.load_list_data_i64(list_ptr)?;
 
-        // handles: i8** = malloc(len * 8)
+        // handles: i8** = malloc(len * 8)  (B4: NULL-checked malloc)
         let bytes = self
             .builder
             .build_int_mul(len, i64_ty.const_int(8, false), "handles_bytes")
             .map_err(|e| format!("mul: {}", e))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or("malloc not declared")?;
-        let handles_raw = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(bytes)],
-                "handles_malloc",
-            )
-            .map_err(|e| format!("malloc: {}", e))?;
-        let handles_arr = call_try_basic_value(&handles_raw)
-            .ok_or("malloc void")?
-            .into_pointer_value();
+        let handles_arr = self.malloc_or_abort(bytes, "handles_malloc")?;
 
         let function = self
             .builder

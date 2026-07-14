@@ -830,13 +830,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
             _ => BasicMetadataTypeEnum::IntType(i64_ty),
         };
-        let elem_meta_for_store = match &elem_for_call {
-            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
-            BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
-            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
-            BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
-            _ => BasicMetadataValueEnum::IntValue(elem_i64_int),
-        };
         // Call the function: fn(elem) or fn(env_ptr, elem)
         let result = match &fn_ref {
             FnRef::Named(fn_llvm) => {

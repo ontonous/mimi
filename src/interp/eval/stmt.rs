@@ -848,11 +848,11 @@ impl<'a> Interpreter<'a> {
                         let mut interp = Interpreter::new(&file);
                         let result = interp.eval_expr(&expr);
                         let checked = match &result {
-                            Ok(v) if crate::interp::value::contains_local_shared(v) => Err(
-                                InterpError::new(
+                            Ok(v) if crate::interp::value::contains_local_shared(v) => {
+                                Err(InterpError::new(
                                     "parasteps: local_shared values cannot cross thread boundary",
-                                ),
-                            ),
+                                ))
+                            }
                             other => (*other).clone(),
                         };
                         let _ = tx.send(checked);
