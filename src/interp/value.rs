@@ -1035,7 +1035,28 @@ impl std::fmt::Display for Value {
                 write!(f, ")")
             }
             Value::Record(type_name, fields) => {
-                let name = type_name.as_deref().unwrap_or("Record");
+                // Untyped records (JSON/Map) print as JSON objects for dual
+                // with codegen Map handles (mimi_map_to_json_i64).
+                if type_name.is_none() {
+                    write!(f, "{{")?;
+                    let mut keys: Vec<_> = fields.keys().collect();
+                    keys.sort();
+                    for (i, k) in keys.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ",")?;
+                        }
+                        write!(f, "\"{}\":", k)?;
+                        match &fields[*k] {
+                            Value::Int(n) => write!(f, "{}", n)?,
+                            Value::String(s) => write!(f, "\"{}\"", s)?,
+                            Value::Bool(b) => write!(f, "{}", b)?,
+                            Value::Float(x) => write!(f, "{}", x)?,
+                            other => write!(f, "{}", other)?,
+                        }
+                    }
+                    return write!(f, "}}");
+                }
+                let name = type_name.as_deref().unwrap();
                 if fields.is_empty() {
                     write!(f, "{} {{}}", name)
                 } else {

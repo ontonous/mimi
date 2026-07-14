@@ -233,6 +233,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string()))
             }
             BasicMetadataValueEnum::IntValue(iv) => {
+                // Map/Set opaque handles: serialize via runtime JSON helpers.
+                if arg_type == "Map" || arg_type.starts_with("Map<") {
+                    let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[BasicMetadataValueEnum::IntValue(*iv)],
+                            "print_map_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_map_to_json_i64 void")?
+                        .into_pointer_value();
+                    return Ok((
+                        BasicMetadataValueEnum::PointerValue(raw),
+                        "%s".to_string(),
+                    ));
+                }
+                if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
+                    let func = self.get_runtime_fn("mimi_set_to_json_i64")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[BasicMetadataValueEnum::IntValue(*iv)],
+                            "print_set_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_set_to_json_i64 void")?
+                        .into_pointer_value();
+                    return Ok((
+                        BasicMetadataValueEnum::PointerValue(raw),
+                        "%s".to_string(),
+                    ));
+                }
                 // A1: Ensure integer is i64 for printf("%ld").
                 // i1 bool: print "true"/"false" to match interpreter.
                 let bw = iv.get_type().get_bit_width();
