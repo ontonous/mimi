@@ -1,5 +1,5 @@
 use super::super::*;
-use super::helpers::{compute_arg_free_mask, FfiGuard};
+use super::helpers::{compute_arg_free_mask, compute_arg_kinds, FfiGuard};
 use crate::ast::*;
 use crate::ffi::{callback_table_register, callback_table_remove, Errno};
 use libffi::low::{self as ffi_low};
@@ -19,9 +19,10 @@ unsafe impl Sync for SendFilePtr {}
 
 // F8: Thread-local context for synchronous callback invocation.
 // Set before each FFI call that involves callbacks, cleared after.
-// Maps callback_id -> (Mimi closure, ret_is_float, arg_free_mask).
+// Maps callback_id -> (Mimi closure, ret_is_float, arg_free_mask, arg_kinds).
 // arg_free_mask[i] = true means callback arg i is a C-allocated string
 // that Mimi takes ownership of and must free after the callback returns.
+// arg_kinds[i] selects how to decode the raw C argument (IP-H4).
 // SAFETY: The interpreter pointer is only valid during the synchronous
 // FFI call on the same thread. The closure value is cloned from the
 // interpreter's environment and lives for the duration of the call.
@@ -32,10 +33,19 @@ thread_local! {
     });
 }
 
+/// How to decode a C callback argument from the raw void* slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::interp) enum CallbackArgKind {
+    Int,
+    Float,
+    /// C string pointer (`*const c_char`), free if free_mask says so.
+    CString,
+}
+
 pub(in crate::interp) struct FfiCallbackCtx {
     pub(in crate::interp) interp: *mut Interpreter<'static>,
-    // (closure, ret_is_float, arg_free_mask: Vec<bool>)
-    pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>)>,
+    // (closure, ret_is_float, arg_free_mask, arg_kinds)
+    pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>)>,
 }
 
 use std::sync::Mutex;
@@ -52,12 +62,13 @@ use std::sync::Mutex;
 /// deregister waits for count == 0 before removing the entry.
 #[allow(clippy::type_complexity)]
 static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<
-    Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>>,
+    Mutex<HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>, Arc<AtomicUsize>)>>,
 > = std::sync::OnceLock::new();
 
 #[allow(clippy::type_complexity)]
 fn global_callback_store(
-) -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Arc<AtomicUsize>)>> {
+) -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>, Arc<AtomicUsize>)>>
+{
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -149,7 +160,7 @@ pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
         let mut store = global_callback_store()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some((_, _, _, count)) = store.get(&callback_id) {
+        if let Some((_, _, _, _, count)) = store.get(&callback_id) {
             let cnt = Arc::clone(count);
             // Remove entry first so new calls won't find it and increment count
             store.remove(&callback_id);
@@ -228,19 +239,25 @@ unsafe fn callback_trampoline_inner(
 
     // Look up closure + active guard (bound for RAII Drop semantics)
     #[allow(unused_variables)]
-    let (closure, ret_is_float, arg_free_mask, active_guard) = match entry {
-        Some((closure, ret_is_float, arg_free_mask)) => {
+    let (closure, ret_is_float, arg_free_mask, arg_kinds, active_guard) = match entry {
+        Some((closure, ret_is_float, arg_free_mask, arg_kinds)) => {
             // TLS entry — use no-op active guard (global store count not affected)
-            (closure, ret_is_float, arg_free_mask, ActiveCountGuard(None))
+            (
+                closure,
+                ret_is_float,
+                arg_free_mask,
+                arg_kinds,
+                ActiveCountGuard(None),
+            )
         }
         None => {
             // Global store entry — increment and track the count
-            let (closure, ret_is_float, arg_free_mask, cnt) = {
+            let (closure, ret_is_float, arg_free_mask, arg_kinds, cnt) = {
                 let store = global_callback_store()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 match store.get(&callback_id).cloned() {
-                    Some((c, r, a, cnt)) => (c, r, a, cnt),
+                    Some((c, r, a, k, cnt)) => (c, r, a, k, cnt),
                     None => {
                         *result = 0;
                         return;
@@ -251,13 +268,14 @@ unsafe fn callback_trampoline_inner(
                 closure,
                 ret_is_float,
                 arg_free_mask,
+                arg_kinds,
                 ActiveCountGuard::new(&cnt),
             )
         }
     };
 
     // active_guard is live here — if we return early it will be dropped (decremented).
-    // Extract C arguments from raw void pointers.
+    // Extract C arguments from raw void pointers using declared kinds (IP-H4).
     let nargs = cif.nargs as usize;
     let mut mimi_args: Vec<Value> = Vec::with_capacity(nargs);
     for i in 0..nargs {
@@ -266,9 +284,31 @@ unsafe fn callback_trampoline_inner(
             mimi_args.push(Value::Int(0));
             continue;
         }
-        // For V1, treat all args as i64. Float is handled via to_bits.
-        let val = *(arg_ptr as *const i64);
-        mimi_args.push(Value::Int(val));
+        let kind = arg_kinds.get(i).copied().unwrap_or(CallbackArgKind::Int);
+        let val = match kind {
+            CallbackArgKind::Float => {
+                // ABI: f64 passed by value in the slot (or as bits via libffi).
+                let bits = *(arg_ptr as *const i64);
+                Value::Float(f64::from_bits(bits as u64))
+            }
+            CallbackArgKind::CString => {
+                let cptr = *(arg_ptr as *const *const std::ffi::c_char);
+                if cptr.is_null() {
+                    Value::String(String::new())
+                } else {
+                    // SAFETY: free_mask decides ownership; for borrow, C keeps it.
+                    let s = unsafe { std::ffi::CStr::from_ptr(cptr) }
+                        .to_string_lossy()
+                        .into_owned();
+                    Value::String(s)
+                }
+            }
+            CallbackArgKind::Int => {
+                let n = *(arg_ptr as *const i64);
+                Value::Int(n)
+            }
+        };
+        mimi_args.push(val);
     }
 
     // Call the Mimi closure via interpreter
@@ -460,14 +500,32 @@ impl<'a> Interpreter<'a> {
                 // for synchronous callbacks) and the global store (fallback for async/
                 // off-thread callbacks where TLS has been cleared).
                 let arg_free_mask = compute_arg_free_mask(param_types);
+                let arg_kinds = compute_arg_kinds(param_types);
                 // FFI-10: Per-callback active-call counter for deregister race prevention.
                 let active_count = Arc::new(AtomicUsize::new(0));
                 FFI_CALLBACK_CTX.with(|c| {
                     let mut ctx = c.borrow_mut();
-                    ctx.entries.insert(cb_id, (closure.clone(), ret_is_float, arg_free_mask.clone()));
+                    ctx.entries.insert(
+                        cb_id,
+                        (
+                            closure.clone(),
+                            ret_is_float,
+                            arg_free_mask.clone(),
+                            arg_kinds.clone(),
+                        ),
+                    );
                 });
                 if let Ok(mut store) = global_callback_store().lock() {
-                    store.insert(cb_id, (closure, ret_is_float, arg_free_mask, Arc::clone(&active_count)));
+                    store.insert(
+                        cb_id,
+                        (
+                            closure,
+                            ret_is_float,
+                            arg_free_mask,
+                            arg_kinds,
+                            Arc::clone(&active_count),
+                        ),
+                    );
                 }
 
                 // Create a libffi Closure that generates a C-compatible function pointer.
