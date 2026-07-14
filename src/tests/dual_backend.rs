@@ -6921,6 +6921,43 @@ fn dual_result_map_println() {
     );
 }
 
+/// Nested Option of List println.
+#[test]
+fn dual_nested_option_list_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(Some([1, 2]))
+            println(a)
+            0
+        }
+        "#,
+        "Some(Some([1, 2]))"
+    );
+}
+
+/// Result of Set println.
+#[test]
+fn dual_result_set_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[3,1]")
+            let a: Result<Set<i32>, i32> = Ok(s)
+            println(a)
+            0
+        }
+        "#,
+        "Ok(Set{1, 3})"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

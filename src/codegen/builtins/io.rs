@@ -1970,7 +1970,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                     )
                 {
-                    let nested = self.emit_option_to_string(psv, None, "Option")?;
+                    // Strip one Option layer: Option<Option<List<i32>>> → Option<List<i32>>
+                    let inner_ty = arg_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or("Option");
+                    let nested = self.emit_option_to_string(psv, None, inner_ty)?;
                     OptPay::StrPtr(nested)
                 } else {
                     // string {ptr,len}
