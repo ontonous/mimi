@@ -171,18 +171,40 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::IntValue(iv) => {
                 // A1: Ensure integer is i64 for printf("%ld").
-                // i32 values must be sign-extended to preserve negatives.
+                // i1 bool: print "true"/"false" to match interpreter.
                 let bw = iv.get_type().get_bit_width();
+                if bw == 1 {
+                    let true_g = self
+                        .builder
+                        .build_global_string_ptr("true", "print_bool_true")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let false_g = self
+                        .builder
+                        .build_global_string_ptr("false", "print_bool_false")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let zero = iv.get_type().const_int(0, false);
+                    let is_true = self
+                        .builder
+                        .build_int_compare(IntPredicate::NE, *iv, zero, "print_bool")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let selected = self
+                        .builder
+                        .build_select(
+                            is_true,
+                            true_g.as_pointer_value(),
+                            false_g.as_pointer_value(),
+                            "print_bool_str",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    return Ok((
+                        BasicMetadataValueEnum::PointerValue(selected.into_pointer_value()),
+                        "%s".to_string(),
+                    ));
+                }
                 let ext_iv = if bw < 64 {
-                    if bw == 1 {
-                        self.builder
-                            .build_int_z_extend(*iv, i64_ty, "print_zext")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                    } else {
-                        self.builder
-                            .build_int_s_extend(*iv, i64_ty, "print_sext")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                    }
+                    self.builder
+                        .build_int_s_extend(*iv, i64_ty, "print_sext")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
                 } else {
                     *iv
                 };

@@ -6620,6 +6620,29 @@ fn dual_tuple_and_map_get_println() {
     );
 }
 
+/// map_set / map_get / has_key after from_json Map.
+#[test]
+fn dual_map_set_get_has_key() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let m2 = map_set(m, "b", 2)
+            println(map_size(m2))
+            println(map_get(m2, "b"))
+            println(has_key(m2, "a"))
+            println(has_key(m2, "z"))
+            println(map_get(m2, "z"))
+            0
+        }
+        "#,
+        "2\n(true, 2)\ntrue\nfalse\n(false, 0)"
+    );
+}
+
 /// from_json::<Result<T,E>> wraps a JSON value as Ok(T).
 #[test]
 fn dual_from_json_result_ok() {
@@ -6794,7 +6817,7 @@ fn dual_from_json_all_scalar_fields() {
             0
         }
     "#,
-        "12345678901\n1"
+        "12345678901\ntrue"
     );
 }
 
@@ -6833,7 +6856,7 @@ fn dual_set_contains() {
             0
         }
     "#,
-        "1\n0"
+        "true\nfalse"
     );
 }
 
@@ -6873,7 +6896,7 @@ fn dual_set_insert_remove() {
             0
         }
     "#,
-        "4\n1\n3\n0\n1"
+        "4\ntrue\n3\nfalse\ntrue"
     );
 }
 
@@ -7002,7 +7025,7 @@ fn dual_file_stat_file() {
             0
         }
         "#,
-        "1\n0\n11"
+        "true\nfalse\n11"
     );
 }
 
@@ -7021,7 +7044,7 @@ fn dual_file_stat_dir() {
             0
         }
         "#,
-        "0\n1"
+        "false\ntrue"
     );
 }
 
@@ -7113,7 +7136,7 @@ fn dual_write_file_bytes() {
             0
         }
         "#,
-        "1"
+        "true"
     );
 }
 
