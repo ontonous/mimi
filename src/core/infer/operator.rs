@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::core::borrow::BorrowState;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
-    common_numeric_type, fmt_type, is_bool, is_int, is_numeric, is_string, same_type,
+    common_numeric_type, fmt_type, is_bool, is_int, is_numeric, is_string,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -360,7 +360,10 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::EqCmp | BinOp::NeCmp => {
-                let compatible = same_type(&lt, &rt) || common_numeric_type(&lt, &rt).is_some();
+                // IF-H1: try unify first so TypeVars resolve; fall back to
+                // numeric common type for i32/i64 mixed comparisons.
+                let compatible = self.unification.unify(&lt, &rt).is_ok()
+                    || common_numeric_type(&lt, &rt).is_some();
                 if !compatible {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
@@ -389,7 +392,8 @@ impl<'a> Checker<'a> {
                 Type::Name("bool".into(), vec![])
             }
             BinOp::Range => {
-                if !same_type(&lt, &rt) || !is_int(&lt) {
+                let range_ok = self.unification.unify(&lt, &rt).is_ok() && is_int(&lt);
+                if !range_ok {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
                         format!(

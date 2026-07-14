@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
-use crate::core::helpers::{fmt_type, same_type};
+use crate::core::helpers::fmt_type;
 use std::collections::HashMap;
 
 /// Replace type parameters in `ty` according to `subst`.
@@ -164,7 +164,8 @@ impl<'a> Checker<'a> {
                                         ),
                                     );
                                 }
-                            } else if !same_type(expected_ty, &actual_ty) {
+                            } else if self.unification.unify(expected_ty, &actual_ty).is_err() {
+                                // IF-H2: unify concrete record fields too (TypeVar resolution).
                                 self.emit_code(
                                     crate::diagnostic::codes::E0247,
                                     format!(
@@ -230,7 +231,8 @@ impl<'a> Checker<'a> {
             let t = self.infer_expr(e, scopes);
             if i == 0 {
                 elem_ty = t;
-            } else if !same_type(&elem_ty, &t) {
+            } else if self.unification.unify(&elem_ty, &t).is_err() {
+                // IF-H3: unify list elements so TypeVars resolve.
                 self.emit_code(
                     crate::diagnostic::codes::E0242,
                     format!(
@@ -240,6 +242,8 @@ impl<'a> Checker<'a> {
                         fmt_type(&elem_ty)
                     ),
                 );
+            } else {
+                elem_ty = self.unification.resolve(&elem_ty);
             }
         }
         Type::Name("List".into(), vec![elem_ty])
@@ -276,7 +280,7 @@ impl<'a> Checker<'a> {
             let t = self.infer_expr(e, scopes);
             if i == 0 {
                 elem_ty = t;
-            } else if !same_type(&elem_ty, &t) {
+            } else if self.unification.unify(&elem_ty, &t).is_err() {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,
                     format!(
@@ -286,6 +290,8 @@ impl<'a> Checker<'a> {
                         fmt_type(&elem_ty)
                     ),
                 );
+            } else {
+                elem_ty = self.unification.resolve(&elem_ty);
             }
         }
         Type::Name("Set".into(), vec![elem_ty])

@@ -107,6 +107,17 @@ impl<'a> Interpreter<'a> {
         // SAFETY: fork() is serialized by FORK_LOCK. The child path uses only
         // async-signal-safe functions and _exit(0) (see function-level docs).
         let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            // IP residual: fork failure must close both pipe ends.
+            unsafe {
+                libc::close(pipe_fds[0]);
+                libc::close(pipe_fds[1]);
+            }
+            return Err(format!(
+                "FFI safety: fork failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
         if pid == 0 {
             // SAFETY: pipe_fds[0] is a valid pipe fd; closing it in the child is
             // required before writing to pipe_fds[1].
@@ -323,6 +334,17 @@ impl<'a> Interpreter<'a> {
         // SAFETY: fork() is serialized by FORK_LOCK. The child uses only
         // async-signal-safe functions before _exit(0) (see function-level docs).
         let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            // IP residual: fork failure must close both pipe ends.
+            unsafe {
+                libc::close(pipe_fds[0]);
+                libc::close(pipe_fds[1]);
+            }
+            return Err(format!(
+                "FFI safety: fork failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
         if pid == 0 {
             // SAFETY: pipe_fds[0] is the read end in the child and is closed before writing.
             unsafe {

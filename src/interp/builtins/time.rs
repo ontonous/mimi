@@ -30,6 +30,12 @@ impl<'a> Interpreter<'a> {
         }
         match &args[0] {
             Value::Int(ms) => {
+                // IP-H2: negative ms must not wrap to ~5.84e11 years via `as u64`.
+                if *ms < 0 {
+                    return Err(InterpError::new(
+                        "sleep expects a non-negative integer (milliseconds)",
+                    ));
+                }
                 std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
                 Ok(Value::Unit)
             }

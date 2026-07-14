@@ -917,7 +917,8 @@ impl<'a> Checker<'a> {
                     // Check field initialization if present
                     if let Some(init) = &field.init {
                         let init_ty = self.infer_expr(init, &mut vec![HashMap::new()]);
-                        if !same_type(&field_ty, &init_ty) {
+                        // CK-H3: unify so TypeVars / Option payloads resolve.
+                        if self.unification.unify(&field_ty, &init_ty).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0209,
                                 format!(
@@ -1071,7 +1072,8 @@ impl<'a> Checker<'a> {
                 let value_ty = self.infer_expr(value, &mut scopes);
                 let const_ty = if let Some(declared_ty) = ty {
                     let resolved = self.resolve_type(declared_ty);
-                    if !same_type(&resolved, &value_ty) {
+                    // CK-H10: unify (not same_type) for TypeVar resolution.
+                    if self.unification.unify(&resolved, &value_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             format!(
@@ -1082,7 +1084,7 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
-                    resolved
+                    self.unification.resolve(&resolved)
                 } else {
                     value_ty
                 };

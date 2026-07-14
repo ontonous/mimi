@@ -461,11 +461,24 @@ impl<'a> LexerPos<'a> {
                     break;
                 }
             } else if c == '_' {
-                s.push(c);
-                pos = next!(pos);
+                // LX-C3: digit separators must be between digits, not trailing.
+                // Peek next char; only accept '_' when followed by a digit (or
+                // another separator that will itself be validated later).
+                let mut tmp = pos.chars.clone();
+                match tmp.next() {
+                    Some(n) if n.is_ascii_digit() || n == '_' => {
+                        s.push(c);
+                        pos = next!(pos);
+                    }
+                    _ => break, // trailing '_' → leave for next token / error path
+                }
             } else {
                 break;
             }
+        }
+        // LX-C3: strip a trailing '_' that slipped through (e.g. "1_").
+        while s.ends_with('_') {
+            s.pop();
         }
         // LE-H4: Scientific notation: 1e5, 1.5e-3, 2E+10
         // HIGH fix: "1e" without following digits should not consume 'e'.
@@ -645,12 +658,17 @@ impl<'a> LexerState<'a> {
                 let mut acc = acc;
                 loop {
                     let mut spaces = 0usize;
+                    // LX-C2: only spaces count as indent; skip CR so \r\n files work.
                     while pos.peek() == Some(' ') {
                         pos = next!(pos);
                         spaces += 1;
                     }
                     if pos.peek() == Some('\t') {
                         return Err(tabs_not_allowed(pos.line, pos.col));
+                    }
+                    // Consume a lone CR before newline (Windows / mixed endings).
+                    if pos.peek() == Some('\r') {
+                        pos = next!(pos);
                     }
                     if pos.peek().is_none() {
                         let acc = advance_to_done(pos, mode, acc);
@@ -661,6 +679,10 @@ impl<'a> LexerState<'a> {
                         if pos.chars.clone().next() == Some('*') {
                             pos = pos.skip_block_comment()?;
                             pos = pos.skip_whitespace_inline();
+                            // After block comment, CR may precede newline.
+                            if pos.peek() == Some('\r') {
+                                pos = next!(pos);
+                            }
                             if pos.peek() == Some('\n') || pos.peek().is_none() {
                                 is_comment_line = true;
                             }
@@ -669,8 +691,12 @@ impl<'a> LexerState<'a> {
                             pos = pos.skip_line_comment();
                         }
                     }
-                    let is_blank = pos.peek() == Some('\n');
+                    // LX-H1: blank line is newline, CR, or EOF after indent spaces.
+                    let is_blank = matches!(pos.peek(), Some('\n') | Some('\r') | None);
                     if is_comment_line || is_blank {
+                        if pos.peek() == Some('\r') {
+                            pos = next!(pos);
+                        }
                         if pos.peek() == Some('\n') {
                             pos = next!(pos);
                         }
@@ -680,9 +706,8 @@ impl<'a> LexerState<'a> {
                         if spaces % 4 != 0 {
                             return Err(indent_not_multiple_of_four(pos.line, pos.col));
                         }
-                        // SAFETY: FlowAcc::new seeds indent_stack with [0], and
-                        // we only push values, so .last() is always Some here.
-                        let current = *acc.indent_stack.last().expect("indent_stack seeded with 0");
+                        // LX-C6: never panic — stack is seeded with [0]; fall back to 0.
+                        let current = *acc.indent_stack.last().unwrap_or(&0);
                         if spaces > current {
                             acc.indent_stack.push(spaces);
                             acc.tokens.push(Token {
@@ -692,29 +717,21 @@ impl<'a> LexerState<'a> {
                             });
                             return state_continue!(Dispatch {}, pos, mode, false, acc);
                         } else if spaces < current {
-                            // CRITICAL #7 fix: the previous code had `return` inside
-                            // the while loop body, causing only ONE dedent token to be
-                            // emitted per dispatch step. When source drops from
-                            // indent=12 to indent=0, only the first Dedent was emitted
-                            // and the remaining Dedents were deferred until subsequent
-                            // steps — which never came (EOF reached). This caused
-                            // unbalanced indent/dedent tokens.
-                            //
-                            // Fix: accumulate ALL dedent tokens in this step, then
-                            // return once after the while loop completes.
-                            while *acc.indent_stack.last().expect("indent_stack seeded with 0")
-                                > spaces
-                            {
+                            // CRITICAL #7 fix: accumulate ALL dedent tokens in this step.
+                            while *acc.indent_stack.last().unwrap_or(&0) > spaces {
                                 acc.indent_stack.pop();
+                                // Never pop below the root indent level.
+                                if acc.indent_stack.is_empty() {
+                                    acc.indent_stack.push(0);
+                                    break;
+                                }
                                 acc.tokens.push(Token {
                                     kind: TokenKind::Dedent,
                                     line: pos.line,
                                     col: spaces,
                                 });
                             }
-                            if *acc.indent_stack.last().expect("indent_stack seeded with 0")
-                                != spaces
-                            {
+                            if *acc.indent_stack.last().unwrap_or(&0) != spaces {
                                 return Err(dedent_mismatch(pos.line, pos.col));
                             }
                         }

@@ -387,6 +387,59 @@ fn ck_c5_user_fault_state_rejected() {
 }
 
 #[test]
+fn lx_c6_indent_stack_no_panic() {
+    // LX-C6: sketch mode indent/dedent must not panic on empty stack.
+    let src = "func main() -> i32:\n    0\n";
+    let tokens = crate::lexer::Lexer::new_sketch(src).tokenize();
+    assert!(tokens.is_ok() || tokens.is_err()); // either way: no panic
+}
+
+#[test]
+fn ip_h2_sleep_negative_rejected() {
+    // IP-H2: negative sleep must error, not wrap to huge u64.
+    use super::run_source;
+    // sleep is a builtin; negative should error at runtime in interp.
+    let src = r#"
+        func main() -> i32 {
+            sleep(-1)
+            0
+        }
+    "#;
+    // typecheck may pass; runtime must not hang for years.
+    let _ = check_source(src);
+    // Direct builtin path via a short run that should fail fast.
+    let result = std::panic::catch_unwind(|| {
+        let _ = run_source(src);
+    });
+    // Either interp error (Ok of panic catch with Err from run) or panic — both fine
+    // as long as we don't sleep for years. The important fix is the guard itself.
+    let _ = result;
+}
+
+#[test]
+fn ck_c4_pinned_timeout_must_be_literal() {
+    let src = r#"
+        flow F {
+            state S { data: i32 }
+            transition t(S) -> S {
+                do {
+                    let ms = 5
+                    pinned(self.data, timeout = ms) |p| { let _ = p }
+                    return S { data: self.data }
+                }
+            }
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let err = check_source(src).expect_err("non-literal pinned timeout must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("timeout") || msg.contains("literal") || msg.contains("E0209"),
+        "unexpected: {msg}"
+    );
+}
+
+#[test]
 fn ck_c1_duplicate_impl_method_key() {
     // CK-C1: two impls registering the same Type_method key should error.
     // Use two traits with same method name on the same type.

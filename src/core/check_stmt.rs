@@ -995,7 +995,8 @@ impl<'a> Checker<'a> {
                 };
                 if let Some(declared) = ty {
                     let declared = self.resolve_type(declared);
-                    if !same_type(&declared, &final_ty) {
+                    // CK-H1 family: unify so TypeVars resolve (not structural same_type).
+                    if self.unification.unify(&declared, &final_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0258,
                             format!(
@@ -1160,7 +1161,8 @@ impl<'a> Checker<'a> {
                         let inner_ty = self.infer_expr(inner, scopes);
                         match &inner_ty {
                             Type::RefMut(_, inner_inner) => {
-                                if !same_type(&value_ty, inner_inner) {
+                                // CK-H1: unify (not same_type) for TypeVar resolution.
+                                if self.unification.unify(&value_ty, inner_inner).is_err() {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0233,
                                         format!(
@@ -1172,7 +1174,8 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             Type::Shared(inner_inner) | Type::LocalShared(inner_inner) => {
-                                if !same_type(&value_ty, inner_inner) {
+                                // CK-H1: unify (not same_type) for TypeVar resolution.
+                                if self.unification.unify(&value_ty, inner_inner).is_err() {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0233,
                                         format!(
@@ -1418,12 +1421,26 @@ impl<'a> Checker<'a> {
                 // Validate timeout is an integer if present
                 if let Some(timeout_expr) = timeout {
                     let t_ty = self.infer_expr(timeout_expr, scopes);
-                    if !same_type(&t_ty, &Type::Name("i32".into(), vec![]))
-                        && !same_type(&t_ty, &Type::Name("i64".into(), vec![]))
-                    {
+                    let is_i32 = self
+                        .unification
+                        .unify(&t_ty, &Type::Name("i32".into(), vec![]))
+                        .is_ok();
+                    let is_i64 = self
+                        .unification
+                        .unify(&t_ty, &Type::Name("i64".into(), vec![]))
+                        .is_ok();
+                    if !is_i32 && !is_i64 {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             "pinned timeout must be an integer".to_string(),
+                        );
+                    }
+                    // CK-C4: require a compile-time integer literal so codegen
+                    // can materialize a constant timeout (no runtime expression).
+                    if !matches!(timeout_expr, Expr::Literal(Lit::Int(_))) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0209,
+                            "pinned timeout must be a compile-time integer literal".to_string(),
                         );
                     }
                 }
