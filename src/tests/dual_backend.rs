@@ -7118,6 +7118,25 @@ fn dual_hetero_tuple_println() {
     );
 }
 
+/// List of Result of Map println.
+#[test]
+fn dual_list_result_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let xs: List<Result<Map<string, i32>, i32>> = [Ok(m), Err(2)]
+            println(xs)
+            0
+        }
+        "#,
+        "[Ok({\"a\":1}), Err(2)]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
