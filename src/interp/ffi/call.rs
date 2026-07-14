@@ -17,6 +17,40 @@ fn ensure_fork_lock() -> &'static std::sync::Mutex<()> {
     FORK_LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// IP-C1 soft mitigation: detect multi-threaded process before `fork()`.
+/// `fork()` in a multi-threaded Rust process is UB (locked mutexes in other
+/// threads stay locked in the child). We cannot fully replace fork with
+/// posix_spawn here (need in-process libffi call + pipe result), so warn once.
+fn warn_if_multithreaded_fork() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(n) = line.strip_prefix("Threads:") {
+                    if let Ok(count) = n.trim().parse::<usize>() {
+                        if count > 1
+                            && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                        {
+                            eprintln!(
+                                "[mimi] WARNING: FFI fork isolation in a multi-threaded process \
+                                 ({} threads). fork() after threads is undefined behavior; \
+                                 prefer single-threaded FFI crash isolation or avoid concurrent \
+                                 FFI+spawn (IP-C1).",
+                                count
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // ===================== FFI Call Methods =====================
 
 impl<'a> Interpreter<'a> {
@@ -98,6 +132,7 @@ impl<'a> Interpreter<'a> {
         ret_buf: &mut [u8],
     ) -> Result<(), String> {
         let _guard = ensure_fork_lock().lock().unwrap_or_else(|e| e.into_inner());
+        warn_if_multithreaded_fork();
         let mut pipe_fds: [std::ffi::c_int; 2] = [0; 2];
         // SAFETY: pipe_fds is a valid two-element out-array.
         let pipe_ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
@@ -323,6 +358,7 @@ impl<'a> Interpreter<'a> {
         // Acquire fork lock to serialize fork() with other FFI operations.
         // The lock is held across fork and released in parent/child handlers.
         let _guard = ensure_fork_lock().lock().unwrap_or_else(|e| e.into_inner());
+        warn_if_multithreaded_fork();
 
         let mut pipe_fds: [std::ffi::c_int; 2] = [0; 2];
         // SAFETY: pipe_fds is a valid two-element out-array.
