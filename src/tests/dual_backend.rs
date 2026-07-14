@@ -7401,6 +7401,25 @@ fn dual_optional_chain_field() {
     );
 }
 
+/// to_json List of Map dual.
+#[test]
+fn dual_to_json_list_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let xs = [m]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"a\":1}]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
