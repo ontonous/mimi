@@ -459,6 +459,31 @@ fn ck_c4_pinned_timeout_must_be_literal() {
     );
 }
 
+/// H3: actor method arguments must be type-checked (no silent skip).
+#[test]
+fn h3_actor_method_arg_typecheck() {
+    let src = r#"
+        actor Counter {
+            n: i32
+            func add(x: i32) -> i32 {
+                self.n + x
+            }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn()
+            c.add("bad")
+            0
+        }
+    "#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.message.contains("expected i32") || d.message.contains("E0211")),
+        "expected actor method arg type error, got: {:?}",
+        errs
+    );
+}
+
 /// PA-H3: optional chain typechecks and evaluates on Option/Result records.
 #[test]
 fn pa_h3_optional_chain_typecheck_and_interp() {

@@ -295,6 +295,41 @@ impl<'a> Checker<'a> {
                 }
             }) {
                 if let Some(method) = actor_def.methods.iter().find(|m| m.name == *method_name) {
+                    // H3: check user-facing args (skip leading `self` if present).
+                    let method_params: Vec<Type> = method
+                        .params
+                        .iter()
+                        .filter(|p| p.name != "self")
+                        .map(|p| self.resolve_type(&p.ty))
+                        .collect();
+                    if args.len() != method_params.len() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0257,
+                            format!(
+                                "method '{}' of actor '{}' expects {} arguments, got {}",
+                                method_name,
+                                type_name,
+                                method_params.len(),
+                                args.len()
+                            ),
+                        );
+                    } else {
+                        for (i, (arg, param)) in args.iter().zip(method_params.iter()).enumerate() {
+                            let at = self.infer_expr(arg, scopes);
+                            if self.unification.unify_strict(&at, param).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0211,
+                                    format!(
+                                        "argument {} of method '{}' expected {}, found {}",
+                                        i + 1,
+                                        method_name,
+                                        fmt_type(param),
+                                        fmt_type(&at)
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     let ret = method
                         .ret
                         .as_ref()
