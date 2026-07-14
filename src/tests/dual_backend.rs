@@ -6660,6 +6660,26 @@ fn dual_result_println() {
     );
 }
 
+/// Result<i32,string> Err prints message on both backends.
+#[test]
+fn dual_result_string_err_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<i32, string> = Ok(1)
+            let b: Result<i32, string> = Err("fail")
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Ok(1)\nErr(fail)"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
