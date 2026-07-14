@@ -6790,6 +6790,44 @@ fn dual_list_enum_println() {
     );
 }
 
+/// Result of Option println.
+#[test]
+fn dual_result_option_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<Option<i32>, i32> = Ok(Some(5))
+            let b: Result<Option<i32>, i32> = Ok(None)
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Ok(Some(5))\nOk(None())"
+    );
+}
+
+/// Multi-key Map println sorted JSON.
+#[test]
+fn dual_map_multi_key_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"z\":3,\"a\":1}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":1,\"z\":3}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
