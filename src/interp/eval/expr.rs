@@ -1573,8 +1573,11 @@ impl<'a> Interpreter<'a> {
                                     } else {
                                         let (var_name, payload_val) = fields
                                             .drain()
+                                            // fields.len()!=1 already rejected above
                                             .next()
-                                            .expect("enum variant fields should non-empty");
+                                            .ok_or_else(|| {
+                                                InterpError::new("empty enum JSON object")
+                                            })?;
                                         let variant = variants
                                             .iter()
                                             .find(|v| v.name == var_name)

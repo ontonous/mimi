@@ -7453,7 +7453,9 @@ pub extern "C" fn mimi_actor_spawn(
     // channel + id. But we need the fields blob to be `Send`. Box<[u8]> is Send.
     let worker_fields: Box<[u8]> = fields_blob;
 
-    let dispatch = dispatch_fn.expect("dispatch_fn checked non-null at entry");
+    let Some(dispatch) = dispatch_fn else {
+        return std::ptr::null_mut();
+    };
     let worker_id = id;
     let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_faulted = faulted.clone();
@@ -7893,7 +7895,7 @@ pub extern "C" fn mimi_broadcast(
             let v = i64::from_le_bytes(
                 result_buf[0..8]
                     .try_into()
-                    .expect("result_buf[0..8] is always 8 bytes"),
+                    .unwrap_or([0u8; 8]),
             );
             results.push(v);
         } else {
