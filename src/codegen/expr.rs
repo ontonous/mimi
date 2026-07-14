@@ -858,7 +858,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     fa / fb
                                 }
                             }
-                            _ => unreachable!(),
+                            _ => return None,
                         };
                         Some(BasicValueEnum::FloatValue(
                             self.context.f64_type().const_float(v),
@@ -872,7 +872,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BinOp::Le => fa <= fb,
                             BinOp::Gt => fa > fb,
                             BinOp::Ge => fa >= fb,
-                            _ => unreachable!(),
+                            _ => return None,
                         };
                         Some(BasicValueEnum::IntValue(
                             self.context.bool_type().const_int(b as u64, false),

@@ -4880,7 +4880,7 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
         unsafe { cstr_to_string(name) }
     };
     CAP_TABLE.with(|table| {
-        let mut state = table.lock().expect("cap table lock poisoned");
+        let mut state = table.lock().unwrap_or_else(|e| e.into_inner());
         let id = state.next_id;
         state.next_id += 1;
         state.entries.push(CapEntry {
@@ -5094,7 +5094,7 @@ pub extern "C" fn mimi_executor_spawn(
     if future.is_null() {
         return;
     }
-    let mut queue = EXECUTOR_QUEUE.lock().expect("executor queue lock poisoned");
+    let mut queue = EXECUTOR_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     // Don't add duplicates
     if !queue.iter().any(|(_, f)| f.0 == future) {
         queue.push((poll_fn, SendPtr(future)));
@@ -5107,7 +5107,7 @@ pub extern "C" fn mimi_executor_spawn(
 pub extern "C" fn mimi_executor_run() {
     loop {
         let entry = {
-            let mut queue = EXECUTOR_QUEUE.lock().expect("executor queue lock poisoned");
+            let mut queue = EXECUTOR_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             if queue.is_empty() {
                 return;
             }
@@ -5154,7 +5154,7 @@ pub extern "C" fn mimi_cap_check(cap: i64, name: *const std::ffi::c_char) -> boo
         unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
     };
     CAP_TABLE.with(|table| {
-        let state = table.lock().expect("cap table lock poisoned");
+        let state = table.lock().unwrap_or_else(|e| e.into_inner());
         state
             .entries
             .iter()
@@ -5171,7 +5171,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
         unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
     };
     CAP_TABLE.with(|table| {
-        let mut state = table.lock().expect("cap table lock poisoned");
+        let mut state = table.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state
             .entries
             .iter_mut()
@@ -7466,7 +7466,7 @@ pub extern "C" fn mimi_actor_spawn(
     let mailbox_depth_limit: usize = 2048;
     let worker_limit = mailbox_depth_limit;
 
-    let handle = std::thread::Builder::new()
+    let thread_result = std::thread::Builder::new()
         .name(format!("mimi-actor-{}", id))
         .spawn(move || {
             // Set the thread-local so self-call detection works.
@@ -7528,8 +7528,14 @@ pub extern "C" fn mimi_actor_spawn(
                     size: result_size as u64,
                 });
             }
-        })
-        .expect("failed to spawn actor worker thread");
+        });
+    let handle = match thread_result {
+        Ok(h) => h,
+        Err(_) => {
+            // Thread spawn failed (resource limit) — return null actor handle.
+            return std::ptr::null_mut();
+        }
+    };
 
     let repr = Box::new(MimiActorRepr {
         id,
