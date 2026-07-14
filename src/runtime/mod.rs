@@ -1211,6 +1211,11 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
     if ptr.is_null() || len <= 0 {
         return 0;
     }
+    // RT-H9: cap length to prevent absurd allocations / OOB copy requests.
+    const MAX_STR_CLONE: i64 = 64 * 1024 * 1024; // 64 MiB
+    if len > MAX_STR_CLONE {
+        return 0;
+    }
     // MEM-C9 (deep audit): use checked_add to prevent integer overflow on len+1.
     let alloc_len = match (len as usize).checked_add(1) {
         Some(n) => n,
@@ -1220,6 +1225,8 @@ pub extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> Valu
     if buf.is_null() {
         return 0;
     }
+    // SAFETY: caller must ensure `ptr` points to at least `len` readable bytes.
+    // We trust the length ABI used by codegen (not CStr::from_ptr).
     unsafe {
         std::ptr::copy_nonoverlapping(ptr as *const u8, buf, len as usize);
         *buf.add(len as usize) = 0;
@@ -5842,8 +5849,11 @@ pub extern "C" fn mimi_set_env(
 
 // ─── Crypto operations ─────────────────────────────────────────
 
-/// SHA-256 hash — returns hex string (64 chars).
+/// SHA-256 hash of a NUL-terminated C string — returns hex string (64 chars).
 /// Pure Rust implementation, no external dependencies.
+///
+/// RT-H8 note: CStr stops at the first NUL. For binary data with embedded NULs,
+/// use `mimi_sha256_n(data, len)` instead.
 #[no_mangle]
 pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c_char {
     let input = if data.is_null() {
@@ -5852,6 +5862,26 @@ pub extern "C" fn mimi_sha256(data: *const std::ffi::c_char) -> *mut std::ffi::c
         // SAFETY: `data` was checked non-null above.
         unsafe { CStr::from_ptr(data) }.to_bytes()
     };
+    let hash = sha256_bytes(input);
+    let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    alloc_c_string(&hex)
+}
+
+/// SHA-256 of an explicit byte buffer (handles embedded NULs).
+/// Returns a heap hex string (caller frees with mimi_string_free).
+#[no_mangle]
+pub extern "C" fn mimi_sha256_n(data: *const u8, len: i64) -> *mut std::ffi::c_char {
+    if data.is_null() || len <= 0 {
+        let hash = sha256_bytes(b"");
+        let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+        return alloc_c_string(&hex);
+    }
+    const MAX: i64 = 64 * 1024 * 1024;
+    if len > MAX {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller provides `len` readable bytes at `data`.
+    let input = unsafe { std::slice::from_raw_parts(data, len as usize) };
     let hash = sha256_bytes(input);
     let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
     alloc_c_string(&hex)

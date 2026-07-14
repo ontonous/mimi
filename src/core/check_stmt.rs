@@ -1274,7 +1274,8 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(elem_ty) = list_elem_ty {
-                            if !same_type(&value_ty, &elem_ty) {
+                            // CK residual: unify so TypeVars resolve on index assign.
+                            if self.unification.unify(&value_ty, &elem_ty).is_err() {
                                 self.errors.push(
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0209,

@@ -1349,7 +1349,7 @@ fn register_crypto_fns<'ctx>(
     _ctx: &'ctx Context,
     i8_ptr: inkwell::types::PointerType<'ctx>,
     _i32: inkwell::types::IntType<'ctx>,
-    _i64: inkwell::types::IntType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
     _void: inkwell::types::VoidType<'ctx>,
 ) {
     // ========== Crypto runtime functions ==========
@@ -1357,6 +1357,18 @@ fn register_crypto_fns<'ctx>(
     module.add_function(
         "mimi_sha256",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_sha256_n(data: i8*, len: i64) -> i8* (hex; handles embedded NULs)
+    module.add_function(
+        "mimi_sha256_n",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
     // mimi_base64_encode(data: i8*) -> i8*

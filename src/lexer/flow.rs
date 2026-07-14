@@ -402,12 +402,25 @@ impl<'a> LexerPos<'a> {
                     s.push('x');
                     pos = next!(pos);
                     while let Some(c) = pos.peek() {
-                        if c.is_ascii_hexdigit() || c == '_' {
+                        if c.is_ascii_hexdigit() {
                             s.push(c);
                             pos = next!(pos);
+                        } else if c == '_' {
+                            // LX-C3: separator only between digits.
+                            let mut tmp = pos.chars.clone();
+                            match tmp.next() {
+                                Some(n) if n.is_ascii_hexdigit() || n == '_' => {
+                                    s.push(c);
+                                    pos = next!(pos);
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     return (pos, TokenKind::Int(s));
                 }
@@ -417,12 +430,24 @@ impl<'a> LexerPos<'a> {
                     s.push('b');
                     pos = next!(pos);
                     while let Some(c) = pos.peek() {
-                        if c == '0' || c == '1' || c == '_' {
+                        if c == '0' || c == '1' {
                             s.push(c);
                             pos = next!(pos);
+                        } else if c == '_' {
+                            let mut tmp = pos.chars.clone();
+                            match tmp.next() {
+                                Some(n) if n == '0' || n == '1' || n == '_' => {
+                                    s.push(c);
+                                    pos = next!(pos);
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     return (pos, TokenKind::Int(s));
                 }
@@ -432,12 +457,26 @@ impl<'a> LexerPos<'a> {
                     s.push('o');
                     pos = next!(pos);
                     while let Some(c) = pos.peek() {
-                        if (c.is_ascii_digit() && c != '8' && c != '9') || c == '_' {
+                        if c.is_ascii_digit() && c != '8' && c != '9' {
                             s.push(c);
                             pos = next!(pos);
+                        } else if c == '_' {
+                            let mut tmp = pos.chars.clone();
+                            match tmp.next() {
+                                Some(n)
+                                    if (n.is_ascii_digit() && n != '8' && n != '9') || n == '_' =>
+                                {
+                                    s.push(c);
+                                    pos = next!(pos);
+                                }
+                                _ => break,
+                            }
                         } else {
                             break;
                         }
+                    }
+                    while s.ends_with('_') {
+                        s.pop();
                     }
                     return (pos, TokenKind::Int(s));
                 }

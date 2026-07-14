@@ -63,12 +63,17 @@ fn collect_files(
     dir: &Path,
     entries: &mut Vec<std::path::PathBuf>,
 ) -> std::io::Result<()> {
+    // AU-C4: do not follow symlinks (checksum must not include external trees).
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             collect_files(_base, &path, entries)?;
-        } else {
+        } else if ft.is_file() {
             entries.push(path);
         }
     }
