@@ -140,6 +140,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "%s".to_string(),
                         ));
                     }
+                    if (arg_type.starts_with("Result") || arg_type == "Result")
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        )
+                        && num_fields >= 3
+                    {
+                        let str_ptr = self.emit_result_to_string(*sv)?;
+                        return Ok((
+                            BasicMetadataValueEnum::PointerValue(str_ptr),
+                            "%s".to_string(),
+                        ));
+                    }
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
@@ -235,6 +248,108 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Ok((*arg, "%p".to_string())),
         }
+    }
+
+    /// Format Result {i1, ok, err} integer payloads as `Ok(n)` / `Err(n)`.
+    fn emit_result_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let disc = self
+            .build_extract_value(sv.into(), 0, "res_disc")?
+            .into_int_value();
+        let ok = self
+            .build_extract_value(sv.into(), 1, "res_ok")?
+            .into_int_value();
+        let err = self
+            .build_extract_value(sv.into(), 2, "res_err")?
+            .into_int_value();
+        let to_i64 = |iv: inkwell::values::IntValue<'ctx>, name: &str| -> MimiResult<_> {
+            if iv.get_type().get_bit_width() < 64 {
+                Ok(self
+                    .builder
+                    .build_int_s_extend(iv, i64_ty, name)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?)
+            } else {
+                Ok(iv)
+            }
+        };
+        let ok_i64 = to_i64(ok, "res_ok_i64")?;
+        let err_i64 = to_i64(err, "res_err_i64")?;
+        let ok_fmt = self
+            .builder
+            .build_global_string_ptr("Ok(%ld)", "res_ok_fmt")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let err_fmt = self
+            .builder
+            .build_global_string_ptr("Err(%ld)", "res_err_fmt")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let buf_size = i64_ty.const_int(64, false);
+        let buf = self.malloc_or_abort(buf_size, "res_print_buf")?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let i32_ty = self.context.i32_type();
+            let ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent fn".into()))?;
+        let ok_bb = self.context.append_basic_block(parent, "res_print_ok");
+        let err_bb = self.context.append_basic_block(parent, "res_print_err");
+        let merge_bb = self.context.append_basic_block(parent, "res_print_merge");
+        let zero = disc.get_type().const_int(0, false);
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, disc, zero, "res_is_ok")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(is_ok, ok_bb, err_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(ok_bb);
+        self.build_call(
+            snprintf_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::IntValue(buf_size),
+                BasicMetadataValueEnum::PointerValue(ok_fmt.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(ok_i64),
+            ],
+            "res_ok_snprintf",
+        )?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(err_bb);
+        self.build_call(
+            snprintf_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::IntValue(buf_size),
+                BasicMetadataValueEnum::PointerValue(err_fmt.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(err_i64),
+            ],
+            "res_err_snprintf",
+        )?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(merge_bb);
+        Ok(buf)
     }
 
     /// Format Option {i1, i64} as `Some(n)` / `None()` matching interp Display.
