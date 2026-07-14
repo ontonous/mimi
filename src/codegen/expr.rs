@@ -950,7 +950,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Some("List<string>".to_string())
             }
             "sort_f64" => return Some("List<f64>".to_string()),
-            "exec" => return Some("ExecResult".to_string()),
+            "exec" | "exec_safe" => return Some("ExecResult".to_string()),
             "file_stat" => return Some("StatResult".to_string()),
             _ => {}
         }

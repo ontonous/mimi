@@ -2389,9 +2389,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        // Minimal codegen: program string + optional null args list.
-        // Multi-arg argv packing is left for a later pass; null args is the
-        // common case and matches the runtime's empty-args path.
+        // exec_safe(prog, arg1, arg2, …) → mimi_exec_safe(prog, MimiList* argv).
+        // Pack remaining string args into a temporary {len, data} list (null
+        // when no extra args). Matches interpreter varargs semantics.
         if args.is_empty() {
             return Err(CompileError::WrongArgCount(
                 "exec_safe expects at least 1 argument (program)".to_string(),
@@ -2399,12 +2399,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let prog_ptr = self.extract_raw_str_ptr(&args[0])?;
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        let args_list = i8_ptr.const_null();
-        if args.len() > 1 {
-            return Err(CompileError::Generic(
-                "exec_safe with argv list is not yet supported in codegen; pass only the program path or use `mimi run`".to_string(),
-            ));
-        }
+        let i64_ty = self.context.i64_type();
+        let args_list = if args.len() == 1 {
+            i8_ptr.const_null()
+        } else {
+            // Pack argv[1..] as C-string pointers into a MimiList on the stack.
+            let n = (args.len() - 1) as u64;
+            let n_iv = i64_ty.const_int(n, false);
+            let ptr_size = i64_ty.const_int(8, false);
+            let data_bytes = self
+                .builder
+                .build_int_mul(n_iv, ptr_size, "exec_argv_bytes")
+                .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
+            let data_raw = self.malloc_or_abort(data_bytes, "exec_argv_data")?;
+            for (i, arg) in args.iter().skip(1).enumerate() {
+                let s_ptr = self.extract_raw_str_ptr(arg)?;
+                let idx = i64_ty.const_int(i as u64, false);
+                let slot = self
+                    .gep()
+                    .build_in_bounds_gep(
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        data_raw,
+                        &[idx],
+                        &format!("exec_argv_{}", i),
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                self.build_store(slot, s_ptr)?;
+            }
+            let list_ty = self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::PointerType(i8_ptr),
+                ],
+                false,
+            );
+            let list_alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "exec_argv")?;
+            self.build_store(
+                self.gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(list_ty), list_alloca, 0, "alen")
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+                n_iv,
+            )?;
+            self.build_store(
+                self.gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(list_ty), list_alloca, 1, "adata")
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
+                data_raw,
+            )?;
+            list_alloca
+        };
         let exec_fn = self.get_runtime_fn("mimi_exec_safe")?;
         let res_ptr = self
             .build_call(
