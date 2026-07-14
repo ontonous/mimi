@@ -6681,6 +6681,27 @@ fn dual_result_println() {
     );
 }
 
+/// Result of record println Ok(Point { ... }).
+#[test]
+fn dual_result_record_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let a: Result<Point, i32> = Ok(Point { x: 1, y: 2 })
+            let b: Result<Point, i32> = Err(9)
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Ok(Point { x: 1, y: 2 })\nErr(9)"
+    );
+}
+
 /// Result<i32,string> Err prints message on both backends.
 #[test]
 fn dual_result_string_err_println() {

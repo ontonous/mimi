@@ -214,7 +214,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         && num_fields >= 3
                     {
-                        let str_ptr = self.emit_result_to_string(*sv)?;
+                        let ok_rec = arg_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| s.split(',').next())
+                            .map(|s| s.trim())
+                            .filter(|inner| {
+                                !inner.is_empty()
+                                    && self.type_defs.get(*inner).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    })
+                            });
+                        let str_ptr = self.emit_result_to_string(*sv, ok_rec)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -688,10 +698,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Format Result {i1, ok, err} as `Ok(...)` / `Err(...)` (int or string payload).
+    /// Format Result {i1, ok, err} as `Ok(...)` / `Err(...)` (int, string, or record Ok).
     fn emit_result_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        ok_record: Option<&str>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let fields = sv.get_type().get_field_types();
@@ -742,7 +753,62 @@ impl<'ctx> CodeGenerator<'ctx> {
                         field_ty: BasicTypeEnum<'ctx>|
          -> MimiResult<()> {
             self.builder.position_at_end(bb);
+            // Ok arm with named record payload (pointer or ptrtoint).
+            if label == "ok" {
+                if let Some(rec_name) = ok_record {
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let rec_ptr = match val {
+                        BasicValueEnum::PointerValue(pv) => pv,
+                        BasicValueEnum::IntValue(iv) => self
+                            .builder
+                            .build_int_to_ptr(iv, i8_ptr, "res_ok_rec")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        _ => {
+                            return Err(CompileError::LlvmError(
+                                "Result Ok record payload unexpected kind".into(),
+                            ))
+                        }
+                    };
+                    let rec_str = self.emit_record_display(rec_name, rec_ptr)?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("Ok(%s)", "res_ok_rec_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(rec_str),
+                        ],
+                        "res_ok_rec_snprintf",
+                    )?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    return Ok(());
+                }
+            }
             match field_ty {
+                BasicTypeEnum::PointerType(_) if label == "ok" => {
+                    // Untyped record pointer Ok — print Ok(%p) fallback.
+                    let ptr = val.into_pointer_value();
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("Ok(%p)", "res_ok_ptr_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(ptr),
+                        ],
+                        "res_ok_ptr_snprintf",
+                    )?;
+                }
                 BasicTypeEnum::IntType(_) => {
                     let iv = val.into_int_value();
                     let as_i64 = if iv.get_type().get_bit_width() < 64 {
