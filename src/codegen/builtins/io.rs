@@ -2385,6 +2385,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("set display void")?
                             .into_pointer_value();
                         OptPay::StrPtr(raw)
+                    } else if arg_type.contains("List<") || arg_type.starts_with("Option<List") {
+                        // Option of List stored as ptrtoint of list struct.
+                        // Use runtime helper so null payload (None) is safe — do not
+                        // GEP/load before the is_some branch.
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let list_ptr = self
+                            .builder
+                            .build_int_to_ptr(as_i64, i8_ptr, "opt_list_from_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let fn_name = if arg_type.contains("List<string>") {
+                            "mimi_list_to_string"
+                        } else {
+                            "mimi_list_i32_to_string"
+                        };
+                        let fn_ty = i8_ptr.fn_type(
+                            &[BasicMetadataTypeEnum::PointerType(i8_ptr)],
+                            false,
+                        );
+                        let list_fn = self.module.get_function(fn_name).unwrap_or_else(|| {
+                            self.module.add_function(
+                                fn_name,
+                                fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                        let list_str = self
+                            .build_call(
+                                list_fn,
+                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                "opt_list_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list display void")?
+                            .into_pointer_value();
+                        OptPay::StrPtr(list_str)
                     } else {
                         OptPay::Int(as_i64)
                     }
