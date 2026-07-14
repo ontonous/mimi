@@ -1481,11 +1481,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             match field_ty {
                 BasicTypeEnum::PointerType(_) if label == "ok" => {
-                    // Untyped record pointer Ok — print Ok(%p) fallback.
                     let ptr = val.into_pointer_value();
+                    // Result of List: pointer to list struct.
+                    // Try load as list and format; otherwise %p fallback.
+                    let list_ty = self.list_struct_type();
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(list_ty),
+                            ptr,
+                            "res_ok_list_ld",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    let list_str = self.emit_list_i32_to_string(loaded)?;
                     let fmt = self
                         .builder
-                        .build_global_string_ptr("Ok(%p)", "res_ok_ptr_fmt")
+                        .build_global_string_ptr("Ok(%s)", "res_ok_list_fmt")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     self.build_call(
                         snprintf_fn,
@@ -1493,9 +1505,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(buf),
                             BasicMetadataValueEnum::IntValue(buf_size),
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::PointerValue(ptr),
+                            BasicMetadataValueEnum::PointerValue(list_str),
                         ],
-                        "res_ok_ptr_snprintf",
+                        "res_ok_list_snprintf",
                     )?;
                 }
                 BasicTypeEnum::IntType(_) => {
@@ -1838,6 +1850,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         OptPay::StrPtr(sel.into_pointer_value())
+                    } else if arg_type.contains("Map<") || arg_type == "Option<Map>" {
+                        let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                        let raw = self
+                            .build_call(
+                                func,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "opt_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_map_to_json_i64 void")?
+                            .into_pointer_value();
+                        OptPay::StrPtr(raw)
+                    } else if arg_type.contains("Set<") || arg_type == "Option<Set>" {
+                        let func = self.get_runtime_fn("mimi_set_to_display")?;
+                        let raw = self
+                            .build_call(
+                                func,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "opt_set_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_set_to_display void")?
+                            .into_pointer_value();
+                        OptPay::StrPtr(raw)
                     } else {
                         OptPay::Int(as_i64)
                     }
