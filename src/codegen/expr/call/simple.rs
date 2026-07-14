@@ -328,6 +328,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
+                // Map / Map<string, i32|i64> → mimi_map_to_json_i64(handle)
+                if obj_type == "Map" || obj_type.starts_with("Map<") {
+                    let handle = match &metadata_args[0] {
+                        BasicMetadataValueEnum::IntValue(iv) => *iv,
+                        BasicMetadataValueEnum::PointerValue(_) => {
+                            // Unexpected pointer map — reject rather than inttoptr.
+                            return Err(CompileError::Generic(
+                                "to_json: Map handle must be i64".into(),
+                            ));
+                        }
+                        other => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json: unexpected Map argument kind {:?}",
+                                other
+                            )))
+                        }
+                    };
+                    let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[BasicMetadataValueEnum::IntValue(handle)],
+                            "to_json_map",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_map_to_json_i64 returned void")?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return self.wrap_c_string(raw);
+                }
                 // Check for Record type — serialize to JSON object via sprintf
                 if let Some(type_def) = self.type_defs.get(&obj_type) {
                     if let TypeDefKind::Record(fields) = &type_def.kind {

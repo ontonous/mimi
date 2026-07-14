@@ -2507,6 +2507,34 @@ pub extern "C" fn json_get_element(
 
 // ─── from_json::<T> typed parsing helpers ────────────────────────
 
+/// Serialize a MapHandle of integer ValueHandles to a JSON object string.
+/// Keys are JSON-escaped; values are printed as decimal integers.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("{}");
+    }
+    // SAFETY: handle is a non-zero MapHandle from mimi_map_new / from_json.
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(map.inner.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let mut first = true;
+    for (k, v) in &map.inner {
+        if !first {
+            parts.push(String::from(","));
+        }
+        first = false;
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        parts.push(v.to_string());
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Build a MapHandle from a JSON object with string keys and integer values.
 /// Values are stored as raw i64 ValueHandles (same as map_set of integers).
 #[no_mangle]
