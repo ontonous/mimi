@@ -119,7 +119,7 @@ impl LspServer {
                     if path.extension().and_then(|e| e.to_str()) == Some("mimi") {
                         let uri = format!("file://{}", encode_path_for_uri(&path));
                         if !self.documents.contains_key(&uri) {
-                            if let Ok(text) = std::fs::read_to_string(&path) {
+                            if let Ok(text) = crate::path_safety::read_source_capped(&path) {
                                 sources.push((uri, text));
                             }
                         }

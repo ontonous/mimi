@@ -53,9 +53,18 @@ pub(crate) fn mms(
         let source = if path == &PathBuf::from("-") {
             use std::io::Read;
             let mut input = String::new();
-            std::io::stdin()
+            // CL-H1: bound stdin the same way as file sources (100 MiB).
+            let max = mimi::path_safety::MAX_SOURCE_BYTES as usize;
+            let mut limited = std::io::stdin().take(max as u64 + 1);
+            limited
                 .read_to_string(&mut input)
                 .map_err(|e| format!("stdin error: {}", e))?;
+            if input.len() > max {
+                return Err(format!(
+                    "stdin too large (max {} bytes)",
+                    mimi::path_safety::MAX_SOURCE_BYTES
+                ));
+            }
             input
         } else {
             mimi::path_safety::read_source_capped(path)?

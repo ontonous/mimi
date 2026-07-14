@@ -12,9 +12,18 @@ pub(crate) fn fmt_files(files: &[PathBuf], check: bool) -> Result<(), String> {
         discover_mimi_files()?
     } else if files.len() == 1 && files[0].as_os_str() == "-" {
         let mut source = String::new();
-        std::io::stdin()
+        // CL-H1: bound stdin the same way as file sources (100 MiB).
+        let max = mimi::path_safety::MAX_SOURCE_BYTES as usize;
+        let mut limited = std::io::stdin().take(max as u64 + 1);
+        limited
             .read_to_string(&mut source)
             .map_err(|e| format!("failed to read stdin: {}", e))?;
+        if source.len() > max {
+            return Err(format!(
+                "stdin too large (max {} bytes)",
+                mimi::path_safety::MAX_SOURCE_BYTES
+            ));
+        }
         let formatted = formatter.format(&source);
         print!("{}", formatted);
         return Ok(());

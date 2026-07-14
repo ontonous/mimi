@@ -123,13 +123,29 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("read_file expects 1 argument (path)"));
         }
         match &args[0] {
-            Value::String(path) => match std::fs::read_to_string(path) {
-                Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
-                Err(e) => Ok(Value::Variant(
-                    "Err".into(),
-                    vec![Value::String(format!("read_file error: {}", e))],
-                )),
-            },
+            Value::String(path) => {
+                // CL-H1: reject oversized files before loading into memory.
+                let max = crate::path_safety::MAX_SOURCE_BYTES;
+                if let Ok(meta) = std::fs::metadata(path) {
+                    if meta.len() > max {
+                        return Ok(Value::Variant(
+                            "Err".into(),
+                            vec![Value::String(format!(
+                                "read_file error: file too large ({} bytes, max {})",
+                                meta.len(),
+                                max
+                            ))],
+                        ));
+                    }
+                }
+                match std::fs::read_to_string(path) {
+                    Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
+                    Err(e) => Ok(Value::Variant(
+                        "Err".into(),
+                        vec![Value::String(format!("read_file error: {}", e))],
+                    )),
+                }
+            }
             _ => Err(InterpError::new("read_file expects a string path")),
         }
     }
