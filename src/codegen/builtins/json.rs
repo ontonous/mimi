@@ -201,13 +201,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     );
                     Ok(buf.into())
                 } else {
-                    // Untyped pointer path: List/Record are handled in compile_call
-                    // (simple.rs) before reaching here. Remaining pointers are
-                    // Map/Set/opaque handles — refuse silent C-string cast.
-                    // TODO(#v0.31-codegen): Map/Set recursive JSON serialization.
+                    // Untyped pointer path: List/Record/Map/Set are handled in compile_call
+                    // (simple.rs) before reaching here when type names are known.
+                    // Remaining pointers are opaque handles — refuse silent C-string cast.
                     Err(CompileError::Generic(
-                        "to_json: Map/Set and untyped pointer values are not yet supported \
-                         in codegen; List and named Record are handled via specialized paths"
+                        "to_json: untyped pointer values are not supported in codegen; \
+                         use typed List/Record/Map/Set paths"
                             .into(),
                     ))
                 }
