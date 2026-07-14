@@ -375,6 +375,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "mimi_map_to_json_string"
                     } else if arg_type.contains("Map<string, bool>") {
                         "mimi_map_to_json_bool"
+                    } else if arg_type.contains("Map<string, f64>")
+                        || arg_type.contains("Map<string, f32>")
+                    {
+                        "mimi_map_to_json_f64"
                     } else {
                         "mimi_map_to_json_i64"
                     };
