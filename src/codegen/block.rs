@@ -230,13 +230,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // For simple Variable patterns, track type info
                     if let Pattern::Variable(name) = pat {
-                        if let Some(Type::Name(tn, args)) = &ty {
-                            if !args.is_empty() {
-                                if let Some(full) = self.get_full_type_name(ty.as_ref().unwrap()) {
-                                    self.var_type_names.insert(name.clone(), full);
+                        if let Some(decl_ty) = ty.as_ref() {
+                            if let Type::Name(tn, args) = decl_ty {
+                                if !args.is_empty() {
+                                    if let Some(full) = self.get_full_type_name(decl_ty) {
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                } else {
+                                    self.var_type_names.insert(name.clone(), tn.clone());
                                 }
-                            } else {
-                                self.var_type_names.insert(name.clone(), tn.clone());
                             }
                         } else if self.expr_is_string(init) {
                             self.var_type_names

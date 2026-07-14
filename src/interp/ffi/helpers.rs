@@ -185,6 +185,22 @@ pub(crate) fn compute_arg_free_mask(param_types: &[Type]) -> Vec<bool> {
         .collect()
 }
 
+/// IP-H4: map declared callback param types to decode kinds.
+pub(crate) fn compute_arg_kinds(
+    param_types: &[Type],
+) -> Vec<crate::interp::ffi::callback::CallbackArgKind> {
+    use crate::interp::ffi::callback::CallbackArgKind;
+    param_types
+        .iter()
+        .map(|pt| match pt {
+            Type::Name(n, _) if n == "f64" || n == "f32" => CallbackArgKind::Float,
+            Type::Name(n, _) if n == "string" => CallbackArgKind::CString,
+            Type::RawString | Type::CBuffer(_) => CallbackArgKind::CString,
+            _ => CallbackArgKind::Int,
+        })
+        .collect()
+}
+
 /// Tests that FfiGuard's field ordering invariant (guard before Arc) holds.
 /// This is a runtime assertion that the transmute safety contract is
 /// maintained. If fields are reordered, this test will fail or produce
