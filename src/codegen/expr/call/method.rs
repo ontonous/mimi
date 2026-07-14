@@ -1737,6 +1737,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(len_gep, safe_len)?;
                 self.build_load(str_ty, str_alloca, "str_val")
             }
+            // Nested Record: json_get_string returns the nested object as a
+            // JSON substring; recurse into compile_from_json_record.
+            crate::ast::Type::Name(nested_name, _) => {
+                let fields_opt =
+                    self.type_defs
+                        .get(nested_name.as_str())
+                        .and_then(|td| match &td.kind {
+                            crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
+                            _ => None,
+                        });
+                if let Some(nested_fields) = fields_opt {
+                    let nested = self.compile_from_json_record(
+                        nested_name,
+                        &nested_fields,
+                        raw_val,
+                    )?;
+                    // compile_from_json_record returns an alloca pointer; store
+                    // by-value into the parent field slot.
+                    match nested {
+                        BasicValueEnum::PointerValue(pv) => {
+                            let llvm_ty = *self.type_llvm.get(nested_name.as_str()).ok_or_else(
+                                || {
+                                    CompileError::Generic(format!(
+                                        "type '{}' not registered",
+                                        nested_name
+                                    ))
+                                },
+                            )?;
+                            self.build_load(llvm_ty, pv, nested_name)
+                        }
+                        other => Ok(other),
+                    }
+                } else {
+                    Err(CompileError::Generic(format!(
+                        "from_json::<{}>: unsupported field type {:?}",
+                        type_name, field.ty
+                    )))
+                }
+            }
             _ => Err(CompileError::Generic(format!(
                 "from_json::<{}>: unsupported field type {:?}",
                 type_name, field.ty

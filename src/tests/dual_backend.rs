@@ -6482,6 +6482,26 @@ fn dual_from_json_record() {
     );
 }
 
+/// CG-H2: nested Record fields in from_json::<T>.
+#[test]
+fn dual_from_json_nested_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        type Line { a: Point, b: Point }
+        func main() -> i32 {
+            let l = from_json::<Line>("{\"a\":{\"x\":1,\"y\":2},\"b\":{\"x\":3,\"y\":4}}")
+            println(l.a.x + l.b.y)
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {
