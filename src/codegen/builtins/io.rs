@@ -171,7 +171,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }) {
                                 self.emit_list_record_to_string(*sv, inner)?
                             } else if inner.starts_with("Option") {
-                                self.emit_list_option_to_string(*sv)?
+                                self.emit_list_option_to_string(*sv, inner)?
                             } else if inner.starts_with("Result") {
                                 self.emit_list_result_to_string(*sv)?
                             } else if self.type_defs.get(inner).is_some_and(|td| {
@@ -278,6 +278,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             });
                         let str_ptr =
                             self.emit_result_to_string_typed(*sv, ok_rec, arg_type)?;
+                        return Ok((
+                            BasicMetadataValueEnum::PointerValue(str_ptr),
+                            "%s".to_string(),
+                        ));
+                    }
+                    // Heterogeneous product / user tuple: format all fields.
+                    // Skip named enums (i32 tag + payload) already handled above.
+                    let is_named = !arg_type.is_empty() && self.type_defs.contains_key(arg_type);
+                    let is_enum_layout = num_fields == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
+                        )
+                        && matches!(fields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
+                    if !is_named && !is_enum_layout {
+                        let str_ptr = self.emit_product_tuple_to_string(*sv)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -1006,10 +1022,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Format `List<Option<i32>>` as `[Some(1), None(), ...]` (int Option only).
+    /// Format `List<Option<…>>` as `[Some(…), None(), …]`.
+    /// `elem_opt_type` is the full Option type string (e.g. `Option<Map<string, i32>>`).
     fn emit_list_option_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        elem_opt_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         // Reuse list-of-record style loop but format each i64 slot as Option
         // by treating list data as array of {i1,i64} pointers/values stored as i64.
@@ -1126,7 +1144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(BasicTypeEnum::StructType(opt_sty), opt_ptr, "list_opt_ld")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_struct_value();
-        let opt_str = self.emit_option_to_string(loaded, None, "Option<i32>")?;
+        let opt_str = self.emit_option_to_string(loaded, None, elem_opt_type)?;
         self.build_call(
             strcat_fn,
             &[
@@ -2520,6 +2538,212 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(merge_bb);
+        Ok(buf)
+    }
+
+    /// Format a heterogeneous product/tuple (ints, bools, strings, nested structs).
+    fn emit_product_tuple_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let fields = sv.get_type().get_field_types();
+        let i64_ty = self.context.i64_type();
+        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "prod_tup_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("(", "prod_tup_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "prod_tup_open_cpy",
+        )?;
+        let buf_size = i64_ty.const_int(256, false);
+        for (i, ft) in fields.iter().enumerate() {
+            if i > 0 {
+                let comma = self
+                    .builder
+                    .build_global_string_ptr(", ", "prod_tup_comma")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    strcat_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+                    ],
+                    "prod_tup_strcat_comma",
+                )?;
+            }
+            let field_val =
+                self.build_extract_value(sv.into(), i as u32, &format!("prod_tup_{}", i))?;
+            let piece = self.malloc_or_abort(i64_ty.const_int(256, false), "prod_piece")?;
+            match (ft, field_val) {
+                (BasicTypeEnum::IntType(it), BasicValueEnum::IntValue(iv)) => {
+                    if it.get_bit_width() == 1 {
+                        let true_g = self
+                            .builder
+                            .build_global_string_ptr("true", "prod_true")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let false_g = self
+                            .builder
+                            .build_global_string_ptr("false", "prod_false")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let zero = iv.get_type().const_int(0, false);
+                        let is_t = self
+                            .builder
+                            .build_int_compare(IntPredicate::NE, iv, zero, "prod_bool")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let sel = self
+                            .builder
+                            .build_select(
+                                is_t,
+                                true_g.as_pointer_value(),
+                                false_g.as_pointer_value(),
+                                "prod_bool_s",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::PointerValue(sel.into_pointer_value()),
+                            ],
+                            "prod_bool_cpy",
+                        )?;
+                    } else {
+                        let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "prod_sext")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        };
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("%ld", "prod_ld")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::IntValue(as_i64),
+                            ],
+                            "prod_ld_sn",
+                        )?;
+                    }
+                }
+                (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
+                    let ffields = sty.get_field_types();
+                    if ffields.len() >= 1
+                        && matches!(ffields[0], BasicTypeEnum::PointerType(_))
+                    {
+                        // string {ptr,len}
+                        let ptr = self
+                            .build_extract_value(fsv.into(), 0, "prod_str_ptr")?
+                            .into_pointer_value();
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("%s", "prod_s")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(ptr),
+                            ],
+                            "prod_str_sn",
+                        )?;
+                    } else {
+                        // Nested product / list-like — recurse product formatter.
+                        let nested = self.emit_product_tuple_to_string(fsv)?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::PointerValue(nested),
+                            ],
+                            "prod_nested_cpy",
+                        )?;
+                    }
+                }
+                (BasicTypeEnum::PointerType(_), BasicValueEnum::PointerValue(pv)) => {
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("%s", "prod_ptr_s")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(piece),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(pv),
+                        ],
+                        "prod_ptr_sn",
+                    )?;
+                }
+                (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(fv)) => {
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("%g", "prod_f")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(piece),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::FloatValue(fv),
+                        ],
+                        "prod_f_sn",
+                    )?;
+                }
+                _ => {
+                    let q = self
+                        .builder
+                        .build_global_string_ptr("?", "prod_unk")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(piece),
+                            BasicMetadataValueEnum::PointerValue(q.as_pointer_value()),
+                        ],
+                        "prod_unk_cpy",
+                    )?;
+                }
+            }
+            self.build_call(
+                strcat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::PointerValue(piece),
+                ],
+                "prod_strcat_piece",
+            )?;
+        }
+        let close = self
+            .builder
+            .build_global_string_ptr(")", "prod_tup_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "prod_tup_close",
+        )?;
         Ok(buf)
     }
 
