@@ -7,11 +7,23 @@ use crate::lsp::LspServer;
 /// Handles %XX (byte escape) and %uXXXX (Unicode escape).
 pub(crate) fn percent_decode(s: &str) -> String {
     let mut result = String::new();
+    // CL-H7 (deep audit): consecutive `%XX` byte escapes form a UTF-8 byte
+    // sequence and must be decoded together. Accumulate adjacent bytes and
+    // flush them as a single UTF-8 string so multi-byte characters decode
+    // correctly (e.g. `%C3%A9` → "é").
+    let mut pending: Vec<u8> = Vec::new();
+    let mut flush = |pending: &mut Vec<u8>, result: &mut String| {
+        if !pending.is_empty() {
+            result.push_str(&String::from_utf8_lossy(pending));
+            pending.clear();
+        }
+    };
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '%' {
             if let Some(&'u') = chars.peek() {
                 // Unicode escape: %uXXXX
+                flush(&mut pending, &mut result);
                 chars.next(); // consume 'u'
                 let hex: String = chars.by_ref().take(4).collect();
                 if hex.len() == 4 {
@@ -33,17 +45,18 @@ pub(crate) fn percent_decode(s: &str) -> String {
                     result.push_str(&hex);
                 }
             } else {
-                // Byte escape: %XX — decode to raw bytes, then convert to string.
+                // Byte escape: %XX — collect the byte into the pending buffer.
                 let hex: String = chars.by_ref().take(2).collect();
                 if hex.len() == 2 {
                     if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        // Use char::from_u32 to properly handle bytes >= 0x80.
-                        result.push(char::from_u32(byte as u32).unwrap_or('\u{FFFD}'));
+                        pending.push(byte);
                     } else {
+                        flush(&mut pending, &mut result);
                         result.push('%');
                         result.push_str(&hex);
                     }
                 } else {
+                    flush(&mut pending, &mut result);
                     result.push('%');
                     if !hex.is_empty() {
                         result.push_str(&hex);
@@ -51,9 +64,11 @@ pub(crate) fn percent_decode(s: &str) -> String {
                 }
             }
         } else {
+            flush(&mut pending, &mut result);
             result.push(c);
         }
     }
+    flush(&mut pending, &mut result);
     result
 }
 

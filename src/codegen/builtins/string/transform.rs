@@ -28,9 +28,54 @@ impl<'ctx> CodeGenerator<'ctx> {
             n_raw
         };
         let s_len = self.string_len(s_ptr)?;
+        // CG-H2 (deep audit): guard against negative / overflowing repeat counts.
+        // A negative `n` or an `s_len * n` that overflows i64 would yield a
+        // negative alloc_size and out-of-bounds writes. Clamp `n` to a
+        // non-negative value and cap the total size so the product cannot
+        // overflow i64 nor drive an unbounded allocation.
+        let zero = i64_ty.const_int(0, false);
+        let max_total = i64_ty.const_int(1u64 << 33, false); // 8 GiB cap
+        let n_is_neg = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, n, zero, "n_neg")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let n_clamped = self
+            .builder
+            .build_select(n_is_neg, zero, n, "n_clamped")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        // n_safe = min(n_clamped, max_total / max(s_len, 1)). The divisor is
+        // clamped to >= 1 so the division can never be by zero.
+        let s_len_zero = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, s_len, zero, "s_len_zero")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let s_len_divisor = self
+            .builder
+            .build_select(s_len_zero, i64_ty.const_int(1, false), s_len, "s_len_div")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
+        let max_count = self
+            .builder
+            .build_int_signed_div(max_total, s_len_divisor, "max_count")
+            .map_err(|e| CompileError::LlvmError(format!("div error: {}", e)))?;
+        let n_too_big = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                n_clamped,
+                max_count,
+                "n_too_big",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let n_safe = self
+            .builder
+            .build_select(n_too_big, max_count, n_clamped, "n_safe")
+            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
+            .into_int_value();
         let total = self
             .builder
-            .build_int_mul(s_len, n, "total")
+            .build_int_mul(s_len, n_safe, "total")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
         let alloc_size = self
             .builder
@@ -57,7 +102,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_compare(
                 inkwell::IntPredicate::SLT,
                 i.into_int_value(),
-                n,
+                n_safe,
                 "repeat_cmp",
             )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
@@ -574,7 +619,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Call strlen on a raw string pointer.
-    fn string_len(&self, ptr: PointerValue<'ctx>) -> MimiResult<IntValue<'ctx>> {
+    pub(super) fn string_len(&self, ptr: PointerValue<'ctx>) -> MimiResult<IntValue<'ctx>> {
         let strlen_fn = self.get_runtime_fn("strlen")?;
         Ok(self
             .build_call(

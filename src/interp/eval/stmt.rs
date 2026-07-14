@@ -835,19 +835,27 @@ impl<'a> Interpreter<'a> {
         for stmt in block {
             match stmt {
                 Stmt::Expr(Expr::Spawn(expr)) => {
-                    // Runtime assertion: no LocalShared values cross thread boundaries
-                    if crate::interp::value::contains_local_shared(&self.eval_expr(expr)?) {
-                        return Err(InterpError::new(
-                            "parasteps: local_shared values cannot cross thread boundary",
-                        ));
-                    }
+                    // Run the spawn expression only once — in the worker thread.
+                    // The previous implementation evaluated `expr` on the main
+                    // thread (to scan for LocalShared) and again in the worker,
+                    // which doubled any side effects (IN-H10 / parasteps double
+                    // evaluation). We now evaluate exactly once and perform the
+                    // LocalShared boundary check in the worker instead.
                     let (tx, rx) = std::sync::mpsc::channel();
                     let expr = expr.clone();
                     let file = self.file.clone();
                     super::super::pool::get_pool().execute(move || {
                         let mut interp = Interpreter::new(&file);
                         let result = interp.eval_expr(&expr);
-                        let _ = tx.send(result);
+                        let checked = match &result {
+                            Ok(v) if crate::interp::value::contains_local_shared(v) => Err(
+                                InterpError::new(
+                                    "parasteps: local_shared values cannot cross thread boundary",
+                                ),
+                            ),
+                            other => (*other).clone(),
+                        };
+                        let _ = tx.send(checked);
                     });
                     futures.push(std::sync::Arc::new(std::sync::Mutex::new(
                         crate::interp::value::PollFuture::Pending(rx),

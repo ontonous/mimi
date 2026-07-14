@@ -181,6 +181,45 @@ fn did_open(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
     )
 }
 
+/// Apply one LSP `TextDocumentContentChangeEvent` to `text`.
+/// A change carrying a `range` is an incremental edit (splice the new text
+/// between the range's start and end); a change without a `range` replaces the
+/// whole document. Positions are LSP (line, UTF-16 character) and are converted
+/// to byte offsets via `PositionMap` (CL-H6 / B2).
+fn apply_change(text: &mut String, change: &Value) {
+    let new_text = match change.get("text").and_then(|t| t.as_str()) {
+        Some(t) => t,
+        None => return,
+    };
+    let range = match change.get("range") {
+        Some(r) => r,
+        None => {
+            // Full-document sync: the change text is the entire new document.
+            *text = new_text.to_string();
+            return;
+        }
+    };
+    let (start, end) = (range.get("start"), range.get("end"));
+    let (sl, sc, el, ec) = match (start, end) {
+        (Some(s), Some(e)) => (
+            s.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            s.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            e.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            e.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        ),
+        _ => {
+            *text = new_text.to_string();
+            return;
+        }
+    };
+    let map = crate::lsp::position_map::PositionMap::new(text);
+    let start_byte = map.lsp_to_byte(sl, sc);
+    let end_byte = map.lsp_to_byte(el, ec);
+    if start_byte <= end_byte && end_byte <= text.len() {
+        text.replace_range(start_byte..end_byte, new_text);
+    }
+}
+
 fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
     let uri = match get_uri(msg) {
         Some(u) => u,
@@ -197,18 +236,30 @@ fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) 
     if changes.is_empty() {
         return (server, None);
     }
-    let text = match changes
-        .first()
-        .and_then(|c| c.get("text"))
-        .and_then(|t| t.as_str())
-    {
-        Some(t) => t,
-        None => return (server, None),
-    };
-    server.cache_put(uri.to_string(), text.to_string());
+    // CL-H8 (deep audit): apply ALL contentChanges, not just the first. A single
+    // change without a `range` is a full-document sync (replace); changes
+    // carrying a `range` are incremental edits that must be applied in order to
+    // the current document (e.g. editors using incremental sync send many
+    // ranged edits per didChange).
+    let mut text = server.documents.get(uri).cloned().unwrap_or_default();
+    let mut had_full_sync = false;
+    for change in changes {
+        if change.get("range").is_some() {
+            apply_change(&mut text, change);
+        } else if let Some(t) = change.get("text").and_then(|t| t.as_str()) {
+            text = t.to_string();
+            had_full_sync = true;
+        }
+    }
+    if !had_full_sync && text.is_empty() {
+        // Nothing usable to apply (no full-sync text and no cached document).
+        return (server, None);
+    }
+    server.cache_put(uri.to_string(), text.clone());
     *server.parse_cache_text.borrow_mut() = (String::new(), None);
-    let mut diagnostics = server.compute_diagnostics(text, Some(uri));
-    let verif_diags = server.compute_verification_diagnostics(text, server.last_cursor_line, uri);
+    let mut diagnostics = server.compute_diagnostics(&text, Some(uri));
+    let verif_diags =
+        server.compute_verification_diagnostics(&text, server.last_cursor_line, uri);
     diagnostics.extend(verif_diags);
     (
         server,

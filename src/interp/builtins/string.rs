@@ -437,10 +437,18 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("str_index_of expects 2 arguments"));
         }
         match (&args[0], &args[1]) {
-            (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
-                Some(idx) => Ok(Value::Variant("Some".into(), vec![Value::Int(idx as i64)])),
-                None => Ok(Value::Variant("None".into(), vec![])),
-            },
+            (Value::String(s), Value::String(sub)) => {
+                // Return a CHAR index (not a byte offset) to match Mimi's
+                // character-based string indexing (`s[idx]`, `.chars().nth(i)`).
+                // s.find() yields a byte offset; convert it to a char count.
+                match s.find(sub.as_str()) {
+                    Some(byte_idx) => {
+                        let char_idx = s[..byte_idx].chars().count() as i64;
+                        Ok(Value::Variant("Some".into(), vec![Value::Int(char_idx)]))
+                    }
+                    None => Ok(Value::Variant("None".into(), vec![])),
+                }
+            }
             _ => Err(InterpError::new("str_index_of expects (string, string)")),
         }
     }

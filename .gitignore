@@ -59,6 +59,7 @@ Thumbs.db
 
 # Internal development docs (not for public)
 AGENTS.md
+AGENTS_ANCHOR_*.md
 devdocs/
 
 # Reference projects

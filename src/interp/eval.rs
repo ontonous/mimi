@@ -427,7 +427,23 @@ impl<'a> Interpreter<'a> {
         Ok(None)
     }
 
+    /// Depth-guarded entry point for expression evaluation (IN-H2 / deep-audit
+    /// item #12): a self-recursive or diverging expression tree now aborts with a
+    /// clean error instead of overflowing the Rust stack. Every recursive path
+    /// (`eval_expr` → `eval_expr_body` → `eval_expr`) re-enters this guard.
     pub(crate) fn eval_expr(&mut self, expr: &Expr) -> Result<Value, InterpError> {
+        if self.recursion_depth >= Self::MAX_RECURSION_DEPTH {
+            return Err(InterpError::new(
+                "recursion limit exceeded (possible infinite recursion)",
+            ));
+        }
+        self.recursion_depth += 1;
+        let res = self.eval_expr_body(expr);
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
+        res
+    }
+
+    pub(crate) fn eval_expr_body(&mut self, expr: &Expr) -> Result<Value, InterpError> {
         match expr {
             Expr::Literal(l) => Ok(match l {
                 Lit::Int(v) => Value::Int(*v),
@@ -986,15 +1002,26 @@ fn writeback_delegate_result(
             fields.insert(field_name.clone(), result);
         }
         if let Expr::Ident(name) = container.as_ref() {
-            // Use scope_env's direct mutable update (bypasses mutability check
-            // for flow state self which is implicitly mutable in do blocks).
-            for scope in interp.scope_env.env.iter_mut().rev() {
-                if scope.contains_key(name) {
-                    scope.insert(name.clone(), owner);
-                    return Ok(());
+            if name == "self" {
+                // Flow-state `self` is implicitly mutable inside transition do-blocks;
+                // the direct scope update bypasses the normal mutability check only here.
+                for scope in interp.scope_env.env.iter_mut().rev() {
+                    if scope.contains_key(name) {
+                        scope.insert(name.clone(), owner);
+                        return Ok(());
+                    }
                 }
+                interp.scope_env.assign(name, owner)?;
+            } else if interp.is_mutable(name) {
+                // Other targets must be explicitly mutable; `delegate mutate`
+                // must not silently rewrite an immutable variable (IN-H4).
+                interp.scope_env.assign(name, owner)?;
+            } else {
+                return Err(InterpError::new(format!(
+                    "cannot delegate mutate into immutable variable '{}'",
+                    name
+                )));
             }
-            interp.scope_env.assign(name, owner)?;
         }
     }
     Ok(())

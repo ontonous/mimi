@@ -69,9 +69,23 @@ impl LspServer {
     /// Convert a `file://` URI to a filesystem path.
     fn uri_to_path(uri: &str) -> Option<PathBuf> {
         let path_str = uri.strip_prefix("file://")?;
-        // On some platforms the path starts with / (absolute path).
-        // URI like file:///home/user/file.mimi → /home/user/file.mimi
-        Some(PathBuf::from(path_str))
+        // SEC-C4 (deep audit): percent-decode the path (it may be %-encoded)
+        // and normalize away `..` / `.` components so a crafted URI such as
+        // `file:///home/user/../../etc/passwd` cannot escape the filesystem
+        // root. `PathBuf::pop` on a root is a no-op, so escapes are dropped.
+        let decoded = crate::lsp::util::percent_decode(path_str);
+        let path = PathBuf::from(decoded);
+        let mut normalized = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+        Some(normalized)
     }
 
     /// Resolve imports if the file has any, using the workspace root.
