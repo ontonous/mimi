@@ -6680,6 +6680,25 @@ fn dual_result_string_err_println() {
     );
 }
 
+/// Named record println Display form (sorted fields).
+#[test]
+fn dual_record_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let p: Point = Point { x: 1, y: 2 }
+            println(p)
+            0
+        }
+        "#,
+        "Point { x: 1, y: 2 }"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
