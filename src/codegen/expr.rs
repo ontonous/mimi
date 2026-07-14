@@ -1391,10 +1391,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .const_int(n.wrapping_neg() as u64, true),
                     ))
                 }
-                BasicValueEnum::FloatValue(_) => {
-                    // Float constant fold not yet supported (see
-                    // fold_const_binary note).
-                    None
+                BasicValueEnum::FloatValue(fv) => {
+                    let (f, _) = fv.get_constant()?;
+                    Some(BasicValueEnum::FloatValue(
+                        self.context.f64_type().const_float(-f),
+                    ))
                 }
                 _ => None,
             },
