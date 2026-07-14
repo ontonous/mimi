@@ -103,8 +103,8 @@ pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule)
             continue;
         }
 
-        let source = std::fs::read_to_string(&file_path)
-            .map_err(|e| format!("failed to read {}: {}", file_path.display(), e))?;
+        // CL-H1: reject oversized module sources before parse.
+        let source = crate::path_safety::read_source_capped(&file_path)?;
 
         let tokens = lexer::Lexer::new(&source)
             .tokenize()

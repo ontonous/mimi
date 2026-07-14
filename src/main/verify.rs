@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::resolve_path;
@@ -8,8 +7,7 @@ use mimi::{lexer, loader, parser};
 
 pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 

@@ -2,8 +2,7 @@ use std::fs;
 use std::path::Path;
 
 pub(crate) fn promote(path: &Path, output: Option<&Path>) -> Result<(), String> {
-    let source = fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(path)?;
 
     // Check for ... placeholders
     if source.contains("...") {

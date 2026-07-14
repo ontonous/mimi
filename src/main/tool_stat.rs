@@ -105,7 +105,7 @@ fn scan_dir(
                 line = format!("{} (.{})", line, ext);
             }
             if show_hash {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = mimi::path_safety::read_source_capped(&path) {
                     let hash = simple_hash(&content);
                     // CL-H11 (deep audit): this is an FNV-1a hash, NOT SHA-256.
                     // Label it accurately so users are not misled into treating

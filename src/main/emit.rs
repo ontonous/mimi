@@ -8,8 +8,7 @@ use mimi::{ffi, lexer, parser};
 
 pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -44,8 +43,7 @@ pub(crate) fn emit_py_bindings(
     mimi_lib: Option<&Path>,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -123,8 +121,7 @@ pub(crate) fn emit_py_bindings(
 
 pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -157,8 +154,7 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
 
 pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -193,8 +189,7 @@ pub(crate) fn emit_node_bindings(
     ts_output: Option<&Path>,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -239,8 +234,7 @@ pub(crate) fn emit_java_bindings(
     java_output: Option<&Path>,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 
@@ -342,8 +336,7 @@ fn collect_exported_and_types(
 
 pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
 

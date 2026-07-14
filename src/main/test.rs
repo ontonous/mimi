@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::{is_sketch, resolve_path};
@@ -15,8 +14,7 @@ pub(crate) fn test(
     strict: bool,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     if is_sketch(&path) {
         return Err("cannot test a .mms sketch file directly; promote to .mimi first".into());
     }
@@ -51,7 +49,7 @@ pub(crate) fn test(
             diagnostics.len()
         );
         let use_color = colors_enabled();
-        let src = fs::read_to_string(&path).ok();
+        let src = mimi::path_safety::read_source_capped(&path).ok();
         let src_ref = src.as_deref();
         for d in &diagnostics {
             let formatted = format_diagnostic(d, src_ref, &path.display().to_string());

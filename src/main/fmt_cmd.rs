@@ -28,8 +28,7 @@ pub(crate) fn fmt_files(files: &[PathBuf], check: bool) -> Result<(), String> {
     }
 
     for path in &paths {
-        let source = fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let source = mimi::path_safety::read_source_capped(path)?;
         let mut formatted = source.clone();
         let changed = formatter.format_in_place(&mut formatted);
 

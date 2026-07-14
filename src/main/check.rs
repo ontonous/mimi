@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::{is_production, is_sketch, resolve_path};
@@ -7,8 +6,7 @@ use mimi::{lexer, parser};
 
 pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let sketch = is_sketch(&path);
     let tokens = if sketch {
         lexer::Lexer::new_sketch(&source).tokenize()?
@@ -85,7 +83,7 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
             diagnostics.len()
         );
         let use_color = colors_enabled();
-        let src = fs::read_to_string(&path).ok();
+        let src = mimi::path_safety::read_source_capped(&path).ok();
         let src_ref = src.as_deref();
         for d in &diagnostics {
             let formatted = format_diagnostic(d, src_ref, &path.display().to_string());

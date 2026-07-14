@@ -100,26 +100,48 @@ impl ModuleLoader {
 
 // ── Prelude loading ─────────────────────────────────────────────────────
 
+/// Load prelude items. CL-H18: log errors at each step instead of silently
+/// returning an empty vec, so missing/broken prelude files are diagnosable.
 pub fn load_prelude_items() -> Vec<Item> {
     let std_dir = match stdlib_dir() {
         Some(d) => d,
-        None => return vec![],
+        None => {
+            eprintln!(
+                "[mimi] warning: stdlib directory not found; prelude not loaded \
+                 (set MIMI_STDLIB or run from a checkout that contains std/)"
+            );
+            return vec![];
+        }
     };
     let prelude_path = std_dir.join("prelude.mimi");
     if !prelude_path.exists() {
+        eprintln!(
+            "[mimi] warning: prelude file missing: {}",
+            prelude_path.display()
+        );
         return vec![];
     }
-    let source = match std::fs::read_to_string(&prelude_path) {
+    // CL-H1: size-cap prelude reads the same way as CLI source loads.
+    let source = match crate::path_safety::read_source_capped(&prelude_path) {
         Ok(s) => s,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("[mimi] warning: failed to read prelude: {}", e);
+            return vec![];
+        }
     };
     let tokens = match crate::lexer::Lexer::new(&source).tokenize() {
         Ok(t) => t,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("[mimi] warning: failed to tokenize prelude: {}", e);
+            return vec![];
+        }
     };
     match crate::parser::Parser::new(tokens).parse_file() {
         Ok(file) => file.items,
-        Err(_) => vec![],
+        Err(e) => {
+            eprintln!("[mimi] warning: failed to parse prelude: {}", e);
+            vec![]
+        }
     }
 }
 
@@ -241,8 +263,8 @@ pub(crate) mod legacy {
         }
 
         fn load_file_inner(&mut self, path: &Path) -> Result<LoadedModule, String> {
-            let source = std::fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+            // CL-H1: reject oversized module sources before parse.
+            let source = crate::path_safety::read_source_capped(path)?;
             let tokens = lexer::Lexer::new(&source)
                 .tokenize()
                 .map_err(|e| format!("lexer error in {}: {}", path.display(), e))?;
