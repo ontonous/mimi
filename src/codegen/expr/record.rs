@@ -158,7 +158,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // List slots are always i64 — extend i32 (or narrower) values before storing.
                 let i64_ty = self.context.i64_type();
                 if iv.get_type().get_bit_width() < 64 {
-                    Ok(self.builder.build_int_s_extend(iv, i64_ty, "list_elem_sext")
+                    Ok(self
+                        .builder
+                        .build_int_s_extend(iv, i64_ty, "list_elem_sext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?)
                 } else {
                     Ok(iv)
@@ -550,7 +552,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::IntValue(iv) => {
                 // List slots are always i64 — extend i32 values before storing.
                 if iv.get_type().get_bit_width() < 64 {
-                    self.builder.build_int_s_extend(iv, i64_ty, "comp_elem_sext")
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "comp_elem_sext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
                 } else {
                     iv

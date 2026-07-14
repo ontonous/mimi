@@ -558,7 +558,10 @@ func main() -> i32 {
     return ys[0]
 }
 "#;
-    assert!(check_source(src).is_ok(), "comprehension guard should see loop variable");
+    assert!(
+        check_source(src).is_ok(),
+        "comprehension guard should see loop variable"
+    );
     assert_eq!(run_source(src), interp::Value::Int(4));
 }
 
@@ -573,7 +576,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "to_json(List<i32>) should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "to_json(List<i32>) should type-check"
+    );
 }
 
 #[test]

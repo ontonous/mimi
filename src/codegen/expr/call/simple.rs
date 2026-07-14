@@ -386,7 +386,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     fmt.push_str(&format!("\"{}\":%ld", field.name));
                                     let field_iv = field_val.into_int_value();
                                     let field_i64 = if field_iv.get_type().get_bit_width() < 64 {
-                                        self.builder.build_int_s_extend(field_iv, self.context.i64_type(), "json_i32_ext")
+                                        self.builder
+                                            .build_int_s_extend(
+                                                field_iv,
+                                                self.context.i64_type(),
+                                                "json_i32_ext",
+                                            )
                                             .map_err(|e| CompileError::LlvmError(e.to_string()))?
                                     } else {
                                         field_iv
@@ -477,7 +482,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // B3: Use snprintf instead of sprintf for buffer safety.
                         let snprintf_fn =
                             self.module.get_function("snprintf").unwrap_or_else(|| {
-                                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
                                 let ty = i8_ptr.fn_type(
                                     &[
                                         BasicMetadataTypeEnum::PointerType(i8_ptr),
@@ -554,20 +560,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .enumerate()
                     .map(|(i, v)| {
                         if let Some(param) = function.get_nth_param(i as u32) {
-                            if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                            if let (
+                                BasicValueEnum::IntValue(arg_iv),
+                                BasicValueEnum::IntValue(param_iv),
+                            ) = (*v, param)
+                            {
                                 let arg_bw = arg_iv.get_type().get_bit_width();
                                 let param_bw = param_iv.get_type().get_bit_width();
                                 if arg_bw == param_bw {
                                     Ok(*v)
                                 } else if arg_bw > param_bw {
-                                    Ok(self.builder
-                                        .build_int_truncate(arg_iv, param_iv.get_type(), &format!("enum_arg_trunc_{}", i))
-                                        .map_err(|e| CompileError::LlvmError(format!("enum arg trunc: {}", e)))?
+                                    Ok(self
+                                        .builder
+                                        .build_int_truncate(
+                                            arg_iv,
+                                            param_iv.get_type(),
+                                            &format!("enum_arg_trunc_{}", i),
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "enum arg trunc: {}",
+                                                e
+                                            ))
+                                        })?
                                         .into())
                                 } else {
-                                    Ok(self.builder
-                                        .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("enum_arg_sext_{}", i))
-                                        .map_err(|e| CompileError::LlvmError(format!("enum arg s_ext: {}", e)))?
+                                    Ok(self
+                                        .builder
+                                        .build_int_s_extend(
+                                            arg_iv,
+                                            param_iv.get_type(),
+                                            &format!("enum_arg_sext_{}", i),
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "enum arg s_ext: {}",
+                                                e
+                                            ))
+                                        })?
                                         .into())
                                 }
                             } else {
@@ -597,7 +627,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Ok/Some/Err/None are not in func_defs, so maybe_wrap_string_args_for_call
                 // won't find them — wrap manually based on arg expr type.
                 for (i, arg_expr) in args.iter().enumerate() {
-                    if i >= compiled_args.len() { break; }
+                    if i >= compiled_args.len() {
+                        break;
+                    }
                     if let BasicValueEnum::PointerValue(pv) = compiled_args[i] {
                         // Check if the arg is a string literal or string-producing expr
                         if matches!(arg_expr, Expr::Literal(Lit::String(_))) {
@@ -1026,21 +1058,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             .enumerate()
             .map(|(i, v)| {
                 if let Some(param) = function.get_nth_param(i as u32) {
-                    if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                    if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) =
+                        (*v, param)
+                    {
                         let arg_bw = arg_iv.get_type().get_bit_width();
                         let param_bw = param_iv.get_type().get_bit_width();
                         if arg_bw == param_bw {
                             return Ok(*v);
                         } else if arg_bw > param_bw {
                             // Truncate wider arg to param width (e.g. i64→i32)
-                            Ok(self.builder
-                                .build_int_truncate(arg_iv, param_iv.get_type(), &format!("arg_trunc_{}", i))
+                            Ok(self
+                                .builder
+                                .build_int_truncate(
+                                    arg_iv,
+                                    param_iv.get_type(),
+                                    &format!("arg_trunc_{}", i),
+                                )
                                 .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
                                 .into())
                         } else {
                             // Extend narrower arg to param width (e.g. i32→i64)
-                            Ok(self.builder
-                                .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("arg_sext_{}", i))
+                            Ok(self
+                                .builder
+                                .build_int_s_extend(
+                                    arg_iv,
+                                    param_iv.get_type(),
+                                    &format!("arg_sext_{}", i),
+                                )
                                 .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
                                 .into())
                         }
@@ -1076,20 +1120,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .enumerate()
                 .map(|(i, v)| {
                     if let Some(param) = f.get_nth_param(i as u32) {
-                        if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) = (*v, param) {
+                        if let (
+                            BasicValueEnum::IntValue(arg_iv),
+                            BasicValueEnum::IntValue(param_iv),
+                        ) = (*v, param)
+                        {
                             let arg_bw = arg_iv.get_type().get_bit_width();
                             let param_bw = param_iv.get_type().get_bit_width();
                             if arg_bw == param_bw {
                                 Ok(*v)
                             } else if arg_bw > param_bw {
-                                Ok(self.builder
-                                    .build_int_truncate(arg_iv, param_iv.get_type(), &format!("call_arg_trunc_{}", i))
-                                    .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
+                                Ok(self
+                                    .builder
+                                    .build_int_truncate(
+                                        arg_iv,
+                                        param_iv.get_type(),
+                                        &format!("call_arg_trunc_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("arg trunc: {}", e))
+                                    })?
                                     .into())
                             } else {
-                                Ok(self.builder
-                                    .build_int_s_extend(arg_iv, param_iv.get_type(), &format!("call_arg_sext_{}", i))
-                                    .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
+                                Ok(self
+                                    .builder
+                                    .build_int_s_extend(
+                                        arg_iv,
+                                        param_iv.get_type(),
+                                        &format!("call_arg_sext_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("arg s_ext: {}", e))
+                                    })?
                                     .into())
                             }
                         } else {
@@ -1445,11 +1507,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ],
                     true,
                 );
-                self.module.add_function(
-                    "snprintf",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                )
+                self.module
+                    .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
             });
             let mut all_args = vec![BasicMetadataValueEnum::PointerValue(buf)];
             all_args.push(BasicMetadataValueEnum::IntValue(buf_size));

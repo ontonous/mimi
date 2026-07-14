@@ -192,7 +192,12 @@ impl SolverSession {
         let mut params = z3::Params::new();
         params.set_u32("timeout", timeout_ms as u32);
         solver.set_params(&params);
-        Ok(Self { solver, replaced: false, poisoned: false, timeout_ms })
+        Ok(Self {
+            solver,
+            replaced: false,
+            poisoned: false,
+            timeout_ms,
+        })
     }
 
     /// Check satisfiability with timeout and crash protection.
@@ -211,11 +216,16 @@ impl SolverSession {
         }
         // H14-fix: distinguish Z3 crash from timeout. A crash (panic) is now
         // logged to stderr so verification incompleteness is visible.
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.solver.check()));
         match result {
-            Ok(SatResult::Sat) => { self.replaced = false; SatResult::Sat }
-            Ok(SatResult::Unsat) => { self.replaced = false; SatResult::Unsat }
+            Ok(SatResult::Sat) => {
+                self.replaced = false;
+                SatResult::Sat
+            }
+            Ok(SatResult::Unsat) => {
+                self.replaced = false;
+                SatResult::Unsat
+            }
             Ok(SatResult::Unknown) => {
                 // Normal timeout — solver may be in an inconsistent state.
                 // Replace with a fresh solver. The new solver starts at Z3
@@ -239,11 +249,7 @@ impl SolverSession {
                 let msg = panic_payload
                     .downcast_ref::<String>()
                     .cloned()
-                    .or_else(|| {
-                        panic_payload
-                            .downcast_ref::<&str>()
-                            .map(|s| s.to_string())
-                    })
+                    .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
                     .unwrap_or_else(|| "(non-string panic payload)".to_string());
                 eprintln!("[mimi verifier] Z3 solver crashed: {}", msg);
                 let mut params = z3::Params::new();
@@ -267,9 +273,15 @@ impl SolverSession {
     /// RT-H5 (audit): reset clears all assertions and resets Z3 depth to 0.
     /// This is always safe to call regardless of `replaced` state — a fresh
     /// Solver::new() followed by reset() is idempotent with a reused solver.
-    pub fn reset(&mut self) { self.solver.reset(); self.replaced = false; self.poisoned = false; }
+    pub fn reset(&mut self) {
+        self.solver.reset();
+        self.replaced = false;
+        self.poisoned = false;
+    }
 
-    pub fn push(&mut self) { self.solver.push(); }
+    pub fn push(&mut self) {
+        self.solver.push();
+    }
 
     /// Pop solver scope. NO-OP if the solver was replaced by check() (fresh
     /// solver starts at Z3 depth 0; pending old-solver pops are irrelevant).
@@ -285,9 +297,13 @@ impl SolverSession {
         self.solver.assert(ast);
     }
 
-    pub fn get_model(&self) -> Option<z3::Model> { self.solver.get_model() }
+    pub fn get_model(&self) -> Option<z3::Model> {
+        self.solver.get_model()
+    }
 
-    pub fn set_params(&self, params: &z3::Params) { self.solver.set_params(params); }
+    pub fn set_params(&self, params: &z3::Params) {
+        self.solver.set_params(params);
+    }
 
     /// Push, assert constraint, check, pop.
     ///
@@ -346,7 +362,11 @@ impl SolverSession {
 
     pub fn dump_smt2(&self) -> Option<String> {
         let s = self.solver.to_string();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 }
 

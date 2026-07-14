@@ -131,11 +131,10 @@ impl Manifest {
         // M42 (deep audit): atomic write to prevent corruption.
         std::fs::write(&tmp_path, &content)
             .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
-        std::fs::rename(&tmp_path, &toml_path)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                format!("failed to rename manifest: {}", e)
-            })?;
+        std::fs::rename(&tmp_path, &toml_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("failed to rename manifest: {}", e)
+        })?;
         Ok(())
     }
 

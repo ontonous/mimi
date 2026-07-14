@@ -190,7 +190,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 (BasicValueEnum::IntValue(a), BasicMetadataValueEnum::IntValue(b)) => {
                     // List elements are stored as i64; extend search value to i64 if narrower.
                     let b_i64 = if b.get_type().get_bit_width() < 64 {
-                        self.builder.build_int_s_extend(b, i64_ty, "search_sext")
+                        self.builder
+                            .build_int_s_extend(b, i64_ty, "search_sext")
                             .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
                     } else {
                         b

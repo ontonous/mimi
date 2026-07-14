@@ -236,7 +236,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ],
                         true,
                     );
-                    self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+                    self.module.add_function(
+                        "snprintf",
+                        ty,
+                        Some(inkwell::module::Linkage::External),
+                    )
                 });
                 self.builder
                     .build_call(

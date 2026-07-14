@@ -10,7 +10,11 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 
 impl VerifierCtx {
-    pub fn verify_ffi_call_sites(&mut self, session: &mut SolverSession, file: &File) -> Vec<VerificationResult> {
+    pub fn verify_ffi_call_sites(
+        &mut self,
+        session: &mut SolverSession,
+        file: &File,
+    ) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         let mut externs: HashMap<String, ExternFunc> = HashMap::new();
         Self::collect_externs(&file.items, &mut externs);
@@ -32,7 +36,8 @@ impl VerifierCtx {
                 let caller_span = Span::single(func.pos.0, func.pos.1);
                 for (extern_name, args) in &calls {
                     if let Some(extern_func) = externs.get(extern_name.as_str()) {
-                        let result = self.check_extern_call(session, 
+                        let result = self.check_extern_call(
+                            session,
                             &func.name,
                             extern_func,
                             args,
@@ -184,7 +189,12 @@ impl VerifierCtx {
         vars
     }
 
-    fn assert_func_requires(&mut self, session: &mut SolverSession, func: &FuncDef, vars: &mut Z3VarMap) {
+    fn assert_func_requires(
+        &mut self,
+        session: &mut SolverSession,
+        func: &FuncDef,
+        vars: &mut Z3VarMap,
+    ) {
         for stmt in &func.body {
             if let Stmt::Requires(expr, _) = stmt {
                 match expr::expr_to_z3_bool(expr, vars) {
@@ -249,16 +259,14 @@ impl VerifierCtx {
         let constraint_count = 1;
 
         match result {
-            SatResult::Unsat => {
-                VerificationResult {
-                    func_name,
-                    status: VerifStatus::Verified,
-                    message: "precondition always satisfied".into(),
-                    diagnostic: None,
-                    duration_us: start.elapsed().as_micros() as u64,
-                    constraint_count,
-                }
-            }
+            SatResult::Unsat => VerificationResult {
+                func_name,
+                status: VerifStatus::Verified,
+                message: "precondition always satisfied".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+            },
             SatResult::Sat => {
                 let diag = Diagnostic::error(
                     format!(
@@ -280,16 +288,14 @@ impl VerifierCtx {
                     constraint_count,
                 }
             }
-            SatResult::Unknown => {
-                VerificationResult {
-                    func_name,
-                    status: VerifStatus::Unknown,
-                    message: "precondition satisfiability unknown".into(),
-                    diagnostic: None,
-                    duration_us: start.elapsed().as_micros() as u64,
-                    constraint_count,
-                }
-            }
+            SatResult::Unknown => VerificationResult {
+                func_name,
+                status: VerifStatus::Unknown,
+                message: "precondition satisfiability unknown".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+            },
         }
     }
 }

@@ -152,7 +152,9 @@ impl<'a> Interpreter<'a> {
             (Value::String(json), Value::String(key)) => {
                 let jv: serde_json::Value = serde_json::from_str(json)
                     .map_err(|e| InterpError::new(format!("json_has_key parse error: {}", e)))?;
-                Ok(Value::Bool(jv.as_object().is_some_and(|obj| obj.contains_key(key))))
+                Ok(Value::Bool(
+                    jv.as_object().is_some_and(|obj| obj.contains_key(key)),
+                ))
             }
             _ => Err(InterpError::new("json_has_key expects (string, string)")),
         }

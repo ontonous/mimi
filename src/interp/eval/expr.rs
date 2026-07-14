@@ -105,7 +105,9 @@ impl<'a> Interpreter<'a> {
                 // Use write() to enforce exclusive access.
                 Value::RefMut(rc) => Ok(rc
                     .write()
-                    .map_err(|e| InterpError::lock_error(format!("write lock for RefMut deref: {}", e)))?
+                    .map_err(|e| {
+                        InterpError::lock_error(format!("write lock for RefMut deref: {}", e))
+                    })?
                     .clone()),
                 Value::Shared(arc) => Ok(arc
                     .read()
@@ -571,9 +573,7 @@ impl<'a> Interpreter<'a> {
                                 t.name == *method
                                     && from_name.map(|n| n == t.from_state).unwrap_or(false)
                             })
-                            .or_else(|| {
-                                flow.transitions.iter().find(|t| t.name == *method)
-                            });
+                            .or_else(|| flow.transitions.iter().find(|t| t.name == *method));
                         if let Some(t) = t {
                             return self.eval_flow_transition(&flow, t, &vals);
                         }
@@ -798,8 +798,8 @@ impl<'a> Interpreter<'a> {
                                     ty: Type::Name("unknown".into(), vec![]),
                                     mut_: false,
                                     default_value: None,
-                borrow: None,
-            })
+                                    borrow: None,
+                                })
                                 .collect(),
                             ret: None,
                             body: vec![Stmt::Return(Some(Expr::Call(
@@ -1216,11 +1216,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Helper for optional chaining: extract a field from common value shapes.
-    fn eval_optional_field(
-        &self,
-        inner: &Value,
-        field: &str,
-    ) -> Result<Value, InterpError> {
+    fn eval_optional_field(&self, inner: &Value, field: &str) -> Result<Value, InterpError> {
         match inner {
             Value::Record(name, fields) => {
                 for (k, v) in fields {
@@ -1258,9 +1254,7 @@ impl<'a> Interpreter<'a> {
                 if let Value::Actor(handle) = obj_val {
                     // v0.29.11: O(1) short-circuit after Fault absorption.
                     if handle.is_faulted() {
-                        return Err(InterpError::new(
-                            "actor mailbox short-circuited (Fault)",
-                        ));
+                        return Err(InterpError::new("actor mailbox short-circuited (Fault)"));
                     }
                     // Send through mailbox with backpressure (v0.29.21).
                     let rx = handle.try_enqueue(method_name, args_vals)?;

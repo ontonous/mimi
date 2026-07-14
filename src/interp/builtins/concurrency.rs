@@ -377,10 +377,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub(crate) fn builtin_actor_is_muted(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_actor_is_muted(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
             return Err(InterpError::new("actor_is_muted expects 1 argument"));
         }
@@ -432,11 +429,7 @@ impl<'a> Interpreter<'a> {
         let n = match &args[0] {
             Value::Int(x) if *x <= 0 => None,
             Value::Int(x) => Some(*x as usize),
-            _ => {
-                return Err(InterpError::new(
-                    "actor_set_max_children expects i64",
-                ))
-            }
+            _ => return Err(InterpError::new("actor_set_max_children expects i64")),
         };
         self.set_max_children(n);
         // Keep runtime counter in sync for dual-backend / mixed paths.
@@ -444,10 +437,7 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Unit)
     }
 
-    pub(crate) fn builtin_actor_spawn_count(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_actor_spawn_count(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if !args.is_empty() {
             return Err(InterpError::new("actor_spawn_count expects 0 arguments"));
         }
@@ -485,10 +475,7 @@ impl<'a> Interpreter<'a> {
     /// v0.29.38: assert_state(flow_instance, state_name) — verify that a
     /// flow state record has the expected state name. Panics (returns Err)
     /// if the state doesn't match.
-    pub(crate) fn builtin_assert_state(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_assert_state(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new(
                 "assert_state expects 2 arguments (flow_instance, state_name)",
@@ -501,7 +488,11 @@ impl<'a> Interpreter<'a> {
         };
         let expected_state = match &args[1] {
             Value::String(s) => s.clone(),
-            _ => return Err(InterpError::new("assert_state: state_name must be a string")),
+            _ => {
+                return Err(InterpError::new(
+                    "assert_state: state_name must be a string",
+                ))
+            }
         };
         if actual_state != expected_state {
             return Err(InterpError::new(&format!(
@@ -515,10 +506,7 @@ impl<'a> Interpreter<'a> {
     /// v0.29.38: inject_fault(flow_instance) — inject a Fault into a flow
     /// instance by returning a Fault record with SystemTrace.
     /// This is a test utility: it constructs a minimal Fault payload.
-    pub(crate) fn builtin_inject_fault(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_inject_fault(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.is_empty() {
             return Err(InterpError::new(
                 "inject_fault expects 1 argument (flow_instance)",
@@ -532,26 +520,44 @@ impl<'a> Interpreter<'a> {
         // Construct a Fault record
         let mut fault_fields = HashMap::new();
         fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
-        fault_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+        fault_fields.insert(
+            "unexpected_event".to_string(),
+            Value::String("inject_fault".to_string()),
+        );
         fault_fields.insert("snapshot".to_string(), Value::String(String::new()));
         // SystemTrace sub-record — must have all 5 fields (v0.29.39 expanded)
         let mut trace_fields = HashMap::new();
         trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
-        trace_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+        trace_fields.insert(
+            "unexpected_event".to_string(),
+            Value::String("inject_fault".to_string()),
+        );
         trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
         // MemoryDump: empty dump (count=0, regions=[])
         let mut dump_fields = HashMap::new();
         dump_fields.insert("count".to_string(), Value::Int(0));
         dump_fields.insert("regions".to_string(), Value::List(Vec::new()));
-        trace_fields.insert("memory_dump".to_string(), Value::Record(Some("MemoryDump".to_string()), dump_fields));
+        trace_fields.insert(
+            "memory_dump".to_string(),
+            Value::Record(Some("MemoryDump".to_string()), dump_fields),
+        );
         // PanicPayload: synthetic injection info
         let mut panic_fields = HashMap::new();
-        panic_fields.insert("error_type".to_string(), Value::String("InjectFault".to_string()));
+        panic_fields.insert(
+            "error_type".to_string(),
+            Value::String("InjectFault".to_string()),
+        );
         panic_fields.insert("file".to_string(), Value::String(String::new()));
         panic_fields.insert("line".to_string(), Value::Int(0));
         panic_fields.insert("stack_snapshot".to_string(), Value::String(String::new()));
-        trace_fields.insert("panic_payload".to_string(), Value::Record(Some("PanicPayload".to_string()), panic_fields));
-        fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
+        trace_fields.insert(
+            "panic_payload".to_string(),
+            Value::Record(Some("PanicPayload".to_string()), panic_fields),
+        );
+        fault_fields.insert(
+            "trace".to_string(),
+            Value::Record(Some("SystemTrace".to_string()), trace_fields),
+        );
         Ok(Value::Record(Some("Fault".to_string()), fault_fields))
     }
 
@@ -562,10 +568,7 @@ impl<'a> Interpreter<'a> {
     /// On success: Ok-like value (the method return).
     /// On fault/error: PeerFault-shaped record { peer_id, reason }.
     /// No 2PC — caller decides how to handle mixed results.
-    pub(crate) fn builtin_broadcast(
-        &mut self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_broadcast(&mut self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new(
                 "broadcast expects 2 arguments (targets: List, method: string)",
@@ -598,11 +601,7 @@ impl<'a> Interpreter<'a> {
                         continue;
                     }
                     // Dispatch via existing method-call path (mailbox / self).
-                    match self.call_method(
-                        &Value::Actor(handle.clone()),
-                        &method,
-                        vec![],
-                    ) {
+                    match self.call_method(&Value::Actor(handle.clone()), &method, vec![]) {
                         Ok(v) => {
                             // H6-fix: Preserve the original value type instead
                             // of coercing non-i64 to 0. Previously, non-int
@@ -629,12 +628,11 @@ impl<'a> Interpreter<'a> {
     // ── v0.29.44: Shadow memory tagging builtins ──────────────────────
 
     /// shadow_alloc(size: i64, tag: i32, label: string) -> i64 (pointer as int)
-    pub(crate) fn builtin_shadow_alloc(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_shadow_alloc(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 3 {
-            return Err(InterpError::new("shadow_alloc expects 3 arguments (size, tag, label)"));
+            return Err(InterpError::new(
+                "shadow_alloc expects 3 arguments (size, tag, label)",
+            ));
         }
         let size = match &args[0] {
             Value::Int(n) => *n as usize,
@@ -654,12 +652,11 @@ impl<'a> Interpreter<'a> {
     }
 
     /// shadow_tag(ptr: i64, tag: i32) -> i32 (0=ok, -1=err)
-    pub(crate) fn builtin_shadow_tag(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_shadow_tag(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("shadow_tag expects 2 arguments (ptr, tag)"));
+            return Err(InterpError::new(
+                "shadow_tag expects 2 arguments (ptr, tag)",
+            ));
         }
         let ptr = match &args[0] {
             Value::Int(n) => *n as *const u8,
@@ -674,12 +671,11 @@ impl<'a> Interpreter<'a> {
     }
 
     /// shadow_check(ptr: i64, expected_tag: i32) -> bool
-    pub(crate) fn builtin_shadow_check(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_shadow_check(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
-            return Err(InterpError::new("shadow_check expects 2 arguments (ptr, tag)"));
+            return Err(InterpError::new(
+                "shadow_check expects 2 arguments (ptr, tag)",
+            ));
         }
         let ptr = match &args[0] {
             Value::Int(n) => *n as *const u8,
@@ -694,10 +690,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// shadow_free(ptr: i64) -> unit
-    pub(crate) fn builtin_shadow_free(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_shadow_free(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
             return Err(InterpError::new("shadow_free expects 1 argument (ptr)"));
         }
@@ -712,10 +705,7 @@ impl<'a> Interpreter<'a> {
     /// v0.29.48: test_sandbox(config) — multi-actor integration test sandbox.
     /// Spawns actors, runs transitions, injects faults.
     /// White-paper §8: "测试框架支持批量激活多个 Flow 实例"
-    pub(crate) fn builtin_test_sandbox(
-        &mut self,
-        args: Vec<Value>,
-    ) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_test_sandbox(&mut self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.is_empty() {
             return Err(InterpError::new("test_sandbox expects 1 argument (config)"));
         }
@@ -737,8 +727,15 @@ impl<'a> Interpreter<'a> {
             if let Some(Value::List(calls)) = fields.get("calls") {
                 for call in calls {
                     if let Value::Record(_, cf) = call {
-                        let method = cf.get("method")
-                            .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                        let method = cf
+                            .get("method")
+                            .and_then(|v| {
+                                if let Value::String(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
                         results.push(Value::String(format!("called:{}", method)));
                     }
@@ -748,8 +745,15 @@ impl<'a> Interpreter<'a> {
             if let Some(Value::List(faults)) = fields.get("faults") {
                 for fault in faults {
                     if let Value::Record(_, ff) = fault {
-                        let ftype = ff.get("fault_type")
-                            .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                        let ftype = ff
+                            .get("fault_type")
+                            .and_then(|v| {
+                                if let Value::String(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
                         results.push(Value::String(format!("injected:{}", ftype)));
                     }
@@ -785,4 +789,3 @@ impl ValueAsI64 for Value {
         }
     }
 }
-

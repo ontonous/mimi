@@ -853,12 +853,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if arg_bw > param_bw {
                                 self.builder
                                     .build_int_truncate(iv, param_iv.get_type(), "map_elem_trunc")
-                                    .map_err(|e| CompileError::LlvmError(format!("map elem trunc: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("map elem trunc: {}", e))
+                                    })?
                                     .into()
                             } else {
                                 self.builder
                                     .build_int_s_extend(iv, param_iv.get_type(), "map_elem_sext")
-                                    .map_err(|e| CompileError::LlvmError(format!("map elem sext: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("map elem sext: {}", e))
+                                    })?
                                     .into()
                             }
                         }
@@ -911,22 +915,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if arg_bw > param_bw {
                                 self.builder
                                     .build_int_truncate(iv, param_it, "map_indirect_trunc")
-                                    .map_err(|e| CompileError::LlvmError(format!("map indirect trunc: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "map indirect trunc: {}",
+                                            e
+                                        ))
+                                    })?
                                     .into()
                             } else {
                                 self.builder
                                     .build_int_s_extend(iv, param_it, "map_indirect_sext")
-                                    .map_err(|e| CompileError::LlvmError(format!("map indirect sext: {}", e)))?
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("map indirect sext: {}", e))
+                                    })?
                                     .into()
                             }
                         }
                         _ => elem_for_call,
                     };
                     let m = match &adjusted {
-                        BasicValueEnum::IntValue(iv) => BasicMetadataTypeEnum::IntType(iv.get_type()),
-                        BasicValueEnum::StructValue(sv) => BasicMetadataTypeEnum::StructType(sv.get_type()),
-                        BasicValueEnum::PointerValue(pv) => BasicMetadataTypeEnum::PointerType(pv.get_type()),
-                        BasicValueEnum::FloatValue(fv) => BasicMetadataTypeEnum::FloatType(fv.get_type()),
+                        BasicValueEnum::IntValue(iv) => {
+                            BasicMetadataTypeEnum::IntType(iv.get_type())
+                        }
+                        BasicValueEnum::StructValue(sv) => {
+                            BasicMetadataTypeEnum::StructType(sv.get_type())
+                        }
+                        BasicValueEnum::PointerValue(pv) => {
+                            BasicMetadataTypeEnum::PointerType(pv.get_type())
+                        }
+                        BasicValueEnum::FloatValue(fv) => {
+                            BasicMetadataTypeEnum::FloatType(fv.get_type())
+                        }
                         _ => elem_meta,
                     };
                     (adjusted, m)
@@ -948,7 +967,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     match &call_elem {
                         BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
                         BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
-                        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+                        BasicValueEnum::PointerValue(pv) => {
+                            BasicMetadataValueEnum::PointerValue(*pv)
+                        }
                         BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
                         _ => BasicMetadataValueEnum::IntValue(elem_i64_int),
                     },
@@ -974,12 +995,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if bw < 64 {
                         self.builder
                             .build_int_s_extend(iv, i64_ty, "map_result_sext")
-                            .map_err(|e| CompileError::LlvmError(format!("map result sext: {}", e)))?
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("map result sext: {}", e))
+                            })?
                             .into()
                     } else if bw > 64 {
                         self.builder
                             .build_int_truncate(iv, i64_ty, "map_result_trunc")
-                            .map_err(|e| CompileError::LlvmError(format!("map result trunc: {}", e)))?
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("map result trunc: {}", e))
+                            })?
                             .into()
                     } else {
                         result

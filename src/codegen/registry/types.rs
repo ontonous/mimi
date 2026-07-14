@@ -3,8 +3,8 @@ use crate::codegen::types;
 use crate::codegen::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
 use inkwell::types::{BasicType, BasicTypeEnum, StructType};
-use inkwell::values::BasicValueEnum;
 use inkwell::values::BasicMetadataValueEnum;
+use inkwell::values::BasicValueEnum;
 
 /// P0-2: how a variant's payload maps onto the constructor function's
 /// parameter shape. The uniform runtime representation is `{i32 tag, i64
@@ -244,40 +244,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         CompileError::LlvmError("missing payload param".to_string())
                                     })?;
                                     let i64_type = self.context.i64_type();
-                                    let i64_payload =
-                                        if *ty == BasicTypeEnum::IntType(i64_type) {
-                                            payload_arg
-                                        } else if let BasicValueEnum::IntValue(iv) = payload_arg {
-                                            // Integer narrower than i64: s_extend to i64
-                                            // (preserves sign for negative i32 values).
-                                            if iv.get_type().get_bit_width() < 64 {
-                                                self.builder
-                                                    .build_int_s_extend(iv, i64_type, "payload_sext")
-                                                    .map_err(|e| {
-                                                        CompileError::LlvmError(format!(
-                                                            "s_ext payload: {}",
-                                                            e
-                                                        ))
-                                                    })?
-                                                    .into()
-                                            } else {
-                                                payload_arg
-                                            }
-                                        } else {
-                                            // Float or pointer: bitcast is valid for same-width types
+                                    let i64_payload = if *ty == BasicTypeEnum::IntType(i64_type) {
+                                        payload_arg
+                                    } else if let BasicValueEnum::IntValue(iv) = payload_arg {
+                                        // Integer narrower than i64: s_extend to i64
+                                        // (preserves sign for negative i32 values).
+                                        if iv.get_type().get_bit_width() < 64 {
                                             self.builder
-                                                .build_bit_cast(
-                                                    payload_arg,
-                                                    BasicTypeEnum::IntType(i64_type),
-                                                    "payload_bc",
-                                                )
+                                                .build_int_s_extend(iv, i64_type, "payload_sext")
                                                 .map_err(|e| {
                                                     CompileError::LlvmError(format!(
-                                                        "bitcast payload: {}",
+                                                        "s_ext payload: {}",
                                                         e
                                                     ))
                                                 })?
-                                        };
+                                                .into()
+                                        } else {
+                                            payload_arg
+                                        }
+                                    } else {
+                                        // Float or pointer: bitcast is valid for same-width types
+                                        self.builder
+                                            .build_bit_cast(
+                                                payload_arg,
+                                                BasicTypeEnum::IntType(i64_type),
+                                                "payload_bc",
+                                            )
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "bitcast payload: {}",
+                                                    e
+                                                ))
+                                            })?
+                                    };
                                     self.builder.build_store(payload_gep, i64_payload).map_err(
                                         |e| {
                                             CompileError::LlvmError(format!("store payload: {}", e))

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 // Codegen for v0.28.20 concurrency primitives.
 //
 // Each primitive is a thin wrapper around its corresponding
@@ -179,12 +180,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder
                 .build_int_truncate(exp_in, i32_ty, "cas_exp_trunc")
                 .map_err(|e| format!("cas exp truncate error: {}", e))?
-        } else { exp_in };
+        } else {
+            exp_in
+        };
         let nv = if new_in.get_type().get_bit_width() > 32 {
             self.builder
                 .build_int_truncate(new_in, i32_ty, "cas_nv_trunc")
                 .map_err(|e| format!("cas nv truncate error: {}", e))?
-        } else { new_in };
+        } else {
+            new_in
+        };
         let func = self
             .module
             .get_function("mimi_atomic_i32_compare_exchange")
@@ -704,7 +709,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(func, &[args[0]], "actor_bp_query")
             .map_err(|e| format!("{} error: {}", runtime_name, e))?;
-        Ok(call_try_basic_value(&result).ok_or_else(|| format!("{} returned void", runtime_name))?)
+        Ok(call_try_basic_value(&result)
+            .ok_or_else(|| format!("{} returned void", runtime_name))?)
     }
 
     /// v0.29.21: actor_set_mailbox_depth(handle, depth).
@@ -747,9 +753,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ))
     }
 
-    pub(super) fn compile_actor_spawn_count(
-        &self,
-    ) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_actor_spawn_count(&self) -> MimiResult<BasicValueEnum<'ctx>> {
         let func = self
             .module
             .get_function("mimi_actor_spawn_count")
@@ -761,9 +765,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(call_try_basic_value(&result).ok_or("mimi_actor_spawn_count returned void")?)
     }
 
-    pub(super) fn compile_actor_max_children(
-        &self,
-    ) -> MimiResult<BasicValueEnum<'ctx>> {
+    pub(super) fn compile_actor_max_children(&self) -> MimiResult<BasicValueEnum<'ctx>> {
         let func = self
             .module
             .get_function("mimi_actor_max_children")
@@ -792,9 +794,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
             BasicMetadataValueEnum::StructValue(sv) => sv.into(),
             BasicMetadataValueEnum::IntValue(iv) => iv.into(),
-            other => {
-                return Err(format!("broadcast: unexpected method arg {:?}", other).into())
-            }
+            other => return Err(format!("broadcast: unexpected method arg {:?}", other).into()),
         };
         let method_c = self
             .extract_string_ptr(&method_basic)
@@ -935,11 +935,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| format!("load: {}", e))?
             .into_int_value();
         if let Some(free_fn) = self.module.get_function("free") {
-            let _ = self.builder.build_call(
-                free_fn,
-                &[handles_arr.into()],
-                "free_handles",
-            );
+            let _ = self
+                .builder
+                .build_call(free_fn, &[handles_arr.into()], "free_handles");
         }
         // results_ptr is *mut i64; store as list data (i8*)
         let data_out = self
@@ -978,9 +976,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let func = self.module.get_function("mimi_channel_send").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_channel_send".into())
-        })?;
+        let func = self
+            .module
+            .get_function("mimi_channel_send")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_channel_send".into()))?;
         self.builder
             .build_call(
                 func,
@@ -1017,16 +1016,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let func = self.module.get_function("mimi_channel_recv").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_channel_recv".into())
-        })?;
+        let func = self
+            .module
+            .get_function("mimi_channel_recv")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_channel_recv".into()))?;
         let result = self
             .builder
             .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_recv")
             .map_err(|e| CompileError::LlvmError(format!("session_recv error: {}", e)))?;
-        call_try_basic_value(&result).ok_or_else(|| {
-            CompileError::LlvmError("mimi_channel_recv returned void".into())
-        })
+        call_try_basic_value(&result)
+            .ok_or_else(|| CompileError::LlvmError("mimi_channel_recv returned void".into()))
     }
 
     /// v0.29.34: session_close(ch) — delegates to mimi_channel_drop.
@@ -1047,21 +1046,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let func = self.module.get_function("mimi_channel_drop").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_channel_drop".into())
-        })?;
+        let func = self
+            .module
+            .get_function("mimi_channel_drop")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_channel_drop".into()))?;
         self.builder
-            .build_call(func, &[BasicMetadataValueEnum::IntValue(h)], "session_close")
+            .build_call(
+                func,
+                &[BasicMetadataValueEnum::IntValue(h)],
+                "session_close",
+            )
             .map_err(|e| CompileError::LlvmError(format!("session_close error: {}", e)))?;
         Ok(BasicValueEnum::IntValue(
             self.context.i64_type().const_int(0, false),
         ))
     }
 
-    pub(super) fn compile_session_open(&self, _args: &[BasicMetadataValueEnum<'ctx>]) -> MimiResult<BasicValueEnum<'ctx>> {
-        let f = self.module.get_function("mimi_session_pair").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_session_pair".into())
-        })?;
+    pub(super) fn compile_session_open(
+        &self,
+        _args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let f = self
+            .module
+            .get_function("mimi_session_pair")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_session_pair".into()))?;
         let pair = self
             .builder
             .build_call(f, &[], "sp")
@@ -1069,12 +1077,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let packed = call_try_basic_value(&pair)
             .ok_or_else(|| CompileError::LlvmError("session_pair returned void".into()))?
             .into_int_value();
-        let lo_f = self.module.get_function("mimi_session_lo").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_session_lo".into())
-        })?;
-        let hi_f = self.module.get_function("mimi_session_hi").ok_or_else(|| {
-            CompileError::UndefinedFunc("mimi_session_hi".into())
-        })?;
+        let lo_f = self
+            .module
+            .get_function("mimi_session_lo")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_session_lo".into()))?;
+        let hi_f = self
+            .module
+            .get_function("mimi_session_hi")
+            .ok_or_else(|| CompileError::UndefinedFunc("mimi_session_hi".into()))?;
         let lo = call_try_basic_value(
             &self
                 .builder
@@ -1141,21 +1151,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err("shadow_alloc expects 3 arguments".into());
         }
         let size = args[0].into_int_value();
-        let tag = self.builder
+        let tag = self
+            .builder
             .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
             .map_err(|e| format!("trunc: {}", e))?;
         let label_ptr = args[2].into_pointer_value();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let usize_ty = self.context.i64_type(); // size_t on 64-bit
         let fn_ty = usize_ty.fn_type(
-            &[BasicMetadataTypeEnum::IntType(usize_ty), BasicMetadataTypeEnum::IntType(self.context.i8_type()), BasicMetadataTypeEnum::PointerType(i8_ptr)],
+            &[
+                BasicMetadataTypeEnum::IntType(usize_ty),
+                BasicMetadataTypeEnum::IntType(self.context.i8_type()),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
             false,
         );
-        let func = self.module.get_function("mimi_shadow_alloc").unwrap_or_else(|| {
-            self.module.add_function("mimi_shadow_alloc", fn_ty, Some(inkwell::module::Linkage::External))
-        });
-        let call = self.builder
-            .build_call(func, &[size.into(), tag.into(), label_ptr.into()], "shadow_alloc")
+        let func = self
+            .module
+            .get_function("mimi_shadow_alloc")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_shadow_alloc",
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let call = self
+            .builder
+            .build_call(
+                func,
+                &[size.into(), tag.into(), label_ptr.into()],
+                "shadow_alloc",
+            )
             .map_err(|e| format!("shadow_alloc: {}", e))?;
         Ok(call_try_basic_value(&call).unwrap().into_int_value().into())
     }
@@ -1175,33 +1202,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
         if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
             param_types.push(BasicMetadataTypeEnum::PointerType(i8_ptr)); // ptr
-            param_types.push(BasicMetadataTypeEnum::IntType(self.context.i8_type())); // tag
+            param_types.push(BasicMetadataTypeEnum::IntType(self.context.i8_type()));
+        // tag
         } else if fn_name == "mimi_shadow_free" {
             param_types.push(BasicMetadataTypeEnum::PointerType(i8_ptr)); // ptr
         }
         let fn_ty = ret_ty.fn_type(&param_types, false);
         let func = self.module.get_function(fn_name).unwrap_or_else(|| {
-            self.module.add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External))
+            self.module
+                .add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External))
         });
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
         if fn_name == "mimi_shadow_tag" || fn_name == "mimi_shadow_check" {
             let ptr_int = args[0].into_int_value();
-            let ptr = self.builder
+            let ptr = self
+                .builder
                 .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")
                 .map_err(|e| format!("inttoptr: {}", e))?;
-            let tag = self.builder
+            let tag = self
+                .builder
                 .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
                 .map_err(|e| format!("trunc: {}", e))?;
             call_args.push(ptr.into());
             call_args.push(tag.into());
         } else if fn_name == "mimi_shadow_free" {
             let ptr_int = args[0].into_int_value();
-            let ptr = self.builder
+            let ptr = self
+                .builder
                 .build_int_to_ptr(ptr_int, i8_ptr, "ptr_cast")
                 .map_err(|e| format!("inttoptr: {}", e))?;
             call_args.push(ptr.into());
         }
-        let call = self.builder
+        let call = self
+            .builder
             .build_call(func, &call_args, fn_name)
             .map_err(|e| format!("{}: {}", fn_name, e))?;
         Ok(call_try_basic_value(&call).unwrap().into_int_value().into())

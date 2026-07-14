@@ -420,7 +420,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 result,
-                self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null(),
                 "http_is_null",
             )
             .map_err(|e| format!("icmp error: {}", e))?;
@@ -524,7 +526,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 result,
-                self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null(),
                 "http_post_is_null",
             )
             .map_err(|e| format!("icmp error: {}", e))?;

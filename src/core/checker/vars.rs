@@ -125,9 +125,9 @@ impl<'a> Checker<'a> {
                     .map(|a| Self::replace_generic_names_with_typevars(a, names))
                     .collect(),
             ),
-            Type::Option(inner) => {
-                Type::Option(Box::new(Self::replace_generic_names_with_typevars(inner, names)))
-            }
+            Type::Option(inner) => Type::Option(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
             Type::Result(ok, err) => Type::Result(
                 Box::new(Self::replace_generic_names_with_typevars(ok, names)),
                 Box::new(Self::replace_generic_names_with_typevars(err, names)),
@@ -148,12 +148,13 @@ impl<'a> Checker<'a> {
                 Box::new(Self::replace_generic_names_with_typevars(inner, names)),
                 *size,
             ),
-            Type::Slice(inner) => {
-                Type::Slice(Box::new(Self::replace_generic_names_with_typevars(inner, names)))
-            }
-            Type::Ref(lt, inner) => {
-                Type::Ref(lt.clone(), Box::new(Self::replace_generic_names_with_typevars(inner, names)))
-            }
+            Type::Slice(inner) => Type::Slice(Box::new(Self::replace_generic_names_with_typevars(
+                inner, names,
+            ))),
+            Type::Ref(lt, inner) => Type::Ref(
+                lt.clone(),
+                Box::new(Self::replace_generic_names_with_typevars(inner, names)),
+            ),
             Type::RefMut(lt, inner) => Type::RefMut(
                 lt.clone(),
                 Box::new(Self::replace_generic_names_with_typevars(inner, names)),

@@ -576,9 +576,7 @@ impl<'a> Interpreter<'a> {
                     _ => {
                         // v0.29.11: O(1) mailbox short-circuit after Fault.
                         if actor_arc.is_faulted() {
-                            return Err(InterpError::new(
-                                "actor mailbox short-circuited (Fault)",
-                            ));
+                            return Err(InterpError::new("actor mailbox short-circuited (Fault)"));
                         }
                         // Check if we're inside this actor's own worker thread
                         // If so, execute directly to avoid mailbox deadlock.
@@ -607,10 +605,7 @@ impl<'a> Interpreter<'a> {
                             })
                         } else {
                             // Mailbox dispatch with backpressure (v0.29.21).
-                            let rx = actor_arc.try_enqueue(
-                                method.to_string(),
-                                args.to_vec(),
-                            )?;
+                            let rx = actor_arc.try_enqueue(method.to_string(), args.to_vec())?;
                             match rx.recv() {
                                 Ok(result) => result,
                                 Err(_) => Err(InterpError::lock_error(

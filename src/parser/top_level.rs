@@ -787,42 +787,42 @@ impl Parser {
                     let ann_name = self.expect_ident()?;
                     self.expect(TokenKind::LParen, "`(`")?;
                     match ann_name.as_str() {
-                    "mailbox" => {
-                        if matches!(self.peek_kind(), TokenKind::Ident(_))
-                            && self.pos + 1 < self.tokens.len()
-                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
-                        {
-                            self.expect_ident()?;
-                            self.expect(TokenKind::Eq, "`=`")?;
+                        "mailbox" => {
+                            if matches!(self.peek_kind(), TokenKind::Ident(_))
+                                && self.pos + 1 < self.tokens.len()
+                                && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                            {
+                                self.expect_ident()?;
+                                self.expect(TokenKind::Eq, "`=`")?;
+                            }
+                            if let TokenKind::Int(s) = &self.peek().kind {
+                                let depth = s.parse::<usize>().unwrap_or(2048);
+                                self.advance();
+                                annotations.push(FlowAnnotation::MailboxDepth(depth));
+                            }
                         }
-                        if let TokenKind::Int(s) = &self.peek().kind {
-                            let depth = s.parse::<usize>().unwrap_or(2048);
-                            self.advance();
-                            annotations.push(FlowAnnotation::MailboxDepth(depth));
+                        "max_children" => {
+                            if matches!(self.peek_kind(), TokenKind::Ident(_))
+                                && self.pos + 1 < self.tokens.len()
+                                && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                            {
+                                self.expect_ident()?;
+                                self.expect(TokenKind::Eq, "`=`")?;
+                            }
+                            if let TokenKind::Int(s) = &self.peek().kind {
+                                let n = s.parse::<usize>().unwrap_or(10);
+                                self.advance();
+                                annotations.push(FlowAnnotation::MaxChildren(n));
+                            }
                         }
-                    }
-                    "max_children" => {
-                        if matches!(self.peek_kind(), TokenKind::Ident(_))
-                            && self.pos + 1 < self.tokens.len()
-                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
-                        {
-                            self.expect_ident()?;
-                            self.expect(TokenKind::Eq, "`=`")?;
+                        _ => {
+                            // HIGH fix: previously silently ignored unknown @annotations
+                            // with parentheses. Now emit a diagnostic warning.
+                            eprintln!(
+                                "[mimi parser] WARN: unknown flow annotation '@{}' — ignored",
+                                ann_name
+                            );
                         }
-                        if let TokenKind::Int(s) = &self.peek().kind {
-                            let n = s.parse::<usize>().unwrap_or(10);
-                            self.advance();
-                            annotations.push(FlowAnnotation::MaxChildren(n));
-                        }
-                    }
-                    _ => {
-                        // HIGH fix: previously silently ignored unknown @annotations
-                        // with parentheses. Now emit a diagnostic warning.
-                        eprintln!(
-                            "[mimi parser] WARN: unknown flow annotation '@{}' — ignored",
-                            ann_name
-                        );
-                    }
                     }
                     self.expect(TokenKind::RParen, "`)`")?;
                     continue;

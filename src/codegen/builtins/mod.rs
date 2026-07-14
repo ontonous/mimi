@@ -1703,7 +1703,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "session_close" => self.compile_session_close(args),
             "session_open" | "session_pair" => self.compile_session_open(args),
             "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()),
-            "actor_mailbox_depth" => self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth"),
+            "actor_mailbox_depth" => {
+                self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")
+            }
             "actor_is_muted" => self.compile_actor_mailbox_query(args, "mimi_actor_is_muted"),
             "actor_set_mailbox_depth" => self.compile_actor_set_mailbox_depth(args),
             "actor_set_max_children" => self.compile_actor_set_max_children(args),
@@ -1716,9 +1718,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // and generates a real actor spawn. This builtin path is only reached
             // if someone calls `spawn_detached()` as a bare function, which is not
             // valid Mimi syntax for actors. Return 0 as a safe fallback.
-            "spawn_detached" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
-            }
+            "spawn_detached" => Ok(self.context.i64_type().const_int(0, false).into()),
             // v0.29.38: assert_state — test utility. In codegen, we extract the
             // expected state name string and call mimi_assert_state. The actual
             // state is passed as null because LLVM struct type names are not
@@ -1749,15 +1749,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let func = self
                     .module
                     .get_function("mimi_assert_state")
-                    .unwrap_or_else(|| {
-                        self.module.add_function("mimi_assert_state", fn_ty, None)
-                    });
-                let call = self.builder.build_call(
-                    func,
-                    &[null_ptr.into(), expected_ptr.into()],
-                    "assert_state_call",
-                ).map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                Ok(call.try_as_basic_value_opt()
+                    .unwrap_or_else(|| self.module.add_function("mimi_assert_state", fn_ty, None));
+                let call = self
+                    .builder
+                    .build_call(
+                        func,
+                        &[null_ptr.into(), expected_ptr.into()],
+                        "assert_state_call",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                Ok(call
+                    .try_as_basic_value_opt()
                     .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
             }
             // v0.29.38: inject_fault — test utility. In codegen, we call
@@ -1783,15 +1785,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let func = self
                     .module
                     .get_function("mimi_inject_fault")
-                    .unwrap_or_else(|| {
-                        self.module.add_function("mimi_inject_fault", fn_ty, None)
-                    });
-                let call = self.builder.build_call(
-                    func,
-                    &[null_ptr.into()],
-                    "inject_fault_call",
-                ).map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                Ok(call.try_as_basic_value_opt()
+                    .unwrap_or_else(|| self.module.add_function("mimi_inject_fault", fn_ty, None));
+                let call = self
+                    .builder
+                    .build_call(func, &[null_ptr.into()], "inject_fault_call")
+                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+                Ok(call
+                    .try_as_basic_value_opt()
                     .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
             }
             // v0.29.44: shadow memory tagging builtins
@@ -1799,20 +1799,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Delegates to mimi_shadow_alloc(size, tag, label) -> ptr
                 self.compile_shadow_alloc(args)
             }
-            "shadow_tag" => {
-                self.compile_shadow_simple(args, "mimi_shadow_tag", 2)
-            }
-            "shadow_check" => {
-                self.compile_shadow_simple(args, "mimi_shadow_check", 2)
-            }
+            "shadow_tag" => self.compile_shadow_simple(args, "mimi_shadow_tag", 2),
+            "shadow_check" => self.compile_shadow_simple(args, "mimi_shadow_check", 2),
             "shadow_free" => {
                 self.compile_shadow_simple(args, "mimi_shadow_free", 1)?;
-                Ok(BasicValueEnum::IntValue(self.context.i64_type().const_int(0, false)))
+                Ok(BasicValueEnum::IntValue(
+                    self.context.i64_type().const_int(0, false),
+                ))
             }
             // v0.29.48: test_sandbox — returns empty list in codegen (stub)
-            "test_sandbox" => {
-                Ok(self.context.i64_type().const_int(0, false).into())
-            }
+            "test_sandbox" => Ok(self.context.i64_type().const_int(0, false).into()),
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {
                 self.compile_atomic_drop_helper("mimi_channel_drop", args)?;
@@ -2136,9 +2132,21 @@ fn register_actor_concurrency_rt<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     // v0.29.25 broadcast
-    module.add_function("mimi_session_pair", i64.fn_type(&[], false), Some(inkwell::module::Linkage::External));
-    module.add_function("mimi_session_lo", i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false), Some(inkwell::module::Linkage::External));
-    module.add_function("mimi_session_hi", i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false), Some(inkwell::module::Linkage::External));
+    module.add_function(
+        "mimi_session_pair",
+        i64.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_session_lo",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_session_hi",
+        i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_actor_set_method_names",
         void.fn_type(

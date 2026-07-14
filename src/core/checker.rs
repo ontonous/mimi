@@ -201,7 +201,7 @@ impl<'a> Checker<'a> {
     /// C2: Allocate a fresh type variable for inference.
     /// v0.29.22: when a file uses explicit `flow` and still has top-level `main`,
     /// emit a migration diagnostic (script mode is disabled).
-    
+
     /// v0.29.23: true when any view/mutate param is active in this function.
     pub(crate) fn lexical_borrow_active(&self) -> bool {
         !self.view_params.is_empty() || !self.mutate_params.is_empty()
@@ -236,7 +236,7 @@ impl<'a> Checker<'a> {
             );
         }
     }
-pub(crate) fn emit_progressive_migration_hint(&mut self) {
+    pub(crate) fn emit_progressive_migration_hint(&mut self) {
         if self.file.implicit_single {
             return; // still in script mode — no migration needed
         }
@@ -269,7 +269,6 @@ pub(crate) fn emit_progressive_migration_hint(&mut self) {
             ),
         );
     }
-
 
     pub(crate) fn fresh_var(&mut self) -> Type {
         let id = self.unification.fresh_var();

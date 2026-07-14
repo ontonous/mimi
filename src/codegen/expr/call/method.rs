@@ -200,8 +200,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ty: self_ty,
                                         mut_: false,
                                         default_value: None,
-                borrow: None,
-            },
+                                        borrow: None,
+                                    },
                                 );
                                 self.compile_generic_func(f, &type_map)?;
                             }
@@ -326,9 +326,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let flow = self.flow_defs.get(flow_name).ok_or_else(|| {
-            CompileError::Generic(format!("unknown flow '{}'", flow_name))
-        })?;
+        let flow = self
+            .flow_defs
+            .get(flow_name)
+            .ok_or_else(|| CompileError::Generic(format!("unknown flow '{}'", flow_name)))?;
 
         // Find matching transition by name. Prefer the one whose from_state
         // matches the first arg's inferred type when multiple share a name.
@@ -376,7 +377,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(param) = function.get_nth_param(i as u32) {
                 if let BasicTypeEnum::StructType(sty) = param.get_type() {
                     if let BasicValueEnum::PointerValue(pv) = val {
-                        val = self.build_load(BasicTypeEnum::StructType(sty), pv, "flow_arg_load")?;
+                        val =
+                            self.build_load(BasicTypeEnum::StructType(sty), pv, "flow_arg_load")?;
                     }
                 }
             }
@@ -654,7 +656,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Param 0 is self; user args start at index 1.
             let param_idx = i + 1;
             let val = if param_idx < function.count_params() as usize {
-                let param_ty = function.get_nth_param(param_idx as u32)
+                let param_ty = function
+                    .get_nth_param(param_idx as u32)
                     .map(|p| p.get_type())
                     .unwrap_or(val.get_type());
                 self.adjust_int_value_width(val, param_ty, call_name)?

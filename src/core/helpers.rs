@@ -286,9 +286,7 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         // Different-name newtypes do NOT match (consistent with unify).
         // Previous code fell through to inner-type comparison via the
         // catch-all below, allowing Newtype("UserId", i32) == Newtype("OrderId", i32).
-        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => {
-            n1 == n2 && same_type(a, b)
-        }
+        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => n1 == n2 && same_type(a, b),
         // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner
         (Type::Newtype(n, inner), Type::Name(n2, _))
         | (Type::Name(n2, _), Type::Newtype(n, inner)) => {
@@ -387,11 +385,14 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 /// Genuinely unsupported: Option, Result, Map, Set, Tuple (no codegen path).
 pub(crate) fn is_json_serializable(t: &Type) -> bool {
     match t {
-        Type::Infer => true,                           // _ placeholder — defer
+        Type::Infer => true,                                    // _ placeholder — defer
         Type::Newtype(_, inner) => is_json_serializable(inner), // transparent
         Type::Name(n, args) => {
             // Primitive scalars
-            if matches!(n.as_str(), "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "Any") {
+            if matches!(
+                n.as_str(),
+                "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "Any"
+            ) {
                 return true;
             }
             // List<T> is supported if T is serializable
@@ -403,15 +404,41 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             // allow any Name with args (e.g. "Point", "User") — the codegen will
             // produce its own error if the record has unsupported field types.
             // Exclude known unsupported container types.
-            if !args.is_empty() && !matches!(n.as_str(),
-                "Option" | "Result" | "Map" | "Set" | "Tuple" | "Channel"
-                | "Future" | "Weak" | "AtomicI32" | "AtomicI64" | "AtomicBool") {
+            if !args.is_empty()
+                && !matches!(
+                    n.as_str(),
+                    "Option"
+                        | "Result"
+                        | "Map"
+                        | "Set"
+                        | "Tuple"
+                        | "Channel"
+                        | "Future"
+                        | "Weak"
+                        | "AtomicI32"
+                        | "AtomicI64"
+                        | "AtomicBool"
+                )
+            {
                 return true;
             }
             // Bare names without args that aren't primitives — allow (might be a record alias)
-            if args.is_empty() && !matches!(n.as_str(),
-                "Option" | "Result" | "Map" | "Set" | "Tuple" | "Channel"
-                | "Future" | "Weak" | "AtomicI32" | "AtomicI64" | "AtomicBool") {
+            if args.is_empty()
+                && !matches!(
+                    n.as_str(),
+                    "Option"
+                        | "Result"
+                        | "Map"
+                        | "Set"
+                        | "Tuple"
+                        | "Channel"
+                        | "Future"
+                        | "Weak"
+                        | "AtomicI32"
+                        | "AtomicI64"
+                        | "AtomicBool"
+                )
+            {
                 return true;
             }
             false

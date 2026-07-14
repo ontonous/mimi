@@ -165,7 +165,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let idx_alloca = self.entry_alloca(BasicTypeEnum::IntType(i64_ty), "idx")?;
         // Extend start to i64 if it's i32 — the index alloca is always i64.
         let start_i64 = if start.get_type().get_bit_width() < 64 {
-            self.builder.build_int_s_extend(start, i64_ty, "start_sext")
+            self.builder
+                .build_int_s_extend(start, i64_ty, "start_sext")
                 .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
         } else {
             start
@@ -393,41 +394,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         // MEM-C5 (deep audit): clamp start and end to [0, s_len] and ensure end >= start.
         // Extend i32 start/end to i64 for comparison with string length.
         let start = if start.get_type().get_bit_width() < 64 {
-            self.builder.build_int_s_extend(start, i64_ty, "start_sext")
+            self.builder
+                .build_int_s_extend(start, i64_ty, "start_sext")
                 .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else { start };
+        } else {
+            start
+        };
         let end = if end.get_type().get_bit_width() < 64 {
-            self.builder.build_int_s_extend(end, i64_ty, "end_sext")
+            self.builder
+                .build_int_s_extend(end, i64_ty, "end_sext")
                 .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-        } else { end };
+        } else {
+            end
+        };
 
         let zero = i64_ty.const_int(0, false);
-        let start_neg = self.builder
+        let start_neg = self
+            .builder
             .build_int_compare(inkwell::IntPredicate::SLT, start, zero, "start_neg")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_oob = self.builder
+        let start_oob = self
+            .builder
             .build_int_compare(inkwell::IntPredicate::SGT, start, s_len, "start_oob")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_clamped = self.builder
+        let start_clamped = self
+            .builder
             .build_select(start_neg, zero, start, "start_clamped_lo")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        let start_clamped = self.builder
+        let start_clamped = self
+            .builder
             .build_select(start_oob, s_len, start_clamped, "start_clamped_hi")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
 
-        let end_neg = self.builder
-            .build_int_compare(inkwell::IntPredicate::SLT, end, start_clamped, "end_lt_start")
+        let end_neg = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                end,
+                start_clamped,
+                "end_lt_start",
+            )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_oob = self.builder
+        let end_oob = self
+            .builder
             .build_int_compare(inkwell::IntPredicate::SGT, end, s_len, "end_oob")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_clamped = self.builder
+        let end_clamped = self
+            .builder
             .build_select(end_neg, start_clamped, end, "end_clamped_lo")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        let end_clamped = self.builder
+        let end_clamped = self
+            .builder
             .build_select(end_oob, s_len, end_clamped, "end_clamped_hi")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();

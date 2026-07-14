@@ -55,8 +55,14 @@ fn flow_parse_states_only() {
             assert!(f.states.iter().any(|s| s.name == "Fault"));
             // v0.29.13: even with no user events, reset/recover are injected.
             assert!(user_transitions(f).is_empty());
-            assert!(f.transitions.iter().any(|t| t.name == "reset" && t.is_fallback));
-            assert!(f.transitions.iter().any(|t| t.name == "recover" && t.is_fallback));
+            assert!(f
+                .transitions
+                .iter()
+                .any(|t| t.name == "reset" && t.is_fallback));
+            assert!(f
+                .transitions
+                .iter()
+                .any(|t| t.name == "recover" && t.is_fallback));
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -125,10 +131,7 @@ flow Processor {
             assert!(f.states.iter().any(|s| s.name == "Fault"));
             let user = user_transitions(f);
             assert_eq!(user.len(), 1);
-            assert_eq!(
-                user[0].to_states,
-                vec!["Active", "OverloadWarning"]
-            );
+            assert_eq!(user[0].to_states, vec!["Active", "OverloadWarning"]);
             assert_eq!(user[0].params.len(), 1);
             assert_eq!(user[0].params[0].name, "data");
             // Fallbacks for Active/OverloadWarning/Fault + process, plus reset/recover
@@ -668,7 +671,10 @@ protocol BadProto {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for duplicate state in protocol");
+    assert!(
+        result.is_err(),
+        "expected error for duplicate state in protocol"
+    );
 }
 
 #[test]
@@ -682,7 +688,10 @@ protocol BadProto {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for duplicate transition in protocol");
+    assert!(
+        result.is_err(),
+        "expected error for duplicate transition in protocol"
+    );
 }
 
 #[test]
@@ -694,7 +703,10 @@ protocol BadProto {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for undefined from-state in protocol transition");
+    assert!(
+        result.is_err(),
+        "expected error for undefined from-state in protocol transition"
+    );
 }
 
 #[test]
@@ -706,7 +718,10 @@ protocol BadProto {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for undefined target state in protocol transition");
+    assert!(
+        result.is_err(),
+        "expected error for undefined target state in protocol transition"
+    );
 }
 
 #[test]
@@ -717,7 +732,10 @@ protocol BadProto {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for invalid payload type in protocol state");
+    assert!(
+        result.is_err(),
+        "expected error for invalid payload type in protocol state"
+    );
 }
 
 #[test]
@@ -738,7 +756,10 @@ flow BadFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for missing protocol state in flow");
+    assert!(
+        result.is_err(),
+        "expected error for missing protocol state in flow"
+    );
 }
 
 #[test]
@@ -761,7 +782,10 @@ flow BadFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error for missing protocol transition in flow");
+    assert!(
+        result.is_err(),
+        "expected error for missing protocol transition in flow"
+    );
 }
 
 // ===================== Flow negative tests (edge cases) =====================
@@ -778,7 +802,10 @@ flow BadFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error: returning wrong target state");
+    assert!(
+        result.is_err(),
+        "expected error: returning wrong target state"
+    );
 }
 
 #[test]
@@ -793,7 +820,10 @@ flow BadFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error: missing required field in return");
+    assert!(
+        result.is_err(),
+        "expected error: missing required field in return"
+    );
 }
 
 #[test]
@@ -823,7 +853,10 @@ flow BadFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "expected error: wrong field type in return");
+    assert!(
+        result.is_err(),
+        "expected error: wrong field type in return"
+    );
 }
 
 #[test]
@@ -869,7 +902,10 @@ flow BadFlow {
 "#;
     // go(Ready) -> Active, self.v is accessible (Ready has payload), return Active is valid
     let result = check_source(src);
-    assert!(result.is_ok(), "returning Active with self.v should be valid");
+    assert!(
+        result.is_ok(),
+        "returning Active with self.v should be valid"
+    );
 }
 
 #[test]
@@ -889,7 +925,10 @@ flow BadFlow {
 "#;
     // Only returns Active, not Done — but this is fine since it returns one of the valid targets
     let result = check_source(src);
-    assert!(result.is_ok(), "returning one valid target is acceptable in multi-target");
+    assert!(
+        result.is_ok(),
+        "returning one valid target is acceptable in multi-target"
+    );
 }
 
 #[test]
@@ -904,7 +943,10 @@ flow GoodFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_ok(), "returning no-payload state with braces should be valid");
+    assert!(
+        result.is_ok(),
+        "returning no-payload state with braces should be valid"
+    );
 }
 
 #[test]
@@ -931,7 +973,11 @@ flow GoodFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_ok(), "valid protocol implementation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "valid protocol implementation should pass: {:?}",
+        result.err()
+    );
 }
 
 // ===================== Pinned block tests =====================
@@ -954,7 +1000,11 @@ flow TestFlow {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_ok(), "pinned with var binding should type-check: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "pinned with var binding should type-check: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -1077,11 +1127,10 @@ flow GoodFlow {
 "#;
     let warnings = check_source_warnings(src);
     // Ready has no incoming (first state — no W0400) but has no outgoing either
-    let terminal: Vec<&str> = warnings.iter()
+    let terminal: Vec<&str> = warnings
+        .iter()
         .filter(|w| w.code.as_deref() == Some("W0401"))
-        .filter_map(|w| {
-            w.message.split('\'').nth(1)
-        })
+        .filter_map(|w| w.message.split('\'').nth(1))
         .collect();
     assert!(
         !terminal.contains(&"Active"),
@@ -1137,7 +1186,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "10");
@@ -1167,7 +1220,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
@@ -1196,7 +1253,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // view is read-only: val stays 10
@@ -1228,7 +1289,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // mutate writes `self.val` back (identity write-back), then +1
@@ -1262,7 +1327,11 @@ func main() -> i32 {
         result
     );
     let err = result.unwrap_err();
-    assert!(err.contains("nonexistent"), "error should mention target name: {}", err);
+    assert!(
+        err.contains("nonexistent"),
+        "error should mention target name: {}",
+        err
+    );
 }
 
 // ===================== Pinned execution tests (v0.29.16) =====================
@@ -1291,7 +1360,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "101");
@@ -1321,7 +1394,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "52");
@@ -1351,7 +1428,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "10");
@@ -1414,7 +1495,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check failed: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check failed: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "15");
@@ -1448,7 +1533,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
@@ -1483,7 +1572,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
 }
 
@@ -1509,7 +1602,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1");
@@ -1538,7 +1635,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
@@ -1571,10 +1672,18 @@ flow Counter {
             let fb: Vec<_> = f.transitions.iter().filter(|t| t.is_fallback).collect();
             // Positive+inc, Fault+inc, reset, recover
             assert!(fb.len() >= 4, "expected ≥4 fallbacks, got {}", fb.len());
-            assert!(fb.iter().any(|t| t.from_state == "Positive" && t.name == "inc"));
-            assert!(fb.iter().any(|t| t.from_state == "Fault" && t.name == "inc"));
-            assert!(fb.iter().any(|t| t.name == "reset" && t.from_state == "Fault"));
-            assert!(fb.iter().any(|t| t.name == "recover" && t.from_state == "Fault"));
+            assert!(fb
+                .iter()
+                .any(|t| t.from_state == "Positive" && t.name == "inc"));
+            assert!(fb
+                .iter()
+                .any(|t| t.from_state == "Fault" && t.name == "inc"));
+            assert!(fb
+                .iter()
+                .any(|t| t.name == "reset" && t.from_state == "Fault"));
+            assert!(fb
+                .iter()
+                .any(|t| t.name == "recover" && t.from_state == "Fault"));
             // Auto Fault payload has SystemTrace fields (v0.29.12)
             let fault = f.states.iter().find(|s| s.name == "Fault").unwrap();
             let fields: Vec<_> = fault
@@ -1649,7 +1758,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     // Capture stdout from interp via dual path: compile_and_run only for codegen;
     // for interp we verify field values by returning a sentinel after side-effect println.
@@ -1704,7 +1817,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
@@ -1735,7 +1852,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "2");
@@ -1770,7 +1891,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(1)));
 }
 
@@ -1810,7 +1935,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
@@ -1839,7 +1968,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
@@ -1874,19 +2007,17 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
         lines,
-        vec![
-            "Pos",
-            "inc",
-            "Pos",
-            "inc",
-            "undefined transition inc(Pos)"
-        ],
+        vec!["Pos", "inc", "Pos", "inc", "undefined transition inc(Pos)"],
         "got {:?}",
         lines
     );
@@ -1914,7 +2045,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
@@ -1988,7 +2123,11 @@ func main() -> i32 {
     // match may not support Fault pattern if type is Ready — use record field via Value path.
     // Simpler: just assert run succeeds (absorbed) vs Err (not absorbed).
     let r = run_source_result(src);
-    assert!(r.is_ok(), "div-by-zero should be absorbed to Fault, got {:?}", r);
+    assert!(
+        r.is_ok(),
+        "div-by-zero should be absorbed to Fault, got {:?}",
+        r
+    );
     let _ = src2;
 }
 
@@ -2043,7 +2182,11 @@ func main() -> i32 {
 "#;
     // boom from Fault with div-by-zero should error (not re-wrap to Fault)
     let result = run_source_result(src);
-    assert!(result.is_err(), "expected panic to propagate from Fault, got {:?}", result);
+    assert!(
+        result.is_err(),
+        "expected panic to propagate from Fault, got {:?}",
+        result
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("division") || err.contains("E0801") || err.contains("zero"),
@@ -2114,7 +2257,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
@@ -2147,7 +2294,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
@@ -2175,7 +2326,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
@@ -2206,12 +2361,15 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "42");
 }
-
 
 // ── v0.29.17 Subflow synchronous nesting ──────────────────────────────
 
@@ -2244,7 +2402,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
@@ -2268,7 +2430,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7\n3");
@@ -2310,7 +2476,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
@@ -2337,10 +2507,14 @@ flow Child { state CIdle { n: i32 } }
 flow Parent { state Working { child: CIdle } }
 "#;
     let file = parse(src);
-    let parent = file.items.iter().find_map(|i| match i {
-        Item::Flow(f) if f.name == "Parent" => Some(f),
-        _ => None,
-    }).expect("Parent");
+    let parent = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Flow(f) if f.name == "Parent" => Some(f),
+            _ => None,
+        })
+        .expect("Parent");
     let working = parent.states.iter().find(|s| s.name == "Working").unwrap();
     let fields = working.payload.as_ref().unwrap();
     assert_eq!(fields.len(), 1);
@@ -2357,12 +2531,18 @@ flow Parent { state Working { child: CIdle } }
         .expect("reset");
     let body = reset.body.as_ref().expect("reset body");
     match body.first() {
-        Some(Stmt::Return(Some(Expr::Record { ty: Some(t), fields }))) => {
+        Some(Stmt::Return(Some(Expr::Record {
+            ty: Some(t),
+            fields,
+        }))) => {
             assert_eq!(t, "Working");
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].name, "child");
             match &fields[0].value {
-                Expr::Record { ty: Some(ct), fields: cfields } => {
+                Expr::Record {
+                    ty: Some(ct),
+                    fields: cfields,
+                } => {
                     assert_eq!(ct, "CIdle");
                     assert_eq!(cfields.len(), 1);
                     assert_eq!(cfields[0].name, "n");
@@ -2374,7 +2554,6 @@ flow Parent { state Working { child: CIdle } }
         other => panic!("unexpected reset body: {:?}", other),
     }
 }
-
 
 // ── v0.29.18 Protocol interface abstraction ───────────────────────────
 
@@ -2414,7 +2593,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1\n42\n0");
@@ -2449,7 +2632,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "empty protocol: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "empty protocol: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1");
@@ -2467,7 +2654,10 @@ protocol Nested {
 func main() -> i32 { 0 }
 "#;
     let err = check_source(src);
-    assert!(err.is_err(), "expected flatness error for nested protocol payload");
+    assert!(
+        err.is_err(),
+        "expected flatness error for nested protocol payload"
+    );
     let msgs: String = err
         .unwrap_err()
         .iter()
@@ -2499,7 +2689,10 @@ flow Bad {
 }
 func main() -> i32 { 0 }
 "#;
-    assert!(check_source(src).is_err(), "wrong transition target must fail");
+    assert!(
+        check_source(src).is_err(),
+        "wrong transition target must fail"
+    );
 }
 
 #[test]
@@ -2524,7 +2717,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "extra fields: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "extra fields: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "2");
@@ -2556,7 +2753,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "multi-target: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "multi-target: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
 }
 
@@ -2611,7 +2812,11 @@ func client(ch: SessionChan<S>) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    assert!(check_source(src).is_ok(), "good order: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "good order: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
@@ -2626,9 +2831,17 @@ func main() -> i32 { 0 }
 "#;
     let err = check_source(src);
     assert!(err.is_err(), "recv-before-send must fail");
-    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
     assert!(
-        msgs.contains("order") || msgs.contains("E0414") || msgs.contains("ExpectedRecv") || msgs.contains("recv"),
+        msgs.contains("order")
+            || msgs.contains("E0414")
+            || msgs.contains("ExpectedRecv")
+            || msgs.contains("recv"),
         "expected order violation, got: {}",
         msgs
     );
@@ -2690,7 +2903,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "Live\npeer_fault");
@@ -2713,7 +2930,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "15");
@@ -2737,7 +2958,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "3");
@@ -2754,7 +2979,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "peer-7\ndisconnect");
@@ -2781,7 +3010,9 @@ flow N {
         .filter(|t| t.name == "peer_fault")
         .collect();
     assert!(
-        pf.iter().any(|t| t.from_state == "A" && t.to_states == vec!["Fault".to_string()] && t.is_fallback),
+        pf.iter().any(|t| t.from_state == "A"
+            && t.to_states == vec!["Fault".to_string()]
+            && t.is_fallback),
         "A.peer_fault → Fault missing: {:?}",
         pf
     );
@@ -2811,7 +3042,9 @@ flow Audio {
     match &file.items[0] {
         Item::Flow(f) => {
             assert!(
-                f.annotations.iter().any(|a| matches!(a, FlowAnnotation::MailboxDepth(64))),
+                f.annotations
+                    .iter()
+                    .any(|a| matches!(a, FlowAnnotation::MailboxDepth(64))),
                 "expected MailboxDepth(64), got {:?}",
                 f.annotations
             );
@@ -2836,7 +3069,8 @@ fn mailbox_bp_state_mute_and_hysteresis() {
     assert_eq!(bp.current_depth(), 5);
     // Drain to ≤ 50% (2) should allow unmute after cooldown (set cooldown to 0)
     // Force cooldown elapsed by setting unmute_after_ms to 0
-    bp.unmute_after_ms.store(0, std::sync::atomic::Ordering::Release);
+    bp.unmute_after_ms
+        .store(0, std::sync::atomic::Ordering::Release);
     for _ in 0..3 {
         bp.on_dequeue();
     }
@@ -2870,7 +3104,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // depth starts 0, muted 0, bump returns 1
@@ -2901,7 +3139,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "type check: {:?}", check_source(src));
+    assert!(
+        check_source(src).is_ok(),
+        "type check: {:?}",
+        check_source(src)
+    );
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
@@ -2925,13 +3167,19 @@ func main() -> i32 {
     let file = parse(src);
     assert!(file.implicit_single, "script mode should be active");
     assert!(
-        file.items.iter().any(|i| matches!(i, Item::Flow(f) if f.name == "Main")),
+        file.items
+            .iter()
+            .any(|i| matches!(i, Item::Flow(f) if f.name == "Main")),
         "Main flow should be injected"
     );
-    let main_flow = file.items.iter().find_map(|i| match i {
-        Item::Flow(f) if f.name == "Main" => Some(f),
-        _ => None,
-    }).unwrap();
+    let main_flow = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Flow(f) if f.name == "Main" => Some(f),
+            _ => None,
+        })
+        .unwrap();
     assert!(main_flow.states.iter().any(|s| s.name == "Single"));
     // Fault injected by matrix expand
     assert!(main_flow.states.iter().any(|s| s.name == "Fault"));
@@ -2960,12 +3208,18 @@ func main() -> i32 {
     let file = parse(src);
     assert!(!file.implicit_single);
     // Only user Counter flow (+ matrix Fault), not auto Main — unless user named Main
-    let flow_names: Vec<_> = file.items.iter().filter_map(|i| match i {
-        Item::Flow(f) => Some(f.name.as_str()),
-        _ => None,
-    }).collect();
+    let flow_names: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Flow(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
     assert!(flow_names.contains(&"Counter"));
-    assert!(!flow_names.contains(&"Main") || flow_names.iter().filter(|n| **n == "Main").count() == 0);
+    assert!(
+        !flow_names.contains(&"Main") || flow_names.iter().filter(|n| **n == "Main").count() == 0
+    );
     assert!(check_source(src).is_ok());
 }
 
@@ -2988,9 +3242,11 @@ func main() -> i32 {
 "#;
     let warns = check_source_warnings(src);
     assert!(
-        warns.iter().any(|w| w.code.as_deref() == Some(crate::diagnostic::codes::W011)
-            || w.message.contains("progressive")
-            || w.message.contains("implicit Single")),
+        warns.iter().any(
+            |w| w.code.as_deref() == Some(crate::diagnostic::codes::W011)
+                || w.message.contains("progressive")
+                || w.message.contains("implicit Single")
+        ),
         "expected W011 migration warning, got {:?}",
         warns
     );
@@ -3018,10 +3274,14 @@ func f(a: view i32, b: mutate i32) -> i32 { a }
 func main() -> i32 { 0 }
 "#;
     let file = parse(src);
-    let f = file.items.iter().find_map(|i| match i {
-        Item::Func(f) if f.name == "f" => Some(f),
-        _ => None,
-    }).expect("func f");
+    let f = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Func(f) if f.name == "f" => Some(f),
+            _ => None,
+        })
+        .expect("func f");
     assert_eq!(f.params[0].borrow, Some(ParamBorrow::View));
     assert_eq!(f.params[1].borrow, Some(ParamBorrow::Mutate));
     assert!(f.params[1].mut_, "mutate implies mut_");
@@ -3054,9 +3314,12 @@ func main() -> i32 {
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
-    assert_eq!(out.trim(), "3
+    assert_eq!(
+        out.trim(),
+        "3
 5
-8");
+8"
+    );
 }
 
 #[test]
@@ -3069,8 +3332,17 @@ func main() -> i32 { 0 }
 "#;
     let err = check_source(src);
     assert!(err.is_err());
-    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
-    assert!(msgs.contains("view") || msgs.contains("E0415") || msgs.contains("read-only"), "{}", msgs);
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msgs.contains("view") || msgs.contains("E0415") || msgs.contains("read-only"),
+        "{}",
+        msgs
+    );
 }
 
 #[test]
@@ -3091,7 +3363,12 @@ func main() -> i32 { 0 }
 "#;
     let err = check_source(src);
     assert!(err.is_err());
-    let msgs: String = err.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
     assert!(
         msgs.contains("transition") || msgs.contains("borrow") || msgs.contains("E0415"),
         "{}",
@@ -3125,7 +3402,9 @@ flow Parent {
     match &file.items[0] {
         Item::Flow(f) => {
             assert!(
-                f.annotations.iter().any(|a| matches!(a, FlowAnnotation::MaxChildren(3))),
+                f.annotations
+                    .iter()
+                    .any(|a| matches!(a, FlowAnnotation::MaxChildren(3))),
                 "got {:?}",
                 f.annotations
             );
@@ -3374,14 +3653,22 @@ func main() -> i32 { 0 }
     let active = interp::Value::Record(Some("Active".into()), fields);
     let out = interp
         .eval_flow_transition(
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => Some(f),
-                _ => None,
-            }).expect("Buf flow"),
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
-                _ => None,
-            }).expect("expire"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => Some(f),
+                    _ => None,
+                })
+                .expect("Buf flow"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => {
+                        f.transitions.iter().find(|t| t.name == "expire")
+                    }
+                    _ => None,
+                })
+                .expect("expire"),
             &[active],
         )
         .expect("expire should absorb to Fault Value");
@@ -3584,7 +3871,11 @@ func bad(data: mutate i32) -> i32 {
     let err = check_source(src);
     assert!(err.is_err(), "expected E0417");
     let msgs = format!("{:?}", err);
-    assert!(msgs.contains("E0417") || msgs.contains("mutate"), "got {}", msgs);
+    assert!(
+        msgs.contains("E0417") || msgs.contains("mutate"),
+        "got {}",
+        msgs
+    );
 }
 
 #[test]
@@ -3599,7 +3890,11 @@ func bad(data: mutate i32, other: i32) -> i32 {
     let err = check_source(src);
     assert!(err.is_err(), "expected E0417");
     let msgs = format!("{:?}", err);
-    assert!(msgs.contains("E0417") || msgs.contains("mutate"), "got {}", msgs);
+    assert!(
+        msgs.contains("E0417") || msgs.contains("mutate"),
+        "got {}",
+        msgs
+    );
 }
 
 // ── v0.29.31 per-actor-type spawn quota + mailbox auto-depth ───────────
@@ -3615,7 +3910,10 @@ func bad(xs: mutate List<i32>) {
 }
 "#;
     let err = check_source(src);
-    assert!(err.is_err(), "expected E0417 for list literal realloc, got ok");
+    assert!(
+        err.is_err(),
+        "expected E0417 for list literal realloc, got ok"
+    );
     let msgs = format!("{:?}", err);
     assert!(
         msgs.contains("E0417") || msgs.contains("mutate"),
@@ -4046,9 +4344,9 @@ func main() -> i32 {
 fn ffi_pinned_transitions_injected() {
     // L2: verify that enter_ffi, exit_ffi, and ffi_crash are injected
     // when state FFI_Pinned is declared.
+    use crate::flow_matrix::expand_file;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
-    use crate::flow_matrix::expand_file;
     let src = r#"
 flow FFI {
     state Active { buffer: i32 }
@@ -4061,14 +4359,27 @@ flow FFI {
     let tokens = Lexer::new(src).tokenize().expect("lex");
     let mut file = Parser::new(tokens).parse_file().expect("parse");
     expand_file(&mut file);
-    let flow = file.items.iter().find_map(|i| match i {
-        Item::Flow(f) => Some(f),
-        _ => None,
-    }).expect("flow");
+    let flow = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Flow(f) => Some(f),
+            _ => None,
+        })
+        .expect("flow");
     assert!(flow.states.iter().any(|s| s.name == "FFI_Pinned"));
-    assert!(flow.transitions.iter().any(|t| t.name == "enter_ffi" && t.from_state == "Active" && t.is_ffi_pinned));
-    assert!(flow.transitions.iter().any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned" && t.is_ffi_pinned));
-    assert!(flow.transitions.iter().any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned" && t.is_fallback));
+    assert!(flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "enter_ffi" && t.from_state == "Active" && t.is_ffi_pinned));
+    assert!(flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned" && t.is_ffi_pinned));
+    assert!(flow
+        .transitions
+        .iter()
+        .any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned" && t.is_fallback));
 }
 
 // ── v0.29.43: Pinned Delayed Fault Semantics ──────────────────────────
@@ -4097,14 +4408,22 @@ func main() -> i32 { 0 }
     let active = interp::Value::Record(Some("Active".into()), fields);
     let out = interp
         .eval_flow_transition(
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => Some(f),
-                _ => None,
-            }).expect("Buf flow"),
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
-                _ => None,
-            }).expect("expire"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => Some(f),
+                    _ => None,
+                })
+                .expect("Buf flow"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => {
+                        f.transitions.iter().find(|t| t.name == "expire")
+                    }
+                    _ => None,
+                })
+                .expect("expire"),
             &[active],
         )
         .expect("expire should produce Fault value");
@@ -4142,14 +4461,22 @@ func main() -> i32 { 0 }
     let active = interp::Value::Record(Some("Active".into()), fields);
     let out = interp
         .eval_flow_transition(
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => Some(f),
-                _ => None,
-            }).expect("Buf flow"),
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "expire"),
-                _ => None,
-            }).expect("expire"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => Some(f),
+                    _ => None,
+                })
+                .expect("Buf flow"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => {
+                        f.transitions.iter().find(|t| t.name == "expire")
+                    }
+                    _ => None,
+                })
+                .expect("expire"),
             &[active],
         )
         .expect("expire should produce Fault value");
@@ -4196,14 +4523,22 @@ func main() -> i32 { 0 }
     let active = interp::Value::Record(Some("Active".into()), fields);
     let out = interp
         .eval_flow_transition(
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => Some(f),
-                _ => None,
-            }).expect("Buf flow"),
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "crash"),
-                _ => None,
-            }).expect("crash"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => Some(f),
+                    _ => None,
+                })
+                .expect("Buf flow"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => {
+                        f.transitions.iter().find(|t| t.name == "crash")
+                    }
+                    _ => None,
+                })
+                .expect("crash"),
             &[active],
         )
         .expect("crash should produce delayed Fault");
@@ -4274,14 +4609,22 @@ func main() -> i32 { 0 }
     let active = interp::Value::Record(Some("Active".into()), fields);
     let out = interp
         .eval_flow_transition(
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => Some(f),
-                _ => None,
-            }).expect("Buf flow"),
-            file.items.iter().find_map(|i| match i {
-                Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "crash"),
-                _ => None,
-            }).expect("crash"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => Some(f),
+                    _ => None,
+                })
+                .expect("Buf flow"),
+            file.items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Flow(f) if f.name == "Buf" => {
+                        f.transitions.iter().find(|t| t.name == "crash")
+                    }
+                    _ => None,
+                })
+                .expect("crash"),
             &[active],
         )
         .expect("crash should produce Fault");
@@ -4335,17 +4678,32 @@ func main() -> i32 { 0 }
     let mut interp = interp::Interpreter::new(&file);
     use std::collections::HashMap;
     let mut fields = HashMap::new();
-    fields.insert("buffer".into(), interp::Value::List(vec![interp::Value::Int(1), interp::Value::Int(2), interp::Value::Int(3)]));
+    fields.insert(
+        "buffer".into(),
+        interp::Value::List(vec![
+            interp::Value::Int(1),
+            interp::Value::Int(2),
+            interp::Value::Int(3),
+        ]),
+    );
     let active = interp::Value::Record(Some("Active".into()), fields);
     let result = interp.eval_flow_transition(
-        file.items.iter().find_map(|i| match i {
-            Item::Flow(f) if f.name == "Buf" => Some(f),
-            _ => None,
-        }).expect("Buf flow"),
-        file.items.iter().find_map(|i| match i {
-            Item::Flow(f) if f.name == "Buf" => f.transitions.iter().find(|t| t.name == "append_and_crash"),
-            _ => None,
-        }).expect("append_and_crash"),
+        file.items
+            .iter()
+            .find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => Some(f),
+                _ => None,
+            })
+            .expect("Buf flow"),
+        file.items
+            .iter()
+            .find_map(|i| match i {
+                Item::Flow(f) if f.name == "Buf" => {
+                    f.transitions.iter().find(|t| t.name == "append_and_crash")
+                }
+                _ => None,
+            })
+            .expect("append_and_crash"),
         &[active],
     );
     // Should produce a Fault value (div by zero absorbed).
@@ -4479,10 +4837,15 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "direct field access on multi-target should be rejected");
+    assert!(
+        result.is_err(),
+        "direct field access on multi-target should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
-        errors.iter().any(|d| d.message.contains("E0420") || d.message.contains("multi-target")),
+        errors
+            .iter()
+            .any(|d| d.message.contains("E0420") || d.message.contains("multi-target")),
         "expected E0420 error, got: {:?}",
         errors
     );
@@ -4534,5 +4897,9 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src2);
-    assert!(result.is_ok(), "non-field use of multi-target should be accepted: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "non-field use of multi-target should be accepted: {:?}",
+        result
+    );
 }

@@ -180,7 +180,9 @@ impl<'a> SourceScanner<'a> {
         if char_idx < scanned.len() {
             matches!(
                 scanned[char_idx].1,
-                Region::StringContent | Region::CharContent | Region::LineComment
+                Region::StringContent
+                    | Region::CharContent
+                    | Region::LineComment
                     | Region::BlockComment
             )
         } else {

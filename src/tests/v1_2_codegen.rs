@@ -197,13 +197,19 @@ func main() -> i32 { a() + b() }
 #[test]
 fn codegen_ir_has_main() {
     let ir = compile_to_ir("func main() -> i32 { 42 }");
-    assert!(ir.contains("define i32 @main()"), "i32 returns i32 (A1 restoration)");
+    assert!(
+        ir.contains("define i32 @main()"),
+        "i32 returns i32 (A1 restoration)"
+    );
 }
 
 #[test]
 fn codegen_ir_has_add() {
     let ir = compile_to_ir("func add(x: i32, y: i32) -> i32 { x + y }");
-    assert!(ir.contains("define i32 @add(i32"), "i32 params are i32 (A1 restoration)");
+    assert!(
+        ir.contains("define i32 @add(i32"),
+        "i32 params are i32 (A1 restoration)"
+    );
 }
 
 #[test]

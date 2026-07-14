@@ -540,10 +540,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 for (i, m) in actor.methods.iter().enumerate() {
                     let name_gv = self
                         .builder
-                        .build_global_string_ptr(
-                            &m.name,
-                            &format!(".mn_{}_{}", actor.name, m.name),
-                        )
+                        .build_global_string_ptr(&m.name, &format!(".mn_{}_{}", actor.name, m.name))
                         .map_err(|e| CompileError::LlvmError(format!("gstr: {}", e)))?;
                     // SAFETY: `arr_ty` is an array type allocated by build_alloca
                     // above (valid pointer, valid type). The indices [0, i] are

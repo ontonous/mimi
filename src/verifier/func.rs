@@ -1,7 +1,9 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
-use crate::verifier::ctx::{Counterexample, VerifStatus, VerificationResult, VerifierCtx, SolverSession, Z3VarMap};
+use crate::verifier::ctx::{
+    Counterexample, SolverSession, VerifStatus, VerificationResult, VerifierCtx, Z3VarMap,
+};
 use crate::verifier::expr;
 use crate::verifier::helpers::{
     block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr,
@@ -14,7 +16,12 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 use z3::SatResult;
 
 impl VerifierCtx {
-    pub(crate) fn verify_items(&mut self, session: &mut SolverSession, items: &[Item], results: &mut Vec<VerificationResult>) {
+    pub(crate) fn verify_items(
+        &mut self,
+        session: &mut SolverSession,
+        items: &[Item],
+        results: &mut Vec<VerificationResult>,
+    ) {
         // Pre-populate func_defs so call-site verification can look up
         // callee ensures (cross-module contract propagation).
         self.collect_func_defs(items);
@@ -44,13 +51,17 @@ impl VerifierCtx {
         }
     }
 
-    pub(crate) fn verify_extern_func(&mut self, session: &mut SolverSession, func: &ExternFunc) -> VerificationResult {
+    pub(crate) fn verify_extern_func(
+        &mut self,
+        session: &mut SolverSession,
+        func: &ExternFunc,
+    ) -> VerificationResult {
         let start = Instant::now();
         // 2.3: reset() clears all assertions. Z3's Params (incl. timeout) are NOT
         // affected by reset() — they persist across calls. The solver is clean
         // for each extern verification, preventing cross-contamination from
         // prior verify_func calls.
-        
+
         let requires_expr = func.requires.as_ref();
         let ensures_expr = func.ensures.as_ref();
 
@@ -183,14 +194,18 @@ impl VerifierCtx {
         }
     }
 
-    pub(crate) fn verify_func(&mut self, session: &mut SolverSession, func: &FuncDef) -> VerificationResult {
+    pub(crate) fn verify_func(
+        &mut self,
+        session: &mut SolverSession,
+        func: &FuncDef,
+    ) -> VerificationResult {
         let start = Instant::now();
 
         // Shared parameters use abstract heap encoding:
         // shared identity → opaque Int variable,
         // field accesses → fresh Z3 variables (handled by Expr::Field encoding).
         // This allows verifying scalar-field contracts on shared params.
-        
+
         let mut requires_exprs: Vec<Expr> = Vec::new();
         let mut ensures_exprs: Vec<Expr> = Vec::new();
         let mut invariant_exprs: Vec<Expr> = Vec::new();
@@ -241,7 +256,8 @@ impl VerifierCtx {
                 .map(|s| Self::expand_lets_in_stmt(s, &let_subst))
                 .collect();
             let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-            self.check_callee_requires_in_block(session, 
+            self.check_callee_requires_in_block(
+                session,
                 &expanded_body,
                 &mut vars,
                 func.name.as_str(),
@@ -504,7 +520,8 @@ impl VerifierCtx {
         // call in the body, verify that the callee's requires (preconditions)
         // are satisfiable given the current symbolic state.
         let mut call_site_errors: Vec<(String, String, Span)> = Vec::new();
-        self.check_callee_requires_in_block(session, 
+        self.check_callee_requires_in_block(
+            session,
             &expanded_body,
             &mut vars,
             func.name.as_str(),
@@ -596,50 +613,50 @@ impl VerifierCtx {
                         }
                     }
                     if found_violation {
-                            let counterexample =
-                                self.extract_counterexample(&viol_model, &vars, &ensures_exprs);
-                            let diagnostic = self.build_failure_narrative(
-                                func,
-                                &counterexample,
-                                &requires_exprs,
-                                &ensures_exprs,
-                                &requires_spans,
-                                &ensures_spans,
-                            );
-                            VerificationResult {
-                                func_name: func.name.clone(),
-                                status: VerifStatus::Failed,
-                                message: diagnostic.message.clone(),
-                                diagnostic: annotate_parse_errors(Some(diagnostic), &parse_errors),
-                                duration_us: start.elapsed().as_micros() as u64,
-                                constraint_count,
-                            }
+                        let counterexample =
+                            self.extract_counterexample(&viol_model, &vars, &ensures_exprs);
+                        let diagnostic = self.build_failure_narrative(
+                            func,
+                            &counterexample,
+                            &requires_exprs,
+                            &ensures_exprs,
+                            &requires_spans,
+                            &ensures_spans,
+                        );
+                        VerificationResult {
+                            func_name: func.name.clone(),
+                            status: VerifStatus::Failed,
+                            message: diagnostic.message.clone(),
+                            diagnostic: annotate_parse_errors(Some(diagnostic), &parse_errors),
+                            duration_us: start.elapsed().as_micros() as u64,
+                            constraint_count,
+                        }
                     } else if found_unknown {
-                            let elapsed = start.elapsed();
-                            let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
-                                format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
+                        let elapsed = start.elapsed();
+                        let msg = if elapsed.as_millis() >= session.timeout_ms as u128 {
+                            format!("verification timed out after {}ms for '{}' — try simplifying postconditions or reducing constraint count ({})",
                                     elapsed.as_millis(), func.name, constraint_count)
-                            } else {
-                                format!("verification inconclusive for '{}' — solver returned unknown ({} constraints, {:.1?})",
+                        } else {
+                            format!("verification inconclusive for '{}' — solver returned unknown ({} constraints, {:.1?})",
                                     func.name, constraint_count, elapsed)
-                            };
-                            VerificationResult {
-                                func_name: func.name.clone(),
-                                status: VerifStatus::Unknown,
-                                message: msg,
-                                diagnostic: annotate_parse_errors(None, &parse_errors),
-                                duration_us: elapsed.as_micros() as u64,
-                                constraint_count,
-                            }
+                        };
+                        VerificationResult {
+                            func_name: func.name.clone(),
+                            status: VerifStatus::Unknown,
+                            message: msg,
+                            diagnostic: annotate_parse_errors(None, &parse_errors),
+                            duration_us: elapsed.as_micros() as u64,
+                            constraint_count,
+                        }
                     } else {
-                            VerificationResult {
-                                func_name: func.name.clone(),
-                                status: VerifStatus::Verified,
-                                message: "postconditions verified".into(),
-                                diagnostic: annotate_parse_errors(None, &parse_errors),
-                                duration_us: start.elapsed().as_micros() as u64,
-                                constraint_count,
-                            }
+                        VerificationResult {
+                            func_name: func.name.clone(),
+                            status: VerifStatus::Verified,
+                            message: "postconditions verified".into(),
+                            diagnostic: annotate_parse_errors(None, &parse_errors),
+                            duration_us: start.elapsed().as_micros() as u64,
+                            constraint_count,
+                        }
                     }
                 } else {
                     VerificationResult {
@@ -1252,7 +1269,12 @@ impl VerifierCtx {
     /// and, for each call to a known function, assert the callee's ensures
     /// as Z3 constraints. This enables cross-module contract reasoning
     /// (e.g., caller can rely on callee's postconditions).
-    fn assert_callee_ensures_in_expr(&mut self, session: &mut SolverSession, expr: &Expr, vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_expr(
+        &mut self,
+        session: &mut SolverSession,
+        expr: &Expr,
+        vars: &mut Z3VarMap,
+    ) {
         match expr {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
@@ -1342,7 +1364,12 @@ impl VerifierCtx {
     /// Walk an expression tree modeling length-preserving builtins (sort, reverse).
     /// For each `sort(xs)` or `reverse(xs)` call, assert that the output length
     /// equals the input length: len(result) == len(xs).
-    fn assert_builtin_length_preserving(&mut self, session: &mut SolverSession, expr: &Expr, vars: &mut Z3VarMap) {
+    fn assert_builtin_length_preserving(
+        &mut self,
+        session: &mut SolverSession,
+        expr: &Expr,
+        vars: &mut Z3VarMap,
+    ) {
         match expr {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
@@ -1390,7 +1417,12 @@ impl VerifierCtx {
     }
 
     /// Walk function body statements modeling length-preserving builtins.
-    fn assert_builtin_length_preserving_in_block(&mut self, session: &mut SolverSession, block: &[Stmt], vars: &mut Z3VarMap) {
+    fn assert_builtin_length_preserving_in_block(
+        &mut self,
+        session: &mut SolverSession,
+        block: &[Stmt],
+        vars: &mut Z3VarMap,
+    ) {
         for stmt in block {
             match stmt {
                 Stmt::Expr(e) => self.assert_builtin_length_preserving(session, e, vars),
@@ -1436,13 +1468,23 @@ impl VerifierCtx {
     /// propagate callee ensures. This complements `assert_callee_ensures_in_expr`
     /// which only walks the tail expression tree. Together they ensure that
     /// calls in let-bindings, assignments, if-branches, etc. are also covered.
-    fn assert_callee_ensures_in_block(&mut self, session: &mut SolverSession, stmts: &[Stmt], vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_block(
+        &mut self,
+        session: &mut SolverSession,
+        stmts: &[Stmt],
+        vars: &mut Z3VarMap,
+    ) {
         for stmt in stmts {
             self.assert_callee_ensures_in_stmt(session, stmt, vars);
         }
     }
 
-    fn assert_callee_ensures_in_stmt(&mut self, session: &mut SolverSession, stmt: &Stmt, vars: &mut Z3VarMap) {
+    fn assert_callee_ensures_in_stmt(
+        &mut self,
+        session: &mut SolverSession,
+        stmt: &Stmt,
+        vars: &mut Z3VarMap,
+    ) {
         match stmt {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                 self.assert_callee_ensures_in_expr(session, e, vars);

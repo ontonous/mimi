@@ -93,8 +93,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ty: self_ty,
                             mut_: false,
                             default_value: None,
-                borrow: None,
-            },
+                            borrow: None,
+                        },
                     );
                     // Set type_map to identity so compile_func can resolve type params
                     // in self (e.g., &List<T> → T resolves to T in type_map).
@@ -963,27 +963,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let converted = if let crate::ast::Type::Name(n, _) = &p.ty {
                             match n.as_str() {
                                 "i32" => {
-                                     if let BasicValueEnum::IntValue(iv) = param {
-                                         // After A1 restoration, i32 values may already
-                                         // be 32-bit — only truncate if wider than i32.
-                                         if iv.get_type().get_bit_width() > 32 {
-                                             BasicValueEnum::IntValue(
-                                                 self.builder
-                                                     .build_int_truncate(
-                                                         iv,
-                                                         self.context.i32_type(),
-                                                         &format!("trunc_i64_i32_{}", i),
-                                                     )
-                                                     .map_err(|e| {
-                                                         CompileError::LlvmError(format!(
-                                                             "trunc error: {}",
-                                                             e
-                                                         ))
-                                                     })?,
-                                             )
-                                         } else {
-                                             param
-                                         }
+                                    if let BasicValueEnum::IntValue(iv) = param {
+                                        // After A1 restoration, i32 values may already
+                                        // be 32-bit — only truncate if wider than i32.
+                                        if iv.get_type().get_bit_width() > 32 {
+                                            BasicValueEnum::IntValue(
+                                                self.builder
+                                                    .build_int_truncate(
+                                                        iv,
+                                                        self.context.i32_type(),
+                                                        &format!("trunc_i64_i32_{}", i),
+                                                    )
+                                                    .map_err(|e| {
+                                                        CompileError::LlvmError(format!(
+                                                            "trunc error: {}",
+                                                            e
+                                                        ))
+                                                    })?,
+                                            )
+                                        } else {
+                                            param
+                                        }
                                     } else {
                                         param
                                     }

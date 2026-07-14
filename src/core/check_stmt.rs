@@ -525,7 +525,11 @@ impl<'a> Checker<'a> {
                     self.check_expr_parasteps_safe(&f.value, scopes);
                 }
             }
-            Expr::Try(e) | Expr::Old(e) | Expr::TypeOf(e) | Expr::Cast(e, _) | Expr::OptionalChain(e, _) => {
+            Expr::Try(e)
+            | Expr::Old(e)
+            | Expr::TypeOf(e)
+            | Expr::Cast(e, _)
+            | Expr::OptionalChain(e, _) => {
                 self.check_expr_parasteps_safe(e, scopes);
             }
             Expr::SliceExpr { target, start, end } => {
@@ -698,8 +702,7 @@ impl<'a> Checker<'a> {
                     if let Some(init_expr) = init {
                         if let Some(targets) = self.check_multi_target_transition(init_expr) {
                             if targets.len() > 1 {
-                                self.multi_target_vars
-                                    .insert(name.clone(), targets);
+                                self.multi_target_vars.insert(name.clone(), targets);
                             }
                         }
                     }
@@ -721,7 +724,13 @@ impl<'a> Checker<'a> {
                     if let Pattern::Variable(name) = pat {
                         if let Some(s) = self.cap_vars.last_mut() {
                             let bit_index = s.len() as u32;
-                            s.insert(name.clone(), crate::core::checker::CapVarInfo { consumed: false, bit_index });
+                            s.insert(
+                                name.clone(),
+                                crate::core::checker::CapVarInfo {
+                                    consumed: false,
+                                    bit_index,
+                                },
+                            );
                         }
                         // Introduce the cap as an effect
                         if let Some(s) = self.available_effects.last_mut() {
@@ -773,15 +782,24 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if !ok {
-                        let types_str: Vec<String> = self.flow_return_targets.iter()
-                            .map(|t| fmt_type(t)).collect();
+                        let types_str: Vec<String> = self
+                            .flow_return_targets
+                            .iter()
+                            .map(|t| fmt_type(t))
+                            .collect();
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0207,
-                                format!("return type mismatch: expected one of [{}], found {}",
-                                    types_str.join(", "), fmt_type(&t)),
+                                format!(
+                                    "return type mismatch: expected one of [{}], found {}",
+                                    types_str.join(", "),
+                                    fmt_type(&t)
+                                ),
                                 Span::single(self.current_line, self.current_col),
-                            ).with_help("the returned value must be one of the declared target states")
+                            )
+                            .with_help(
+                                "the returned value must be one of the declared target states",
+                            ),
                         );
                     }
                 }
@@ -845,7 +863,8 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0251,
                         "while-let list/slice patterns are not supported in codegen; \
                          use a regular for loop, an index-based while loop, \
-                         or destructure into individual variables".to_string(),
+                         or destructure into individual variables"
+                            .to_string(),
                     );
                     // Still type-check the pattern and body to catch other errors,
                     // but return early to avoid cascading diagnostics from the
@@ -1395,7 +1414,13 @@ impl<'a> Checker<'a> {
             Stmt::Delegate { expr, .. } => {
                 self.infer_expr(expr, scopes);
             }
-            Stmt::Pinned { expr, var, body, timeout, .. } => {
+            Stmt::Pinned {
+                expr,
+                var,
+                body,
+                timeout,
+                ..
+            } => {
                 let val_ty = self.infer_expr(expr, scopes);
                 // Validate timeout is an integer if present
                 if let Some(timeout_expr) = timeout {

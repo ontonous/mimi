@@ -69,19 +69,28 @@ fn ir_i32_add() {
 #[test]
 fn ir_i32_mul() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a * b }");
-    assert!(ir.contains("mul i32"), "i32 mul uses native i32 (A1 restoration)");
+    assert!(
+        ir.contains("mul i32"),
+        "i32 mul uses native i32 (A1 restoration)"
+    );
 }
 
 #[test]
 fn ir_sdiv() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a / b }");
-    assert!(ir.contains("sdiv "), "signed integer division uses native i32 (A1 restoration)");
+    assert!(
+        ir.contains("sdiv "),
+        "signed integer division uses native i32 (A1 restoration)"
+    );
 }
 
 #[test]
 fn ir_srem() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a % b }");
-    assert!(ir.contains("srem "), "signed integer remainder uses native i32 (A1 restoration)");
+    assert!(
+        ir.contains("srem "),
+        "signed integer remainder uses native i32 (A1 restoration)"
+    );
 }
 
 #[test]
@@ -260,7 +269,10 @@ fn ir_call_instruction() {
         func main() -> i32 { inc(41) }
     "#,
     );
-    assert!(ir.contains("call i32"), "should have call to i32 function (A1 restoration)");
+    assert!(
+        ir.contains("call i32"),
+        "should have call to i32 function (A1 restoration)"
+    );
     assert!(ir.contains("@inc"), "should call @inc");
     assert!(ir.contains("@main"), "should define @main");
 }

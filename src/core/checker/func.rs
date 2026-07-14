@@ -44,7 +44,13 @@ impl<'a> Checker<'a> {
             if matches!(&ty, Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
                     let bit_index = s.len() as u32;
-                    s.insert(p.name.clone(), super::CapVarInfo { consumed: false, bit_index });
+                    s.insert(
+                        p.name.clone(),
+                        super::CapVarInfo {
+                            consumed: false,
+                            bit_index,
+                        },
+                    );
                 }
             }
             // SessionChan<S> params: seed residual from declared session body.
@@ -52,8 +58,8 @@ impl<'a> Checker<'a> {
                 if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
                     if let Type::Name(sname, _) = &args[0] {
                         if let Some(body) = self.session_types.get(sname).cloned() {
-                            let resolved = crate::session::resolve(&body, &self.session_types)
-                                .unwrap_or(body);
+                            let resolved =
+                                crate::session::resolve(&body, &self.session_types).unwrap_or(body);
                             self.session_residuals.insert(p.name.clone(), resolved);
                         }
                     }

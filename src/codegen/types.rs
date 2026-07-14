@@ -7,10 +7,7 @@ use inkwell::AddressSpace;
 /// Widen integer BasicTypeEnums to i64. Non-integer types pass through.
 /// This ensures Result<i32,E> and Option<i32> use i64 for the payload slot,
 /// matching the Ok/Some constructors which receive i64 literal values.
-fn widen_int_to_i64<'ctx>(
-    ctx: &'ctx Context,
-    ty: BasicTypeEnum<'ctx>,
-) -> BasicTypeEnum<'ctx> {
+fn widen_int_to_i64<'ctx>(ctx: &'ctx Context, ty: BasicTypeEnum<'ctx>) -> BasicTypeEnum<'ctx> {
     match ty {
         BasicTypeEnum::IntType(it) => {
             if it.get_bit_width() == 64 {

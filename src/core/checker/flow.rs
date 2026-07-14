@@ -352,8 +352,8 @@ mod tests {
         let file = File {
             imports: Vec::new(),
             items: Vec::new(),
-                    implicit_single: false,
-                };
+            implicit_single: false,
+        };
         let state = CheckerState::new(&file);
         let state = state.transition(FlowEvent::Step).unwrap();
         assert!(matches!(state, CheckerState::Checking { total: 0, .. }));
