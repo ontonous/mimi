@@ -6581,6 +6581,25 @@ fn dual_named_args_function() {
     );
 }
 
+/// Named args + default parameters reordered on both backends.
+#[test]
+fn dual_named_args_with_defaults() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func add(x: i32, y: i32 = 10) -> i32 { x + y }
+        func main() -> i32 {
+            println(add(x = 5))
+            println(add(y = 3, x = 2))
+            0
+        }
+        "#,
+        "15\n5"
+    );
+}
+
 /// from_json::<Result<T,E>> wraps a JSON value as Ok(T).
 #[test]
 fn dual_from_json_result_ok() {
@@ -6616,6 +6635,25 @@ fn dual_from_json_set_i64() {
         }
         "#,
         "3"
+    );
+}
+
+/// from_json Set dedupes and to_json sorts.
+#[test]
+fn dual_from_json_set_dedupe() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[1,1,2,2,3]")
+            println(s.size())
+            println(to_json(s))
+            0
+        }
+        "#,
+        "3\n[1,2,3]"
     );
 }
 
