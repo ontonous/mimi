@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
-use crate::core::helpers::{fmt_type, same_type, subst_type_params, suggest_name};
+use crate::core::helpers::{fmt_type, subst_type_params, suggest_name};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -418,7 +418,8 @@ impl<'a> Checker<'a> {
                     for (i, (arg, param)) in user_args.iter().zip(method_params.iter()).enumerate()
                     {
                         let at = self.infer_expr(arg, scopes);
-                        if !same_type(&at, param) {
+                        // IF-C5 residual: unify so TypeVars resolve.
+                        if self.unification.unify(&at, param).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0211,
                                 format!(
@@ -654,7 +655,8 @@ impl<'a> Checker<'a> {
                 } else {
                     param.clone()
                 };
-                if !same_type(&at, &subst_param) {
+                // IF residual: unify so TypeVars / generic params resolve.
+                if self.unification.unify(&at, &subst_param).is_err() {
                     self.emit_code(
                         crate::diagnostic::codes::E0211,
                         format!(
