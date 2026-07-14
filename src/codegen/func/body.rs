@@ -538,7 +538,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         iterable_val: BasicValueEnum<'ctx>,
     ) -> MimiResult<PointerValue<'ctx>> {
-        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         match iterable_val {
             BasicValueEnum::PointerValue(pv) => Ok(pv),
             BasicValueEnum::StructValue(sv) => {
@@ -547,12 +546,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store(alloca, sv)?;
                 Ok(alloca)
             }
-            BasicValueEnum::IntValue(iv) => {
-                let int_ptr = self
-                    .builder
-                    .build_int_to_ptr(iv, i8_ptr_ty, "list_as_ptr")
-                    .map_err(|e| CompileError::LlvmError(format!("int_to_ptr error: {}", e)))?;
-                Ok(int_ptr)
+            BasicValueEnum::IntValue(_iv) => {
+                // CG-H3: bare integers are not valid list handles for iteration.
+                // inttoptr on an arbitrary integer is provenance-free UB under -O2.
+                Err(CompileError::LlvmError(
+                    "for loop requires a list or range (got integer)".to_string(),
+                ))
             }
             _ => Err(CompileError::LlvmError(
                 "for loop requires a list or range".to_string(),

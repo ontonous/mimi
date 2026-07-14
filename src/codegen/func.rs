@@ -1212,11 +1212,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let disc = self.build_extract_value(sv.into(), 0, "coerce_disc")?;
                 self.build_store(gep, disc)?;
             } else if is_result && i == target_fields.len() - 1 {
-                let err = self.build_extract_value(
-                    sv.into(),
-                    (source_fields.len() - 1) as u32,
-                    "coerce_err",
-                )?;
+                // CG-H6: extract Err field by target index (same layout index),
+                // not source_fields.len()-1 which can mis-index when layouts differ
+                // only in field types (same length was checked above).
+                let err_idx = (target_fields.len() - 1) as u32;
+                let err = self.build_extract_value(sv.into(), err_idx, "coerce_err")?;
                 let err = self.coerce_field_to_type(err, *tf)?;
                 self.build_store(gep, err)?;
             } else {
