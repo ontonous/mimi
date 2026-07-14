@@ -1553,6 +1553,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .expect_basic_value(&result, "mimi_map_from_json_i64")?
                     .into())
             }
+            Type::Name(n, args) if n == "Set" => {
+                let elem_is_int = args
+                    .first()
+                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "i32" || tn == "i64"))
+                    .unwrap_or(true);
+                if !elem_is_int {
+                    return Err(CompileError::Generic(
+                        "from_json::<Set>: only Set<i32|i64> is supported in codegen".into(),
+                    ));
+                }
+                let func = self.get_runtime_fn("mimi_set_from_json_i64")?;
+                let result = self.build_call(
+                    func,
+                    &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                    "set_from_json",
+                )?;
+                Ok(self
+                    .expect_basic_value(&result, "mimi_set_from_json_i64")?
+                    .into())
+            }
             Type::Name(n, args) if n == "Result" && !args.is_empty() => {
                 let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_ptr)?;
                 self.compile_constructor("Ok", vec![ok_val])
