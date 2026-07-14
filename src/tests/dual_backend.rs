@@ -7808,6 +7808,42 @@ fn dual_to_json_list_list() {
     );
 }
 
+/// from_json List of Result dual (bare JSON → Ok).
+#[test]
+fn dual_from_json_list_result() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Result<i32, i32>>>("[1, 2]")
+            println(xs)
+            0
+        }
+        "#,
+        "[Ok(1), Ok(2)]"
+    );
+}
+
+/// to_json List of Result dual.
+#[test]
+fn dual_to_json_list_result() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [Ok(1), Err(2)]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"Ok\":[1]},{\"Err\":[2]}]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

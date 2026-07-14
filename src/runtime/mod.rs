@@ -1457,6 +1457,46 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
     alloc_c_string(&parts.join(""))
 }
 
+/// Render `List<Result<i32,i32>>` (ptrtoint of Result structs) as JSON array of
+/// `{"Ok":[n]}` / `{"Err":[n]}` tags matching interp to_json.
+#[no_mangle]
+pub extern "C" fn mimi_list_result_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let base = unsafe { *(lst.data as *const i64).offset(i) } as *const u8;
+        if base.is_null() {
+            parts.push(String::from("null"));
+            continue;
+        }
+        // Layout {i1 disc, i64 ok, i64 err} — disc at 0, ok at 8, err at 16 on x86_64.
+        // SAFETY: base is heap Result from list element storage.
+        let disc = unsafe { *base };
+        let ok = unsafe { *(base.add(8) as *const i64) };
+        let err = unsafe { *(base.add(16) as *const i64) };
+        if disc != 0 {
+            parts.push(format!("{{\"Ok\":[{}]}}", ok));
+        } else {
+            parts.push(format!("{{\"Err\":[{}]}}", err));
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Render `List<Option<i32>>` (ptrtoint of Option structs) as JSON array of
 /// `{"Some":[n]}` / `"None"` tags matching interp to_json.
 #[no_mangle]
