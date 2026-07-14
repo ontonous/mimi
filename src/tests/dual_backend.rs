@@ -6047,7 +6047,7 @@ fn dual_string_comparison() {
             0
         }
     "#,
-        "1\n0\n0"
+        "true\nfalse\nfalse"
     );
 }
 
@@ -6652,6 +6652,24 @@ fn dual_to_json_set_i64() {
         }
         "#,
         "[1,2,3]"
+    );
+}
+
+/// println of comparison/not bool expressions (CG-H9).
+#[test]
+fn dual_bool_cmp_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(1 < 2)
+            println(!(1 < 2))
+            0
+        }
+        "#,
+        "true\nfalse"
     );
 }
 
