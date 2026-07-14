@@ -6640,6 +6640,26 @@ fn dual_option_println() {
     );
 }
 
+/// Result println formats Ok(n) / Err(n) on both backends.
+#[test]
+fn dual_result_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<i32, i32> = Ok(7)
+            let b: Result<i32, i32> = Err(9)
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Ok(7)\nErr(9)"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
