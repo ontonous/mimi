@@ -1764,7 +1764,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names
                                             .insert(name.clone(), "Result".to_string());
                                     }
-                                    "Some" | "None" => {
+                                    "Some" => {
+                                        // Prefer Option<Inner> when the payload type is known.
+                                        let full = match call_args.first() {
+                                            Some(arg) => {
+                                                let inner = self.infer_object_type(arg, vars);
+                                                if !inner.is_empty()
+                                                    && inner != "Some"
+                                                    && inner != "None"
+                                                {
+                                                    format!("Option<{}>", inner)
+                                                } else {
+                                                    "Option".to_string()
+                                                }
+                                            }
+                                            None => "Option".to_string(),
+                                        };
+                                        self.var_type_names.insert(name.clone(), full);
+                                    }
+                                    "None" => {
                                         self.var_type_names
                                             .insert(name.clone(), "Option".to_string());
                                     }

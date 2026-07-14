@@ -101,10 +101,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => Ok((BasicMetadataValueEnum::StructValue(*sv), "%p".to_string())),
                     }
                 } else if num_fields == 2
-                    && matches!(fields[0], BasicTypeEnum::IntType(_))
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
                     && matches!(fields[1], BasicTypeEnum::PointerType(_))
                 {
-                    // Mimi list struct: {i64 len, ptr data}. Format via runtime helper.
+                    // Mimi list struct: {i64 len, ptr data} — require i64 len
+                    // so Option {i1, ptr} is not misclassified as List.
                     let str_ptr =
                         if arg_type == "List<string>" || arg_type.starts_with("List<string>") {
                             self.emit_list_string_to_string(*sv)?
@@ -132,6 +136,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             self.emit_list_i32_to_string(*sv)?
                         };
+                    Ok((
+                        BasicMetadataValueEnum::PointerValue(str_ptr),
+                        "%s".to_string(),
+                    ))
+                } else if num_fields == 2
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                    )
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
+                {
+                    // Option with pointer payload (e.g. Option<record>):
+                    // disc i1 + payload ptr. Prefer typed Option path when known.
+                    let inner_rec = arg_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .filter(|inner| {
+                            self.type_defs.get(*inner).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                            })
+                        });
+                    // Also when arg_type is bare "Option" but payload is a record
+                    // pointer — cannot recover name; fall back to Some(%p).
+                    let str_ptr = self.emit_option_to_string(*sv, inner_rec)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -165,7 +193,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                         )
                     {
-                        let str_ptr = self.emit_option_to_string(*sv)?;
+                        let inner_rec = arg_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .filter(|inner| {
+                                self.type_defs.get(*inner).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                })
+                            });
+                        let str_ptr = self.emit_option_to_string(*sv, inner_rec)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -904,34 +940,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Format Option {i1, i64} as `Some(n)` / `None()` matching interp Display.
+    /// Format Option {i1, i64} as `Some(...)` / `None()` matching interp Display.
+    /// When `inner_record` is Some, payload is ptrtoint of that record type.
     fn emit_option_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
+        inner_record: Option<&str>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
         let disc = self
             .build_extract_value(sv.into(), 0, "opt_disc")?
             .into_int_value();
-        let payload = self
-            .build_extract_value(sv.into(), 1, "opt_pay")?
-            .into_int_value();
-        let payload_i64 = if payload.get_type().get_bit_width() < 64 {
-            self.builder
-                .build_int_s_extend(payload, i64_ty, "opt_pay_i64")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-        } else {
-            payload
+        let payload_bv = self.build_extract_value(sv.into(), 1, "opt_pay")?;
+        let payload_i64 = match payload_bv {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "opt_pay_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    iv
+                }
+            }
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "opt_pay_ptr")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+            other => {
+                return Err(CompileError::LlvmError(format!(
+                    "option payload unexpected kind {:?}",
+                    other
+                )))
+            }
         };
-        let some_fmt = self
-            .builder
-            .build_global_string_ptr("Some(%ld)", "opt_some_fmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let none_str = self
             .builder
             .build_global_string_ptr("None()", "opt_none_str")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let buf_size = i64_ty.const_int(64, false);
+        let buf_size = i64_ty.const_int(512, false);
         let buf = self.malloc_or_abort(buf_size, "opt_print_buf")?;
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -950,7 +996,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Some(inkwell::module::Linkage::External),
             )
         });
-        // if disc: snprintf(buf, "Some(%ld)", payload) else strcpy(buf, "None()")
         let parent = self
             .builder
             .get_insert_block()
@@ -968,16 +1013,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(is_some, some_bb, none_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(some_bb);
-        self.build_call(
-            snprintf_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(buf_size),
-                BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
-                BasicMetadataValueEnum::IntValue(payload_i64),
-            ],
-            "opt_some_snprintf",
-        )?;
+        if let Some(rec_name) = inner_record {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let rec_ptr = self
+                .builder
+                .build_int_to_ptr(payload_i64, i8_ptr, "opt_rec_ptr")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let rec_str = self.emit_record_display(rec_name, rec_ptr)?;
+            let some_fmt = self
+                .builder
+                .build_global_string_ptr("Some(%s)", "opt_some_sfmt")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(buf_size),
+                    BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                    BasicMetadataValueEnum::PointerValue(rec_str),
+                ],
+                "opt_some_snprintf_s",
+            )?;
+        } else {
+            let some_fmt = self
+                .builder
+                .build_global_string_ptr("Some(%ld)", "opt_some_fmt")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::IntValue(buf_size),
+                    BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(payload_i64),
+                ],
+                "opt_some_snprintf",
+            )?;
+        }
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
