@@ -7322,6 +7322,44 @@ fn dual_result_set_string_println() {
     );
 }
 
+/// Result of Map of string println.
+#[test]
+fn dual_result_map_string_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, string>>("{\"a\":\"hi\"}")
+            let a: Result<Map<string, string>, i32> = Ok(m)
+            println(a)
+            0
+        }
+        "#,
+        "Ok({\"a\":\"hi\"})"
+    );
+}
+
+/// Option of Set of string println.
+#[test]
+fn dual_option_set_string_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<string>>("[\"a\",\"b\"]")
+            let a = Some(s)
+            println(a)
+            0
+        }
+        "#,
+        "Some(Set{a, b})"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
