@@ -1928,6 +1928,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_int_value();
                 self.build_string_struct(pv, len)
             }
+            Type::Name(n, args) if n == "List" => {
+                let nested_ty = Type::Name("List".into(), args.clone());
+                self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_ptr)
+            }
             Type::Name(n, args) if n == "Map" => {
                 let val_is_string = args
                     .get(1)

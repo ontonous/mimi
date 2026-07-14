@@ -7882,6 +7882,42 @@ fn dual_to_json_option_list() {
     );
 }
 
+/// from_json Result of List dual.
+#[test]
+fn dual_from_json_result_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<List<i32>, i32>>("[1,2,3]")
+            println(a)
+            0
+        }
+        "#,
+        "Ok([1, 2, 3])"
+    );
+}
+
+/// to_json Result of List dual.
+#[test]
+fn dual_to_json_result_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<List<i32>, i32> = Ok([1, 2])
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[[1,2]]}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
