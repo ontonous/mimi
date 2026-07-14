@@ -6655,6 +6655,30 @@ fn dual_to_json_set_i64() {
     );
 }
 
+/// to_json(Option/Result) tagged JSON matching interp Variant format.
+#[test]
+fn dual_to_json_option_result() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some(1)
+            let b: Option<i32> = None
+            let c: Result<i32, i32> = Ok(7)
+            let d: Result<i32, i32> = Err(9)
+            println(to_json(a))
+            println(to_json(b))
+            println(to_json(c))
+            println(to_json(d))
+            0
+        }
+        "#,
+        "{\"Some\":[1]}\n\"None\"\n{\"Ok\":[7]}\n{\"Err\":[9]}"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {

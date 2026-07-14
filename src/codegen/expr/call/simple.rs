@@ -386,6 +386,146 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
+                // Option / Option<T> with integer payload: {i1,i64}
+                if obj_type == "Option" || obj_type.starts_with("Option<") {
+                    let sv = match &metadata_args[0] {
+                        BasicMetadataValueEnum::StructValue(s) => *s,
+                        BasicMetadataValueEnum::PointerValue(pv) => {
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(
+                                        self.context.struct_type(
+                                            &[
+                                                self.context.bool_type().into(),
+                                                self.context.i64_type().into(),
+                                            ],
+                                            false,
+                                        ),
+                                    ),
+                                    *pv,
+                                    "opt_load",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                .into_struct_value();
+                            loaded
+                        }
+                        other => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json: unexpected Option argument kind {:?}",
+                                other
+                            )))
+                        }
+                    };
+                    let disc = self
+                        .build_extract_value(sv.into(), 0, "opt_disc")?
+                        .into_int_value();
+                    let disc_i64 = self
+                        .builder
+                        .build_int_z_extend(disc, self.context.i64_type(), "opt_disc_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let payload = self
+                        .build_extract_value(sv.into(), 1, "opt_payload")?
+                        .into_int_value();
+                    let payload_i64 = if payload.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(payload, self.context.i64_type(), "opt_pay_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        payload
+                    };
+                    let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[
+                                BasicMetadataValueEnum::IntValue(disc_i64),
+                                BasicMetadataValueEnum::IntValue(payload_i64),
+                            ],
+                            "to_json_opt",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_option_i64_to_json void")?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return self.wrap_c_string(raw);
+                }
+                // Result / Result<T,E> integer payloads: {i1, ok, err}
+                if obj_type == "Result" || obj_type.starts_with("Result<") {
+                    let sv = match &metadata_args[0] {
+                        BasicMetadataValueEnum::StructValue(s) => *s,
+                        BasicMetadataValueEnum::PointerValue(pv) => {
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(
+                                        self.context.struct_type(
+                                            &[
+                                                self.context.bool_type().into(),
+                                                self.context.i64_type().into(),
+                                                self.context.i64_type().into(),
+                                            ],
+                                            false,
+                                        ),
+                                    ),
+                                    *pv,
+                                    "res_load",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                .into_struct_value();
+                            loaded
+                        }
+                        other => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json: unexpected Result argument kind {:?}",
+                                other
+                            )))
+                        }
+                    };
+                    let disc = self
+                        .build_extract_value(sv.into(), 0, "res_disc")?
+                        .into_int_value();
+                    let disc_i64 = self
+                        .builder
+                        .build_int_z_extend(disc, self.context.i64_type(), "res_disc_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let ok = self
+                        .build_extract_value(sv.into(), 1, "res_ok")?
+                        .into_int_value();
+                    let ok_i64 = if ok.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(ok, self.context.i64_type(), "res_ok_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        ok
+                    };
+                    let err = self
+                        .build_extract_value(sv.into(), 2, "res_err")?
+                        .into_int_value();
+                    let err_i64 = if err.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(err, self.context.i64_type(), "res_err_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        err
+                    };
+                    let func = self.get_runtime_fn("mimi_result_i64_to_json")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[
+                                BasicMetadataValueEnum::IntValue(disc_i64),
+                                BasicMetadataValueEnum::IntValue(ok_i64),
+                                BasicMetadataValueEnum::IntValue(err_i64),
+                            ],
+                            "to_json_res",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_result_i64_to_json void")?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return self.wrap_c_string(raw);
+                }
                 // Check for Record type — serialize to JSON object via sprintf
                 if let Some(type_def) = self.type_defs.get(&obj_type) {
                     if let TypeDefKind::Record(fields) = &type_def.kind {

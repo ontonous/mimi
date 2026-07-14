@@ -2728,6 +2728,27 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
     Box::into_raw(set) as SetHandle
 }
 
+/// Serialize Option<i64> layout `{disc:i1/i64, payload:i64}` to match interp:
+/// Some → `{"Some":[n]}`, None → `"None"`.
+#[no_mangle]
+pub extern "C" fn mimi_option_i64_to_json(disc: i64, payload: i64) -> *mut std::ffi::c_char {
+    if disc != 0 {
+        alloc_c_string(&format!("{{\"Some\":[{}]}}", payload))
+    } else {
+        alloc_c_string("\"None\"")
+    }
+}
+
+/// Serialize Result ok/err integer payloads: Ok → `{"Ok":[n]}`, Err → `{"Err":[n]}`.
+#[no_mangle]
+pub extern "C" fn mimi_result_i64_to_json(disc: i64, ok: i64, err: i64) -> *mut std::ffi::c_char {
+    if disc != 0 {
+        alloc_c_string(&format!("{{\"Ok\":[{}]}}", ok))
+    } else {
+        alloc_c_string(&format!("{{\"Err\":[{}]}}", err))
+    }
+}
+
 /// Serialize a SetHandle of integer values to a JSON array string.
 #[no_mangle]
 pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
