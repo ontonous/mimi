@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
-use crate::core::helpers::{fmt_type, is_int, same_type};
+use crate::core::helpers::{fmt_type, is_int};
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -397,7 +397,8 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let t = self.infer_expr(&args[0], scopes);
-                    if !same_type(&t, &Type::Name("string".into(), vec![])) {
+                    let string_ty = Type::Name("string".into(), vec![]);
+                    if self.unification.unify(&t, &string_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!("{} expects a string argument", method),
@@ -411,7 +412,8 @@ impl<'a> Checker<'a> {
                     self.emit_code(crate::diagnostic::codes::E0242, "split expects 1 argument");
                 } else {
                     let t = self.infer_expr(&args[0], scopes);
-                    if !same_type(&t, &Type::Name("string".into(), vec![])) {
+                    let string_ty = Type::Name("string".into(), vec![]);
+                    if self.unification.unify(&t, &string_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             "split expects a string argument",
@@ -427,9 +429,10 @@ impl<'a> Checker<'a> {
                         "replace expects 2 arguments",
                     );
                 } else {
+                    let string_ty = Type::Name("string".into(), vec![]);
                     for a in args {
                         let t = self.infer_expr(a, scopes);
-                        if !same_type(&t, &Type::Name("string".into(), vec![])) {
+                        if self.unification.unify(&t, &string_ty).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0242,
                                 "replace expects string arguments",
@@ -497,7 +500,8 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let t = self.infer_expr(&args[0], scopes);
-                    if !same_type(&t, &Type::Name("string".into(), vec![])) {
+                    let string_ty = Type::Name("string".into(), vec![]);
+                    if self.unification.unify(&t, &string_ty).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             "index_of expects a string argument",
@@ -552,7 +556,7 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let arg_ty = self.infer_expr(&args[0], scopes);
-                    if !same_type(&arg_ty, inner) {
+                    if self.unification.unify(&arg_ty, inner).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
                             format!(
@@ -564,7 +568,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                Type::Name("Set".into(), vec![(*inner).clone()])
+                Type::Name("Set".into(), vec![self.unification.resolve(inner)])
             }
             "to_list" => Type::Name("List".into(), vec![(*inner).clone()]),
             _ => {
