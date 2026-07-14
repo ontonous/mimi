@@ -507,20 +507,40 @@ impl<'a> Interpreter<'a> {
                 Ok(serde_json::Value::Array(arr?))
             }
             Value::Set(items) => {
-                // Sort integer elements for dual-backend stable to_json.
+                // Sort for dual-backend stable to_json.
                 let mut ints: Vec<i64> = Vec::new();
+                let mut strs: Vec<String> = Vec::new();
+                let mut bools: Vec<bool> = Vec::new();
+                let mut floats: Vec<f64> = Vec::new();
                 let mut other: Vec<serde_json::Value> = Vec::new();
                 for i in items {
                     match i {
                         Value::Int(n) => ints.push(*n),
+                        Value::String(s) => strs.push(s.clone()),
+                        Value::Bool(b) => bools.push(*b),
+                        Value::Float(f) => floats.push(*f),
                         other_v => other.push(self.value_to_json(other_v)?),
                     }
                 }
                 ints.sort_unstable();
+                strs.sort();
+                bools.sort_unstable();
+                floats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let mut arr: Vec<serde_json::Value> = ints
                     .into_iter()
                     .map(|n| serde_json::Value::Number(n.into()))
                     .collect();
+                for s in strs {
+                    arr.push(serde_json::Value::String(s));
+                }
+                for b in bools {
+                    arr.push(serde_json::Value::Bool(b));
+                }
+                for f in floats {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        arr.push(serde_json::Value::Number(n));
+                    }
+                }
                 arr.extend(other);
                 Ok(serde_json::Value::Array(arr))
             }

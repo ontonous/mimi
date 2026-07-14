@@ -260,6 +260,11 @@ fn register_map_record_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_map_to_json_f64_serde",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_map_to_json_string",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
@@ -944,6 +949,11 @@ fn register_set_fns<'ctx>(
     );
     module.add_function(
         "mimi_set_to_json_i64",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_set_to_json_string",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
