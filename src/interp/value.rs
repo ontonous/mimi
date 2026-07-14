@@ -76,10 +76,11 @@ fn executor_queue() -> &'static std::sync::Mutex<Vec<std::sync::Arc<std::sync::M
 
 /// Submit a deferred future to the global executor.
 pub fn executor_submit(future: std::sync::Arc<std::sync::Mutex<PollFuture>>) {
-    executor_queue()
+    // Recover from poison so a panicked poller cannot brick the queue.
+    let mut guard = executor_queue()
         .lock()
-        .expect("executor queue lock")
-        .push(future);
+        .unwrap_or_else(|e| e.into_inner());
+    guard.push(future);
 }
 
 /// Run the executor: poll all deferred futures until all are completed.
@@ -87,19 +88,19 @@ pub fn executor_run() {
     loop {
         let entry = {
             let queue = executor_queue();
-            let mut guard = queue.lock().expect("executor queue lock");
+            let mut guard = queue.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_empty() {
                 return;
             }
             // Remove all completed futures before looking for Deferred ones
             guard.retain(|fut| {
-                let state = fut.lock().expect("future lock");
+                let state = fut.lock().unwrap_or_else(|e| e.into_inner());
                 !matches!(&*state, PollFuture::Ready(_))
             });
             let mut found = None;
             for i in 0..guard.len() {
                 let fut = &guard[i];
-                let state = fut.lock().expect("future lock");
+                let state = fut.lock().unwrap_or_else(|e| e.into_inner());
                 match &*state {
                     PollFuture::Deferred { .. } => {
                         found = Some(i);
@@ -118,7 +119,7 @@ pub fn executor_run() {
             }
         };
         if let Some(fut) = entry {
-            let mut state = fut.lock().expect("future lock");
+            let mut state = fut.lock().unwrap_or_else(|e| e.into_inner());
             poll_deferred(&mut state);
         }
     }
@@ -655,7 +656,7 @@ impl ActorHandle {
                     let result = {
                         // Read method definition
                         let (func, _actor_name) = {
-                            let actor = worker_inner.read().expect("actor worker lock");
+                            let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
                             let Some(func) =
                                 actor.methods.iter().find(|f| f.name == msg.method).cloned()
                             else {
@@ -679,19 +680,26 @@ impl ActorHandle {
                             bp: worker_bp.clone(),
                         });
                         interp.push_scope();
-                        interp
-                            .bind("self", self_val)
-                            .expect("bind self in actor worker");
+                        if let Err(e) = interp.bind("self", self_val) {
+                            let _ = msg.response.send(Err(e));
+                            continue;
+                        }
                         // Bind method parameters
                         let mut args_iter = msg.args.iter();
+                        let mut bind_err = None;
                         for param in &func.params {
                             if param.name == "self" {
                                 continue;
                             }
                             let arg = args_iter.next().cloned().unwrap_or(Value::Unit);
-                            interp
-                                .bind(&param.name, arg)
-                                .expect("bind param in actor worker");
+                            if let Err(e) = interp.bind(&param.name, arg) {
+                                bind_err = Some(e);
+                                break;
+                            }
+                        }
+                        if let Some(e) = bind_err {
+                            let _ = msg.response.send(Err(e));
+                            continue;
                         }
                         let result = interp
                             .eval_block(&func.body)
@@ -1051,7 +1059,7 @@ impl std::fmt::Display for Value {
                 write!(f, "shared({})", v)
             }
             Value::LocalShared(rc) => {
-                let v = rc.lock().expect("local_shared lock not poisoned");
+                let v = rc.lock().unwrap_or_else(|e| e.into_inner());
                 write!(f, "local_shared({})", v)
             }
             Value::WeakShared(w) => match w.upgrade() {
@@ -1063,7 +1071,7 @@ impl std::fmt::Display for Value {
             },
             Value::WeakLocal(w) => match w.upgrade() {
                 Some(rc) => {
-                    let v = rc.lock().expect("local_shared lock not poisoned");
+                    let v = rc.lock().unwrap_or_else(|e| e.into_inner());
                     write!(f, "weak_local({})", v)
                 }
                 None => write!(f, "weak_local(None)"),
@@ -1185,13 +1193,13 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
             false
         }
         Value::LocalShared(inner) => contains_arena_ref(
-            &inner.0.lock().expect("local_shared lock not poisoned"),
+            &inner.0.lock().unwrap_or_else(|e| e.into_inner()),
             arena_id,
         ),
         Value::WeakLocal(inner) => {
             if let Some(rc) = inner.0.upgrade() {
                 contains_arena_ref(
-                    &rc.lock().expect("local_shared lock not poisoned"),
+                    &rc.lock().unwrap_or_else(|e| e.into_inner()),
                     arena_id,
                 )
             } else {
@@ -1359,8 +1367,8 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
             }
         }
         (Value::LocalShared(a), Value::LocalShared(b)) => values_equal_depth(
-            &a.0.lock().expect("local_shared lock not poisoned"),
-            &b.0.lock().expect("local_shared lock not poisoned"),
+            &a.0.lock().unwrap_or_else(|e| e.into_inner()),
+            &b.0.lock().unwrap_or_else(|e| e.into_inner()),
             depth + 1,
         ),
         (Value::Cap(a), Value::Cap(b)) => a == b,
