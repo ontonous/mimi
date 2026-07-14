@@ -55,8 +55,7 @@ impl CallbackTable {
         });
         let mut handles = self
             .handles
-            .lock()
-            .expect("CALLBACK_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.insert(id, handle);
         id
     }
@@ -65,8 +64,7 @@ impl CallbackTable {
     pub fn get(&self, id: i64) -> Option<Arc<CallbackHandle>> {
         let handles = self
             .handles
-            .lock()
-            .expect("CALLBACK_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.get(&id).cloned()
     }
 
@@ -74,8 +72,7 @@ impl CallbackTable {
     pub fn remove(&self, id: i64) -> bool {
         let mut handles = self
             .handles
-            .lock()
-            .expect("CALLBACK_TABLE handles lock poisoned");
+            .lock().unwrap_or_else(|e| e.into_inner());
         handles.remove(&id).is_some()
     }
 }
